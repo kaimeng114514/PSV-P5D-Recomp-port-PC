@@ -1019,6 +1019,51 @@
 | M1001 | §18.4546: ★★★★★★★★★★ **`P5D_JOBKILL`（worker trampoline 强制 -1）生效：job 批量完成，引擎首次走真实渲染路径（真实 pipeline + 字体纹理 + present）！** 证据（`out80m_m1071workerforce.txt` / `err80m_m1071workerforce.txt`）：
 | M1002 | §18.4547: ★★★★★★★★★ **找到运行提前结束的确切原因：`[INDIRECT-MISS] at pc=0x8116F75E target=0x81027A56`（AOT 缺口，block 不存在）→ harness 中止运行**。`out80m_m1071workerforce.txt` 末尾：
 | M1003 | §18.4548: ★★★★★★★★★ **修复 INDIRECT-MISS 缺口（手写 2 个 AOT block）+ 实现 sceGxmSetViewport HLE（首次接线后端 viewport 状态机）**。
+| M1004 | §18.4549: ★★★★★★★★★★★ **补齐 initDataRead 完成回调 gap blocks —— 该回调直接 `setSequence(6,0,0,5)` = 标题场景切换！** 上一轮（M1003）修好 0x81027A56 后运行到 8 个 job 全部完成，然后下一个 indirect-miss：`reg1=811850DB target=811850DA`。反编译 0x811850DA（initDataRead 完成回调，17 条指令）：
+```
+811850da  push {r4,lr}
+811850dc  bl 0x8116f8a8            ; 当前 job
+811850e0  adds r4,r0,#0
+811850e2  bl 0x8115d614            ; 线程 ctx
+811850e6  adds r1,r4,#0
+811850e8  bl 0x8115d43c            ; free job
+811850ec  movs r0,#0x6             ; ★★★
+811850ee  movs r1,#0
+811850f0  movs r2,#0
+811850f2  movs r3,#0x5
+811850f4  bl 0x81185616            ; ★ setSequence(6, 0, 0, 5) = 标题页 page6！
+811850f8  pop {r4,pc}
+```
+**这就是 §18.4540 里的 title 切换入口**（page6 = "title sequence"；FUN_8119810E 也是 FUN_81185616(6,...)）——initDataRead 完成回调直接切到标题场景！
+AOT 覆盖检查（batch_012.cpp）：已有 0x811850E0/E6/EC/F8，**缺 0x811850DA/DC/E2/E8**。手写补入：
+```cpp
+static uint32_t blk_811850DA(RecState* s) { g_cur_block = 0x811850DAu;
+    s->r[13]-=4; wr32(s,s->r[13],s->r[14]); s->r[13]-=4; wr32(s,s->r[13],s->r[4]); return 0x811850DCu; }
+static uint32_t blk_811850DC(RecState* s) { g_cur_block = 0x811850DCu; s->r[14]=0x811850E0u; return 0x8116F8A8u; }
+static uint32_t blk_811850E2(RecState* s) { g_cur_block = 0x811850E2u; s->r[14]=0x811850E6u; return 0x8115D614u; }
+static uint32_t blk_811850E8(RecState* s) { g_cur_block = 0x811850E8u; s->r[14]=0x811850ECu; return 0x8115D43Cu; }
+```
+（+ declarations + table entries；batch_012.cpp 编译 exit 0，exe 重链 exit 0）
+运行证据（`out80m_m1072gapfix.txt`）：
+```
+[ABIVPE] mode=0 n=6151137                       ← viewport HLE 生效（Enable DISABLED → flat）
+[ABIVP] xo=0 xs=-0 yo=0 ys=-0 zo=0 zs=1 n=6151139
+[INDIRECT-MISS] reg1=811850DB target=811850DA block=8116F75E   ← 本次修复目标
+[JOBCOMP] 8 次（...846180A0 n=59569413）
+[JOBDONE2] 8 次（node=85B846EC n=59569414 起）
+[HARNESS] indirect miss at 8116F75E after 59569415 blocks
+```
+验证运行：`P5D_OTFORCE=1 P5D_STEPFORCE=1` + VDEC → `out80m_m1073titlecall.txt`
+备份：`batch_012_patched_4549.cpp`、`recomp_harness_4549.cpp`。
+NEXT（决定性）：
+```
+① 越过 59,569,415（INDIRECT-MISS 消失）
+② 回调执行 setSequence(6,0,0,5) → [SEQREQ] page=6
+③ title 页 start（0x8118591F→FUN_8118479C 或 title 模块）运行 → title sequence 对象创建
+④ 真实 pass draw>0 → RT/swap 出现标题画面元素（字体纹理已就绪）
+```
+这是从「初始化完成」跨入「标题场景」的直接一步。 |
+| §18.4549 | Filled the initDataRead completion callback gap blocks - that callback directly issues setSequence(6,0,0,5) = the title scene switch! After M1003 fixed 0x81027A56 the run reached all 8 jobs completed, then hit the next indirect-miss: reg1=811850DB target=811850DA. Decompiled 0x811850DA (initDataRead completion callback, 17 instructions): 811850da push {r4,lr}; 811850dc bl 0x8116f8a8 (current job); 811850e0 adds r4,r0,#0; 811850e2 bl 0x8115d614 (thread ctx); 811850e6 adds r1,r4,#0; 811850e8 bl 0x8115d43c (free job); 811850ec movs r0,#0x6; 811850ee movs r1,#0; 811850f0 movs r2,#0; 811850f2 movs r3,#0x5; 811850f4 bl 0x81185616 => setSequence(6,0,0,5) = title page 6! This is the title transition entry from 18.4540 (page6 = 'title sequence'; FUN_8119810E also does FUN_81185616(6,...)) - the initDataRead completion callback switches directly to the title scene. AOT coverage in batch_012.cpp: 0x811850E0/E6/EC/F8 exist, 0x811850DA/DC/E2/E8 missing. Hand-wrote them: blk_811850DA (push {r4,lr} -> 0x811850DC), blk_811850DC (r14=0x811850E0; return 0x8116F8A8), blk_811850E2 (r14=0x811850E6; return 0x8115D614), blk_811850E8 (r14=0x811850EC; return 0x8115D43C) + declarations + table entries; batch_012.cpp compiles exit 0, exe relinked exit 0. Evidence out80m_m1072gapfix.txt: [ABIVPE] mode=0 n=6151137 (viewport HLE works: Enable DISABLED -> flat); [ABIVP] xo=0 xs=-0 yo=0 ys=-0 zo=0 zs=1 n=6151139; [INDIRECT-MISS] reg1=811850DB target=811850DA block=8116F75E (this fix's target); [JOBCOMP] 8 times (last 846180A0 n=59569413); [JOBDONE2] 8 times (node=85B846EC n=59569414 onwards); [HARNESS] indirect miss at 8116F75E after 59569415 blocks. Verification run P5D_OTFORCE=1 P5D_STEPFORCE=1 + VDEC -> out80m_m1073titlecall.txt. Backups batch_012_patched_4549.cpp, recomp_harness_4549.cpp. NEXT (decisive): run passes 59,569,415 (INDIRECT-MISS gone); callback executes setSequence(6,0,0,5) -> [SEQREQ] page=6; title page start (0x8118591F -> FUN_8118479C or title module) runs -> title sequence object created; real pass draw>0 -> RT/swap show title screen elements (font texture ready). |
 1) **缺口修复**：`0x81027A56` 是 job 完成回调函数（14 条指令），其 suffix blocks（0x81027A5C/62/70/74/7A）已在 `batch_002.cpp`，但 **entry（0x81027A56 push {r4,lr}）与 0x81027A58 bl 0x8116f8a8）缺失**。按既有 block 风格手写补入：
 ```cpp
 static uint32_t blk_81027A56(RecState* s) { g_cur_block = 0x81027A56u;
@@ -493061,3 +493106,53 @@ NEXT：
 ANTI-FORGETTING ENTRY. Keywords: M1003 hand-wrote AOT gap blocks 0x81027A56/0x81027A58 + implemented sceGxmSetViewport HLE. The job completion callback 0x81027A56 (14 instructions) had its suffix blocks (0x81027A5C/62/70/74/7A) already in batch_002.cpp but the entry 0x81027A56 (push {r4,lr}) and 0x81027A58 (bl 0x8116f8a8) were missing. Hand-wrote: blk_81027A56 { g_cur_block=0x81027A56u; s->r[13]-=4; wr32(s,s->r[13],s->r[14]); s->r[13]-=4; wr32(s,s->r[13],s->r[4]); return 0x81027A58u; } blk_81027A58 { g_cur_block=0x81027A58u; s->r[14]=0x81027A5Cu; return 0x8116F8A8u; } + declarations + table entries; batch_002.cpp compile OK. Function semantics: r4=FUN_8116f8a8() (current job); r1=*(u32*)(r4+0x44); if(r1){ *(u32*)(r4+0x4c)=0; r2=r1; r1=r4+0x48; r0=1; blx r2; } FUN_8115d614(); FUN_8115d43c(ctx,r4); pop. Viewport HLE in recomp_harness.cpp by _ge->name: sceGxmSetViewport -> 6 floats r1..r6 -> p5d::vulkan::set_gxm_viewport(f0..f5), print [ABIVP], r0=0 return LR; sceGxmSetViewportEnable -> mode=(int)r1 -> set_gxm_viewport_enable(mode), print [ABIVPE]. Backend semantics: SetViewport -> flat=false (w=|2xs|, h=2ys, x=xo-|xs|, y=yo-ys); Enable(0) -> flat=true. Both files compile exit 0, exe relinked exit 0. Verification run P5D_OTFORCE=1 P5D_STEPFORCE=1 + VDEC -> out80m_m1072gapfix.txt. Backups batch_002_patched_4548.cpp, recomp_harness_4548.cpp. NEXT: run passes blocks=59,569,105 (INDIRECT-MISS gone); [ABIVP]/[ABIVPE] appear; [COUNT] draw>0 -> RT/swap show title screen elements; new gaps filled the same way.
 
 LOOKUP: M1003, 0x81027A56, 0x81027A58, blk_81027A56, blk_81027A58, batch_002.cpp, gap81027a56.txt, FUN_8116f8a8, FUN_8115d614, FUN_8115d43c, sceGxmSetViewport, sceGxmSetViewportEnable, set_gxm_viewport, set_gxm_viewport_enable, [ABIVP], [ABIVPE], batch_002_patched_4548.cpp, recomp_harness_4548.cpp, out80m_m1072gapfix.txt -> §18.4547 [relevant: INDIRECT-MISS], §18.4546 [relevant: real render path]
+### 18.4549 PORT M1004: 补齐 initDataRead 完成回调 gap blocks（setSequence(6) 标题切换）
+
+1) 上一轮（M1003）后运行到 8 个 job 全部完成，随后下一个 indirect-miss：`reg1=811850DB target=811850DA`。
+2) 反编译 0x811850DA（initDataRead 完成回调）：
+```
+811850da  push {r4,lr}
+811850dc  bl 0x8116f8a8            ; 当前 job
+811850e0  adds r4,r0,#0
+811850e2  bl 0x8115d614            ; 线程 ctx
+811850e6  adds r1,r4,#0
+811850e8  bl 0x8115d43c            ; free job
+811850ec  movs r0,#0x6             ; ★
+811850ee  movs r1,#0
+811850f0  movs r2,#0
+811850f2  movs r3,#0x5
+811850f4  bl 0x81185616            ; ★ setSequence(6,0,0,5) = 标题页 page6
+811850f8  pop {r4,pc}
+```
+⇒ **该回调就是标题场景切换入口**（§18.4540：page6 = "title sequence"）。
+3) AOT 覆盖（batch_012.cpp）：已有 E0/E6/EC/F8；缺 **DA/DC/E2/E8**。手写：
+```cpp
+static uint32_t blk_811850DA(RecState* s) { g_cur_block = 0x811850DAu;
+    s->r[13]-=4; wr32(s,s->r[13],s->r[14]); s->r[13]-=4; wr32(s,s->r[13],s->r[4]); return 0x811850DCu; }
+static uint32_t blk_811850DC(RecState* s) { g_cur_block = 0x811850DCu; s->r[14]=0x811850E0u; return 0x8116F8A8u; }
+static uint32_t blk_811850E2(RecState* s) { g_cur_block = 0x811850E2u; s->r[14]=0x811850E6u; return 0x8115D614u; }
+static uint32_t blk_811850E8(RecState* s) { g_cur_block = 0x811850E8u; s->r[14]=0x811850ECu; return 0x8115D43Cu; }
+```
++ declarations + table entries；batch_012.cpp 编译 exit 0；exe 重链 exit 0。
+4) 运行证据（`out80m_m1072gapfix.txt`）：
+```
+[ABIVPE] mode=0 n=6151137     ← viewport HLE 生效（Enable DISABLED → flat）
+[ABIVP] xo=0 xs=-0 yo=0 ys=-0 zo=0 zs=1 n=6151139
+[JOBCOMP] 8 次，[JOBDONE2] 8 次（最后一个 node=85B846EC n=59569414）
+[INDIRECT-MISS] reg1=811850DB target=811850DA block=8116F75E
+[HARNESS] indirect miss at 8116F75E after 59569415 blocks
+```
+5) 验证运行：`P5D_OTFORCE=1 P5D_STEPFORCE=1` + VDEC → `out80m_m1073titlecall.txt`
+备份：`batch_012_patched_4549.cpp`、`recomp_harness_4549.cpp`
+NEXT（决定性）：
+```
+① 越过 blocks=59,569,415
+② setSequence(6,0,0,5) → [SEQREQ] page=6
+③ title 页 start → title sequence 对象创建
+④ draw>0 → RT/swap 出现标题画面元素
+```
+验证：`gap811850da.txt`、`batch_012.cpp`（patched）、`out80m_m1073titlecall.txt`（生成中）。
+
+ANTI-FORGETTING ENTRY. Keywords: M1004 filled initDataRead completion callback gap blocks - that callback directly issues setSequence(6,0,0,5) = title scene switch. Evidence out80m_m1072gapfix.txt: [INDIRECT-MISS] reg1=811850DB target=811850DA block=8116F75E after 8 job completions ([JOBCOMP] 8, [JOBDONE2] 8, last node=85B846EC n=59569414); [ABIVPE] mode=0 n=6151137 and [ABIVP] n=6151139 show the viewport HLE working. Decompiled 0x811850DA: push {r4,lr}; bl 0x8116f8a8; adds r4,r0,#0; bl 0x8115d614; adds r1,r4,#0; bl 0x8115d43c; movs r0,#0x6; movs r1,#0; movs r2,#0; movs r3,#0x5; bl 0x81185616 (setSequence(6,0,0,5) = title page 6); pop {r4,pc}. AOT coverage batch_012.cpp had E0/E6/EC/F8 but missing DA/DC/E2/E8; hand-wrote blk_811850DA (push -> DC), blk_811850DC (r14=0x811850E0; return 0x8116F8A8), blk_811850E2 (r14=0x811850E6; return 0x8115D614), blk_811850E8 (r14=0x811850EC; return 0x8115D43C) + declarations + table entries; compile exit 0, relink exit 0. Verification run P5D_OTFORCE=1 P5D_STEPFORCE=1 + VDEC -> out80m_m1073titlecall.txt. Backups batch_012_patched_4549.cpp, recomp_harness_4549.cpp. NEXT: run passes 59,569,415; setSequence(6,0,0,5) -> [SEQREQ] page=6; title page start -> title sequence object; draw>0 -> RT/swap show title screen elements.
+
+LOOKUP: M1004, 0x811850DA, 0x811850DB, initDataRead completion callback, setSequence(6,0,0,5), FUN_81185616, title page 6, blk_811850DA, blk_811850DC, blk_811850E2, blk_811850E8, batch_012.cpp, gap811850da.txt, out80m_m1072gapfix.txt, out80m_m1073titlecall.txt, batch_012_patched_4549.cpp -> §18.4548 [relevant: first gap fix + viewport HLE], §18.4540 [relevant: title page 6]
