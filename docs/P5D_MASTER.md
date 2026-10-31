@@ -1021,6 +1021,42 @@
 | M1003 | §18.4548: ★★★★★★★★★ **修复 INDIRECT-MISS 缺口（手写 2 个 AOT block）+ 实现 sceGxmSetViewport HLE（首次接线后端 viewport 状态机）**。
 | M1004 | §18.4549: ★★★★★★★★★★★ **补齐 initDataRead 完成回调 gap blocks —— 该回调直接 `setSequence(6,0,0,5)` = 标题场景切换！** 上一轮（M1003）修好 0x81027A56 后运行到 8 个 job 全部完成，然后下一个 indirect-miss：`reg1=811850DB target=811850DA`。反编译 0x811850DA（initDataRead 完成回调，17 条指令）：
 | M1005 | §18.4550: ★★★★★★★★★★ **INDIRECT-MISS 清零！11 个 job 全部完成、`setSequence(6,0,0,5)` 执行 → 标题序列 page=6 启动，引擎进入真实逐帧渲染循环（8 次 Present 成功、10,816 次 pass、40 次 draw，运行推进到 n=68.2M）**。证据（`out80m_m1073titlecall.txt`）：
+| M1006 | §18.4551: ★★★★★★★★ **序列页表完整解析：page6 = "TITLE" 标题页（start=0x81185974 / update=0x81185986 / end=0x81185998）+ 新增 `P5D_NOMOVIE` 开关隔离宿主 movie 层**。从 `eboot_true.elf` 直接读取表 `0x813B01B4`（每项 0x50 字节，+0x44 start/+0x48 update/+0x4c end）：
+```
+page0 = "DEBUG MENU"  start=0x811858CE update=0x811858D0 end=0x811858EC
+page1 = "initread"    start=0x8118591E update=0x81185926 end=0x81185942
+page2 = "FREE MODE"   start=0x81185A0C update=0x81185A14 end=0x81185A26
+page3 = "COMMU"       start=0x810C84D8 update=0x810C8566 end=0x810C8582
+page4 = "TUTORIAL"    start=0x81185A50 update=0x81185A58 end=0x81185A6A
+page5 = "MAIN MENU"   start=0x811859C0 update=0x811859D2 end=0x811859E4
+page6 = "TITLE"       start=0x81185974 update=0x81185986 end=0x81185998   ← ★ S1_TITLE
+```
+**page6（TITLE）函数反编译**：
+```c
+// start 0x81185974: 读 data 指针 → FUN_8119807C(param)
+81185974  push {r4,lr}; r1=0; cbz r0; ldr r1,[r0]; r0=r1; bl 0x8119807C; pop
+// update 0x81185986: 返回 1 = 保持（"title sequence" 对象存在），0 = 页结束
+81185986  push {r4,lr}; bl 0x811980FC; r0 = (r0!=0); pop
+// end 0x81185998: FUN_811980FC 清理 + FUN_8116f8ac
+```
+（FUN_811980FC = `FUN_8116f900("title sequence",0) != 0`；FUN_8119807C = title sequence 对象创建/启动）
+⇒ setSequence(6,0,0,**5**) 的 delay=5 在管理器中执行：`if flag&1 { if delayCount<1 { start fn(data); free; flag&=~1 } else delayCount-- }`；之后每帧调 update：**对象存在→1（保持）；不存在→0（页立即结束）** ⇒ **必须在 5 帧内让 "title sequence" 对象出现**，否则标题页会退出。
+**新增 `P5D_NOMOVIE`（18.4551）**：DisplayQueueAddEntry 里的 `movie_advance_frame()` 改为可关闭（`P5D_NOMOVIE=1` 跳过），用于隔离"引擎真实输出"与"宿主 movie 层"：
+```cpp
+{ static int _nomovie=-1;
+  if(_nomovie<0){ const char* _e=getenv("P5D_NOMOVIE"); _nomovie=(_e&&atoi(_e))?1:0; }
+  if(!_nomovie) movie_advance_frame(); }
+```
+编译 exit 0、链接 exit 0；验证运行：`P5D_NOMOVIE=1 P5D_OTFORCE=1 P5D_STEPFORCE=1` → `out80m_m1074nomovie.txt`。
+NEXT：
+```
+① NOMOVIE 运行：确认 p5d_swap_*/p5d_frame_* 是否还有内容（无内容=确实来自 movie 层；有内容=引擎自绘）
+② 查 "title sequence" 对象创建（FUN_8119807C → 依赖文件加载/HLE）→ 5 帧内对象出现与否
+③ 若对象未出现：title 页会立即结束 → 需要让 FUN_8119807C 成功（文件/资源 HLE）
+④ 目标：title 页保持活动 → title UI 绘制 → 真实标题画面（引擎自绘）
+```
+验证：`eboot_true.elf` 表读取、`titlepage.txt`、`out80m_m1074nomovie.txt`（生成中）。 |
+| §18.4551 | Full sequence page table decoded: page6 = 'TITLE' (start=0x81185974 / update=0x81185986 / end=0x81185998) + new P5D_NOMOVIE switch to isolate the host movie layer. Read table 0x813B01B4 directly from eboot_true.elf (each entry 0x50 bytes, +0x44 start/+0x48 update/+0x4c end): page0 = 'DEBUG MENU' 0x811858CE/0x811858D0/0x811858EC; page1 = 'initread' 0x8118591E/0x81185926/0x81185942; page2 = 'FREE MODE' 0x81185A0C/0x81185A14/0x81185A26; page3 = 'COMMU' 0x810C84D8/0x810C8566/0x810C8582; page4 = 'TUTORIAL' 0x81185A50/0x81185A58/0x81185A6A; page5 = 'MAIN MENU' 0x811859C0/0x811859D2/0x811859E4; page6 = 'TITLE' 0x81185974/0x81185986/0x81185998 (S1_TITLE). page6 functions: start 0x81185974: push {r4,lr}; r1=0; cbz r0; ldr r1,[r0]; r0=r1; bl 0x8119807C (creates/starts the title sequence object with the data pointer); update 0x81185986: bl 0x811980FC; r0=(r0!=0) (returns 1 = keep active while 'title sequence' object exists, 0 = page ends); end 0x81185998: FUN_811980FC cleanup + FUN_8116f8ac. FUN_811980FC = FUN_8116f900('title sequence',0) != 0; FUN_8119807C = title sequence object create/start. So setSequence(6,0,0,5) delay=5 is handled by the manager: if flag&1 { if delayCount<1 { start fn(data); free; flag&=~1 } else delayCount-- }; afterwards each frame calls update: object exists -> 1 (keep), not exists -> 0 (page ends immediately) => the 'title sequence' object MUST appear within 5 frames or the title page exits. New P5D_NOMOVIE (18.4551): the movie_advance_frame() call in the DisplayQueueAddEntry handler is now switchable (P5D_NOMOVIE=1 skips it) to isolate engine output from the host movie layer: { static int _nomovie=-1; if(_nomovie<0){ const char* _e=getenv('P5D_NOMOVIE'); _nomovie=(_e&&atoi(_e))?1:0; } if(!_nomovie) movie_advance_frame(); }. Compiles/links exit 0; verification run P5D_NOMOVIE=1 P5D_OTFORCE=1 P5D_STEPFORCE=1 -> out80m_m1074nomovie.txt. NEXT: NOMOVIE run to determine whether swap/frame captures still have content (none = host movie layer; some = engine-drawn); check 'title sequence' object creation (FUN_8119807C -> file/resource HLE) within 5 frames; if absent the title page ends immediately -> make FUN_8119807C succeed; goal: title page stays active -> title UI draws -> real engine-drawn title screen. |
 ```
 [INDIRECT-MISS] 0                                   ← ★ 缺口修复成功
 [JOBCOMP] 11 次 / [JOBDONE2] 11 次                  ← ★ 11 个 job 完成
@@ -493233,3 +493269,44 @@ NEXT：
 ANTI-FORGETTING ENTRY. Keywords: M1005 INDIRECT-MISS cleared! 11 jobs completed, setSequence(6,0,0,5) executed -> title sequence page=6 started, engine entered a real per-frame render loop. Evidence out80m_m1073titlecall.txt: [INDIRECT-MISS] 0; [JOBCOMP] 11 / [JOBDONE2] 11 (#8 node=85B846EC n=59569414 initDataRead done; #9 85A9E18C; #10 85B843AC; #11 85A8FCDC); [SEQREQ] #1 page=00000001 a3=0, [SEQREQ] #2 page=00000006 a3=00000005 (setSequence(6,0,0,5) title page started!); [ABIVP] 42 (SetViewport each frame); [ABIVTX] 40 (vc=3 fullscreen triangles); [ABIRT] 8 (disp 0..7 cd=8CF00000/8D300000/8D700000); [PRESENT] 8 (VK_SUCCESS); [ABIBEGIN] 10816; [FRAMEDUMP] 13647 up to n=68235000; run stopped by itself at n≈68.235M (no crash marker; watchdog shows guest busy-wait 812B2880@811732C2). Screenshots: p5d_swap_7.bmp = P5D LOGO (neon 'P5D GONA ST☆RLIGHT' + champagne glass); p5d_frame_4.bmp = title artwork (red sky/city/confetti); p5d_disp_1..7.bmp all black (engine RT). The visible content most likely comes from the HOST movie layer ([MOVIE] frames 0..11 + present_frame blit), while the engine RT is still black (engine draws are only fullscreen triangles). Milestones: job system + AOT gap chain fully working; title sequence page=6 started; engine in a real per-frame render loop. NEXT: add P5D_NOMOVIE to disable the host movie layer and isolate engine output; investigate black p5d_disp_* (waiting for title UI/movie texture draws); investigate the 68.2M stop (HLE busy-wait); advance the title page update (FUN_8116f900('title sequence')) -> title UI objects -> engine-drawn title elements. Evidence saved evidence_p5d_logo_engine.png, evidence_p5d_title_movie_artwork.png, evidence_p5d_logo_engine_prev.png.
 
 LOOKUP: M1005, [INDIRECT-MISS] 0, [JOBCOMP] 11, [JOBDONE2] 11, [SEQREQ] #2 page=6 a3=5, setSequence(6,0,0,5), [ABIVP] 42, [ABIVTX] 40, [ABIRT] 8, [PRESENT] 8, [ABIBEGIN] 10816, [FRAMEDUMP] 13647, n=68235000, p5d_swap_7.bmp P5D logo, p5d_frame_4.bmp title artwork, p5d_disp black, evidence_p5d_logo_engine.png, evidence_p5d_title_movie_artwork.png, out80m_m1073titlecall.txt -> §18.4549 [relevant: gap fix], §18.4540 [relevant: title page]
+### 18.4551 PORT M1006: 序列页表完整解析（page6 = TITLE）+ P5D_NOMOVIE 开关
+
+1) 从 `eboot_true.elf` 读取表 `0x813B01B4`（每项 0x50：+0x44 start / +0x48 update / +0x4c end）：
+```
+page0 = "DEBUG MENU"  start=0x811858CE update=0x811858D0 end=0x811858EC
+page1 = "initread"    start=0x8118591E update=0x81185926 end=0x81185942
+page2 = "FREE MODE"   start=0x81185A0C update=0x81185A14 end=0x81185A26
+page3 = "COMMU"       start=0x810C84D8 update=0x810C8566 end=0x810C8582
+page4 = "TUTORIAL"    start=0x81185A50 update=0x81185A58 end=0x81185A6A
+page5 = "MAIN MENU"   start=0x811859C0 update=0x811859D2 end=0x811859E4
+page6 = "TITLE"       start=0x81185974 update=0x81185986 end=0x81185998   ← S1_TITLE
+```
+2) page6 函数反编译（`titlepage.txt`）：
+```c
+// start: FUN_8119807C(data) 创建/启动 title sequence 对象
+81185974  push {r4,lr}; r1=0; cbz r0; ldr r1,[r0]; r0=r1; bl 0x8119807C; pop
+// update: 对象存在→1 保持；不存在→0 页结束
+81185986  push {r4,lr}; bl 0x811980FC; r0=(r0!=0); pop
+// end: 清理
+81185998  push {r4,lr}; bl 0x811980FC; ... bl 0x8116f8ac; pop
+```
+3) setSequence(6,0,0,5) 的 delay=5 语义 + update 语义 ⇒ **5 帧内 "title sequence" 对象必须出现**，否则标题页立即结束。
+4) 新增 `P5D_NOMOVIE`（18.4551）：
+```cpp
+{ static int _nomovie=-1;
+  if(_nomovie<0){ const char* _e=getenv("P5D_NOMOVIE"); _nomovie=(_e&&atoi(_e))?1:0; }
+  if(!_nomovie) movie_advance_frame(); }
+```
+编译/链接 exit 0；验证运行：`P5D_NOMOVIE=1 P5D_OTFORCE=1 P5D_STEPFORCE=1` → `out80m_m1074nomovie.txt`
+NEXT：
+```
+① NOMOVIE 运行区分"引擎自绘"与"宿主 movie 层"
+② 查 FUN_8119807C 创建 "title sequence" 对象的依赖（文件/资源 HLE）
+③ 对象 5 帧内出现与否 → title 页是否保持
+④ 目标：title 页保持 → title UI 绘制 → 真实标题画面
+```
+验证：`titlepage.txt`、`out80m_m1074nomovie.txt`（生成中）、`eboot_true.elf` 表读取。
+
+ANTI-FORGETTING ENTRY. Keywords: M1006 full sequence page table decoded: page6 = 'TITLE' start=0x81185974 update=0x81185986 end=0x81185998; page0='DEBUG MENU' 0x811858CE/0x811858D0/0x811858EC; page1='initread' 0x8118591E/0x81185926/0x81185942; page2='FREE MODE' 0x81185A0C/0x81185A14/0x81185A26; page3='COMMU' 0x810C84D8/0x810C8566/0x810C8582; page4='TUTORIAL' 0x81185A50/0x81185A58/0x81185A6A; page5='MAIN MENU' 0x811859C0/0x811859D2/0x811859E4; table at 0x813B01B4 (0x50 per entry, +0x44 start/+0x48 update/+0x4c end). page6 functions: start 0x81185974: push {r4,lr}; r1=0; cbz r0; ldr r1,[r0]; r0=r1; bl 0x8119807C (creates/starts the title sequence object with data ptr); update 0x81185986: bl 0x811980FC; r0=(r0!=0) (1=keep while 'title sequence' object exists, 0=page ends); end 0x81185998 cleanup + FUN_8116f8ac. FUN_811980FC = FUN_8116f900('title sequence',0) != 0. setSequence(6,0,0,5) delay=5: manager waits 5 frames then calls start(data); afterwards every frame calls update: object exists -> 1 keep, absent -> 0 page ends => 'title sequence' object must appear within 5 frames. New P5D_NOMOVIE (18.4551): movie_advance_frame() in the DisplayQueueAddEntry handler is switchable: { static int _nomovie=-1; if(_nomovie<0){ const char* _e=getenv('P5D_NOMOVIE'); _nomovie=(_e&&atoi(_e))?1:0; } if(!_nomovie) movie_advance_frame(); }. Compiled/linked exit 0; verification run P5D_NOMOVIE=1 P5D_OTFORCE=1 P5D_STEPFORCE=1 -> out80m_m1074nomovie.txt. NEXT: NOMOVIE run to distinguish engine-drawn vs host movie layer; check FUN_8119807C 'title sequence' object creation deps (file/resource HLE); object within 5 frames -> title page stays; goal title page active -> title UI draws -> real title screen.
+
+LOOKUP: M1006, page6 TITLE, 0x81185974, 0x81185986, 0x81185998, 0x8119807C, 0x811980FC, 'title sequence', table 0x813B01B4, page names DEBUG MENU/initread/FREE MODE/COMMU/TUTORIAL/MAIN MENU/TITLE, P5D_NOMOVIE, movie_advance_frame, out80m_m1074nomovie.txt, titlepage.txt -> §18.4550 [relevant: title page started], §18.4540 [relevant: page table basics]

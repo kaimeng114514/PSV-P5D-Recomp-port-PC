@@ -2073,7 +2073,9 @@ extern "C" uint32_t hle_call(uint32_t stub_va, RecState* s) {
         uint32_t _data = 0; { uint8_t* _sp = GP(s->r[2]); if (_sp) std::memcpy(&_data, _sp, 4); }
         p5d::vulkan::end_scene_pass();
         if (_dq && _data) {
-          movie_advance_frame();   // 18.4514 M969: feed the offline-decoded movie frame as the texture source
+          { static int _nomovie = -1;   // 18.4551 M1006: P5D_NOMOVIE=1 disables the host movie overlay
+            if (_nomovie < 0) { const char* _e = getenv("P5D_NOMOVIE"); _nomovie = (_e && atoi(_e)) ? 1 : 0; }
+            if (!_nomovie) movie_advance_frame(); }   // 18.4514 M969: feed the offline-decoded movie frame as the texture source
           p5d::vulkan::present_frame(_data);
           { static int _sc = 0;   // 18.4516 M971: capture the swapchain (movie layer blitted inside present_frame)
             if (_sc < 8) { char _fn[64]; std::snprintf(_fn, sizeof(_fn), "p5d_swap_%d.bmp", _sc);
