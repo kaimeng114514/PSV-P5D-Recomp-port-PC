@@ -1017,6 +1017,41 @@
 | M999 | §18.4544: **patch 已进 exe 但执行路径未变 → 判定 nested/interpreter 路径使用的是另一套 block 分发；转为反编译 job 池执行器（0x811DB1F0/0x811DB244）找"完成判定点"**。证据：
 | M1000 | §18.4545: ★★★★★★★★★ **job 执行器 FUN_811db020 完全反编译（终于找到"完成判定"）+ patch worker trampoline 让所有 job 立即完成**。核心代码：
 | M1001 | §18.4546: ★★★★★★★★★★ **`P5D_JOBKILL`（worker trampoline 强制 -1）生效：job 批量完成，引擎首次走真实渲染路径（真实 pipeline + 字体纹理 + present）！** 证据（`out80m_m1071workerforce.txt` / `err80m_m1071workerforce.txt`）：
+| M1002 | §18.4547: ★★★★★★★★★ **找到运行提前结束的确切原因：`[INDIRECT-MISS] at pc=0x8116F75E target=0x81027A56`（AOT 缺口，block 不存在）→ harness 中止运行**。`out80m_m1071workerforce.txt` 末尾：
+```
+[JOBCOMP] #7 poolnode=84617FC0 n=59569103
+[JOBDONE2] #7 node=85B42A3C n=59569104
+[JOBDONE] #7 node=85B42A3C n=59569104
+[PROC] delete p=85B42A3C n=1500000
+[PROCWR] a=815554C0 v=85B42A3C blk=8116F75E
+[INDIRECT-MISS] reg1=81027A57 target=81027A56 block=8116F75E
+[HARNESS] indirect miss at pc=8116F75E after 59569105 blocks (block 0x8116F75E)
+```
+AOT block 覆盖检查：
+```
+0x81027A56 / 0x81027A57 : 不在任何 batch_*.cpp（GAP）
+0x81027A46 / 0x81027A3A : 存在（batch_002.cpp）
+```
+⇒ **运行在 job #7 完成后的 completion trampoline 间接跳转（bx reg1=0x81027A57 → 0x81027A56）处因 AOT 缺口中止**；此前 M1001 看到的真实渲染路径（[REALPIPE-CREATE]/[TEXUPLOAD #2]）就在这段。
+**下一个修复点（新发现）**：
+1) **补 AOT 缺口 0x81027A56**：该地址不在 220,991 块表内（gap-fill 未覆盖）；需用 4f 阶段的函数边界 gap-fill 流程重新生成该区域 block，或生成一个小补充 batch 覆盖 0x81027A5x 函数；
+2) **sceGxmSetViewport HLE（已知可用后端符号）**：
+```
+后端已存在：p5d::vulkan::set_gxm_viewport(xo,xs,yo,ys,zo,zs) / set_gxm_viewport_enable(mode) / gxm_viewport_flat()
+stub VA：sceGxmSetViewport=0x812B1300（NID 3EB3380B, 7 args），sceGxmSetViewportEnable=0x812B1420（NID 814F61EB, 2 args）
+语义（h144k74 权威）：SetViewport→flat=false（vk viewport w=|2*xs|, h=2*ys, x=xo-|xs|, y=yo-ys）；
+                 SetViewportEnable(0=DISABLED)→flat=true（全屏）
+```
+（harness 的 GXM ABI 拦截是按 `_ge->name` 分派的，可直接加 `strcmp(name,"sceGxmSetViewport")` 分支调用后端。）
+3) 运行中 `[COUNT] present=1 begin_pass=1 draw=0`：真实 pass 已创建但无 draw（可能在 indirect-miss 之后才继续）；补 gap 后应出现 draw。
+NEXT：
+```
+① 实现 SetViewport/SetViewportEnable HLE（调用后端 set_gxm_viewport*）
+② 补 AOT gap 0x81027A56（gap-fill 生成 → 新 batch/现有 batch 追加 → 重链）
+③ 重跑 → [INDIRECT-MISS] 消失 → 运行继续 → draw>0 → 标题画面内容
+```
+验证：`out80m_m1071workerforce.txt`（INDIRECT-MISS 证据）、batch_*.cpp 检查、后端符号 nm 结果。 |
+| §18.4547 | Found the exact reason the run ended early: [INDIRECT-MISS] at pc=0x8116F75E target=0x81027A56 - an AOT gap (block does not exist) makes the harness abort. Evidence out80m_m1071workerforce.txt tail: [JOBCOMP] #7 poolnode=84617FC0 n=59569103; [JOBDONE2] #7 node=85B42A3C n=59569104; [JOBDOBE] #7; [PROC] delete p=85B42A3C; [PROCWR] a=815554C0 v=85B42A3C blk=8116F75E; [INDIRECT-MISS] reg1=81027A57 target=81027A56 block=8116F75E; [HARNESS] indirect miss at pc=8116F75E after 59569105 blocks (block 0x8116F75E). AOT block coverage check: 0x81027A56/0x81027A57 not in any batch_*.cpp (GAP); 0x81027A46/0x81027A3A exist (batch_002.cpp). So the run stops at the completion trampoline indirect jump (bx reg1=0x81027A57 -> 0x81027A56) due to an AOT gap; the real render path seen in M1001 ([REALPIPE-CREATE]/[TEXUPLOAD #2]) happens before this point. Next fixes: (1) fill AOT gap 0x81027A56 - not in the 220,991-block table (gap-fill did not cover it); regenerate that region's blocks via the stage-4f function-boundary gap-fill flow or generate a small supplementary batch covering the 0x81027A5x function; (2) implement sceGxmSetViewport HLE using the existing backend symbols: p5d::vulkan::set_gxm_viewport(xo,xs,yo,ys,zo,zs) / set_gxm_viewport_enable(mode) / gxm_viewport_flat(); stub VAs sceGxmSetViewport=0x812B1300 (NID 3EB3380B, 7 args), sceGxmSetViewportEnable=0x812B1420 (NID 814F61EB, 2 args); semantics (h144k74 authoritative): SetViewport -> flat=false (vk viewport w=|2*xs|, h=2*ys, x=xo-|xs|, y=yo-ys); SetViewportEnable(0=DISABLED) -> flat=true (fullscreen); harness GXM ABI interception dispatches by _ge->name so we can add strcmp(name,'sceGxmSetViewport') branches that call the backend; (3) [COUNT] present=1 begin_pass=1 draw=0 - the real pass is created but no draw yet (probably after the indirect-miss point); after the gap fix draws should appear. NEXT: implement SetViewport/SetViewportEnable HLE; fill the AOT gap 0x81027A56 (gap-fill generation -> append to an existing batch or a new batch -> relink); rerun -> [INDIRECT-MISS] gone -> run continues -> draw>0 -> title screen content. |
 ```
 [JOBCOMP] 7 次（poolnode=84617C40/84617D20/84617EE0/84617E00/84617E70/84617F50/84617FC0）
 [JOBDONE2] 7 次（node=85A8FC8C/85A9E13C/85A9E65C/85A9E46C/85A9E4FC/85B428AC/85B42A3C）
@@ -492887,3 +492922,43 @@ NEXT：
 ANTI-FORGETTING ENTRY. Keywords: M1001 P5D_JOBKILL (worker trampoline forced -1) works: jobs complete in bulk and the engine enters the real render path for the first time. Evidence out80m_m1071workerforce.txt: [JOBCOMP] 7 (poolnode 84617C40/84617D20/84617EE0/84617E00/84617E70/84617F50/84617FC0); [JOBDONE2] 7 (node 85A8FC8C/85A9E13C/85A9E65C/85A9E46C/85A9E4FC/85B428AC/85B42A3C) - initDataRead + 6 jobs completed at n≈59,568,051-59,569,104; [ABIVTX] #1 vc=3 n=59568128; [ABIBEGIN] data=8D300000 960x544; [ABIRT] disp=0 saved p5d_disp_0.bmp rc=-1. stderr real render path: [CBEG]; [FACQ]; [RTALIAS] cd=8D300000; [RTPOOL] create 960x544; [BSIMG] cd=8D300000 960x544 doClear=1; [GXMVIEWPORT] flat x=0 y=0 w=960 h=544; [WARN] [STUB] sceGxmSetViewport called - NOT IMPLEMENTED; [SHADERMOD] ok codeWords=2285/1684; [REALPIPE-CREATE] vkCreateGraphicsPipelines v=gxp_vert_0001.gxp.spv f=gxp_frag_0165.gxp.spv r=0; [TEXCH#1] fmt=133 256x512 bytes=65536; [TEXUPLOAD #2] mean=186.61 nonzero=49568/65536; [FUBOHOST] fragment UBO; [TEXBIND] real=1 u0=tex256x512; [ENDPASS] inRP=1; [COUNT] present=1 begin_pass=1 draw=0. p5d_swap_0.bmp mean=0 (black, draw=0 clear only). Run ended at blocks=59,569,105. Meanings: bulk job completion works; engine enters real render path with real SPIR-V pipelines + 256x512 font/title texture + BeginPass/EndPass/Present; pass had draw=0 so still black; run ends early (TBD); missing HLE sceGxmSetViewport (NOT IMPLEMENTED); HLE-BADMEM va=0/1/0x821 (stubs 812B16D0/812B1470/812B12E0/812B1560). NEXT: implement/wire sceGxmSetViewport HLE (vkCmdSetViewport/Scissor); find why draw=0 (GXM HLE filtering: viewport/scissor/RT binding); investigate early run end; goal draw>0 -> title frame elements on swapchain/RT (font texture ready).
 
 LOOKUP: M1001, P5D_JOBKILL, [JOBCOMP], [JOBDONE2], 7 jobs bulk completion, [CBEG], [FACQ], [RTALIAS], [RTPOOL], [BSIMG], [GXMVIEWPORT], sceGxmSetViewport NOT IMPLEMENTED, [SHADERMOD], [REALPIPE-CREATE] gxp_vert_0001 gxp_frag_0165, [TEXCH#1], [TEXUPLOAD #2] fmt=133 256x512 mean=186.61, [FUBOHOST], [TEXBIND], [ENDPASS], [COUNT] present=1 begin_pass=1 draw=0, p5d_swap_0.bmp black, blocks=59,569,105, HLE-BADMEM 812B16D0 812B1470 812B12E0 812B1560, out80m_m1071workerforce.txt -> §18.4545 [relevant: worker trampoline], §18.4540 [relevant: app init]
+### 18.4547 PORT M1002: 运行提前结束根因 = INDIRECT-MISS（AOT 缺口 0x81027A56）
+
+1) 日志末尾（`out80m_m1071workerforce.txt`）：
+```
+[JOBCOMP] #7 poolnode=84617FC0 n=59569103
+[JOBDONE2] #7 node=85B42A3C n=59569104
+[JOBDONE] #7 node=85B42A3C n=59569104
+[PROC] delete p=85B42A3C n=1500000
+[PROCWR] a=815554C0 v=85B42A3C blk=8116F75E
+[INDIRECT-MISS] reg1=81027A57 target=81027A56 block=8116F75E
+[HARNESS] indirect miss at pc=8116F75E after 59569105 blocks (block 0x8116F75E)
+```
+2) AOT 覆盖检查：
+```
+0x81027A56 / 0x81027A57 : 不在任何 batch_*.cpp（GAP）
+0x81027A46 / 0x81027A3A : 存在（batch_002.cpp）
+```
+⇒ 运行在 job #7 完成后的 completion trampoline 间接跳转处中止（bx reg1=0x81027A57 → 0x81027A56 无对应 block）。
+3) 修复清单：
+- **补 AOT 缺口 0x81027A56**：不在 220,991 块表内（4f gap-fill 未覆盖），需 gap-fill 生成该函数 block 并重链；
+- **sceGxmSetViewport HLE**（后端符号已存在）：
+```
+set_gxm_viewport(xo,xs,yo,ys,zo,zs) / set_gxm_viewport_enable(mode) / gxm_viewport_flat()
+stub VA: sceGxmSetViewport=0x812B1300 (NID 3EB3380B, 7 args)
+         sceGxmSetViewportEnable=0x812B1420 (NID 814F61EB, 2 args)
+语义: SetViewport→flat=false (vk viewport w=|2*xs|,h=2*ys,x=xo-|xs|,y=yo-ys)
+     SetViewportEnable(DISABLED=0)→flat=true (全屏)
+```
+- `[COUNT] present=1 begin_pass=1 draw=0`：真实 pass 已建但尚无 draw（应在 indirect-miss 之后）。
+NEXT：
+```
+① 实现 SetViewport/SetViewportEnable HLE（调后端）
+② 补 AOT gap 0x81027A56（gap-fill → 追加 batch → 重链）
+③ 重跑 → [INDIRECT-MISS] 消失 → 运行继续 → draw>0 → 标题画面
+```
+验证：`out80m_m1071workerforce.txt`、batch_*.cpp 覆盖检查、nm 后端符号。
+
+ANTI-FORGETTING ENTRY. Keywords: M1002 run ended early because of INDIRECT-MISS (AOT gap 0x81027A56). out80m_m1071workerforce.txt tail: [JOBCOMP] #7 poolnode=84617FC0 n=59569103; [JOBDONE2] #7 node=85B42A3C n=59569104; [PROC] delete p=85B42A3C; [PROCWR] a=815554C0 v=85B42A3C blk=8116F75E; [INDIRECT-MISS] reg1=81027A57 target=81027A56 block=8116F75E; [HARNESS] indirect miss at pc=8116F75E after 59569105 blocks. AOT coverage: 0x81027A56/0x81027A57 not in any batch_*.cpp (GAP); 0x81027A46/0x81027A3A exist in batch_002.cpp. So the run aborts at the job completion trampoline's indirect jump (bx reg1=0x81027A57 -> 0x81027A56) because that block is missing; the real render path from M1001 happens before this. Fixes: (1) fill AOT gap 0x81027A56 via the stage-4f function-boundary gap-fill flow and relink; (2) implement sceGxmSetViewport HLE with existing backend symbols p5d::vulkan::set_gxm_viewport(xo,xs,yo,ys,zo,zs)/set_gxm_viewport_enable(mode)/gxm_viewport_flat(); stub VAs sceGxmSetViewport=0x812B1300 (NID 3EB3380B, 7 args), sceGxmSetViewportEnable=0x812B1420 (NID 814F61EB, 2 args); semantics: SetViewport -> flat=false (vk viewport w=|2*xs|, h=2*ys, x=xo-|xs|, y=yo-ys); SetViewportEnable(0=DISABLED) -> flat=true fullscreen; harness GXM ABI dispatch uses _ge->name so add strcmp branches; (3) [COUNT] present=1 begin_pass=1 draw=0 - real pass created but no draw yet. NEXT: implement SetViewport HLE; fill AOT gap 0x81027A56; rerun -> [INDIRECT-MISS] gone -> draw>0 -> title screen content.
+
+LOOKUP: M1002, [INDIRECT-MISS], reg1=81027A57, target=81027A56, 0x8116F75E, [HARNESS] indirect miss after 59569105 blocks, batch_002.cpp gaps, gap-fill 4f, sceGxmSetViewport 0x812B1300 NID 3EB3380B, sceGxmSetViewportEnable 0x812B1420 NID 814F61EB, p5d::vulkan::set_gxm_viewport, set_gxm_viewport_enable, gxm_viewport_flat, out80m_m1071workerforce.txt -> §18.4546 [relevant: real render path], §18.4545 [relevant: worker trampoline]
