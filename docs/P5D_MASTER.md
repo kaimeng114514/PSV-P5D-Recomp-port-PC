@@ -1012,6 +1012,39 @@
 | M994 | §18.4539: ★★★★★★★ **场景序列管理器完全反编译（setSequence/update 语义 + 页表布局）→ 发现 PAGEFORCE 语义搞反了：update 返回 1 = "保持活动"，≠1 = "页结束"**。`FUN_81185616`（[SEQREQ] 探针处）= **setSequence(page,data,size,delay)**：
 | M995 | §18.4540: ★★★★★★★ **场景页语义与入口彻底确定：page1 = 引导页（initDataRead+影片），page6 = "title sequence" 标题页；app 启动主函数 FUN_8118464C 完整反编译**。字符串解析（`eboot_true.elf` .rodata）：
 | M996 | §18.4541: **修正 init sound 完成强制的 block 地址（0x811848D6 是 `bl` 指令本身，真正的 post-call block 是 0x811848DA）+ 增加完成 trampoline 探针 `[JOBCOMP]`**。`out80m_m1068pagefinish.txt` 结果：
+| M997 | §18.4542: **诊断：job_probes 的强制 block 在 nested 执行路径下可能不被调用（0x811848DA 命中缺失）→ 改走「直接 patch AOT 生成 block」方案**。`out80m_m1069initdone.txt`：
+```
+[JOBCOMP] #1 poolnode=84618110 n=59626141        ← ★ app job 完成 trampoline FUN_8116FA66 触发（trophy 路径）
+[SFIRE] pc=81185936 n=59585547                   ← page1 update 强制 0
+[SFIRE] pc=811848D6 n=59667141                   ← init sound worker bl block
+[SFIRE] pc=811548CC n=59667178/67251/67310/67358/67445   ← 声音对象检查 5 次（说明 FUN_8115487a 完整跑了 5 轮）
+[JOBDONE2] 1（仅 trophy）   [IDR] idx=1（仍 step1）   [PRESENT] 1
+```
+**分析**：
+1) `[JOBCOMP] #1` 证实 app job 完成路径 `0x8116FA66 → FUN_8116f75e` 是通的（trophy 用了它）；
+2) init sound 的 5 次检查全被强制（SFIRE 5×0x811548CC）⇒ `FUN_8115487a` 应返回 1 ⇒ worker 应在 `0x811848DA` 之后返回 -1；
+3) **但 `[SFIRE] pc=811848DA` 从未出现** ⇒ 该 block 虽在 `batch_012.cpp` 表中（`{ 0x811848DAu, blk_811848DA }`）却未被 job_probes 命中：
+   - 最可能原因：guest→guest 调用（nested 执行）返回后继续执行走的是**不带 job_probes 的 nested runner**（`P5D_NESTED_UNTIL=1500000` 的嵌套执行路径）；
+   - 即"强制 block"方案在 nested 路径不可靠。
+**方案（M997 下一步）**：**直接 patch AOT 生成 block 源码**（`batch_012.cpp` 等）——在 `blk_811848DA` 等强制 block 的开头直接写 `s->r[0]=1u;`，绕开 job_probes 分发：
+```
+blk_811848DA : 开头加 s->r[0] = 1u;            // init sound 完成
+blk_81184AB0 : 开头加 s->r[0] = 0xFFFFFFFFu;   // msgwindow 完成(-1)
+blk_81184BA0 : 开头加 s->r[0] = 0xFFFFFFFFu;   // mainmenu 完成
+blk_811849E8 : 开头加 s->r[0] = 0xFFFFFFFFu;   // gamedata 完成
+blk_81184D22 : 开头加 s->r[0] = 0xFFFFFFFFu;   // step5 完成
+```
+（对应 block 内 `cmp r0,#0` / `movs r0,#-1` 的语义；生成 block 为普通 C++ 函数，直接插入一行即可。）
+编译：只重编 `batch_012.cpp` → 替换 `batch_012.o` → 重新链接 `recomp_harness.exe`。
+NEXT：
+```
+① patch batch_012.cpp 的强制 block（首行插入强制寄存器值）
+② 重编 batch_012.o + 链接
+③ 运行 → [JOBDONE2] 增加 → [IDR] idx 递增（step2 init gamedata…）
+④ 8 步完成 → page1 页结束 → FUN_8119810E → setSequence(6) → title
+```
+验证：`out80m_m1069initdone.txt`、`batch_012.cpp` block 表、`[JOBCOMP]` 证据。 |
+| §18.4542 | Diagnosis: job_probes force blocks may not be called under the nested execution path (0x811848DA hit missing) -> switch to directly patching the AOT-generated blocks. out80m_m1069initdone.txt: [JOBCOMP] #1 poolnode=84618110 n=59626141 (app job completion trampoline FUN_8116FA66 fired - trophy path); [SFIRE] pc=81185936 n=59585547 (page1 update forced 0); [SFIRE] pc=811848D6 n=59667141 (init sound worker bl block); [SFIRE] pc=811548CC n=59667178/67251/67310/67358/67445 (sound object checks 5x, meaning FUN_8115487a ran all 5 iterations); [JOBDONE2] 1 (trophy only); [IDR] idx=1 (still step1); [PRESENT] 1. Analysis: (1) [JOBCOMP] #1 confirms the app job completion path 0x8116FA66 -> FUN_8116f75e works (trophy used it); (2) all 5 init-sound checks were forced (SFIRE 5x0x811548CC) so FUN_8115487a should return 1 and the worker should return -1 after 0x811848DA; (3) but [SFIRE] pc=811848DA never appeared even though the block is in the batch_012.cpp table ({0x811848DAu, blk_811848DA}) - the most likely reason is that after a guest->guest call returns, the nested runner (P5D_NESTED_UNTIL=1500000 path) does not call job_probes, so the 'force block' scheme is unreliable in that path. Plan (next): directly patch the AOT-generated block sources (batch_012.cpp etc.) - insert s->r[0]=1u; at the top of blk_811848DA (init sound done) and s->r[0]=0xFFFFFFFFu; at the top of blk_81184AB0/blk_81184BA0/blk_811849E8/blk_81184D22 (msgwindow/mainmenu/gamedata/step5 done), bypassing job_probes dispatch. Rebuild only batch_012.cpp -> replace batch_012.o -> relink recomp_harness.exe. NEXT: patch batch_012.cpp force blocks; rebuild batch_012.o + link; run -> [JOBDONE2] increases -> [IDR] idx increases (step2 init gamedata ...); all 8 steps -> page1 ends -> FUN_8119810E -> setSequence(6) -> title. |
 ```
 [SFIRE] pc=81185936 n=59585547            ← page1 update 被强制为 0（页结束）只 1 次
 [SFIRE] pc=811848D6 n=59667141            ← 命中 init sound worker 的 bl 指令 block（无效强制！）
@@ -492529,3 +492562,38 @@ NEXT：
 ANTI-FORGETTING ENTRY. Keywords: M996 fixed init-sound completion force block address - 0x811848D6 is the bl instruction itself, real post-call block is 0x811848DA (cmp r0,#0 -> movs r0,#0xffffffff return -1). Evidence out80m_m1068pagefinish.txt: [SFIRE] pc=81185936 n=59585547 (page1 update forced 0, page finished, once); [SFIRE] pc=811848D6 n=59667141 (ineffective bl-block hit); [SFIRE] pc=811548CC x5 (sound object checks); [JOBDONE2] 1 (trophy only); [SEQREQ] only page=1; [PRESENT] 1. M996 fix: case 0x811848D6u r[0]=1 + case 0x811848DAu r[0]=1u (real post-call -> worker returns -1 done). Added [JOBCOMP] probe at FUN_8116FA66 (app job completion trampoline, first 40 + all after page1): if((pcv&~1)==0x8116FA66u){ printf('[JOBCOMP] #%d poolnode=%08X n=%u'); }. Compiled OK; verification run P5D_OTFORCE=1 P5D_STEPFORCE=1 -> out80m_m1069initdone.txt. NEXT: [JOBCOMP] appears => app job completion path works; [JOBDONE2] increases => init sound done -> [IDR] idx increases; all 8 steps -> page1 ends -> app triggers FUN_8119810E -> setSequence(6) -> [SEQREQ] page=6; title page start -> title sequence object -> title draws.
 
 LOOKUP: M996, 0x811848D6, 0x811848DA, init sound worker 0x811848B6, FUN_8115487a, [JOBCOMP], FUN_8116FA66, FUN_8116f75e, [SFIRE], [JOBDONE2], out80m_m1068pagefinish.txt, out80m_m1069initdone.txt -> §18.4540 [relevant: page semantics], §18.4537 [relevant: object checks], §18.4536 [relevant: STEPFORCE]
+### 18.4542 PORT M997: job_probes 在 nested 路径不可靠 → 直接 patch AOT 生成 block
+
+1) `out80m_m1069initdone.txt`：
+```
+[JOBCOMP] #1 poolnode=84618110 n=59626141        ← app job 完成 trampoline（trophy 路径）
+[SFIRE] pc=81185936 n=59585547                   ← page1 update → 0（页结束）
+[SFIRE] pc=811848D6 n=59667141                   ← init sound worker bl block
+[SFIRE] pc=811548CC n=59667178/67251/67310/67358/67445  ← 声音对象检查 ×5（FUN_8115487a 跑满 5 轮）
+[JOBDONE2] 1（仅 trophy）   [IDR] idx=1   [PRESENT] 1
+```
+2) 分析：
+- `[JOBCOMP] #1` 证实 app job 完成路径 `0x8116FA66 → FUN_8116f75e` **是通的**；
+- 检查已全部强制通过 ⇒ worker 应返回 -1；
+- **`[SFIRE] pc=811848DA` 从未出现**（虽然 block 在批表里）⇒ guest→guest 调用返回后走的是 **nested runner（P5D_NESTED_UNTIL=1500000）**，该路径不调用 job_probes ⇒ 强制 block 方案无效。
+3) **新方案：直接 patch AOT 生成 block 源码**：
+```
+blk_811848DA 开头插入 s->r[0] = 1u;             // init sound 完成
+blk_81184AB0 开头插入 s->r[0] = 0xFFFFFFFFu;    // msgwindow 完成
+blk_81184BA0 开头插入 s->r[0] = 0xFFFFFFFFu;    // mainmenu 完成
+blk_811849E8 开头插入 s->r[0] = 0xFFFFFFFFu;    // gamedata 完成
+blk_81184D22 开头插入 s->r[0] = 0xFFFFFFFFu;    // step5 完成
+```
+重编 `batch_012.cpp` → `batch_012.o` → 重链接。
+NEXT：
+```
+① patch batch_012.cpp 强制 block
+② 重编 batch_012.o + 链接
+③ 运行 → [JOBDONE2] 增加 → [IDR] idx 递增
+④ 8 步完成 → page1 页结束 → FUN_8119810E → setSequence(6) → title
+```
+验证：`out80m_m1069initdone.txt`、`batch_012.cpp`、`[JOBCOMP]`。
+
+ANTI-FORGETTING ENTRY. Keywords: M997 job_probes force blocks unreliable under the nested execution path (0x811848DA hit missing) -> switch to directly patching the AOT-generated blocks. out80m_m1069initdone.txt: [JOBCOMP] #1 poolnode=84618110 n=59626141 (app job completion trampoline FUN_8116FA66 fired - trophy path); [SFIRE] pc=81185936 n=59585547 (page1 update forced 0); [SFIRE] pc=811848D6 n=59667141 (init sound worker bl block); [SFIRE] pc=811548CC x5 (sound object checks); [JOBDONE2] 1 (trophy only); [IDR] idx=1; [PRESENT] 1. All 5 checks forced so FUN_8115487a should return 1 and the worker should return -1 after 0x811848DA, but [SFIRE] pc=811848DA never appeared although the block is in the batch_012.cpp table - most likely the nested runner (P5D_NESTED_UNTIL=1500000) does not call job_probes after guest->guest returns. Plan: directly patch AOT block sources - insert s->r[0]=1u; at the top of blk_811848DA and s->r[0]=0xFFFFFFFFu; at the top of blk_81184AB0/blk_81184BA0/blk_811849E8/blk_81184D22; rebuild only batch_012.cpp -> batch_012.o -> relink recomp_harness.exe. NEXT: patch batch_012.cpp force blocks; rebuild; run -> [JOBDONE2] increases -> [IDR] idx increases; all 8 steps -> page1 ends -> FUN_8119810E -> setSequence(6) -> title.
+
+LOOKUP: M997, [JOBCOMP], poolnode 84618110, FUN_8116FA66, FUN_8116f75e, [SFIRE] missing 811848DA, nested runner P5D_NESTED_UNTIL, patch batch_012.cpp, blk_811848DA, blk_81184AB0, blk_81184BA0, blk_811849E8, blk_81184D22, out80m_m1069initdone.txt -> §18.4541 [relevant: force block address], §18.4536 [relevant: STEPFORCE]
