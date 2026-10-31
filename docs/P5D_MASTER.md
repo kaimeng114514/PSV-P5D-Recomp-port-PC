@@ -1008,6 +1008,34 @@
 | M990 | §18.4535: **page1 的 8 步初始化链全部反编译：它们是 boot 阶段的 "init *" proc 任务（init trophy / init sound / init gamedata / init msgwindow / init mainmenu / …），每个步骤 = 提交一个 app job（worker+completion）**。已查明的步骤与 worker/completion：
 | M991 | §18.4536: ★★★★★★★ **init 各步骤 worker 的完成检查全部反编译 + 实现 `P5D_STEPFORCE`（强制所有步骤完成）**。关键约定（由反编译确认）：**worker 返回负值 = job 完成；返回 0 = 还在等待**（与 trophy worker `FUN_81184808` 的 `return FUN_8102d544()==0 ? 0 : -1` 完全一致，OTForce 让其为 -1 → JOBDONE）。各 worker：
 | M992 | §18.4537: ★★★★★★★★ **init 步骤完成检查的本质 = 对象存在性查询 `FUN_8116f900(name,0)`！据此扩展 STEPFORCE（强制查询结果）**。反编译三个关键检查函数：
+| M993 | §18.4538: **验证 STEPFORCE 目标地址全部是 AOT block 起点 + 增加「场景页推进强制」（PAGEFORCE）**。检查生成源码 `batch_*.cpp` 确认我们所有强制地址都是真实 block 起点：
+```
+batch_012.cpp: { 0x811848D6u, blk_811848D6 } { 0x81184AA8u, blk_81184AA8 }
+               { 0x81184B6Cu, blk_81184B6C } { 0x81184D1Au, blk_81184D1A }
+               { 0x811858E0u, blk_811858E0 } { 0x81185936u, blk_81185936 }
+batch_009.cpp: { 0x811548CCu, blk_811548CC }
+batch_003.cpp: { 0x81031916u, blk_81031916 } { 0x81049A88u, blk_81049A88 }
+```
+**M993 两个改进**：
+1) `[SFIRE]` 日志改为**只记录命中强制表的 block**（之前的实现记录所有 block，无法判断命中）；每地址 cap 8 次；
+2) **新增 PAGEFORCE（18.4538）**——直接让场景序列页推进，绕过 init 任务：
+```cpp
+case 0x811858E0u: s->r[0] = 1u; break;   // page0 update: FUN_8116f900(0x81309644) != 0
+case 0x81185936u: s->r[0] = 1u; break;   // page1 update: FUN_8116f900(0x81309690) != 0
+```
+（依据 §18.4528：page0 update=FUN_8116f900(0x81309644)、page1 update=FUN_8116f900(0x81309690)；
+强制为 1 ⇒ 场景管理器认为该页"就绪" ⇒ 推进到下一页 ⇒ 触发 S1_TITLE 场景加载/绘制。）
+3) 快速 boot 测试（3M blocks，`out3m_m1067sftest.txt`）：`[SFIRE]` 0 次（这些 block 在 page1 之前不执行，属正常，不能据此判断失败）。
+4) 全量验证运行：`P5D_OTFORCE=1 P5D_STEPFORCE=1`（含 PAGEFORCE 新地址）→ `out80m_m1067stepforce3.txt`。
+NEXT：
+```
+① [SFIRE] 出现 ⇒ 强制生效；[IDR] idx 递增 / 场景页推进
+② page0/page1 update 被强制 ⇒ 场景序列前进（可能直接到 S1_TITLE）
+③ 新 draw/present 出现 → RT 截图/窗口捕获确认内容
+④ 若 [SFIRE] 仍 0：说明这些 block 走的是无 job_probes 的 AOT 快路径 → 改在 HLE 层（FUN_8116f900 返回值）或 block 内插桩
+```
+验证：`out3m_m1067sftest.txt`、`out80m_m1067stepforce3.txt`（生成中）、`batch_*.cpp`（block 表）。 |
+| §18.4538 | Verified all STEPFORCE target addresses are real AOT block starts + added page-sequence advance force (PAGEFORCE). Checked generated sources batch_*.cpp: batch_012.cpp has {0x811848D6u, blk_811848D6} {0x81184AA8u, blk_81184AA8} {0x81184B6Cu, blk_81184B6C} {0x81184D1Au, blk_81184D1A} {0x811858E0u, blk_811858E0} {0x81185936u, blk_81185936}; batch_009.cpp has {0x811548CCu, blk_811548CC}; batch_003.cpp has {0x81031916u, blk_81031916} {0x81049A88u, blk_81049A88}. M993 improvements: (1) [SFIRE] logging now records ONLY blocks that matched the force table (previous implementation logged all blocks, making hits unverifiable), cap 8 per address; (2) new PAGEFORCE (18.4538) to advance the scene sequence pages directly, bypassing the init task: case 0x811858E0u: r[0]=1 (page0 update FUN_8116f900(0x81309644) != 0); case 0x81185936u: r[0]=1 (page1 update FUN_8116f900(0x81309690) != 0) - per 18.4528 page0/page1 update are object lookups; forcing 1 makes the scene manager consider the page ready and advance to the next page, triggering S1_TITLE scene load/draw. (3) Quick 3M-block boot test (out3m_m1067sftest.txt): [SFIRE] 0 times (these blocks do not execute before page1, which is normal - not proof of failure). (4) Full verification run P5D_OTFORCE=1 P5D_STEPFORCE=1 (with the new PAGEFORCE addresses) -> out80m_m1067stepforce3.txt. NEXT: (1) [SFIRE] appears => forces take effect; [IDR] idx increases / scene pages advance; (2) forced page0/page1 update => scene sequence advances (possibly straight to S1_TITLE); (3) new draws/presents appear -> RT screenshot/window capture to confirm content; (4) if [SFIRE] still 0 the blocks run through an AOT fast path without job_probes -> move the force into the HLE layer (FUN_8116f900 return value) or insert instrumentation inside the block. |
 ```c
 // init msgwindow 检查 FUN_81031904():
 bool FUN_81031904(void) { return FUN_8116f900("message window load", 0) != 0; }
@@ -492189,3 +492217,36 @@ NEXT：
 ANTI-FORGETTING ENTRY. Keywords: M992 the init-step completion checks are object existence queries FUN_8116f900(name,0). Decompiled: FUN_81031904() = FUN_8116f900('message window load',0) != 0 (init msgwindow check); FUN_81049a76() = FUN_8116f900('DanceSystem',0) != 0 (step5 check); FUN_8115487a() (init sound check) loops over {BGM,COMSE,EVENT,EVENT_ENV,DCOMMON}: FUN_81171bea(name); iVar1=FUN_81171476(); if(iVar1==0){uVar2=0;done;} while(++uVar4<5); uVar2=1. So each init step waits for the objects its own init creates; object registration does not complete under our HLE so checks stay false and workers return 0 (pending). Extended P5D_STEPFORCE (18.4537): case 0x81031916u: r[0]=1 (message window load lookup); case 0x81049A88u: r[0]=1 (DanceSystem lookup); case 0x811548CCu: r[0]=1 (FUN_81171476 sound object check). Added [SFIRE] logging: static std::set<uint32_t> _sf_hit; if(_sf_hit.insert(_p).second && _sf_hit.size()<=60) printf('[SFIRE] pc=%08X n=%u'). Compiled OK; verification run P5D_OTFORCE=1 P5D_STEPFORCE=1 -> out80m_m1066stepforce2.txt. NEXT: [SFIRE] hits to confirm the force blocks are real block starts; [INITEXEC]/[JOBDONE2] for workers returning -1 and job completion; [IDR] idx increasing to 8 -> page1 update object ready -> scene advances -> new draws -> S1_TITLE picture; if [SFIRE] never appears the block addresses are not block starts - switch to hooking the check-function entry or registering the objects directly.
 
 LOOKUP: M992, FUN_8116f900, 'message window load', 'DanceSystem', BGM COMSE EVENT EVENT_ENV DCOMMON, FUN_81031904, FUN_81049a76, FUN_8115487a, FUN_81171bea, FUN_81171476, 0x81031916, 0x81049A88, 0x811548CC, [SFIRE], P5D_STEPFORCE, stepchecks.txt, out80m_m1066stepforce2.txt -> §18.4536 [relevant: STEPFORCE], §18.4535 [relevant: init steps]
+### 18.4538 PORT M993: STEPFORCE block 起点验证 + PAGEFORCE（场景页推进强制）
+
+1) 生成源码 block 表确认（`batch_*.cpp`）：
+```
+batch_012.cpp: { 0x811848D6u, blk_811848D6 } { 0x81184AA8u, blk_81184AA8 }
+               { 0x81184B6Cu, blk_81184B6C } { 0x81184D1Au, blk_81184D1A }
+               { 0x811858E0u, blk_811858E0 } { 0x81185936u, blk_81185936 }
+batch_009.cpp: { 0x811548CCu, blk_811548CC }
+batch_003.cpp: { 0x81031916u, blk_81031916 } { 0x81049A88u, blk_81049A88 }
+```
+⇒ 所有强制地址都是真实 block 起点。
+2) M993 改进：
+- `[SFIRE]` 只记录**命中强制表**的 block（每地址 cap 8）；
+- **PAGEFORCE（18.4538）**：
+```cpp
+case 0x811858E0u: s->r[0] = 1u; break;   // page0 update FUN_8116f900(0x81309644) != 0
+case 0x81185936u: s->r[0] = 1u; break;   // page1 update FUN_8116f900(0x81309690) != 0
+```
+依据：page0/page1 update 都是对象存在性查询（§18.4528）→ 强制为 1 即让场景管理器认为该页就绪 → 推进到下一页 → 触发 S1_TITLE 场景加载/绘制。
+3) 快速 boot 测试（3M blocks，`out3m_m1067sftest.txt`）：`[SFIRE]` 0（这些 block 在 page1 前不执行，正常）。
+4) 全量验证运行：`P5D_OTFORCE=1 P5D_STEPFORCE=1` → `out80m_m1067stepforce3.txt`
+NEXT：
+```
+① [SFIRE] 出现 ⇒ 强制生效；[IDR] idx 递增 / 场景页推进
+② page0/page1 update 被强制 ⇒ 场景序列前进（可能直接到 S1_TITLE）
+③ 新 draw/present → RT 截图/窗口捕获确认内容
+④ 若 [SFIRE] 仍 0：这些 block 走无 job_probes 的 AOT 快路径 → 改在 HLE 层（FUN_8116f900 返回）或 block 内插桩
+```
+验证：`out3m_m1067sftest.txt`、`out80m_m1067stepforce3.txt`（生成中）、`batch_*.cpp`。
+
+ANTI-FORGETTING ENTRY. Keywords: M993 verified all STEPFORCE target addresses are real AOT block starts + added PAGEFORCE page-sequence advance force. batch_*.cpp evidence: batch_012.cpp {0x811848D6u, blk_811848D6} {0x81184AA8u, blk_81184AA8} {0x81184B6Cu, blk_81184B6C} {0x81184D1Au, blk_81184D1A} {0x811858E0u, blk_811858E0} {0x81185936u, blk_81185936}; batch_009.cpp {0x811548CCu, blk_811548CC}; batch_003.cpp {0x81031916u, blk_81031916} {0x81049A88u, blk_81049A88}. M993: [SFIRE] logging now records only blocks matching the force table (cap 8 per address); new PAGEFORCE (18.4538): case 0x811858E0u: r[0]=1 (page0 update FUN_8116f900(0x81309644) != 0); case 0x81185936u: r[0]=1 (page1 update FUN_8116f900(0x81309690) != 0) - makes the scene manager consider the page ready and advance to the next page, triggering S1_TITLE scene load/draw. Quick 3M-block boot test (out3m_m1067sftest.txt): [SFIRE] 0 (these blocks do not execute before page1, normal). Full verification run P5D_OTFORCE=1 P5D_STEPFORCE=1 -> out80m_m1067stepforce3.txt. NEXT: [SFIRE] appears => forces effective and [IDR] idx increases / scene pages advance; forced page0/page1 update => scene sequence advances possibly straight to S1_TITLE; new draws/presents -> RT screenshot/window capture; if [SFIRE] still 0 the blocks run through an AOT fast path without job_probes - move the force into the HLE layer (FUN_8116f900 return) or instrument inside the block.
+
+LOOKUP: M993, [SFIRE], PAGEFORCE, 0x811858E0, 0x81185936, page0 update FUN_8116f900(0x81309644), page1 update FUN_8116f900(0x81309690), batch_012.cpp blk_811848D6, blk_811858E0, batch_009.cpp blk_811548CC, batch_003.cpp blk_81031916 blk_81049A88, out3m_m1067sftest.txt, out80m_m1067stepforce3.txt -> §18.4537 [relevant: object checks], §18.4536 [relevant: STEPFORCE], §18.4528 [relevant: scene pages]

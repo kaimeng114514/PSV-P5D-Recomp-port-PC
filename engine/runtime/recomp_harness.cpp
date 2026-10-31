@@ -1177,11 +1177,22 @@ static void job_probes(uint32_t pcv, RecState* s) {
         case 0x81049A88u: s->r[0] = 1u; break;
         case 0x811548C8u: s->r[1] = 1u; break;   // (unused placeholder; real force below)
         case 0x811548CCu: s->r[0] = 1u; break;
+        // 18.4538 M993: page-sequence update object lookups (advance S0->S1 independent of init jobs)
+        case 0x811858E0u: s->r[0] = 1u; break;   // page0 update: FUN_8116f900(0x81309644) != 0
+        case 0x81185936u: s->r[0] = 1u; break;   // page1 update: FUN_8116f900(0x81309690) != 0
         default: break; }
-      // log which force blocks actually fire (cap 60)
-      { static std::set<uint32_t> _sf_hit;
-        if (_sf_hit.insert(_p).second && _sf_hit.size() <= 60) {
-          printf("[SFIRE] pc=%08X n=%u\n", _p, g_main_n); fflush(stdout); } } } }
+      // 18.4538 M993: only log blocks that actually matched the force table
+      { bool _hit = false;
+        switch (_p) {
+          case 0x811848D6u: case 0x811849A4u: case 0x811849ACu: case 0x811849B4u: case 0x811849BCu:
+          case 0x811849C4u: case 0x811849CCu: case 0x811849D4u: case 0x811849E0u:
+          case 0x81184AA8u: case 0x81184B6Cu: case 0x81184B74u: case 0x81184B7Cu: case 0x81184B88u:
+          case 0x81184B90u: case 0x81184B98u: case 0x81184D1Au:
+          case 0x81031916u: case 0x81049A88u: case 0x811548CCu:
+          case 0x811858E0u: case 0x81185936u: _hit = true; break;
+          default: break; }
+        if (_hit) { static std::map<uint32_t,int> _sfc;
+          int& _c = _sfc[_p]; if (_c++ < 8) { printf("[SFIRE] pc=%08X n=%u\n", _p, g_main_n); fflush(stdout); } } } } }
   // 18.4533 M988: P5D_OTFORCE - force the appOtNode "netTrophyProc" status check to succeed.
   // FUN_8105a0d4() returns 3 < **(int**)(DAT_8132f984 + 0x34); DAT_8132f984 is the low-level job
   // node submitted by FUN_8105a0ee("netTrophyProc"). Our HLE never advances that status, so the
