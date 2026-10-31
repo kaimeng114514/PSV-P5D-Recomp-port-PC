@@ -1160,6 +1160,9 @@ static void job_probes(uint32_t pcv, RecState* s) {
       const uint32_t _p = pcv & ~1u;
       switch (_p) {
         case 0x811848D6u: s->r[0] = 1u; break;   // init sound: FUN_8115487a done
+        // 18.4541 M996: the real post-call block of bl FUN_8115487a in the init-sound worker is
+        // 0x811848DA (cmp r0,#0) - force its result to 1 there so the worker returns -1 (done).
+        case 0x811848DAu: s->r[0] = 1u; break;
         case 0x811849A4u: case 0x811849ACu: case 0x811849B4u: case 0x811849BCu:
         case 0x811849C4u: case 0x811849CCu: case 0x811849D4u: case 0x811849E0u:
           s->r[0] = 1u; break;                   // init gamedata checks pass
@@ -1257,6 +1260,11 @@ static void job_probes(uint32_t pcv, RecState* s) {
             fflush(stdout);
             call_guest_cb(s, _wfn, 0u, 400000);
             printf("[JOBINLINE] worker=%08X returned n=%u\n", _wfn, g_main_n); fflush(stdout); } } } } }
+  // 18.4541 M996: probe the app-job completion trampoline (FUN_8116FA66 -> FUN_8116f75e).
+  { if ((pcv & ~1u) == 0x8116FA66u) {
+      uint32_t _n6 = s->r[0]; static int _c6 = 0; ++_c6;
+      if (_c6 <= 40 || g_main_n >= 59000000u) {
+        printf("[JOBCOMP] #%d poolnode=%08X n=%u\n", _c6, _n6, g_main_n); fflush(stdout); } } }
   // 18.4527 M981: P5D_JOBFORCE - force-complete the app async job the page1 init pipeline is waiting on.
   // Guest FUN_81184ffe is a step state machine: piVar1 = *(u32*)(param_1+8); state=piVar1[0], idx=piVar1[1],
   // job=piVar1[2]; when state==2 it polls FUN_8116f8d2(job) which returns 0 iff *(u32*)(job+0xC)==0.

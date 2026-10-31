@@ -1011,6 +1011,35 @@
 | M993 | §18.4538: **验证 STEPFORCE 目标地址全部是 AOT block 起点 + 增加「场景页推进强制」（PAGEFORCE）**。检查生成源码 `batch_*.cpp` 确认我们所有强制地址都是真实 block 起点：
 | M994 | §18.4539: ★★★★★★★ **场景序列管理器完全反编译（setSequence/update 语义 + 页表布局）→ 发现 PAGEFORCE 语义搞反了：update 返回 1 = "保持活动"，≠1 = "页结束"**。`FUN_81185616`（[SEQREQ] 探针处）= **setSequence(page,data,size,delay)**：
 | M995 | §18.4540: ★★★★★★★ **场景页语义与入口彻底确定：page1 = 引导页（initDataRead+影片），page6 = "title sequence" 标题页；app 启动主函数 FUN_8118464C 完整反编译**。字符串解析（`eboot_true.elf` .rodata）：
+| M996 | §18.4541: **修正 init sound 完成强制的 block 地址（0x811848D6 是 `bl` 指令本身，真正的 post-call block 是 0x811848DA）+ 增加完成 trampoline 探针 `[JOBCOMP]`**。`out80m_m1068pagefinish.txt` 结果：
+```
+[SFIRE] pc=81185936 n=59585547            ← page1 update 被强制为 0（页结束）只 1 次
+[SFIRE] pc=811848D6 n=59667141            ← 命中 init sound worker 的 bl 指令 block（无效强制！）
+[SFIRE] pc=811548CC n=59667178/67251/67310/67358/67445   ← 声音对象检查 5 次（有效）
+[JOBDONE2] 1（仅 trophy，init sound 仍未完成）
+[SEQREQ] 仅 page=1（没有 page=6 title 请求）
+[PRESENT] 1  [draw] 1
+```
+⇒ **关键错误**：init sound worker 的调用序列是 `811848d6 bl 0x8115487a` / `811848da cmp r0,#0`，post-call block 是 **0x811848DA**；之前强制 `0x811848D6`（bl 本身）无效。
+**M996 修正**：
+```cpp
+case 0x811848D6u: s->r[0]=1u; break;   // (bl 块，保留无害)
+case 0x811848DAu: s->r[0]=1u; break;   // ★ 真正 post-call：r0!=0 → worker 返回 -1（完成）
+```
+新增 **`[JOBCOMP]`**（app job 完成 trampoline `FUN_8116FA66` 入口探针，前 40 次 + page1 后全部）：
+```cpp
+if ((pcv & ~1u) == 0x8116FA66u) { printf("[JOBCOMP] #%d poolnode=%08X n=%u\n", ...); }
+```
+编译成功（`[JOBCOMP]` 入二进制）；验证运行：`P5D_OTFORCE=1 P5D_STEPFORCE=1` → `out80m_m1069initdone.txt`。
+NEXT：
+```
+① [JOBCOMP] 是否出现（app job 完成路径 0x8116FA66 → FUN_8116f75e）
+② [JOBDONE2] 增加（init sound 完成）→ [IDR] idx 递增（step2 init gamedata …）
+③ 8 步完成后 page1 update（initDataRead 对象销毁）→ 页结束 → app 触发 FUN_8119810E → setSequence(6) → [SEQREQ] page=6
+④ title 页 start 执行 → title sequence 对象创建 → 标题画面 draw
+```
+验证：`out80m_m1068pagefinish.txt`、`batch_012.cpp` block 表（0x811848DA）、`out80m_m1069initdone.txt`（生成中）。 |
+| §18.4541 | Fixed the init-sound completion force block address (0x811848D6 is the bl instruction itself; the real post-call block is 0x811848DA) + added completion trampoline probe [JOBCOMP]. out80m_m1068pagefinish.txt results: [SFIRE] pc=81185936 n=59585547 (page1 update forced to 0 = page finished, only once); [SFIRE] pc=811848D6 n=59667141 (hit the bl instruction block of the init-sound worker - ineffective force!); [SFIRE] pc=811548CC n=59667178/67251/67310/67358/67445 (sound object checks 5x, effective); [JOBDONE2] 1 (trophy only, init sound still not completed); [SEQREQ] only page=1 (no page=6 title request); [PRESENT] 1; [draw] 1. KEY ERROR: the init-sound worker call sequence is 811848d6 bl 0x8115487a / 811848da cmp r0,#0, so the post-call block is 0x811848DA; forcing 0x811848D6 (the bl itself) has no effect. M996 fix: case 0x811848D6u: r[0]=1; break; (bl block, harmless) + case 0x811848DAu: r[0]=1u; break; (real post-call: r0!=0 -> worker returns -1 (done)). Added [JOBCOMP] (app-job completion trampoline FUN_8116FA66 entry probe, first 40 + all after page1): if((pcv&~1)==0x8116FA66u){ printf('[JOBCOMP] #%d poolnode=%08X n=%u'); }. Compiled OK ([JOBCOMP] in binary); verification run P5D_OTFORCE=1 P5D_STEPFORCE=1 -> out80m_m1069initdone.txt. NEXT: (1) whether [JOBCOMP] appears (app job completion path 0x8116FA66 -> FUN_8116f75e); (2) [JOBDONE2] increases (init sound done) -> [IDR] idx increases to step2 init gamedata ...; (3) after all 8 steps the page1 update (initDataRead object destroyed) ends the page -> app triggers FUN_8119810E -> setSequence(6) -> [SEQREQ] page=6; (4) title page start executes -> title sequence object creation -> title screen draws. |
 ```
 0x81309644 = "debug menu"    ← page0 update 查询对象
 0x81309690 = "initDataRead"  ← page1 update 查询对象
@@ -492460,3 +492489,43 @@ NEXT：
 ANTI-FORGETTING ENTRY. Keywords: M995 scene page semantics and entries determined: page1 = intro page (initDataRead + movie), page6 = 'title sequence' title page; string resolution from eboot_true.elf .rodata: 0x81309644='debug menu' (page0 update object), 0x81309690='initDataRead' (page1 update object), 0x8130B140='title sequence' (page5 update object). FUN_8118464C = app startup master flow: SceAppUtil_5DFB9CA0(1,&local_10) sets DAT_81670354; FUN_811546f0() audio init; FUN_8102a780(1,1,1); FUN_81154a1c(0x1e,0x1e) 30/30 fps; FUN_81159bc0(0x81184777,0x81184791,0) callbacks; FUN_8116e3e2(2000); FUN_811850fc/81185152/811851da; FUN_81155ba6/81155768; FUN_8115fa3e(0x41); FUN_81025874; FUN_8115fa3e(0x20); FUN_8106fdb2; FUN_81030f98; FUN_8102ecb4; FUN_8102b248; FUN_81031034; FUN_81025aa8; FUN_81031920; FUN_810394a8; FUN_8103114c; FUN_81181430; FUN_8103a2d0; FUN_8115922c() PLAY MOVIE; FUN_811858bc() sets 7-page sequence table; FUN_8118542e; FUN_81183dd8; FUN_81183de6; FUN_810994b2; FUN_8108ebb4; FUN_81094bd4; FUN_81090074; FUN_8107aa7c; FUN_8107aab4; FUN_81185616(1,0,0,0) setSequence(page=1) intro page. Title: void FUN_8119810e(param){ local_10=param; FUN_81185616(6,&local_10,4,0); } start page 6; void FUN_8119813e(void){ local_10=0; FUN_81185616(6,&local_10,4,0); } end page 6. Callers of FUN_8119810E: FUN_810FC208 @0x810FCE64, FUN_810EF0D8 @0x810F0B68, FUN_810FD49E @0x810FE140. M995 change: PAGEFORCE page1 update forced to 0: case 0x81185936u: s->r[0]=0u; break; to allow page switch. Verification run -> out80m_m1068pagefinish.txt. NEXT: check [SEQREQ] page=6; decompile FUN_810FC208/FUN_810EF0D8/FUN_810FD49E for the start-title condition; force dependent blocks; title page start -> title sequence object -> title draws.
 
 LOOKUP: M995, FUN_8118464C app init, FUN_81185616(1,0,0,0), setSequence(6), FUN_8119810E title start, FUN_8119813E title end, FUN_810FC208, FUN_810EF0D8, FUN_810FD49E, 'initDataRead' 0x81309690, 'debug menu' 0x81309644, 'title sequence' 0x8130B140, FUN_8115922c PLAY MOVIE, FUN_811858bc, DAT_81670354, FUN_81154a1c 30fps, setseq_callers.txt, title_callers.txt, out80m_m1068pagefinish.txt -> §18.4539 [relevant: sequence manager], §18.4528 [relevant: page table]
+### 18.4541 PORT M996: init sound 强制 block 地址修正 + JOBCOMP 探针
+
+1) `out80m_m1068pagefinish.txt`：
+```
+[SFIRE] pc=81185936 n=59585547                     ← page1 update 强制 0（页结束）1 次
+[SFIRE] pc=811848D6 n=59667141                     ← ★ 命中 bl 指令 block（无效强制）
+[SFIRE] pc=811548CC n=59667178/67251/67310/67358/67445  ← 声音对象检查 5 次（有效）
+[JOBDONE2] 1（仅 trophy）   [SEQREQ] 仅 page=1   [PRESENT] 1
+```
+2) **错误原因**：init sound worker 调用序列：
+```
+811848d6  bl 0x8115487a
+811848da  cmp r0,#0        ← post-call block 是 0x811848DA
+811848dc  beq 0x811848e4
+811848de  movs r0,#0xffffffff   ← 返回 -1（完成）
+```
+之前强制 `0x811848D6`（bl 本身）无效。
+3) M996 修正：
+```cpp
+case 0x811848D6u: s->r[0]=1u; break;   // bl 块（保留无害）
+case 0x811848DAu: s->r[0]=1u; break;   // ★ 真正 post-call → worker 返回 -1
+```
+4) 新增 `[JOBCOMP]`（`FUN_8116FA66` 完成 trampoline 入口探针）：
+```cpp
+if ((pcv & ~1u) == 0x8116FA66u) {
+    printf("[JOBCOMP] #%d poolnode=%08X n=%u\n", ...); }
+```
+5) 编译成功（`[JOBCOMP]`×1）；验证运行：`P5D_OTFORCE=1 P5D_STEPFORCE=1` → `out80m_m1069initdone.txt`
+NEXT：
+```
+① [JOBCOMP] 出现 ⇒ app job 完成路径打通
+② [JOBDONE2] 增加 ⇒ init sound 完成 → [IDR] idx 递增
+③ 8 步完成 ⇒ page1 页结束 ⇒ app 触发 FUN_8119810E → setSequence(6) → [SEQREQ] page=6
+④ title 页 start → title sequence 对象 → 标题画面 draw
+```
+验证：`out80m_m1068pagefinish.txt`、`out80m_m1069initdone.txt`（生成中）。
+
+ANTI-FORGETTING ENTRY. Keywords: M996 fixed init-sound completion force block address - 0x811848D6 is the bl instruction itself, real post-call block is 0x811848DA (cmp r0,#0 -> movs r0,#0xffffffff return -1). Evidence out80m_m1068pagefinish.txt: [SFIRE] pc=81185936 n=59585547 (page1 update forced 0, page finished, once); [SFIRE] pc=811848D6 n=59667141 (ineffective bl-block hit); [SFIRE] pc=811548CC x5 (sound object checks); [JOBDONE2] 1 (trophy only); [SEQREQ] only page=1; [PRESENT] 1. M996 fix: case 0x811848D6u r[0]=1 + case 0x811848DAu r[0]=1u (real post-call -> worker returns -1 done). Added [JOBCOMP] probe at FUN_8116FA66 (app job completion trampoline, first 40 + all after page1): if((pcv&~1)==0x8116FA66u){ printf('[JOBCOMP] #%d poolnode=%08X n=%u'); }. Compiled OK; verification run P5D_OTFORCE=1 P5D_STEPFORCE=1 -> out80m_m1069initdone.txt. NEXT: [JOBCOMP] appears => app job completion path works; [JOBDONE2] increases => init sound done -> [IDR] idx increases; all 8 steps -> page1 ends -> app triggers FUN_8119810E -> setSequence(6) -> [SEQREQ] page=6; title page start -> title sequence object -> title draws.
+
+LOOKUP: M996, 0x811848D6, 0x811848DA, init sound worker 0x811848B6, FUN_8115487a, [JOBCOMP], FUN_8116FA66, FUN_8116f75e, [SFIRE], [JOBDONE2], out80m_m1068pagefinish.txt, out80m_m1069initdone.txt -> §18.4540 [relevant: page semantics], §18.4537 [relevant: object checks], §18.4536 [relevant: STEPFORCE]
