@@ -1009,6 +1009,54 @@
 | M991 | §18.4536: ★★★★★★★ **init 各步骤 worker 的完成检查全部反编译 + 实现 `P5D_STEPFORCE`（强制所有步骤完成）**。关键约定（由反编译确认）：**worker 返回负值 = job 完成；返回 0 = 还在等待**（与 trophy worker `FUN_81184808` 的 `return FUN_8102d544()==0 ? 0 : -1` 完全一致，OTForce 让其为 -1 → JOBDONE）。各 worker：
 | M992 | §18.4537: ★★★★★★★★ **init 步骤完成检查的本质 = 对象存在性查询 `FUN_8116f900(name,0)`！据此扩展 STEPFORCE（强制查询结果）**。反编译三个关键检查函数：
 | M993 | §18.4538: **验证 STEPFORCE 目标地址全部是 AOT block 起点 + 增加「场景页推进强制」（PAGEFORCE）**。检查生成源码 `batch_*.cpp` 确认我们所有强制地址都是真实 block 起点：
+| M994 | §18.4539: ★★★★★★★ **场景序列管理器完全反编译（setSequence/update 语义 + 页表布局）→ 发现 PAGEFORCE 语义搞反了：update 返回 1 = "保持活动"，≠1 = "页结束"**。`FUN_81185616`（[SEQREQ] 探针处）= **setSequence(page,data,size,delay)**：
+```c
+puVar1[2]=puVar1[1];
+if (currentPage >= 0) {
+    iVar6 = (**(code**)(DAT_813b01ac + curPage*0x50 + 0x48))();   // 旧页 update
+    if (iVar6 == 1) (**(code**)(DAT_813b01ac + curPage*0x50 + 0x4c))();  // 旧页 end
+    *(iVar2+4) = -1; }                                            // 清当前页
+puVar1[1] = param_1;                                              // 新页
+if (delay == 0) { (**(code**)(DAT_813b01ac + param_1*0x50 + 0x44))(param_2); }  // 新页 start
+else { *puVar1 |= 1; ... 缓存 data/size ... }                      // 延迟启动
+```
+`FUN_811857c2`（序列 update 主循环）：
+```c
+uVar4 = curPage;
+if (uVar4 >= 0) {
+  if ((flag&1)==0) { iVar3 = (**(code**)(tab + uVar4*0x50 + 0x48))();
+      if (iVar3 != 1) { curPage = -1; } }        // ★ update != 1 ⇒ 页结束
+  ... }
+```
+**页表布局（每项 0x50 字节）**：`+0x44 = start fn, +0x48 = update fn, +0x4c = end fn`
+**6 个页的 update 全是对象存在性查询**：
+```
+page0 update 0x811858D0: FUN_8116f900(0x81309644)
+page1 update 0x81185926: FUN_8116f900(0x81309690)
+page2 update 0x8113ABCA: FUN_8116f900("MusicSelectMain")
+page3 update 0x810C8566: FUN_8116f900("commuMain") != 0
+page4 update 0x811116E8: FUN_8116f900("TutorialMain") != 0
+page5 update 0x811980FC: FUN_8116f900("title sequence")
+```
+⇒ **页 update 返回 1 = 继续运行；返回 0 或其他 = 页结束（curPage=-1）**。所以 M993 的 PAGEFORCE 把 page0/page1 update 强制为 1 实际是"让页永远不结束"（保持活动），与预期推进相反；真实场景切换由 app 主动调用 `FUN_81185616(setSequence)` 完成。
+运行证据（`out80m_m1067stepforce3.txt`）：
+```
+[SFIRE] pc=81185936 n=59585547/59606176/59626127/59646399/59669020   ← page1 update 被强制（5 次）
+[SFIRE] pc=811848D6 n=59667376                                       ← init sound 完成检查被强制
+[SFIRE] pc=811548CC n=59667413/486/545/593/680                       ← 声音对象检查被强制（5 个对象）
+[INITEXEC] #7 worker=811848B7 node=85B8861C n=59665486
+[JOBDONE2] 1（仅 trophy）  [IDR] idx=1（仍 step1）  [PRESENT] 1  [draw] 1
+```
+⇒ 强制机制确实生效（SFIRE 命中），但 (a) init sound job 的完成回调仍未触发（JOBDONE2 未增），(b) 页推进语义需改为"update 返回 0"。
+NEXT：
+```
+① 找 setSequence 调用点（app 场景切换逻辑）：反编译 FUN_81185616 的调用者 / xrefs，确认 movie 完成后 App 请求哪个 page
+② 页推进正确做法：让当前页 update 返回 0（页结束）→ 或直接在 app 场景切换处强制进入目标 page 的 start
+③ 继续 init sound 完成链：worker 已强制检查通过，查 completion 回调 0x811848E9 为何未执行
+④ 目标仍是 S1_TITLE 场景 start 被调用 → 产生标题 draw
+```
+验证：`seqmgr.txt`（Ghidra）、`pageupd.txt`、`out80m_m1067stepforce3.txt`。 |
+| §18.4539 | Scene sequence manager fully decompiled (setSequence/update semantics + page table layout) - discovered PAGEFORCE semantics were inverted: update returning 1 = 'keep active', !=1 = 'page finished'. FUN_81185616 (the [SEQREQ] probe site) = setSequence(page,data,size,delay): puVar1[2]=puVar1[1]; if(currentPage>=0){ iVar6=(**(code**)(DAT_813b01ac+curPage*0x50+0x48))() (old page update); if(iVar6==1) (**(code**)(DAT_813b01ac+curPage*0x50+0x4c))() (old page end); *(iVar2+4)=-1; } puVar1[1]=param_1; if(delay==0){ (**(code**)(DAT_813b01ac+param_1*0x50+0x44))(param_2); } else { *puVar1|=1; cache data/size; }. FUN_811857c2 (sequence update loop): uVar4=curPage; if(uVar4>=0){ if((flag&1)==0){ iVar3=(**(code**)(tab+uVar4*0x50+0x48))(); if(iVar3 != 1){ curPage=-1; } } ... } => update != 1 means page finished. Page table entry layout (0x50 bytes): +0x44 = start fn, +0x48 = update fn, +0x4c = end fn. All 6 page updates are object existence queries: page0 update 0x811858D0 FUN_8116f900(0x81309644); page1 update 0x81185926 FUN_8116f900(0x81309690); page2 update 0x8113ABCA FUN_8116f900('MusicSelectMain'); page3 update 0x810C8566 FUN_8116f900('commuMain') != 0; page4 update 0x811116E8 FUN_8116f900('TutorialMain') != 0; page5 update 0x811980FC FUN_8116f900('title sequence'). So update returning 1 = keep running; returning 0/other = page finished (curPage=-1). Therefore the M993 PAGEFORCE forcing page0/page1 update to 1 actually keeps the page alive forever (opposite of advancing); real scene transitions come from the app calling FUN_81185616(setSequence). Evidence out80m_m1067stepforce3.txt: [SFIRE] pc=81185936 n=59585547/59606176/59626127/59646399/59669020 (page1 update forced 5x); [SFIRE] pc=811848D6 n=59667376 (init sound completion check forced); [SFIRE] pc=811548CC n=59667413/486/545/593/680 (5 sound object checks forced); [INITEXEC] #7 worker=811848B7 node=85B8861C n=59665486; [JOBDONE2] 1 (trophy only); [IDR] idx=1 (still step1); [PRESENT] 1; [draw] 1. So the force mechanism works (SFIRE hits) but (a) init sound job completion callback still not fired (JOBDONE2 unchanged), (b) page advancement semantics must be update returns 0 instead. NEXT: (1) find setSequence call sites (app scene transition logic): decompile callers/xrefs of FUN_81185616 to see which page the app requests after movie completion; (2) correct page advancement: make the current page update return 0 (page finished) or force the target page start directly at the app transition; (3) continue init sound completion chain: the worker's forced check passes but completion callback 0x811848E9 still does not run - investigate; (4) goal remains S1_TITLE scene start being called -> title draws appear. |
 ```
 batch_012.cpp: { 0x811848D6u, blk_811848D6 } { 0x81184AA8u, blk_81184AA8 }
                { 0x81184B6Cu, blk_81184B6C } { 0x81184D1Au, blk_81184D1A }
@@ -492250,3 +492298,57 @@ NEXT：
 ANTI-FORGETTING ENTRY. Keywords: M993 verified all STEPFORCE target addresses are real AOT block starts + added PAGEFORCE page-sequence advance force. batch_*.cpp evidence: batch_012.cpp {0x811848D6u, blk_811848D6} {0x81184AA8u, blk_81184AA8} {0x81184B6Cu, blk_81184B6C} {0x81184D1Au, blk_81184D1A} {0x811858E0u, blk_811858E0} {0x81185936u, blk_81185936}; batch_009.cpp {0x811548CCu, blk_811548CC}; batch_003.cpp {0x81031916u, blk_81031916} {0x81049A88u, blk_81049A88}. M993: [SFIRE] logging now records only blocks matching the force table (cap 8 per address); new PAGEFORCE (18.4538): case 0x811858E0u: r[0]=1 (page0 update FUN_8116f900(0x81309644) != 0); case 0x81185936u: r[0]=1 (page1 update FUN_8116f900(0x81309690) != 0) - makes the scene manager consider the page ready and advance to the next page, triggering S1_TITLE scene load/draw. Quick 3M-block boot test (out3m_m1067sftest.txt): [SFIRE] 0 (these blocks do not execute before page1, normal). Full verification run P5D_OTFORCE=1 P5D_STEPFORCE=1 -> out80m_m1067stepforce3.txt. NEXT: [SFIRE] appears => forces effective and [IDR] idx increases / scene pages advance; forced page0/page1 update => scene sequence advances possibly straight to S1_TITLE; new draws/presents -> RT screenshot/window capture; if [SFIRE] still 0 the blocks run through an AOT fast path without job_probes - move the force into the HLE layer (FUN_8116f900 return) or instrument inside the block.
 
 LOOKUP: M993, [SFIRE], PAGEFORCE, 0x811858E0, 0x81185936, page0 update FUN_8116f900(0x81309644), page1 update FUN_8116f900(0x81309690), batch_012.cpp blk_811848D6, blk_811858E0, batch_009.cpp blk_811548CC, batch_003.cpp blk_81031916 blk_81049A88, out3m_m1067sftest.txt, out80m_m1067stepforce3.txt -> §18.4537 [relevant: object checks], §18.4536 [relevant: STEPFORCE], §18.4528 [relevant: scene pages]
+### 18.4539 PORT M994: 场景序列管理器反编译（PAGEFORCE 语义修正）
+
+1) `FUN_81185616` = **setSequence(page,data,size,delay)**：
+```c
+puVar1[2] = puVar1[1];
+if (currentPage >= 0) {
+    iVar6 = (**(code**)(DAT_813b01ac + curPage*0x50 + 0x48))();          // 旧页 update
+    if (iVar6 == 1) (**(code**)(DAT_813b01ac + curPage*0x50 + 0x4c))();  // 旧页 end
+    *(iVar2+4) = -1; }                                                   // 清当前页
+puVar1[1] = param_1;
+if (delay == 0) { (**(code**)(DAT_813b01ac + param_1*0x50 + 0x44))(param_2); } // 新页 start
+else { *puVar1 |= 1; ...缓存 data/size... }
+```
+2) `FUN_811857c2` = **序列 update 主循环**：
+```c
+uVar4 = curPage;
+if (uVar4 >= 0) {
+  if ((flag&1)==0) {
+      iVar3 = (**(code**)(tab + uVar4*0x50 + 0x48))();   // 当前页 update
+      if (iVar3 != 1) { curPage = -1; }                  // ★ !=1 ⇒ 页结束
+  } ... }
+```
+3) **页表布局（每项 0x50 字节）**：`+0x44 = start, +0x48 = update, +0x4c = end`
+4) 6 个页的 update 全是对象存在性查询：
+```
+page0 0x811858D0: FUN_8116f900(0x81309644)
+page1 0x81185926: FUN_8116f900(0x81309690)
+page2 0x8113ABCA: FUN_8116f900("MusicSelectMain")
+page3 0x810C8566: FUN_8116f900("commuMain") != 0
+page4 0x811116E8: FUN_8116f900("TutorialMain") != 0
+page5 0x811980FC: FUN_8116f900("title sequence")
+```
+⇒ **update 返回 1 = 保持运行；返回 0/其他 = 页结束**。M993 的 PAGEFORCE（强制=1）实际是"让页永不结束"，语义搞反；真实切换由 app 调 `FUN_81185616(setSequence)` 完成。
+5) 运行证据（`out80m_m1067stepforce3.txt`）：
+```
+[SFIRE] pc=81185936 n=59585547/59606176/59626127/59646399/59669020  ← page1 update 强制×5
+[SFIRE] pc=811848D6 n=59667376                                      ← init sound 完成检查强制
+[SFIRE] pc=811548CC n=59667413/486/545/593/680                      ← 声音对象检查强制×5
+[INITEXEC] #7 worker=811848B7 node=85B8861C n=59665486
+[JOBDONE2] 1（trophy） [IDR] idx=1（仍 step1） [PRESENT] 1
+```
+⇒ 强制机制生效（SFIRE 命中），但 init sound job 完成回调仍未触发、页推进语义需改为 update 返回 0。
+NEXT：
+```
+① 找 FUN_81185616 调用者 → app 场景切换逻辑（movie 完成后请求哪个 page）
+② 页推进正确做法：让当前页 update 返回 0；或直接在 app 切换处强制目标页 start
+③ 查 init sound completion 回调 0x811848E9 未执行原因（JOBDONE2 未增）
+④ 目标：S1_TITLE 场景 start 被调用 → 标题 draw
+```
+验证：`seqmgr.txt`、`pageupd.txt`、`out80m_m1067stepforce3.txt`。
+
+ANTI-FORGETTING ENTRY. Keywords: M994 scene sequence manager fully decompiled (setSequence/update semantics + page table layout) - PAGEFORCE semantics inverted: update returning 1 = keep active, !=1 = page finished. FUN_81185616 = setSequence(page,data,size,delay): calls old page update (+0x48); if it returns 1 calls old page end (+0x4c); then sets current page, and if delay==0 calls new page start (+0x44) else caches data. FUN_811857c2 = sequence update loop: iVar3=(**(code**)(tab+curPage*0x50+0x48))(); if(iVar3 != 1) curPage=-1. Page table entry layout (0x50 bytes): +0x44 start fn, +0x48 update fn, +0x4c end fn. All 6 page updates are object existence queries: page0 update 0x811858D0 FUN_8116f900(0x81309644); page1 update 0x81185926 FUN_8116f900(0x81309690); page2 update 0x8113ABCA FUN_8116f900('MusicSelectMain'); page3 update 0x810C8566 FUN_8116f900('commuMain') != 0; page4 update 0x811116E8 FUN_8116f900('TutorialMain') != 0; page5 update 0x811980FC FUN_8116f900('title sequence'). So PAGEFORCE forcing 1 keeps the page alive forever (opposite of advancing); real scene transitions come from the app calling FUN_81185616(setSequence). Evidence out80m_m1067stepforce3.txt: [SFIRE] pc=81185936 5x (page1 update forced); [SFIRE] pc=811848D6 n=59667376 (init sound completion check forced); [SFIRE] pc=811548CC 5x (sound object checks forced); [INITEXEC] #7 worker=811848B7 node=85B8861C n=59665486; [JOBDONE2] 1 (trophy only); [IDR] idx=1; [PRESENT] 1; [draw] 1. Force mechanism works (SFIRE hits) but the init sound job completion callback still does not fire and page advancement must be driven by update returning 0. NEXT: find setSequence call sites/callers of FUN_81185616 to see which page the app requests after movie completion; correct page advancement (make update return 0 or force target page start at the app transition); investigate why init sound completion callback 0x811848E9 does not run (JOBDONE2 unchanged); goal remains S1_TITLE scene start being called -> title draws.
+
+LOOKUP: M994, FUN_81185616, FUN_811857c2, setSequence, DAT_813b01ac, page table 0x50, +0x44 start, +0x48 update, +0x4c end, page0 0x81309644, page1 0x81309690, MusicSelectMain, commuMain, TutorialMain, title sequence, 0x8113ABCA, 0x810C8566, 0x811116E8, 0x811980FC, [SFIRE], out80m_m1067stepforce3.txt, seqmgr.txt, pageupd.txt -> §18.4538 [relevant: PAGEFORCE], §18.4528 [relevant: scene pages]
