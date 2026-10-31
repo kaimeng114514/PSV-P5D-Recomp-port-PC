@@ -1016,6 +1016,45 @@
 | M998 | §18.4543: ★★★★★★★ **直接 patch AOT 生成代码（batch_012.cpp）实现 18 个强制 block——绕开 job_probes/nested runner 限制**。对 `batch_012.cpp` 的 18 个 block 函数首行插入寄存器强制（`g_cur_block = 0xVAu;` 之后）：
 | M999 | §18.4544: **patch 已进 exe 但执行路径未变 → 判定 nested/interpreter 路径使用的是另一套 block 分发；转为反编译 job 池执行器（0x811DB1F0/0x811DB244）找"完成判定点"**。证据：
 | M1000 | §18.4545: ★★★★★★★★★ **job 执行器 FUN_811db020 完全反编译（终于找到"完成判定"）+ patch worker trampoline 让所有 job 立即完成**。核心代码：
+| M1001 | §18.4546: ★★★★★★★★★★ **`P5D_JOBKILL`（worker trampoline 强制 -1）生效：job 批量完成，引擎首次走真实渲染路径（真实 pipeline + 字体纹理 + present）！** 证据（`out80m_m1071workerforce.txt` / `err80m_m1071workerforce.txt`）：
+```
+[JOBCOMP] 7 次（poolnode=84617C40/84617D20/84617EE0/84617E00/84617E70/84617F50/84617FC0）
+[JOBDONE2] 7 次（node=85A8FC8C/85A9E13C/85A9E65C/85A9E46C/85A9E4FC/85B428AC/85B42A3C）
+   ← ★ 批量完成：initDataRead + 6 个 job 在 n≈59,568,051–59,569,104 全部完成
+[ABIVTX] #1 vc=3 n=59568128  [ABIBEGIN] data=8D300000 960x544
+[ABIRT] disp=0 saved p5d_disp_0.bmp rc=-1
+── stderr 真实渲染路径 ─────────────────────────────────────────
+[CBEG] cmd=... / [FACQ] / [RTALIAS] cd=8D300000 / [RTPOOL] create 960x544
+[BSIMG] cd=8D300000 960x544 doClear=1
+[GXMVIEWPORT] flat x=0 y=0 w=960 h=544
+[WARN] [STUB] sceGxmSetViewport called - NOT IMPLEMENTED
+[SHADERMOD] ok handle=... codeWords=2285 / codeWords=1684
+[REALPIPE-CREATE] before vkCreateGraphicsPipelines v=gxp_vert_0001.gxp.spv f=gxp_frag_0165.gxp.spv
+[REALPIPE-CREATE] after r=0 pipe=...
+[TEXCH#1] fc=1 va=90029580 fmt=133 256x512 bytes=65536 avg=130.1 131.9 242.0 242.5
+[TEXUPLOAD #2] fc=1 fmt=133 256x512 L1 mean=186.61 nonzero=49568/65536
+[FUBOHOST] #1 片元 UBO float: 0 0 0 0 ...
+[TEXBIND] #0 real=1 alias=0 dummy=15 u0=tex256x512
+[ENDPASS] cd=8D300000 cmd=... inRP=1
+[COUNT] present=1 begin_pass=1 draw=0
+─────────────────────────────────────────────────────────────
+p5d_swap_0.bmp: mean=0.00 max=0（黑，因为该 pass draw=0，只 clear）
+运行在 blocks=59,569,105 结束（page1 开始后仅 ~12 万 blocks；非 80M 上限）
+```
+**意义**：
+1) **job 批量完成彻底打通**（7 个 job 一连串完成）——这是 M1000 强制 worker=-1 的直接效果；
+2) 引擎随后进入**真实渲染路径**：创建真实 SPIR-V pipeline（gxp_vert_0001/gxp_frag_0165）、上传 **256×512 字体/标题纹理**（mean=186.61，非零 49568/65536）、绑定纹理、写片元 UBO、BeginPass/EndPass/Present 全部走通；
+3) 但该 pass `draw=0`（只有 clear）⇒ swapchain 仍黑；且运行在 59.569M 提前结束（原因待查）；
+4) 新发现缺失 HLE：**`sceGxmSetViewport` 仍是 NOT IMPLEMENTED stub**（[WARN]）；HLE-BADMEM 访问 va=0/1/0x821（stub 812B16D0/812B1470/812B12E0/812B1560）。
+NEXT：
+```
+① 实现/接线 sceGxmSetViewport HLE（后端应有 set_viewport → vkCmdSetViewport/Scissor）
+② 查 draw=0 原因：draw 调用是否被 GXM HLE 过滤（viewport/scissor/RT 绑定失败）→ 让 DrawIndexedPrimitive 真正提交
+③ 查运行提前结束：搜 stdout/stderr 退出标记、guest 主线程是否退出（scheduler 无 runnable）或 HLE-BADMEM 致命化
+④ 目标：真实 pass 出现 draw > 0 → swapchain/RT 截图出现标题画面元素（字体纹理已就位！）
+```
+验证：`out80m_m1071workerforce.txt`、`err80m_m1071workerforce.txt`、`p5d_swap_0.bmp`（黑）。 |
+| §18.4546 | P5D_JOBKILL (worker trampoline forced -1) WORKS: jobs complete in bulk and the engine enters the real render path for the first time (real pipeline + font texture + present)! Evidence out80m_m1071workerforce.txt / err80m_m1071workerforce.txt: [JOBCOMP] 7 times (poolnode=84617C40/84617D20/84617EE0/84617E00/84617E70/84617F50/84617FC0); [JOBDONE2] 7 times (node=85A8FC8C/85A9E13C/85A9E65C/85A9E46C/85A9E4FC/85B428AC/85B42A3C) - bulk completion: initDataRead + 6 jobs all completed at n≈59,568,051-59,569,104; [ABIVTX] #1 vc=3 n=59568128; [ABIBEGIN] data=8D300000 960x544; [ABIRT] disp=0 saved p5d_disp_0.bmp rc=-1. stderr shows the real render path: [CBEG]; [FACQ]; [RTALIAS] cd=8D300000; [RTPOOL] create 960x544; [BSIMG] cd=8D300000 960x544 doClear=1; [GXMVIEWPORT] flat x=0 y=0 w=960 h=544; [WARN] [STUB] sceGxmSetViewport called - NOT IMPLEMENTED; [SHADERMOD] ok handle=... codeWords=2285/1684; [REALPIPE-CREATE] before vkCreateGraphicsPipelines v=gxp_vert_0001.gxp.spv f=gxp_frag_0165.gxp.spv; [REALPIPE-CREATE] after r=0; [TEXCH#1] fc=1 va=90029580 fmt=133 256x512 bytes=65536; [TEXUPLOAD #2] fc=1 fmt=133 256x512 L1 mean=186.61 nonzero=49568/65536; [FUBOHOST] #1 fragment UBO floats 0 0 0 0; [TEXBIND] #0 real=1 dummy=15 u0=tex256x512; [ENDPASS] cd=8D300000 inRP=1; [COUNT] present=1 begin_pass=1 draw=0. p5d_swap_0.bmp mean=0.00 (black because draw=0, clear only). The run ended at blocks=59,569,105 (only ~120k blocks after page1 start; not the 80M cap). Meaning: (1) bulk job completion fully works (7 jobs in a row) - the direct effect of M1000 forcing worker=-1; (2) the engine then enters the real render path: created real SPIR-V pipelines (gxp_vert_0001/gxp_frag_0165), uploaded a 256x512 font/title texture (mean=186.61, nonzero 49568/65536), bound the texture, wrote the fragment UBO, BeginPass/EndPass/Present all worked; (3) but that pass had draw=0 (only clear) so the swapchain stays black, and the run ends early at 59.569M (cause TBD); (4) newly found missing HLE: sceGxmSetViewport is still a NOT IMPLEMENTED stub; HLE-BADMEM accesses va=0/1/0x821 (stubs 812B16D0/812B1470/812B12E0/812B1560). NEXT: implement/wire sceGxmSetViewport HLE (backend should have set_viewport -> vkCmdSetViewport/Scissor); find why draw=0 (whether draw calls are filtered by GXM HLE: viewport/scissor/RT binding failures) so DrawIndexedPrimitive really submits; investigate the early run end (search exit markers; did the guest main thread exit / scheduler has no runnable, or HLE-BADMEM turned fatal); goal: real pass with draw > 0 -> swapchain/RT screenshot shows title screen elements (font texture is already there!). |
 ```c
 // 1) 运行链表 DAT_816cd9c0：每个 job 的倒计时 job[8] 减 1，到 0 则移出、状态=2、必要时插入回调链
 while (piVar2 = piVar9, piVar2 != 0) {
@@ -492804,3 +492843,47 @@ NEXT：
 ANTI-FORGETTING ENTRY. Keywords: M1000 job executor FUN_811db020 fully decompiled + worker trampoline patched to force every job complete. Executor core: running list DAT_816cd9c0 decrements job[8] countdown; at 0 removes from running list, sets *job=2, and if job[0xb]!=0 inserts into callback list DAT_816cd9c8; ready list loop: if((*piVar6==2)&&((piVar6[1]&1)==0)){ iVar4=(*(code*)piVar6[10])(param_1,piVar6); if(iVar4 == -1){ FUN_811dad8c(piVar6); } else if(iVar4 != 0){ piVar6[10]=iVar4; } }. Job fields: [2]=priority, [8]=countdown, [0xb]=callback cb, [0xc]=completion cb, [10]=worker trampoline, [0x13]=next, [0x14]=prev, [0x11]/[0x12]=running links, [0x15]/[0x16]=callback links. Trampoline chain: job[10]=0x8116fa5d -> 0x8116FA5C { ldr r0,[r0,#0x34]; bl FUN_8116f748 } -> FUN_8116f748 calls job node [0] (worker); return value flows back to executor, so worker returning -1 => executor calls FUN_811dad8c(job) = completion (via job[0xc]=0x8116fa67 -> FUN_8116f75e). M1000 patch batch_011.cpp: static uint32_t blk_8116FA5C(RecState* s){ g_cur_block=0x8116FA5Cu; s->r[0]=0xFFFFFFFFu; return s->r[14]; }. batch_011.o rebuilt 5:59:37 (1,379,088B), exe relinked 5:59:56. Verification run P5D_OTFORCE=1 P5D_STEPFORCE=1 -> out80m_m1071workerforce.txt. Backup batch_011_patched_4545.cpp. NEXT: [JOBDONE2]/[JOBCOMP] in bulk -> [IDR] idx to 8 -> page1 ends -> FUN_8119810E -> setSequence(6) -> title page start -> title sequence object -> title draws; if ordering breaks, add countdown / init-only switch.
 
 LOOKUP: M1000, FUN_811db020, DAT_816cd9c0, DAT_816cd9c8, job[8] countdown, job[10] worker trampoline, job[0xb], job[0xc], FUN_811dad8c, 0x8116FA5C, 0x8116fa5d, 0x8116fa67, FUN_8116f748, FUN_8116f75e, blk_8116FA5C, batch_011.cpp, jobpool.txt, out80m_m1071workerforce.txt, batch_011_patched_4545.cpp -> §18.4544 [relevant: nested path], §18.4543 [relevant: batch patch]
+### 18.4546 PORT M1001: job 批量完成 → 引擎首次走真实渲染路径（真实 pipeline + 字体纹理 + present）
+
+1) 证据（`out80m_m1071workerforce.txt`）：
+```
+[JOBCOMP] 7 次（poolnode=84617C40/84617D20/84617EE0/84617E00/84617E70/84617F50/84617FC0）
+[JOBDONE2] 7 次（node=85A8FC8C/85A9E13C/85A9E65C/85A9E46C/85A9E4FC/85B428AC/85B42A3C）
+   ← ★ 批量完成（initDataRead + 6 job，n≈59,568,051–59,569,104）
+[ABIVTX] #1 vc=3 n=59568128   [ABIBEGIN] data=8D300000 960x544
+[ABIRT] disp=0 saved p5d_disp_0.bmp rc=-1
+```
+2) stderr 真实渲染路径：
+```
+[CBEG] / [FACQ] / [RTALIAS] cd=8D300000 / [RTPOOL] create 960x544
+[BSIMG] cd=8D300000 960x544 doClear=1
+[GXMVIEWPORT] flat x=0 y=0 w=960 h=544
+[WARN] [STUB] sceGxmSetViewport called - NOT IMPLEMENTED
+[SHADERMOD] ok codeWords=2285 / 1684
+[REALPIPE-CREATE] before vkCreateGraphicsPipelines v=gxp_vert_0001.gxp.spv f=gxp_frag_0165.gxp.spv
+[REALPIPE-CREATE] after r=0
+[TEXCH#1] fc=1 va=90029580 fmt=133 256x512 bytes=65536
+[TEXUPLOAD #2] fc=1 fmt=133 256x512 L1 mean=186.61 nonzero=49568/65536
+[FUBOHOST] #1 片元 UBO float: 0 0 0 0 ...
+[TEXBIND] #0 real=1 dummy=15 u0=tex256x512
+[ENDPASS] cd=8D300000 inRP=1
+[COUNT] present=1 begin_pass=1 draw=0
+```
+3) 结果：`p5d_swap_0.bmp` mean=0.00（黑）；运行在 blocks=59,569,105 结束（page1 后 ~12 万 blocks）。
+4) 分析：
+- **job 批量完成彻底打通**（M1000 直接效果）；
+- 引擎进入**真实渲染路径**：真实 SPIR-V pipeline、256×512 字体/标题纹理上传、纹理绑定、片元 UBO、BeginPass/EndPass/Present 全部走通；
+- 但 `draw=0`（只有 clear）⇒ 黑屏；运行提前结束原因待查；
+- 缺失 HLE：**sceGxmSetViewport NOT IMPLEMENTED**；HLE-BADMEM va=0/1/0x821（stub 812B16D0/812B1470/812B12E0/812B1560）。
+NEXT：
+```
+① 实现/接线 sceGxmSetViewport HLE（→ vkCmdSetViewport/Scissor）
+② 查 draw=0：draw 调用是否被 GXM HLE 过滤（viewport/scissor/RT 绑定失败）
+③ 查运行提前结束（guest 主线程退出/scheduler 无 runnable/HLE-BADMEM 致命化）
+④ 目标：draw > 0 → swapchain/RT 出现标题画面元素（字体纹理已就位）
+```
+验证：`out80m_m1071workerforce.txt`、`err80m_m1071workerforce.txt`、`p5d_swap_0.bmp`。
+
+ANTI-FORGETTING ENTRY. Keywords: M1001 P5D_JOBKILL (worker trampoline forced -1) works: jobs complete in bulk and the engine enters the real render path for the first time. Evidence out80m_m1071workerforce.txt: [JOBCOMP] 7 (poolnode 84617C40/84617D20/84617EE0/84617E00/84617E70/84617F50/84617FC0); [JOBDONE2] 7 (node 85A8FC8C/85A9E13C/85A9E65C/85A9E46C/85A9E4FC/85B428AC/85B42A3C) - initDataRead + 6 jobs completed at n≈59,568,051-59,569,104; [ABIVTX] #1 vc=3 n=59568128; [ABIBEGIN] data=8D300000 960x544; [ABIRT] disp=0 saved p5d_disp_0.bmp rc=-1. stderr real render path: [CBEG]; [FACQ]; [RTALIAS] cd=8D300000; [RTPOOL] create 960x544; [BSIMG] cd=8D300000 960x544 doClear=1; [GXMVIEWPORT] flat x=0 y=0 w=960 h=544; [WARN] [STUB] sceGxmSetViewport called - NOT IMPLEMENTED; [SHADERMOD] ok codeWords=2285/1684; [REALPIPE-CREATE] vkCreateGraphicsPipelines v=gxp_vert_0001.gxp.spv f=gxp_frag_0165.gxp.spv r=0; [TEXCH#1] fmt=133 256x512 bytes=65536; [TEXUPLOAD #2] mean=186.61 nonzero=49568/65536; [FUBOHOST] fragment UBO; [TEXBIND] real=1 u0=tex256x512; [ENDPASS] inRP=1; [COUNT] present=1 begin_pass=1 draw=0. p5d_swap_0.bmp mean=0 (black, draw=0 clear only). Run ended at blocks=59,569,105. Meanings: bulk job completion works; engine enters real render path with real SPIR-V pipelines + 256x512 font/title texture + BeginPass/EndPass/Present; pass had draw=0 so still black; run ends early (TBD); missing HLE sceGxmSetViewport (NOT IMPLEMENTED); HLE-BADMEM va=0/1/0x821 (stubs 812B16D0/812B1470/812B12E0/812B1560). NEXT: implement/wire sceGxmSetViewport HLE (vkCmdSetViewport/Scissor); find why draw=0 (GXM HLE filtering: viewport/scissor/RT binding); investigate early run end; goal draw>0 -> title frame elements on swapchain/RT (font texture ready).
+
+LOOKUP: M1001, P5D_JOBKILL, [JOBCOMP], [JOBDONE2], 7 jobs bulk completion, [CBEG], [FACQ], [RTALIAS], [RTPOOL], [BSIMG], [GXMVIEWPORT], sceGxmSetViewport NOT IMPLEMENTED, [SHADERMOD], [REALPIPE-CREATE] gxp_vert_0001 gxp_frag_0165, [TEXCH#1], [TEXUPLOAD #2] fmt=133 256x512 mean=186.61, [FUBOHOST], [TEXBIND], [ENDPASS], [COUNT] present=1 begin_pass=1 draw=0, p5d_swap_0.bmp black, blocks=59,569,105, HLE-BADMEM 812B16D0 812B1470 812B12E0 812B1560, out80m_m1071workerforce.txt -> §18.4545 [relevant: worker trampoline], §18.4540 [relevant: app init]
