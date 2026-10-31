@@ -1022,6 +1022,47 @@
 | M1004 | §18.4549: ★★★★★★★★★★★ **补齐 initDataRead 完成回调 gap blocks —— 该回调直接 `setSequence(6,0,0,5)` = 标题场景切换！** 上一轮（M1003）修好 0x81027A56 后运行到 8 个 job 全部完成，然后下一个 indirect-miss：`reg1=811850DB target=811850DA`。反编译 0x811850DA（initDataRead 完成回调，17 条指令）：
 | M1005 | §18.4550: ★★★★★★★★★★ **INDIRECT-MISS 清零！11 个 job 全部完成、`setSequence(6,0,0,5)` 执行 → 标题序列 page=6 启动，引擎进入真实逐帧渲染循环（8 次 Present 成功、10,816 次 pass、40 次 draw，运行推进到 n=68.2M）**。证据（`out80m_m1073titlecall.txt`）：
 | M1006 | §18.4551: ★★★★★★★★ **序列页表完整解析：page6 = "TITLE" 标题页（start=0x81185974 / update=0x81185986 / end=0x81185998）+ 新增 `P5D_NOMOVIE` 开关隔离宿主 movie 层**。从 `eboot_true.elf` 直接读取表 `0x813B01B4`（每项 0x50 字节，+0x44 start/+0x48 update/+0x4c end）：
+| M1007 | §18.4552: ★★★★★★★★★ **NOMOVIE 隔离实验证伪（可见画面全来自宿主 movie 层）+ 选择性 job 强制（只强制 init 系列 worker，放行 title/movie job 真正执行）**。`out80m_m1074nomovie.txt`（P5D_NOMOVIE=1）：
+```
+[JOBCOMP] 11 / [JOBDONE2] 11（不变）
+[SEQREQ] 16（含 page=6）
+[ABIVTX] 40 / [PRESENT] 8 / [ABIBEGIN] 10816（帧循环照旧）
+截帧全部 mean=0/全黑：p5d_frame_1..4、p5d_swap_0..7、p5d_disp_7 均 mean=0.00
+```
+⇒ **之前 M1005 看到的 P5D Logo/标题美术全部来自宿主 movie 层（离线 NV12 捷径），引擎自绘仍黑**——这是关键的"去伪存真"。
+**新发现（title 对象被谁创建）**：反编译 `FUN_8119807C`（TITLE 页 start 调用）：
+```c
+void FUN_8119807C(undefined4 param_1) {
+  uVar1 = FUN_8115d614();  uVar2 = FUN_8115d79c(0xc);
+  iVar3 = FUN_8115d3ce(uVar1,uVar2,1,0xc,4,"...\\title\\titleSequence.c",0xa4,1);
+  *(u32*)(iVar3+4) = param_1;
+  FUN_8116f7ca(0,"title sequence",200,0,0, 0x81198173 /*worker*/, 0x811982a9 /*completion*/, iVar3);
+}
+```
+⇒ "title sequence" 对象由 **job "title sequence"（worker=0x81198173）创建**；而 M1000 的 trampoline patch **强制所有 worker 返回 -1** → title worker 被跳过 → 对象永远不出现 → page6 update 返回 0 → title 页 5 帧内立即结束。
+**M1007 修复（batch_011.cpp）**：把 blk_8116FA5C 从"全强制"改为**选择性强制**：
+```cpp
+uint32_t _node = s->r[0] ? rd32(s, s->r[0] + 0x34u) : 0u;
+uint32_t _wf = _node ? rd32(s, _node) : 0u;
+if (_wf == 0x81184809u || _wf == 0x811848B7u || _wf == 0x81184965u ||
+    _wf == 0x81184A89u || _wf == 0x81184B39u || _wf == 0x81184FFFu) {
+  s->r[0] = 0xFFFFFFFFu; return s->r[14]; }        // 仅 init 系列 job 强制完成
+// 其余 job 走原始 trampoline：push 现场 → r0=node → 返回 FUN_8116F748 执行 worker
+s->r[13] -= 4; wr32(s,s->r[13],s->r[14]); s->r[13] -= 4; wr32(s,s->r[13],s->r[4]);
+s->r[0] = rd32(s, s->r[0] + 0x34u); s->r[14] = 0x8116FA64u; return 0x8116F748u;
+```
+（init worker 列表= trophy 0x81184809 / sound 0x811848B7 / gamedata 0x81184965 / msgwindow 0x81184A89 / mainmenu 0x81184B39 / initDataRead 0x81184FFF）
+编译：`batch_011.o` 重编 exit 0；`recomp_harness.exe` 重链 exit 0。
+验证运行：`P5D_NOMOVIE=1 P5D_OTFORCE=1 P5D_STEPFORCE=1` + VDEC → `out80m_m1075selectforce.txt`
+NEXT：
+```
+① title worker 0x81198173 是否在 [JOBEXEC]/[INITEXEC] 出现并执行
+② "title sequence" 对象是否创建 → page6 update 返回 1 → title 页保持
+③ 引擎 draw 是否从 vc=3 fullscreen 变为 UI/文字 draw（ABIVTX vc 变化、ABIRT 非黑）
+④ NOMOVIE 下 swap/RT 是否出现引擎自绘内容
+```
+这是让 title 页真正"活着"的关键开关：只强制 boot init job，放行 title job。 |
+| §18.4552 | NOMOVIE isolation experiment disproved the visible content (all from the host movie layer) + selective job forcing (only force the init-series workers, let the title/movie jobs really execute). out80m_m1074nomovie.txt (P5D_NOMOVIE=1): [JOBCOMP] 11 / [JOBDONE2] 11 (unchanged); [SEQREQ] 16 (incl. page=6); [ABIVTX] 40 / [PRESENT] 8 / [ABIBEGIN] 10816 (frame loop unchanged); all captured frames mean=0/black: p5d_frame_1..4, p5d_swap_0..7, p5d_disp_7 mean=0.00 => the P5D logo/title artwork seen in M1005 all came from the host movie layer (offline NV12 shortcut); the engine's own drawing is still black - key 'separate truth from illusion' result. New finding (who creates the title object): decompiled FUN_8119807C (called by the TITLE page start): v1=FUN_8115d614(); v2=FUN_8115d79c(0xc); iVar3=FUN_8115d3ce(v1,v2,1,0xc,4,'...\title\titleSequence.c',0xa4,1); *(u32*)(iVar3+4)=param_1; FUN_8116f7ca(0,'title sequence',200,0,0, 0x81198173 /*worker*/, 0x811982a9 /*completion*/, iVar3); => the 'title sequence' object is created by the job 'title sequence' (worker=0x81198173); the M1000 trampoline patch forced ALL workers to return -1, so the title worker was skipped, the object never appeared, page6 update returned 0 and the title page ended within 5 frames. M1007 fix (batch_011.cpp): change blk_8116FA5C from force-all to selective force: _node=s->r[0]?rd32(s,s->r[0]+0x34):0; _wf=_node?rd32(s,_node):0; if(_wf==0x81184809||0x811848B7||0x81184965||0x81184A89||0x81184B39||0x81184FFF){ s->r[0]=0xFFFFFFFF; return s->r[14]; } otherwise run the original trampoline body (push regs, r0=node, return FUN_8116F748 to execute the worker). Init worker list = trophy 0x81184809 / sound 0x811848B7 / gamedata 0x81184965 / msgwindow 0x81184A89 / mainmenu 0x81184B39 / initDataRead 0x81184FFF. batch_011.o rebuilt exit 0; recomp_harness.exe relinked exit 0. Verification run P5D_NOMOVIE=1 P5D_OTFORCE=1 P5D_STEPFORCE=1 + VDEC -> out80m_m1075selectforce.txt. NEXT: whether title worker 0x81198173 appears in [JOBEXEC]/[INITEXEC] and executes; whether the 'title sequence' object is created -> page6 update returns 1 -> title page stays; whether engine draws change from vc=3 fullscreen to UI/text draws (ABIVTX vc changes, ABIRT non-black); whether NOMOVIE swap/RT shows engine-drawn content. This is the key switch to make the title page stay alive: force only boot-init jobs, let the title job run. |
 ```
 page0 = "DEBUG MENU"  start=0x811858CE update=0x811858D0 end=0x811858EC
 page1 = "initread"    start=0x8118591E update=0x81185926 end=0x81185942
@@ -493310,3 +493351,44 @@ NEXT：
 ANTI-FORGETTING ENTRY. Keywords: M1006 full sequence page table decoded: page6 = 'TITLE' start=0x81185974 update=0x81185986 end=0x81185998; page0='DEBUG MENU' 0x811858CE/0x811858D0/0x811858EC; page1='initread' 0x8118591E/0x81185926/0x81185942; page2='FREE MODE' 0x81185A0C/0x81185A14/0x81185A26; page3='COMMU' 0x810C84D8/0x810C8566/0x810C8582; page4='TUTORIAL' 0x81185A50/0x81185A58/0x81185A6A; page5='MAIN MENU' 0x811859C0/0x811859D2/0x811859E4; table at 0x813B01B4 (0x50 per entry, +0x44 start/+0x48 update/+0x4c end). page6 functions: start 0x81185974: push {r4,lr}; r1=0; cbz r0; ldr r1,[r0]; r0=r1; bl 0x8119807C (creates/starts the title sequence object with data ptr); update 0x81185986: bl 0x811980FC; r0=(r0!=0) (1=keep while 'title sequence' object exists, 0=page ends); end 0x81185998 cleanup + FUN_8116f8ac. FUN_811980FC = FUN_8116f900('title sequence',0) != 0. setSequence(6,0,0,5) delay=5: manager waits 5 frames then calls start(data); afterwards every frame calls update: object exists -> 1 keep, absent -> 0 page ends => 'title sequence' object must appear within 5 frames. New P5D_NOMOVIE (18.4551): movie_advance_frame() in the DisplayQueueAddEntry handler is switchable: { static int _nomovie=-1; if(_nomovie<0){ const char* _e=getenv('P5D_NOMOVIE'); _nomovie=(_e&&atoi(_e))?1:0; } if(!_nomovie) movie_advance_frame(); }. Compiled/linked exit 0; verification run P5D_NOMOVIE=1 P5D_OTFORCE=1 P5D_STEPFORCE=1 -> out80m_m1074nomovie.txt. NEXT: NOMOVIE run to distinguish engine-drawn vs host movie layer; check FUN_8119807C 'title sequence' object creation deps (file/resource HLE); object within 5 frames -> title page stays; goal title page active -> title UI draws -> real title screen.
 
 LOOKUP: M1006, page6 TITLE, 0x81185974, 0x81185986, 0x81185998, 0x8119807C, 0x811980FC, 'title sequence', table 0x813B01B4, page names DEBUG MENU/initread/FREE MODE/COMMU/TUTORIAL/MAIN MENU/TITLE, P5D_NOMOVIE, movie_advance_frame, out80m_m1074nomovie.txt, titlepage.txt -> §18.4550 [relevant: title page started], §18.4540 [relevant: page table basics]
+### 18.4552 PORT M1007: NOMOVIE 隔离证伪 + 选择性 job 强制（放行 title job）
+
+1) `P5D_NOMOVIE=1` 运行（`out80m_m1074nomovie.txt`）：
+```
+[JOBCOMP] 11 / [JOBDONE2] 11（不变）
+[SEQREQ] 16（含 page=6）
+[ABIVTX] 40 / [PRESENT] 8 / [ABIBEGIN] 10816（帧循环照旧）
+所有截帧 mean=0/全黑：p5d_frame_1..4、p5d_swap_0..7、p5d_disp_7
+```
+⇒ **M1005 可见的 Logo/标题美术全部来自宿主 movie 层；引擎自绘仍黑**（去伪存真）。
+2) 反编译 `FUN_8119807C`（TITLE 页 start）：
+```c
+iVar3 = FUN_8115d3ce(...titleSequence.c...);
+*(u32*)(iVar3+4) = param_1;
+FUN_8116f7ca(0,"title sequence",200,0,0, 0x81198173 /*worker*/, 0x811982a9 /*completion*/, iVar3);
+```
+⇒ "title sequence" 对象由 job（worker=0x81198173）创建；**M1000 全强制使其被跳过** → 对象不出现 → title 页 5 帧内结束。
+3) M1007 修复（batch_011.cpp blk_8116FA5C）：**选择性强制**，只对 init 系列 6 个 worker 强制 -1，其余走原始 trampoline 真正执行：
+```cpp
+uint32_t _node = s->r[0] ? rd32(s, s->r[0] + 0x34u) : 0u;
+uint32_t _wf = _node ? rd32(s, _node) : 0u;
+if (_wf == 0x81184809u || _wf == 0x811848B7u || _wf == 0x81184965u ||
+    _wf == 0x81184A89u || _wf == 0x81184B39u || _wf == 0x81184FFFu) {
+  s->r[0] = 0xFFFFFFFFu; return s->r[14]; }
+s->r[13] -= 4; wr32(s,s->r[13],s->r[14]); s->r[13] -= 4; wr32(s,s->r[13],s->r[4]);
+s->r[0] = rd32(s, s->r[0] + 0x34u); s->r[14] = 0x8116FA64u; return 0x8116F748u;
+```
+4) 编译/链接：batch_011.o exit 0；exe exit 0。
+5) 验证运行：`P5D_NOMOVIE=1 P5D_OTFORCE=1 P5D_STEPFORCE=1` + VDEC → `out80m_m1075selectforce.txt`
+NEXT：
+```
+① title worker 0x81198173 是否执行
+② "title sequence" 对象创建 → page6 update=1 → title 页保持
+③ 引擎 draw 从 vc=3 fullscreen → UI/文字（ABIVTX vc 变化 / ABIRT 非黑）
+④ NOMOVIE 下 swap/RT 出现引擎自绘内容
+```
+验证：`title_obj.txt`、`out80m_m1074nomovie.txt`、`out80m_m1075selectforce.txt`（生成中）。
+
+ANTI-FORGETTING ENTRY. Keywords: M1007 P5D_NOMOVIE=1 isolation run proved the visible P5D logo/title artwork all came from the HOST movie layer - all captured frames black (p5d_frame_1..4, p5d_swap_0..7, p5d_disp_7 mean=0.00) while [JOBCOMP] 11 / [SEQREQ] 16 / [ABIVTX] 40 / [PRESENT] 8 / [ABIBEGIN] 10816 unchanged. FUN_8119807C (TITLE page start) decompiled: iVar3=FUN_8115d3ce(...titleSequence.c...); *(u32*)(iVar3+4)=param_1; FUN_8116f7ca(0,'title sequence',200,0,0, worker=0x81198173, completion=0x811982a9, iVar3) => the 'title sequence' object is created by the title job; the M1000 all-worker force skipped it so the object never appeared and the title page ended within 5 frames. M1007 fix in batch_011.cpp blk_8116FA5C: selective force - _node=s->r[0]?rd32(s,s->r[0]+0x34):0; _wf=_node?rd32(s,_node):0; if(_wf==0x81184809||0x811848B7||0x81184965||0x81184A89||0x81184B39||0x81184FFF){ s->r[0]=0xFFFFFFFF; return s->r[14]; } else run the original trampoline body (push regs, r0=node, return FUN_8116F748). batch_011.o exit 0, exe exit 0. Verification run P5D_NOMOVIE=1 P5D_OTFORCE=1 P5D_STEPFORCE=1 + VDEC -> out80m_m1075selectforce.txt. NEXT: title worker 0x81198173 executes; 'title sequence' object created -> page6 update 1 -> title page stays; engine draws change from vc=3 fullscreen to UI/text (ABIVTX vc changes, ABIRT non-black); NOMOVIE swap/RT shows engine-drawn content.
+
+LOOKUP: M1007, P5D_NOMOVIE, out80m_m1074nomovie.txt black frames, FUN_8119807C, 'title sequence' job, worker 0x81198173, completion 0x811982a9, titleSequence.c, selective force, blk_8116FA5C, init workers 0x81184809 0x811848B7 0x81184965 0x81184A89 0x81184B39 0x81184FFF, batch_011.cpp, out80m_m1075selectforce.txt, title_obj.txt -> §18.4551 [relevant: page6 TITLE], §18.4550 [relevant: title page started], §18.4545 [relevant: worker trampoline]
