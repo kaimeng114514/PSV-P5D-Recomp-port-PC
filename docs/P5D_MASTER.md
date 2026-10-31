@@ -1018,6 +1018,53 @@
 | M1000 | §18.4545: ★★★★★★★★★ **job 执行器 FUN_811db020 完全反编译（终于找到"完成判定"）+ patch worker trampoline 让所有 job 立即完成**。核心代码：
 | M1001 | §18.4546: ★★★★★★★★★★ **`P5D_JOBKILL`（worker trampoline 强制 -1）生效：job 批量完成，引擎首次走真实渲染路径（真实 pipeline + 字体纹理 + present）！** 证据（`out80m_m1071workerforce.txt` / `err80m_m1071workerforce.txt`）：
 | M1002 | §18.4547: ★★★★★★★★★ **找到运行提前结束的确切原因：`[INDIRECT-MISS] at pc=0x8116F75E target=0x81027A56`（AOT 缺口，block 不存在）→ harness 中止运行**。`out80m_m1071workerforce.txt` 末尾：
+| M1003 | §18.4548: ★★★★★★★★★ **修复 INDIRECT-MISS 缺口（手写 2 个 AOT block）+ 实现 sceGxmSetViewport HLE（首次接线后端 viewport 状态机）**。
+1) **缺口修复**：`0x81027A56` 是 job 完成回调函数（14 条指令），其 suffix blocks（0x81027A5C/62/70/74/7A）已在 `batch_002.cpp`，但 **entry（0x81027A56 push {r4,lr}）与 0x81027A58 bl 0x8116f8a8）缺失**。按既有 block 风格手写补入：
+```cpp
+static uint32_t blk_81027A56(RecState* s) { g_cur_block = 0x81027A56u;
+    s->r[13] -= 4; wr32(s, s->r[13], s->r[14]);      // push lr
+    s->r[13] -= 4; wr32(s, s->r[13], s->r[4]);       // push r4
+    return 0x81027A58u; }
+static uint32_t blk_81027A58(RecState* s) { g_cur_block = 0x81027A58u;
+    s->r[14] = 0x81027A5Cu; return 0x8116F8A8u; /* bl */ }
+```
++ 前置声明 2 条 + 分发表追加 2 条 `{0x81027A56u, blk_81027A56}, {0x81027A58u, blk_81027A58}`；`batch_002.cpp` 编译 exit 0。
+反编译确认该函数语义（job 完成回调）：
+```
+0x81027A56: push {r4,lr}; r4=FUN_8116f8a8()（当前 job）;
+  r1=*(u32*)(r4+0x44); if(r1){ *(u32*)(r4+0x4c)=0; r2=r1; r1=r4+0x48; r0=1; blx r2; } // 调 completion handler
+  FUN_8115d614(); FUN_8115d43c(ctx, r4);  // 释放 job
+  pop {r4,pc}
+```
+2) **sceGxmSetViewport / SetViewportEnable HLE 接线**（`recomp_harness.cpp`，按 `_ge->name` 分派）：
+```cpp
+if (std::strcmp(_ge->name, "sceGxmSetViewport") == 0) {
+    float _f[6]; for (int _i=0;_i<6;++_i){ uint32_t _b=s->r[1+_i]; std::memcpy(&_f[_i],&_b,4); }
+    p5d::vulkan::set_gxm_viewport(_f[0],_f[1],_f[2],_f[3],_f[4],_f[5]);
+    printf("[ABIVP] xo=... n=%u"); s->r[0]=0; return s->r[14]; }
+if (std::strcmp(_ge->name, "sceGxmSetViewportEnable") == 0) {
+    int _m=(int)s->r[1]; p5d::vulkan::set_gxm_viewport_enable(_m);
+    printf("[ABIVPE] mode=%d n=%u"); s->r[0]=0; return s->r[14]; }
+```
+声明：
+```cpp
+namespace p5d { namespace vulkan {
+    void set_gxm_viewport(float xo,float xs,float yo,float ys,float zo,float zs);
+    void set_gxm_viewport_enable(int mode); } }
+```
+后端语义（h144k74 权威）：SetViewport → flat=false（vk viewport w=|2*xs|, h=2*ys, x=xo-|xs|, y=yo-ys）；SetViewportEnable(DISABLED=0) → flat=true（全屏）。
+3) 编译/链接：`batch_002.cpp`、`recomp_harness.cpp` 均 exit 0；`recomp_harness.exe` 重链 exit 0（含 `[ABIVP]`/`[ABIVPE]` 字符串）。
+4) 验证运行：`P5D_OTFORCE=1 P5D_STEPFORCE=1` + VDEC → `out80m_m1072gapfix.txt`
+备份：`batch_002_patched_4548.cpp`、`recomp_harness_4548.cpp`。
+NEXT：
+```
+① 运行应越过 blocks=59,569,105（[INDIRECT-MISS] 消失）
+② [ABIVP]/[ABIVPE] 出现（viewport HLE 生效）
+③ [COUNT] draw 从 0 变 >0 → RT/swap 截图出现标题画面元素
+④ 若还有新 indirect-miss：同样方式补 gap block（手写或生成）
+```
+这是首次同时打通：**AOT 缺口手写填充 + GXM viewport 后端接线**。 |
+| §18.4548 | Fixed the INDIRECT-MISS gap (hand-wrote 2 AOT blocks) + implemented sceGxmSetViewport HLE (first wiring of the backend viewport state machine). (1) Gap fix: 0x81027A56 is the job completion callback (14 instructions); its suffix blocks (0x81027A5C/62/70/74/7A) already exist in batch_002.cpp, but the entry (0x81027A56 push {r4,lr}) and 0x81027A58 (bl 0x8116f8a8) were missing. Hand-wrote them in the existing block style: static uint32_t blk_81027A56(RecState* s){ g_cur_block=0x81027A56u; s->r[13]-=4; wr32(s,s->r[13],s->r[14]); s->r[13]-=4; wr32(s,s->r[13],s->r[4]); return 0x81027A58u; } static uint32_t blk_81027A58(RecState* s){ g_cur_block=0x81027A58u; s->r[14]=0x81027A5Cu; return 0x8116F8A8u; } + 2 forward declarations + 2 table entries {0x81027A56u,blk_81027A56},{0x81027A58u,blk_81027A58}; batch_002.cpp compiles exit 0. Decompiled semantics (job completion callback): 0x81027A56: push {r4,lr}; r4=FUN_8116f8a8() (current job); r1=*(u32*)(r4+0x44); if(r1){ *(u32*)(r4+0x4c)=0; r2=r1; r1=r4+0x48; r0=1; blx r2; } (call completion handler) FUN_8115d614(); FUN_8115d43c(ctx, r4); (free job) pop {r4,pc}. (2) sceGxmSetViewport / SetViewportEnable HLE wiring in recomp_harness.cpp by _ge->name: sceGxmSetViewport -> read 6 floats from r1..r6 -> p5d::vulkan::set_gxm_viewport(_f[0..5]); print [ABIVP]; s->r[0]=0; return LR. sceGxmSetViewportEnable -> mode=(int)s->r[1]; set_gxm_viewport_enable(mode); print [ABIVPE]. Declarations: namespace p5d { namespace vulkan { void set_gxm_viewport(float,float,float,float,float,float); void set_gxm_viewport_enable(int); } }. Backend semantics (h144k74): SetViewport -> flat=false (vk viewport w=|2*xs|, h=2*ys, x=xo-|xs|, y=yo-ys); SetViewportEnable(DISABLED=0) -> flat=true. (3) batch_002.cpp and recomp_harness.cpp both compile exit 0; recomp_harness.exe relinked exit 0 (contains [ABIVP]/[ABIVPE] strings). (4) Verification run P5D_OTFORCE=1 P5D_STEPFORCE=1 + VDEC -> out80m_m1072gapfix.txt. Backups batch_002_patched_4548.cpp, recomp_harness_4548.cpp. NEXT: run should pass blocks=59,569,105 (INDIRECT-MISS gone); [ABIVP]/[ABIVPE] appear; [COUNT] draw from 0 to >0 -> RT/swap images show title screen elements; if new indirect-miss appears, fill the gap block the same way. |
 ```
 [JOBCOMP] #7 poolnode=84617FC0 n=59569103
 [JOBDONE2] #7 node=85B42A3C n=59569104
@@ -492962,3 +493009,55 @@ NEXT：
 ANTI-FORGETTING ENTRY. Keywords: M1002 run ended early because of INDIRECT-MISS (AOT gap 0x81027A56). out80m_m1071workerforce.txt tail: [JOBCOMP] #7 poolnode=84617FC0 n=59569103; [JOBDONE2] #7 node=85B42A3C n=59569104; [PROC] delete p=85B42A3C; [PROCWR] a=815554C0 v=85B42A3C blk=8116F75E; [INDIRECT-MISS] reg1=81027A57 target=81027A56 block=8116F75E; [HARNESS] indirect miss at pc=8116F75E after 59569105 blocks. AOT coverage: 0x81027A56/0x81027A57 not in any batch_*.cpp (GAP); 0x81027A46/0x81027A3A exist in batch_002.cpp. So the run aborts at the job completion trampoline's indirect jump (bx reg1=0x81027A57 -> 0x81027A56) because that block is missing; the real render path from M1001 happens before this. Fixes: (1) fill AOT gap 0x81027A56 via the stage-4f function-boundary gap-fill flow and relink; (2) implement sceGxmSetViewport HLE with existing backend symbols p5d::vulkan::set_gxm_viewport(xo,xs,yo,ys,zo,zs)/set_gxm_viewport_enable(mode)/gxm_viewport_flat(); stub VAs sceGxmSetViewport=0x812B1300 (NID 3EB3380B, 7 args), sceGxmSetViewportEnable=0x812B1420 (NID 814F61EB, 2 args); semantics: SetViewport -> flat=false (vk viewport w=|2*xs|, h=2*ys, x=xo-|xs|, y=yo-ys); SetViewportEnable(0=DISABLED) -> flat=true fullscreen; harness GXM ABI dispatch uses _ge->name so add strcmp branches; (3) [COUNT] present=1 begin_pass=1 draw=0 - real pass created but no draw yet. NEXT: implement SetViewport HLE; fill AOT gap 0x81027A56; rerun -> [INDIRECT-MISS] gone -> draw>0 -> title screen content.
 
 LOOKUP: M1002, [INDIRECT-MISS], reg1=81027A57, target=81027A56, 0x8116F75E, [HARNESS] indirect miss after 59569105 blocks, batch_002.cpp gaps, gap-fill 4f, sceGxmSetViewport 0x812B1300 NID 3EB3380B, sceGxmSetViewportEnable 0x812B1420 NID 814F61EB, p5d::vulkan::set_gxm_viewport, set_gxm_viewport_enable, gxm_viewport_flat, out80m_m1071workerforce.txt -> §18.4546 [relevant: real render path], §18.4545 [relevant: worker trampoline]
+### 18.4548 PORT M1003: 手写补齐 AOT 缺口 block（0x81027A56/0x81027A58）+ sceGxmSetViewport HLE
+
+1) **缺口定位**：job 完成回调 0x81027A56（14 条指令）的 suffix blocks 已在 `batch_002.cpp`（0x81027A5C/62/70/74/7A），但缺失：
+```
+0x81027A56  push {r4,lr}        ← 缺
+0x81027A58  bl 0x8116f8a8       ← 缺（下一块 0x81027A5C 存在）
+```
+2) **手写补入**（同样 block 风格）：
+```cpp
+static uint32_t blk_81027A56(RecState* s) { g_cur_block = 0x81027A56u;
+    s->r[13] -= 4; wr32(s, s->r[13], s->r[14]);
+    s->r[13] -= 4; wr32(s, s->r[13], s->r[4]);
+    return 0x81027A58u; }
+static uint32_t blk_81027A58(RecState* s) { g_cur_block = 0x81027A58u;
+    s->r[14] = 0x81027A5Cu; return 0x8116F8A8u; /* bl */ }
+```
++ 前置声明 + 表项 `{0x81027A56u, blk_81027A56}`, `{0x81027A58u, blk_81027A58}`；编译 exit 0。
+3) 函数语义（反编译）：
+```
+0x81027A56: push {r4,lr}
+  r4 = FUN_8116f8a8();            // 当前 job
+  r1 = *(u32*)(r4+0x44);
+  if (r1) { *(u32*)(r4+0x4c)=0; r2=r1; r1=r4+0x48; r0=1; blx r2; }  // completion handler
+  FUN_8115d614(); FUN_8115d43c(ctx, r4);   // free job
+  pop {r4,pc}
+```
+4) **viewport HLE**（`recomp_harness.cpp`）：
+```cpp
+if (std::strcmp(_ge->name, "sceGxmSetViewport") == 0) {
+    float _f[6]; for (int _i=0;_i<6;++_i){ uint32_t _b=s->r[1+_i]; std::memcpy(&_f[_i],&_b,4); }
+    p5d::vulkan::set_gxm_viewport(_f[0],_f[1],_f[2],_f[3],_f[4],_f[5]);
+    printf("[ABIVP] ..."); s->r[0]=0; return s->r[14]; }
+if (std::strcmp(_ge->name, "sceGxmSetViewportEnable") == 0) {
+    int _m=(int)s->r[1]; p5d::vulkan::set_gxm_viewport_enable(_m);
+    printf("[ABIVPE] mode=%d n=%u"); s->r[0]=0; return s->r[14]; }
+```
+声明 + 语义（SetViewport→flat=false, w=|2xs|,h=2ys,x=xo-|xs|,y=yo-ys；Enable(0)→flat=true）。
+5) 编译/链接：batch_002.cpp、recomp_harness.cpp 均 exit 0；exe 重链 exit 0（含 `[ABIVP]`/`[ABIVPE]`）。
+6) 验证运行：`P5D_OTFORCE=1 P5D_STEPFORCE=1` + VDEC → `out80m_m1072gapfix.txt`
+备份：`batch_002_patched_4548.cpp`、`recomp_harness_4548.cpp`
+NEXT：
+```
+① 越过 blocks=59,569,105（INDIRECT-MISS 消失）
+② [ABIVP]/[ABIVPE] 出现
+③ [COUNT] draw>0 → RT/swap 出现标题画面元素
+④ 新缺口 → 同法补 block
+```
+验证：`batch_002.cpp`（patched）、`out80m_m1072gapfix.txt`（生成中）、`gap81027a56.txt`。
+
+ANTI-FORGETTING ENTRY. Keywords: M1003 hand-wrote AOT gap blocks 0x81027A56/0x81027A58 + implemented sceGxmSetViewport HLE. The job completion callback 0x81027A56 (14 instructions) had its suffix blocks (0x81027A5C/62/70/74/7A) already in batch_002.cpp but the entry 0x81027A56 (push {r4,lr}) and 0x81027A58 (bl 0x8116f8a8) were missing. Hand-wrote: blk_81027A56 { g_cur_block=0x81027A56u; s->r[13]-=4; wr32(s,s->r[13],s->r[14]); s->r[13]-=4; wr32(s,s->r[13],s->r[4]); return 0x81027A58u; } blk_81027A58 { g_cur_block=0x81027A58u; s->r[14]=0x81027A5Cu; return 0x8116F8A8u; } + declarations + table entries; batch_002.cpp compile OK. Function semantics: r4=FUN_8116f8a8() (current job); r1=*(u32*)(r4+0x44); if(r1){ *(u32*)(r4+0x4c)=0; r2=r1; r1=r4+0x48; r0=1; blx r2; } FUN_8115d614(); FUN_8115d43c(ctx,r4); pop. Viewport HLE in recomp_harness.cpp by _ge->name: sceGxmSetViewport -> 6 floats r1..r6 -> p5d::vulkan::set_gxm_viewport(f0..f5), print [ABIVP], r0=0 return LR; sceGxmSetViewportEnable -> mode=(int)r1 -> set_gxm_viewport_enable(mode), print [ABIVPE]. Backend semantics: SetViewport -> flat=false (w=|2xs|, h=2ys, x=xo-|xs|, y=yo-ys); Enable(0) -> flat=true. Both files compile exit 0, exe relinked exit 0. Verification run P5D_OTFORCE=1 P5D_STEPFORCE=1 + VDEC -> out80m_m1072gapfix.txt. Backups batch_002_patched_4548.cpp, recomp_harness_4548.cpp. NEXT: run passes blocks=59,569,105 (INDIRECT-MISS gone); [ABIVP]/[ABIVPE] appear; [COUNT] draw>0 -> RT/swap show title screen elements; new gaps filled the same way.
+
+LOOKUP: M1003, 0x81027A56, 0x81027A58, blk_81027A56, blk_81027A58, batch_002.cpp, gap81027a56.txt, FUN_8116f8a8, FUN_8115d614, FUN_8115d43c, sceGxmSetViewport, sceGxmSetViewportEnable, set_gxm_viewport, set_gxm_viewport_enable, [ABIVP], [ABIVPE], batch_002_patched_4548.cpp, recomp_harness_4548.cpp, out80m_m1072gapfix.txt -> §18.4547 [relevant: INDIRECT-MISS], §18.4546 [relevant: real render path]

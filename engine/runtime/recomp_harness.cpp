@@ -1112,6 +1112,8 @@ namespace p5d { namespace vulkan { void end_frame(); void present_frame(uint32_t
 namespace p5d { namespace vulkan { void request_capture(const char* name); } }   // 18.4485 M940
 namespace p5d { namespace vulkan { void end_scene_pass(); int save_rt_screenshot(unsigned int cd, const char* name); } }   // 18.4486 M941
 namespace p5d { namespace vulkan { void begin_scene_pass(unsigned int colorData, unsigned int w, unsigned int h); void begin_frame(); } }   // 18.4492 M947
+namespace p5d { namespace vulkan { void set_gxm_viewport(float xo,float xs,float yo,float ys,float zo,float zs);
+                                        void set_gxm_viewport_enable(int mode); } }   // 18.4548 M1003
 namespace p5d { namespace vulkan { int32_t select_real_pipeline(const char*, const char*); } }   // 18.4480 M935
 namespace p5d { namespace vulkan { void update_uniform_buffer(const float* local_to_world, const float* view_proj); } }   // 18.4496 M951
 namespace p5d { namespace vulkan { void update_uniform_buffer_raw(const void* data, unsigned int bytes); void update_fragment_uniform_buffer_raw(const void* data, unsigned int bytes); } }   // 18.4507 M962
@@ -2049,6 +2051,18 @@ extern "C" uint32_t hle_call(uint32_t stub_va, RecState* s) {
         else p5d::vulkan::begin_frame();
         s->r[0] = 0; return s->r[14];
       }
+      // 18.4548 M1003: sceGxmSetViewport / SetViewportEnable -> backend GXM viewport state machine
+      if (std::strcmp(_ge->name, "sceGxmSetViewport") == 0) {
+        float _f[6];
+        for (int _i = 0; _i < 6; ++_i) { uint32_t _b = s->r[1 + _i]; std::memcpy(&_f[_i], &_b, 4); }
+        p5d::vulkan::set_gxm_viewport(_f[0], _f[1], _f[2], _f[3], _f[4], _f[5]);
+        static int _vp = 0; if (_vp++ < 30) { printf("[ABIVP] xo=%.2f xs=%.2f yo=%.2f ys=%.2f zo=%.2f zs=%.2f n=%u\n", _f[0],_f[1],_f[2],_f[3],_f[4],_f[5],g_main_n); fflush(stdout); }
+        s->r[0] = 0; return s->r[14]; }
+      if (std::strcmp(_ge->name, "sceGxmSetViewportEnable") == 0) {
+        int _m = (int)s->r[1];
+        p5d::vulkan::set_gxm_viewport_enable(_m);
+        static int _ve = 0; if (_ve++ < 30) { printf("[ABIVPE] mode=%d n=%u\n", _m, g_main_n); fflush(stdout); }
+        s->r[0] = 0; return s->r[14]; }
       if (strncmp(_ge->name, "sceGxmEndScene", 14) == 0) {
         p5d::vulkan::end_scene_pass();
         static int _en = 0; if (_en++ < 12) { printf("[ABIEND] end_scene_pass n=%u\n", g_main_n); fflush(stdout); }
