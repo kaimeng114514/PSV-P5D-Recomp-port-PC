@@ -1179,7 +1179,10 @@ static void job_probes(uint32_t pcv, RecState* s) {
         case 0x811548CCu: s->r[0] = 1u; break;
         // 18.4538 M993: page-sequence update object lookups (advance S0->S1 independent of init jobs)
         case 0x811858E0u: s->r[0] = 1u; break;   // page0 update: FUN_8116f900(0x81309644) != 0
-        case 0x81185936u: s->r[0] = 1u; break;   // page1 update: FUN_8116f900(0x81309690) != 0
+        // 18.4540 M995: page1 = "initDataRead" sequence page. Per sequence manager semantics
+        // (18.4539) update returning != 1 FINISHES the page -> manager sets curPage=-1 and the app
+        // can then setSequence() the next scene (e.g. page5 "title sequence").
+        case 0x81185936u: s->r[0] = 0u; break;   // page1 update -> 0 = page finished
         default: break; }
       // 18.4538 M993: only log blocks that actually matched the force table
       { bool _hit = false;

@@ -1010,6 +1010,61 @@
 | M992 | §18.4537: ★★★★★★★★ **init 步骤完成检查的本质 = 对象存在性查询 `FUN_8116f900(name,0)`！据此扩展 STEPFORCE（强制查询结果）**。反编译三个关键检查函数：
 | M993 | §18.4538: **验证 STEPFORCE 目标地址全部是 AOT block 起点 + 增加「场景页推进强制」（PAGEFORCE）**。检查生成源码 `batch_*.cpp` 确认我们所有强制地址都是真实 block 起点：
 | M994 | §18.4539: ★★★★★★★ **场景序列管理器完全反编译（setSequence/update 语义 + 页表布局）→ 发现 PAGEFORCE 语义搞反了：update 返回 1 = "保持活动"，≠1 = "页结束"**。`FUN_81185616`（[SEQREQ] 探针处）= **setSequence(page,data,size,delay)**：
+| M995 | §18.4540: ★★★★★★★ **场景页语义与入口彻底确定：page1 = 引导页（initDataRead+影片），page6 = "title sequence" 标题页；app 启动主函数 FUN_8118464C 完整反编译**。字符串解析（`eboot_true.elf` .rodata）：
+```
+0x81309644 = "debug menu"    ← page0 update 查询对象
+0x81309690 = "initDataRead"  ← page1 update 查询对象
+0x8130B140 = "title sequence" ← page5 update 查询对象
+```
+**FUN_8118464C = app 启动总流程**（boot 主函数，286B）：
+```c
+SceAppUtil_5DFB9CA0(1,&local_10);           // 取屏幕分辨率类型 → DAT_81670354 (0/1)
+FUN_811546f0();                             // audio init
+FUN_8102a780(1,1,1);
+FUN_81154a1c(0x1e,0x1e);                    // ★ 帧率 30/30
+FUN_81159bc0(0x81184777,0x81184791,0);      // 设置回调
+FUN_8116e3e2(2000);
+FUN_811850fc(); FUN_81185152(); FUN_811851da();
+FUN_81155ba6(); FUN_81155768();             // sound 相关
+FUN_8115fa3e(0x41); FUN_81025874(); FUN_8115fa3e(0x20);
+FUN_8106fdb2(); FUN_81030f98(); FUN_8102ecb4(); FUN_8102b248();
+FUN_81031034(); FUN_81025aa8(); FUN_81031920(); FUN_810394a8();
+FUN_8103114c(); FUN_81181430(); FUN_8103a2d0();
+FUN_8115922c();                             // ★ PLAY MOVIE（page1 引导影片）
+FUN_811858bc();                             // ★ 设置 7 页序列表（sequenceList.c）
+FUN_8118542e(); FUN_81183dd8(); FUN_81183de6();
+FUN_810994b2(); FUN_8108ebb4(); FUN_81094bd4(); FUN_81090074();
+FUN_8107aa7c(); FUN_8107aab4();
+FUN_81185616(1,0,0,0);                      // ★ setSequence(page=1) = 引导页
+```
+**title 入口函数**（反编译）：
+```c
+// 启动 title sequence 页（page 6）
+void FUN_8119810e(param) { local_10=param; FUN_81185616(6,&local_10,4,0); }
+// 结束 title sequence 页（page 6，param=0）
+void FUN_8119813e(void)  { local_10=0; FUN_81185616(6,&local_10,4,0); }
+```
+**调用者**（P5DRefs2 结果）：
+```
+FUN_8119810E ← FUN_810FC208 @0x810FCE64
+             ← FUN_810EF0D8 @0x810F0B68
+             ← FUN_810FD49E @0x810FE140
+```
+⇒ 场景链：**page1 引导页（initDataRead 对象 + 影片）→ 某条件满足后 FUN_810FC208/FUN_810EF0D8/FUN_810FD49E 调 FUN_8119810E → setSequence(6) = title sequence 标题页**。
+**M995 修改**：PAGEFORCE 对 page1 update 改为 **强制返回 0**（页结束）：
+```cpp
+case 0x81185936u: s->r[0] = 0u; break;   // page1 update -> 0 = page finished（允许 app 切页）
+```
+验证运行：`P5D_OTFORCE=1 P5D_STEPFORCE=1` → `out80m_m1068pagefinish.txt`。
+NEXT：
+```
+① 看 [SEQREQ] 是否出现 page=6（标题页请求）/ title 相关活动
+② 反编译 FUN_810FC208 / FUN_810EF0D8 / FUN_810FD49E：找"page1 完成后启动 title"的条件
+③ 若条件依赖 movie/init 完成 → 在对应 block 强制（同 STEPFORCE 模式）
+④ title 页 start 被调用 → title sequence 对象创建 → 标题画面 draw
+```
+验证：`setseq_callers.txt`、`seq_callers.txt`、`title_callers.txt`（Ghidra）、字符串 VA 解析、`out80m_m1068pagefinish.txt`（生成中）。 |
+| §18.4540 | Scene page semantics and entries fully determined: page1 = intro page (initDataRead + movie), page6 = 'title sequence' title page; app startup master function FUN_8118464C fully decompiled. String resolution from eboot_true.elf .rodata: 0x81309644 = 'debug menu' (page0 update query object), 0x81309690 = 'initDataRead' (page1 update query object), 0x8130B140 = 'title sequence' (page5 update query object). FUN_8118464C = app startup master flow (286B): SceAppUtil_5DFB9CA0(1,&local_10) sets DAT_81670354 (screen resolution type 0/1); FUN_811546f0() audio init; FUN_8102a780(1,1,1); FUN_81154a1c(0x1e,0x1e) sets 30/30 fps; FUN_81159bc0(0x81184777,0x81184791,0) sets callbacks; FUN_8116e3e2(2000); FUN_811850fc/81185152/811851da; FUN_81155ba6/81155768 (sound); FUN_8115fa3e(0x41); FUN_81025874; FUN_8115fa3e(0x20); FUN_8106fdb2; FUN_81030f98; FUN_8102ecb4; FUN_8102b248; FUN_81031034; FUN_81025aa8; FUN_81031920; FUN_810394a8; FUN_8103114c; FUN_81181430; FUN_8103a2d0; FUN_8115922c() PLAY MOVIE (page1 intro movie); FUN_811858bc() sets the 7-page sequence table (sequenceList.c); FUN_8118542e; FUN_81183dd8; FUN_81183de6; FUN_810994b2; FUN_8108ebb4; FUN_81094bd4; FUN_81090074; FUN_8107aa7c; FUN_8107aab4; FUN_81185616(1,0,0,0) setSequence(page=1) = intro page. Title entry functions: void FUN_8119810e(param){ local_10=param; FUN_81185616(6,&local_10,4,0); } (start title sequence page 6); void FUN_8119813e(void){ local_10=0; FUN_81185616(6,&local_10,4,0); } (end title page). Callers of FUN_8119810E: FUN_810FC208 @0x810FCE64, FUN_810EF0D8 @0x810F0B68, FUN_810FD49E @0x810FE140. So the scene chain is: page1 intro page (initDataRead object + movie) -> when some condition is met FUN_810FC208/FUN_810EF0D8/FUN_810FD49E call FUN_8119810E -> setSequence(6) = title sequence page. M995 change: PAGEFORCE page1 update now forced to 0 (page finished): case 0x81185936u: s->r[0]=0u; break; to allow the app to switch pages. Verification run P5D_OTFORCE=1 P5D_STEPFORCE=1 -> out80m_m1068pagefinish.txt. NEXT: (1) check whether [SEQREQ] page=6 / title activity appears; (2) decompile FUN_810FC208/FUN_810EF0D8/FUN_810FD49E to find the 'start title after page1' condition; (3) if it depends on movie/init completion, force the corresponding blocks (STEPFORCE pattern); (4) title page start being called -> title sequence object creation -> title screen draws. |
 ```c
 puVar1[2]=puVar1[1];
 if (currentPage >= 0) {
@@ -492352,3 +492407,56 @@ NEXT：
 ANTI-FORGETTING ENTRY. Keywords: M994 scene sequence manager fully decompiled (setSequence/update semantics + page table layout) - PAGEFORCE semantics inverted: update returning 1 = keep active, !=1 = page finished. FUN_81185616 = setSequence(page,data,size,delay): calls old page update (+0x48); if it returns 1 calls old page end (+0x4c); then sets current page, and if delay==0 calls new page start (+0x44) else caches data. FUN_811857c2 = sequence update loop: iVar3=(**(code**)(tab+curPage*0x50+0x48))(); if(iVar3 != 1) curPage=-1. Page table entry layout (0x50 bytes): +0x44 start fn, +0x48 update fn, +0x4c end fn. All 6 page updates are object existence queries: page0 update 0x811858D0 FUN_8116f900(0x81309644); page1 update 0x81185926 FUN_8116f900(0x81309690); page2 update 0x8113ABCA FUN_8116f900('MusicSelectMain'); page3 update 0x810C8566 FUN_8116f900('commuMain') != 0; page4 update 0x811116E8 FUN_8116f900('TutorialMain') != 0; page5 update 0x811980FC FUN_8116f900('title sequence'). So PAGEFORCE forcing 1 keeps the page alive forever (opposite of advancing); real scene transitions come from the app calling FUN_81185616(setSequence). Evidence out80m_m1067stepforce3.txt: [SFIRE] pc=81185936 5x (page1 update forced); [SFIRE] pc=811848D6 n=59667376 (init sound completion check forced); [SFIRE] pc=811548CC 5x (sound object checks forced); [INITEXEC] #7 worker=811848B7 node=85B8861C n=59665486; [JOBDONE2] 1 (trophy only); [IDR] idx=1; [PRESENT] 1; [draw] 1. Force mechanism works (SFIRE hits) but the init sound job completion callback still does not fire and page advancement must be driven by update returning 0. NEXT: find setSequence call sites/callers of FUN_81185616 to see which page the app requests after movie completion; correct page advancement (make update return 0 or force target page start at the app transition); investigate why init sound completion callback 0x811848E9 does not run (JOBDONE2 unchanged); goal remains S1_TITLE scene start being called -> title draws.
 
 LOOKUP: M994, FUN_81185616, FUN_811857c2, setSequence, DAT_813b01ac, page table 0x50, +0x44 start, +0x48 update, +0x4c end, page0 0x81309644, page1 0x81309690, MusicSelectMain, commuMain, TutorialMain, title sequence, 0x8113ABCA, 0x810C8566, 0x811116E8, 0x811980FC, [SFIRE], out80m_m1067stepforce3.txt, seqmgr.txt, pageupd.txt -> §18.4538 [relevant: PAGEFORCE], §18.4528 [relevant: scene pages]
+### 18.4540 PORT M995: 场景页语义/标题入口确定 + app 启动主流程反编译
+
+1) 字符串解析（`eboot_true.elf` .rodata）：
+```
+0x81309644 = "debug menu"      ← page0 update 查询对象
+0x81309690 = "initDataRead"    ← page1 update 查询对象
+0x8130B140 = "title sequence"  ← page5 update 查询对象
+```
+2) **FUN_8118464C = app 启动总流程**：
+```c
+SceAppUtil_5DFB9CA0(1,&local_10);            // 分辨率类型 → DAT_81670354
+FUN_811546f0();                              // audio init
+FUN_8102a780(1,1,1);
+FUN_81154a1c(0x1e,0x1e);                     // ★ 帧率 30/30
+FUN_81159bc0(0x81184777,0x81184791,0);       // 回调
+FUN_8116e3e2(2000);
+FUN_811850fc/81185152/811851da; FUN_81155ba6/81155768;
+FUN_8115fa3e(0x41); FUN_81025874(); FUN_8115fa3e(0x20);
+... 子系统初始化 ...
+FUN_8115922c();                              // ★ PLAY MOVIE（page1 引导影片）
+FUN_811858bc();                              // ★ 设置 7 页序列表
+... 更多子系统 ...
+FUN_81185616(1,0,0,0);                       // ★ setSequence(page=1) 引导页
+```
+3) title 入口：
+```c
+void FUN_8119810e(param) { FUN_81185616(6,&local_10,4,0); }   // 启动 page6 title sequence
+void FUN_8119813e(void)  { FUN_81185616(6,&local_10,4,0); }   // 结束 page6
+```
+调用者：
+```
+FUN_8119810E ← FUN_810FC208 @0x810FCE64
+             ← FUN_810EF0D8 @0x810F0B68
+             ← FUN_810FD49E @0x810FE140
+```
+⇒ 流程：**page1 引导页（initDataRead + movie）→ 条件满足 → FUN_8119810E → setSequence(6) = title sequence 标题页**
+4) M995 修改：page1 update 强制返回 0（页结束）：
+```cpp
+case 0x81185936u: s->r[0] = 0u; break;   // page1 update -> 0 = page finished（允许 app 切页）
+```
+5) 验证运行：`P5D_OTFORCE=1 P5D_STEPFORCE=1` → `out80m_m1068pagefinish.txt`
+NEXT：
+```
+① [SEQREQ] 是否出现 page=6（标题页请求）
+② 反编译 FUN_810FC208 / FUN_810EF0D8 / FUN_810FD49E：找启动 title 的条件
+③ 条件依赖 movie/init 完成 → 在对应 block 强制
+④ title 页 start 被调用 → title sequence 对象创建 → 标题 draw
+```
+验证：`setseq_callers.txt`、`seq_callers.txt`、`title_callers.txt`、`out80m_m1068pagefinish.txt`（生成中）。
+
+ANTI-FORGETTING ENTRY. Keywords: M995 scene page semantics and entries determined: page1 = intro page (initDataRead + movie), page6 = 'title sequence' title page; string resolution from eboot_true.elf .rodata: 0x81309644='debug menu' (page0 update object), 0x81309690='initDataRead' (page1 update object), 0x8130B140='title sequence' (page5 update object). FUN_8118464C = app startup master flow: SceAppUtil_5DFB9CA0(1,&local_10) sets DAT_81670354; FUN_811546f0() audio init; FUN_8102a780(1,1,1); FUN_81154a1c(0x1e,0x1e) 30/30 fps; FUN_81159bc0(0x81184777,0x81184791,0) callbacks; FUN_8116e3e2(2000); FUN_811850fc/81185152/811851da; FUN_81155ba6/81155768; FUN_8115fa3e(0x41); FUN_81025874; FUN_8115fa3e(0x20); FUN_8106fdb2; FUN_81030f98; FUN_8102ecb4; FUN_8102b248; FUN_81031034; FUN_81025aa8; FUN_81031920; FUN_810394a8; FUN_8103114c; FUN_81181430; FUN_8103a2d0; FUN_8115922c() PLAY MOVIE; FUN_811858bc() sets 7-page sequence table; FUN_8118542e; FUN_81183dd8; FUN_81183de6; FUN_810994b2; FUN_8108ebb4; FUN_81094bd4; FUN_81090074; FUN_8107aa7c; FUN_8107aab4; FUN_81185616(1,0,0,0) setSequence(page=1) intro page. Title: void FUN_8119810e(param){ local_10=param; FUN_81185616(6,&local_10,4,0); } start page 6; void FUN_8119813e(void){ local_10=0; FUN_81185616(6,&local_10,4,0); } end page 6. Callers of FUN_8119810E: FUN_810FC208 @0x810FCE64, FUN_810EF0D8 @0x810F0B68, FUN_810FD49E @0x810FE140. M995 change: PAGEFORCE page1 update forced to 0: case 0x81185936u: s->r[0]=0u; break; to allow page switch. Verification run -> out80m_m1068pagefinish.txt. NEXT: check [SEQREQ] page=6; decompile FUN_810FC208/FUN_810EF0D8/FUN_810FD49E for the start-title condition; force dependent blocks; title page start -> title sequence object -> title draws.
+
+LOOKUP: M995, FUN_8118464C app init, FUN_81185616(1,0,0,0), setSequence(6), FUN_8119810E title start, FUN_8119813E title end, FUN_810FC208, FUN_810EF0D8, FUN_810FD49E, 'initDataRead' 0x81309690, 'debug menu' 0x81309644, 'title sequence' 0x8130B140, FUN_8115922c PLAY MOVIE, FUN_811858bc, DAT_81670354, FUN_81154a1c 30fps, setseq_callers.txt, title_callers.txt, out80m_m1068pagefinish.txt -> §18.4539 [relevant: sequence manager], §18.4528 [relevant: page table]
