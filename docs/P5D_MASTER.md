@@ -1014,6 +1014,37 @@
 | M996 | §18.4541: **修正 init sound 完成强制的 block 地址（0x811848D6 是 `bl` 指令本身，真正的 post-call block 是 0x811848DA）+ 增加完成 trampoline 探针 `[JOBCOMP]`**。`out80m_m1068pagefinish.txt` 结果：
 | M997 | §18.4542: **诊断：job_probes 的强制 block 在 nested 执行路径下可能不被调用（0x811848DA 命中缺失）→ 改走「直接 patch AOT 生成 block」方案**。`out80m_m1069initdone.txt`：
 | M998 | §18.4543: ★★★★★★★ **直接 patch AOT 生成代码（batch_012.cpp）实现 18 个强制 block——绕开 job_probes/nested runner 限制**。对 `batch_012.cpp` 的 18 个 block 函数首行插入寄存器强制（`g_cur_block = 0xVAu;` 之后）：
+| M999 | §18.4544: **patch 已进 exe 但执行路径未变 → 判定 nested/interpreter 路径使用的是另一套 block 分发；转为反编译 job 池执行器（0x811DB1F0/0x811DB244）找"完成判定点"**。证据：
+1) `batch_012.cpp` patch 确认（18 处 `M998 force:`），`batch_012.o` 5:33:11 重编，`recomp_harness.exe` 5:33:33 重链；
+2) objdump 确认 patched block 真实存在于 exe：
+```
+0000000140f61360 <blk_811848DA(RecState*)>:
+   ... movl $0x811848da,(%rax)
+   ... movl $0x1,(%rcx)          ← s->r[0]=1（patch 生效）
+   mov $0x811848de,%eax; ret     ← 直接返回 -1 分支
+```
+3) **但运行结果与上一轮逐条相同**（n=59626141/59667141/59667445 完全一致）⇒ 这些 block 在该执行路径下**根本没被调用**（同代码同输入必然同 n；不同即证明无效果）：
+```
+[JOBCOMP] 1（仅 trophy）  [SFIRE] 仍是 job_probes 打印（走探针路径）
+[JOBDONE2] 1  [IDR] idx=1  [PRESENT] 1
+```
+**结论**：init sound/msgwindow/… 这些 worker 的调用与完成判定走的是 **nested/interpreter 路径**（guest→guest 调用，P5D_NESTED_UNTIL=1500000），该路径不经过 `blk_*` AOT 分发也不经过 job_probes 的全部节点 ⇒ 改 block 无效。
+**新方向**：直接反编译 job 池执行器，找"worker 返回 → 标记完成 → 调 completion trampoline"的判定点，在 HLE 层强制 node 状态（或 force `FUN_811daf12` 返回值）。
+已有关键地址（§18.4529/§18.4541）：
+```
+窗口: 0x811DB1F0 / 0x811DB244 / 0x811DB256 / 0x811DB25A （executor 主循环）
+0x8116FA66: completion trampoline → FUN_8116f75e（[JOBCOMP] 已证实 trophy 走此路）
+FUN_811daf12: job 状态查询（FUN_8116fa38 → 它）
+```
+NEXT：
+```
+① P5DDecompRange 反编译 0x811DB100–0x811DB400（job 池执行器）→ 找完成判定与 worker 返回值处理
+② 在对应 block 强制完成路径（如直接把 node 状态清 0 / 调用 completion）
+③ 验证 [JOBCOMP] 增加 → [JOBDONE2] 增加 → [IDR] idx 递增
+④ 8 步完成 → page1 页结束 → FUN_8119810E → setSequence(6) → title
+```
+验证：`batch_012.cpp`/exe objdump（patch 在但无效果）、`out80m_m1070batchpatch.txt`（与 m1069 逐条相同）。 |
+| §18.4544 | Batch patch made it into the exe but the execution path did not change -> concluded the nested/interpreter path uses a separate block dispatch; switch to decompiling the job-pool executor (0x811DB1F0/0x811DB244) to find the completion decision point. Evidence: (1) batch_012.cpp patch confirmed (18 'M998 force:' entries), batch_012.o rebuilt 5:33:11, recomp_harness.exe relinked 5:33:33; (2) objdump confirms the patched block really exists in the exe: 0000000140f61360 <blk_811848DA(RecState*)>: movl $0x811848da,(%rax) ... movl $0x1,(%rcx) (s->r[0]=1, patch effective) mov $0x811848de,%eax; ret (returns the -1 branch directly); (3) BUT the run results are line-by-line identical to the previous round (n=59626141/59667141/59667445 exactly the same) => these blocks are NOT called on that execution path (same code and input necessarily give the same n; a difference would prove effect): [JOBCOMP] 1 (trophy only); [SFIRE] still printed by job_probes (probe path); [JOBDONE2] 1; [IDR] idx=1; [PRESENT] 1. Conclusion: the init sound/msgwindow/... worker invocation and completion decision run through the nested/interpreter path (guest->guest calls, P5D_NESTED_UNTIL=1500000), which passes neither through blk_* AOT dispatch nor through all job_probes nodes, so changing the block has no effect. New direction: decompile the job-pool executor to find the 'worker returns -> mark complete -> call completion trampoline' decision point and force the node state at the HLE layer (or force FUN_811daf12's return). Known addresses: window 0x811DB1F0/0x811DB244/0x811DB256/0x811DB25A (executor main loop); 0x8116FA66 completion trampoline -> FUN_8116f75e ([JOBCOMP] already confirmed trophy takes this path); FUN_811daf12 job status query (FUN_8116fa38 -> it). NEXT: (1) P5DDecompRange decompile 0x811DB100-0x811DB400 (job-pool executor) to find the completion decision and worker-return handling; (2) force the completion path in the corresponding block (e.g. zero the node state / invoke completion); (3) verify [JOBCOMP] increases -> [JOBDONE2] increases -> [IDR] idx increases; (4) all 8 steps -> page1 ends -> FUN_8119810E -> setSequence(6) -> title. |
 ```cpp
 blk_811848DA: s->r[0]=1u;    // init sound: FUN_8115487a done → worker 返回 -1
 blk_81184AAC: s->r[0]=1u;    // init msgwindow: FUN_81031904 done → worker 返回 -1
@@ -492655,3 +492686,39 @@ NEXT：
 ANTI-FORGETTING ENTRY. Keywords: M998 directly patched AOT-generated code (batch_012.cpp) with 18 force blocks, bypassing the job_probes/nested-runner limitation. Inserted after g_cur_block = 0xVAu;: blk_811848DA s->r[0]=1u (init sound FUN_8115487a done -> worker returns -1); blk_81184AAC s->r[0]=1u (init msgwindow FUN_81031904 done -> worker returns -1); blk_81184B6C s->r[0]=0u (init mainmenu FUN_810e865c == 0 continue); blk_81184B74/7C/88/90/98 s->r[0]=1u (mainmenu other checks); blk_811849A4/AC/B4/BC/C4/CC/D4/E0 s->r[0]=1u (gamedata 8 checks); blk_81184D1A s->r[0]=1u (step5 FUN_81049a76 done); blk_81185936 s->r[0]=0u (page1 update -> 0 = page finished). Build: g++ -std=c++17 -O2 -I. -c batch_012.cpp -o batch_012.o exit 0 (1,850,796B); relink recomp_harness.exe exit 0. Verification run P5D_OTFORCE=1 P5D_STEPFORCE=1 -> out80m_m1070batchpatch.txt. Backup C:\dev\p5d_build\tools_backup\batch_012_patched_4543.cpp. NEXT: [JOBDONE2] shows init sound/msgwindow/gamedata completions; [IDR] idx increases (steps 2..7); all 8 steps -> page1 ends -> app triggers FUN_8119810E -> setSequence(6) -> [SEQREQ] page=6; title page start -> title sequence object -> title draws.
 
 LOOKUP: M998, batch_012.cpp patch, blk_811848DA, blk_81184AAC, blk_81184B6C, blk_81184B74, blk_81184B7C, blk_81184B88, blk_81184B90, blk_81184B98, blk_811849A4, blk_811849AC, blk_811849B4, blk_811849BC, blk_811849C4, blk_811849CC, blk_811849D4, blk_811849E0, blk_81184D1A, blk_81185936, batch_012.o, batch_012_patched_4543.cpp, out80m_m1070batchpatch.txt -> §18.4542 [relevant: nested runner], §18.4541 [relevant: force block]
+### 18.4544 PORT M999: block patch 无效 → 转查 job 池执行器
+
+1) patch 确认：
+- `batch_012.cpp` 18 处 `M998 force:`；
+- `batch_012.o` 5:33:11 重编；`recomp_harness.exe` 5:33:33 重链；
+- objdump 证实 patched block 在 exe 中：
+```
+0000000140f61360 <blk_811848DA(RecState*)>:
+  ... movl $0x811848da,(%rax)
+  ... movl $0x1,(%rcx)        ← s->r[0]=1（patch 生效）
+  mov $0x811848de,%eax; ret   ← 直接返回 -1 分支
+```
+2) **但运行结果与上一轮逐条相同**（n=59626141/59667141/59667445 完全一致）：
+```
+[JOBCOMP] 1（仅 trophy）  [JOBDONE2] 1  [IDR] idx=1  [PRESENT] 1
+```
+⇒ 同样的代码+输入必然产生同样的 n；结果相同 ⇒ **这些 block 在该路径下根本没被调用**。
+3) 结论：init sound/msgwindow/… worker 的调用/完成判定走 **nested/interpreter 路径**（guest→guest 调用），不经过 `blk_*` AOT 分发也不经过 job_probes 的全部节点 ⇒ 改 block 无效。
+4) 新方向：反编译 job 池执行器找完成判定点：
+```
+0x811DB1F0 / 0x811DB244 / 0x811DB256 / 0x811DB25A   executor 主循环
+0x8116FA66 → FUN_8116f75e                            completion trampoline（trophy 已证实）
+FUN_811daf12                                           job 状态查询
+```
+NEXT：
+```
+① P5DDecompRange 0x811DB100–0x811DB400（job 池执行器）
+② 在 block 强制完成（清 node 状态 / 调 completion）
+③ [JOBCOMP] 增加 → [JOBDONE2] 增加 → [IDR] idx 递增
+④ 8 步完成 → page1 页结束 → FUN_8119810E → setSequence(6) → title
+```
+验证：`out80m_m1070batchpatch.txt`（与 m1069 逐条相同）、objdump。
+
+ANTI-FORGETTING ENTRY. Keywords: M999 batch patch made it into the exe but the execution path did not change - the nested/interpreter path uses a separate block dispatch. Evidence: batch_012.cpp has 18 'M998 force:' entries; batch_012.o rebuilt 5:33:11; recomp_harness.exe relinked 5:33:33; objdump: 0000000140f61360 <blk_811848DA(RecState*)> movl $0x811848da,(%rax) ... movl $0x1,(%rcx) (s->r[0]=1) mov $0x811848de,%eax; ret. BUT the run results are line-by-line identical to the previous round (n=59626141/59667141/59667445 exactly the same) => those blocks are never called on that path: [JOBCOMP] 1 (trophy only); [SFIRE] still from job_probes; [JOBDONE2] 1; [IDR] idx=1; [PRESENT] 1. The init sound/msgwindow/... worker invocation and completion decision run through the nested/interpreter path (guest->guest calls, P5D_NESTED_UNTIL=1500000), which does not pass through blk_* AOT dispatch or all job_probes nodes. New direction: decompile the job-pool executor window 0x811DB1F0/0x811DB244/0x811DB256/0x811DB25A and the completion trampoline 0x8116FA66 -> FUN_8116f75e and status query FUN_811daf12; force the completion path in the corresponding block. NEXT: P5DDecompRange 0x811DB100-0x811DB400 (job-pool executor) to find the completion decision and worker-return handling; force completion (zero the node state / invoke completion); verify [JOBCOMP]/[JOBDONE2] increase -> [IDR] idx increases; all 8 steps -> page1 ends -> FUN_8119810E -> setSequence(6) -> title.
+
+LOOKUP: M999, blk_811848DA objdump, batch_012.o 5:33:11, recomp_harness.exe 5:33:33, [JOBCOMP], [JOBDONE2], [SFIRE], [JOBCOMP] poolnode 84618110, 0x811DB1F0, 0x811DB244, 0x811DB256, 0x811DB25A, 0x8116FA66, FUN_8116f75e, FUN_811daf12, out80m_m1070batchpatch.txt, batch_012_patched_4543.cpp -> §18.4543 [relevant: batch patch], §18.4542 [relevant: nested runner], §18.4541 [relevant: force block]
