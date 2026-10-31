@@ -1013,6 +1013,32 @@
 | M995 | §18.4540: ★★★★★★★ **场景页语义与入口彻底确定：page1 = 引导页（initDataRead+影片），page6 = "title sequence" 标题页；app 启动主函数 FUN_8118464C 完整反编译**。字符串解析（`eboot_true.elf` .rodata）：
 | M996 | §18.4541: **修正 init sound 完成强制的 block 地址（0x811848D6 是 `bl` 指令本身，真正的 post-call block 是 0x811848DA）+ 增加完成 trampoline 探针 `[JOBCOMP]`**。`out80m_m1068pagefinish.txt` 结果：
 | M997 | §18.4542: **诊断：job_probes 的强制 block 在 nested 执行路径下可能不被调用（0x811848DA 命中缺失）→ 改走「直接 patch AOT 生成 block」方案**。`out80m_m1069initdone.txt`：
+| M998 | §18.4543: ★★★★★★★ **直接 patch AOT 生成代码（batch_012.cpp）实现 18 个强制 block——绕开 job_probes/nested runner 限制**。对 `batch_012.cpp` 的 18 个 block 函数首行插入寄存器强制（`g_cur_block = 0xVAu;` 之后）：
+```cpp
+blk_811848DA: s->r[0]=1u;    // init sound: FUN_8115487a done → worker 返回 -1
+blk_81184AAC: s->r[0]=1u;    // init msgwindow: FUN_81031904 done → worker 返回 -1
+blk_81184B6C: s->r[0]=0u;    // init mainmenu: FUN_810e865c == 0（继续）
+blk_81184B74/7C/88/90/98: s->r[0]=1u;   // mainmenu 其余 5 个检查 != 0
+blk_811849A4/AC/B4/BC/C4/CC/D4/E0: s->r[0]=1u;  // gamedata 8 个检查全部 != 0
+blk_81184D1A: s->r[0]=1u;    // step5: FUN_81049a76 done → worker 返回 -1
+blk_81185936: s->r[0]=0u;    // page1 update → 0 = 页结束（触发场景切换）
+```
+编译/链接：
+```
+g++ -std=c++17 -O2 -I. -c batch_012.cpp -o batch_012.o     → exit 0（batch_012.o 1,850,796B）
+g++ ... recomp_harness.cpp batch_*.o ... -o recomp_harness.exe → exit 0
+```
+验证运行：`P5D_OTFORCE=1 P5D_STEPFORCE=1`（patched batch 已自带强制）→ `out80m_m1070batchpatch.txt`。
+备份：`C:\dev\p5d_build\tools_backup\batch_012_patched_4543.cpp`。
+NEXT：
+```
+① [JOBDONE2] 出现 init sound/msgwindow/gamedata… 完成
+② [IDR] idx 递增（step2..step7）
+③ 8 步完成 → page1 页结束 → app 触发 FUN_8119810E → setSequence(6) → [SEQREQ] page=6
+④ title 页 start 运行 → title sequence 对象创建 → 标题 draw/present 增加
+```
+这是把"强制逻辑"从探针层下沉到 AOT 代码层的首次尝试——若有效，初始化链应连续推进。 |
+| §18.4543 | Directly patched the AOT-generated code (batch_012.cpp) to implement 18 force blocks - bypassing the job_probes/nested-runner limitation. Inserted register forces at the start of 18 block functions (after g_cur_block = 0xVAu;): blk_811848DA: s->r[0]=1u (init sound FUN_8115487a done -> worker returns -1); blk_81184AAC: s->r[0]=1u (init msgwindow FUN_81031904 done -> worker returns -1); blk_81184B6C: s->r[0]=0u (init mainmenu FUN_810e865c == 0 continue); blk_81184B74/7C/88/90/98: s->r[0]=1u (mainmenu other 5 checks != 0); blk_811849A4/AC/B4/BC/C4/CC/D4/E0: s->r[0]=1u (gamedata 8 checks all != 0); blk_81184D1A: s->r[0]=1u (step5 FUN_81049a76 done -> worker returns -1); blk_81185936: s->r[0]=0u (page1 update -> 0 = page finished, triggers scene switch). Build: g++ -std=c++17 -O2 -I. -c batch_012.cpp -o batch_012.o -> exit 0 (batch_012.o 1,850,796B); relink g++ ... recomp_harness.cpp batch_*.o ... -o recomp_harness.exe -> exit 0. Verification run P5D_OTFORCE=1 P5D_STEPFORCE=1 (patched batch has the forces) -> out80m_m1070batchpatch.txt. Backup: C:\dev\p5d_build\tools_backup\batch_012_patched_4543.cpp. NEXT: [JOBDONE2] shows init sound/msgwindow/gamedata completions; [IDR] idx increases (steps 2..7); all 8 steps -> page1 ends -> app triggers FUN_8119810E -> setSequence(6) -> [SEQREQ] page=6; title page start -> title sequence object -> title draws/presents increase. |
 ```
 [JOBCOMP] #1 poolnode=84618110 n=59626141        ← ★ app job 完成 trampoline FUN_8116FA66 触发（trophy 路径）
 [SFIRE] pc=81185936 n=59585547                   ← page1 update 强制 0
@@ -492597,3 +492623,35 @@ NEXT：
 ANTI-FORGETTING ENTRY. Keywords: M997 job_probes force blocks unreliable under the nested execution path (0x811848DA hit missing) -> switch to directly patching the AOT-generated blocks. out80m_m1069initdone.txt: [JOBCOMP] #1 poolnode=84618110 n=59626141 (app job completion trampoline FUN_8116FA66 fired - trophy path); [SFIRE] pc=81185936 n=59585547 (page1 update forced 0); [SFIRE] pc=811848D6 n=59667141 (init sound worker bl block); [SFIRE] pc=811548CC x5 (sound object checks); [JOBDONE2] 1 (trophy only); [IDR] idx=1; [PRESENT] 1. All 5 checks forced so FUN_8115487a should return 1 and the worker should return -1 after 0x811848DA, but [SFIRE] pc=811848DA never appeared although the block is in the batch_012.cpp table - most likely the nested runner (P5D_NESTED_UNTIL=1500000) does not call job_probes after guest->guest returns. Plan: directly patch AOT block sources - insert s->r[0]=1u; at the top of blk_811848DA and s->r[0]=0xFFFFFFFFu; at the top of blk_81184AB0/blk_81184BA0/blk_811849E8/blk_81184D22; rebuild only batch_012.cpp -> batch_012.o -> relink recomp_harness.exe. NEXT: patch batch_012.cpp force blocks; rebuild; run -> [JOBDONE2] increases -> [IDR] idx increases; all 8 steps -> page1 ends -> FUN_8119810E -> setSequence(6) -> title.
 
 LOOKUP: M997, [JOBCOMP], poolnode 84618110, FUN_8116FA66, FUN_8116f75e, [SFIRE] missing 811848DA, nested runner P5D_NESTED_UNTIL, patch batch_012.cpp, blk_811848DA, blk_81184AB0, blk_81184BA0, blk_811849E8, blk_81184D22, out80m_m1069initdone.txt -> §18.4541 [relevant: force block address], §18.4536 [relevant: STEPFORCE]
+### 18.4543 PORT M998: 直接 patch AOT 生成代码（batch_012.cpp）18 个强制 block
+
+1) 背景：job_probes 的强制 block 在 nested 执行路径下不触发（§18.4542），因此把强制逻辑**直接写进 AOT 生成 block 函数**。
+2) patch 表（`batch_012.cpp`，在 `g_cur_block = 0xVAu;` 后插入）：
+```
+blk_811848DA: s->r[0]=1u;    // init sound: FUN_8115487a done → worker 返回 -1
+blk_81184AAC: s->r[0]=1u;    // init msgwindow: FUN_81031904 done → worker 返回 -1
+blk_81184B6C: s->r[0]=0u;    // init mainmenu: FUN_810e865c == 0（继续）
+blk_81184B74/81184B7C/81184B88/81184B90/81184B98: s->r[0]=1u;  // mainmenu 其余检查 != 0
+blk_811849A4/A4→AC/B4/BC/C4/CC/D4/E0: s->r[0]=1u;              // gamedata 8 检查 != 0
+blk_81184D1A: s->r[0]=1u;    // step5: FUN_81049a76 done → worker 返回 -1
+blk_81185936: s->r[0]=0u;    // page1 update → 0 = 页结束
+```
+3) 编译/链接：
+```
+g++ -std=c++17 -O2 -I. -c batch_012.cpp -o batch_012.o      → exit 0（1,850,796B）
+g++ -std=c++17 -O2 -I. recomp_harness.cpp batch_*.o ... -o recomp_harness.exe → exit 0
+```
+4) 验证运行：`P5D_OTFORCE=1 P5D_STEPFORCE=1` → `out80m_m1070batchpatch.txt`
+5) 备份：`C:\dev\p5d_build\tools_backup\batch_012_patched_4543.cpp`
+NEXT：
+```
+① [JOBDONE2] 出现 init sound/msgwindow/gamedata 完成
+② [IDR] idx 递增（step2..step7）
+③ 8 步完成 → page1 页结束 → FUN_8119810E → setSequence(6) → [SEQREQ] page=6
+④ title 页 start → title sequence 对象 → 标题 draw
+```
+验证：`batch_012.cpp`（patched）、`batch_012.o`、`out80m_m1070batchpatch.txt`（生成中）。
+
+ANTI-FORGETTING ENTRY. Keywords: M998 directly patched AOT-generated code (batch_012.cpp) with 18 force blocks, bypassing the job_probes/nested-runner limitation. Inserted after g_cur_block = 0xVAu;: blk_811848DA s->r[0]=1u (init sound FUN_8115487a done -> worker returns -1); blk_81184AAC s->r[0]=1u (init msgwindow FUN_81031904 done -> worker returns -1); blk_81184B6C s->r[0]=0u (init mainmenu FUN_810e865c == 0 continue); blk_81184B74/7C/88/90/98 s->r[0]=1u (mainmenu other checks); blk_811849A4/AC/B4/BC/C4/CC/D4/E0 s->r[0]=1u (gamedata 8 checks); blk_81184D1A s->r[0]=1u (step5 FUN_81049a76 done); blk_81185936 s->r[0]=0u (page1 update -> 0 = page finished). Build: g++ -std=c++17 -O2 -I. -c batch_012.cpp -o batch_012.o exit 0 (1,850,796B); relink recomp_harness.exe exit 0. Verification run P5D_OTFORCE=1 P5D_STEPFORCE=1 -> out80m_m1070batchpatch.txt. Backup C:\dev\p5d_build\tools_backup\batch_012_patched_4543.cpp. NEXT: [JOBDONE2] shows init sound/msgwindow/gamedata completions; [IDR] idx increases (steps 2..7); all 8 steps -> page1 ends -> app triggers FUN_8119810E -> setSequence(6) -> [SEQREQ] page=6; title page start -> title sequence object -> title draws.
+
+LOOKUP: M998, batch_012.cpp patch, blk_811848DA, blk_81184AAC, blk_81184B6C, blk_81184B74, blk_81184B7C, blk_81184B88, blk_81184B90, blk_81184B98, blk_811849A4, blk_811849AC, blk_811849B4, blk_811849BC, blk_811849C4, blk_811849CC, blk_811849D4, blk_811849E0, blk_81184D1A, blk_81185936, batch_012.o, batch_012_patched_4543.cpp, out80m_m1070batchpatch.txt -> §18.4542 [relevant: nested runner], §18.4541 [relevant: force block]
