@@ -1015,6 +1015,44 @@
 | M997 | §18.4542: **诊断：job_probes 的强制 block 在 nested 执行路径下可能不被调用（0x811848DA 命中缺失）→ 改走「直接 patch AOT 生成 block」方案**。`out80m_m1069initdone.txt`：
 | M998 | §18.4543: ★★★★★★★ **直接 patch AOT 生成代码（batch_012.cpp）实现 18 个强制 block——绕开 job_probes/nested runner 限制**。对 `batch_012.cpp` 的 18 个 block 函数首行插入寄存器强制（`g_cur_block = 0xVAu;` 之后）：
 | M999 | §18.4544: **patch 已进 exe 但执行路径未变 → 判定 nested/interpreter 路径使用的是另一套 block 分发；转为反编译 job 池执行器（0x811DB1F0/0x811DB244）找"完成判定点"**。证据：
+| M1000 | §18.4545: ★★★★★★★★★ **job 执行器 FUN_811db020 完全反编译（终于找到"完成判定"）+ patch worker trampoline 让所有 job 立即完成**。核心代码：
+```c
+// 1) 运行链表 DAT_816cd9c0：每个 job 的倒计时 job[8] 减 1，到 0 则移出、状态=2、必要时插入回调链
+while (piVar2 = piVar9, piVar2 != 0) {
+    iVar4 = piVar2[8]; piVar9 = piVar2[0x11]; piVar2[8] = iVar4 - 1;
+    if (iVar4 - 1 == 0) { ...移出运行链...; if (piVar2[0xb] != 0) {...插入 DAT_816cd9c8 回调链...}; *piVar2 = 2; }
+}
+// 2) ready 链表：状态 2 的 job 调用 job[10]（=0x8116fa5d worker trampoline）
+do {
+    if ((*piVar6 == 2) && ((piVar6[1] & 1U) == 0)) {
+        iVar4 = (*(code *)piVar6[10])(param_1, piVar6);     // ★ 调用 worker trampoline
+        if (iVar4 == -1) { FUN_811dad8c(piVar6); }          // ★★★ -1 = 完成 → 走完成路径
+        else if (iVar4 != 0) { piVar6[10] = iVar4; } }      // 非 0 非 -1 = 换下一个回调
+    piVar6 = (int *)piVar6[0x13];
+} while (piVar6 != 0);
+```
+**job 节点字段（关键）**：`[2]=优先级, [8]=倒计时(param_5), [0xb]=回调链 cb(param_8), [0xc]=完成 cb(param_9), [10]=worker trampoline(param_7), [0x13]=next, [0x14]=prev, [0x11]/[0x12]=运行链, [0x15]/[0x16]=回调链`
+**worker trampoline 链**：`job[10]=0x8116fa5d → 0x8116FA5C { ldr r0,[r0,#0x34]; bl FUN_8116f748 }`；`FUN_8116f748` 调 job 节点 [0]（worker），返回值沿 `FUN_8116f748 → 0x8116FA5C → 执行器` 传回 ⇒ **worker 返回 -1 ⇒ 执行器调 FUN_811dad8c(job) = 完成**（其内部走 job[0xc]=0x8116fa67 → FUN_8116f75e）。
+**M1000 patch（batch_011.cpp）**：把 worker trampoline 直接改成"永远返回 -1"：
+```cpp
+static uint32_t blk_8116FA5C(RecState* s) { g_cur_block = 0x8116FA5Cu;
+    s->r[0] = 0xFFFFFFFFu; /*M1000: force every job worker trampoline to report -1 (job done)*/
+    return s->r[14]; }
+```
+⇒ 执行器每次调用 worker trampoline 都得到 -1 ⇒ **立刻完成该 job**（不再依赖 worker 内部检查/嵌套执行路径）。
+编译/链接：`batch_011.o` 5:59:37 重编（1,379,088B）、`recomp_harness.exe` 5:59:56 重链，均 exit 0。
+验证运行：`P5D_OTFORCE=1 P5D_STEPFORCE=1` → `out80m_m1071workerforce.txt`。
+备份：`C:\dev\p5d_build\tools_backup\batch_011_patched_4545.cpp`。
+NEXT：
+```
+① [JOBDONE2]/[JOBCOMP] 大量出现（所有 job 立即完成）
+② [IDR] idx 快速递增到 8（初始化链全速推进）
+③ page1 页结束 → app 触发 FUN_8119810E → setSequence(6)
+④ [SEQREQ] page=6 → title 页 start → title sequence 对象 → 标题 draw
+⑤ 若完成太快导致依赖顺序问题：加倒计时/仅对 init 系列 job 生效的可选开关
+```
+这是第一次能**确定地**让任意 job 完成——executor 的 -1 判定点是整个 job 系统的总开关。 |
+| §18.4545 | Job executor FUN_811db020 fully decompiled (finally found the completion decision) + patched the worker trampoline so every job completes immediately. Core code: (1) running list DAT_816cd9c0: each job's countdown job[8] decremented; at 0 it is removed from the running list, status=2, and if job[0xb]!=0 inserted into the callback list DAT_816cd9c8; (2) ready list: for jobs with status 2 and (job[1]&1)==0, iVar4 = (*(code*)job[10])(param_1, job) (calls the worker trampoline); if (iVar4 == -1) FUN_811dad8c(job) (completion path); else if (iVar4 != 0) job[10] = iVar4. Job node fields: [2]=priority, [8]=countdown(param_5), [0xb]=callback-chain cb(param_8), [0xc]=completion cb(param_9), [10]=worker trampoline(param_7), [0x13]=next, [0x14]=prev, [0x11]/[0x12]=running links, [0x15]/[0x16]=callback links. Worker trampoline chain: job[10]=0x8116fa5d -> 0x8116FA5C { ldr r0,[r0,#0x34]; bl FUN_8116f748 } and FUN_8116f748 calls job node [0] (the worker); the return value flows back through FUN_8116f748 -> 0x8116FA5C -> executor, so worker returning -1 makes the executor call FUN_811dad8c(job) = completion (which goes through job[0xc]=0x8116fa67 -> FUN_8116f75e). M1000 patch (batch_011.cpp): static uint32_t blk_8116FA5C(RecState* s) { g_cur_block = 0x8116FA5Cu; s->r[0]=0xFFFFFFFFu; return s->r[14]; } => every worker trampoline reports -1 => the executor completes that job immediately (no longer depending on worker-internal checks or the nested execution path). Build: batch_011.o rebuilt 5:59:37 (1,379,088B), recomp_harness.exe relinked 5:59:56, both exit 0. Verification run P5D_OTFORCE=1 P5D_STEPFORCE=1 -> out80m_m1071workerforce.txt. Backup C:\dev\p5d_build\tools_backup\batch_011_patched_4545.cpp. NEXT: [JOBDONE2]/[JOBCOMP] appear in bulk; [IDR] idx rapidly increases to 8; page1 ends -> app triggers FUN_8119810E -> setSequence(6); [SEQREQ] page=6 -> title page start -> title sequence object -> title draws; if completing too fast breaks ordering, add a countdown / an init-jobs-only optional switch. |
 1) `batch_012.cpp` patch 确认（18 处 `M998 force:`），`batch_012.o` 5:33:11 重编，`recomp_harness.exe` 5:33:33 重链；
 2) objdump 确认 patched block 真实存在于 exe：
 ```
@@ -492722,3 +492760,47 @@ NEXT：
 ANTI-FORGETTING ENTRY. Keywords: M999 batch patch made it into the exe but the execution path did not change - the nested/interpreter path uses a separate block dispatch. Evidence: batch_012.cpp has 18 'M998 force:' entries; batch_012.o rebuilt 5:33:11; recomp_harness.exe relinked 5:33:33; objdump: 0000000140f61360 <blk_811848DA(RecState*)> movl $0x811848da,(%rax) ... movl $0x1,(%rcx) (s->r[0]=1) mov $0x811848de,%eax; ret. BUT the run results are line-by-line identical to the previous round (n=59626141/59667141/59667445 exactly the same) => those blocks are never called on that path: [JOBCOMP] 1 (trophy only); [SFIRE] still from job_probes; [JOBDONE2] 1; [IDR] idx=1; [PRESENT] 1. The init sound/msgwindow/... worker invocation and completion decision run through the nested/interpreter path (guest->guest calls, P5D_NESTED_UNTIL=1500000), which does not pass through blk_* AOT dispatch or all job_probes nodes. New direction: decompile the job-pool executor window 0x811DB1F0/0x811DB244/0x811DB256/0x811DB25A and the completion trampoline 0x8116FA66 -> FUN_8116f75e and status query FUN_811daf12; force the completion path in the corresponding block. NEXT: P5DDecompRange 0x811DB100-0x811DB400 (job-pool executor) to find the completion decision and worker-return handling; force completion (zero the node state / invoke completion); verify [JOBCOMP]/[JOBDONE2] increase -> [IDR] idx increases; all 8 steps -> page1 ends -> FUN_8119810E -> setSequence(6) -> title.
 
 LOOKUP: M999, blk_811848DA objdump, batch_012.o 5:33:11, recomp_harness.exe 5:33:33, [JOBCOMP], [JOBDONE2], [SFIRE], [JOBCOMP] poolnode 84618110, 0x811DB1F0, 0x811DB244, 0x811DB256, 0x811DB25A, 0x8116FA66, FUN_8116f75e, FUN_811daf12, out80m_m1070batchpatch.txt, batch_012_patched_4543.cpp -> §18.4543 [relevant: batch patch], §18.4542 [relevant: nested runner], §18.4541 [relevant: force block]
+### 18.4545 PORT M1000: job 执行器 FUN_811db020 反编译 + worker trampoline 强制完成
+
+1) 执行器核心（`jobpool.txt`，FUN_811db020 size=978）：
+```c
+// 运行链 DAT_816cd9c0：倒计时 job[8] 减 1
+while (piVar2 = piVar9, piVar2 != 0) {
+    iVar4 = piVar2[8]; piVar9 = piVar2[0x11]; piVar2[8] = iVar4 - 1;
+    if (iVar4 - 1 == 0) { ...移出运行链...
+        if (piVar2[0xb] != 0) { ...插入回调链 DAT_816cd9c8... }
+        *piVar2 = 2; } }
+// ready 链：状态 2 的 job 调 worker trampoline job[10]
+do {
+    if ((*piVar6 == 2) && ((piVar6[1] & 1U) == 0)) {
+        iVar4 = (*(code *)piVar6[10])(param_1, piVar6);   // worker trampoline
+        if (iVar4 == -1) { FUN_811dad8c(piVar6); }        // ★ -1 = 完成
+        else if (iVar4 != 0) { piVar6[10] = iVar4; } }
+    piVar6 = (int *)piVar6[0x13];
+} while (piVar6 != 0);
+```
+2) job 节点字段：`[2]=优先级, [8]=倒计时, [0xb]=回调链 cb, [0xc]=完成 cb, [10]=worker trampoline, [0x13]=next, [0x14]=prev, [0x11]/[0x12]=运行链, [0x15]/[0x16]=回调链`
+3) trampoline 链：`job[10]=0x8116fa5d → 0x8116FA5C { ldr r0,[r0,#0x34]; bl FUN_8116f748 } → FUN_8116f748 调 job[0]（worker）`；返回值沿链传回执行器 ⇒ **worker 返回 -1 ⇒ 执行器调 FUN_811dad8c = 完成**。
+4) **M1000 patch（batch_011.cpp）**：
+```cpp
+static uint32_t blk_8116FA5C(RecState* s) { g_cur_block = 0x8116FA5Cu;
+    s->r[0] = 0xFFFFFFFFu; /*M1000: every job worker trampoline reports -1 (job done)*/
+    return s->r[14]; }
+```
+⇒ **任何 job 第一次被调度就完成**（绕过 worker 内部检查与嵌套路径）。
+5) 编译/链接：`batch_011.o` 5:59:37（1,379,088B）、`recomp_harness.exe` 5:59:56，均 exit 0。
+6) 验证运行：`P5D_OTFORCE=1 P5D_STEPFORCE=1` → `out80m_m1071workerforce.txt`
+备份：`C:\dev\p5d_build\tools_backup\batch_011_patched_4545.cpp`
+NEXT：
+```
+① [JOBDONE2]/[JOBCOMP] 大量出现
+② [IDR] idx 快速递增到 8
+③ page1 页结束 → FUN_8119810E → setSequence(6)
+④ [SEQREQ] page=6 → title 页 start → title sequence 对象 → 标题 draw
+⑤ 若太快导致依赖顺序问题：加倒计时/仅 init 系列 job 开关
+```
+验证：`jobpool.txt`、`batch_011.cpp`（patched）、`out80m_m1071workerforce.txt`（生成中）。
+
+ANTI-FORGETTING ENTRY. Keywords: M1000 job executor FUN_811db020 fully decompiled + worker trampoline patched to force every job complete. Executor core: running list DAT_816cd9c0 decrements job[8] countdown; at 0 removes from running list, sets *job=2, and if job[0xb]!=0 inserts into callback list DAT_816cd9c8; ready list loop: if((*piVar6==2)&&((piVar6[1]&1)==0)){ iVar4=(*(code*)piVar6[10])(param_1,piVar6); if(iVar4 == -1){ FUN_811dad8c(piVar6); } else if(iVar4 != 0){ piVar6[10]=iVar4; } }. Job fields: [2]=priority, [8]=countdown, [0xb]=callback cb, [0xc]=completion cb, [10]=worker trampoline, [0x13]=next, [0x14]=prev, [0x11]/[0x12]=running links, [0x15]/[0x16]=callback links. Trampoline chain: job[10]=0x8116fa5d -> 0x8116FA5C { ldr r0,[r0,#0x34]; bl FUN_8116f748 } -> FUN_8116f748 calls job node [0] (worker); return value flows back to executor, so worker returning -1 => executor calls FUN_811dad8c(job) = completion (via job[0xc]=0x8116fa67 -> FUN_8116f75e). M1000 patch batch_011.cpp: static uint32_t blk_8116FA5C(RecState* s){ g_cur_block=0x8116FA5Cu; s->r[0]=0xFFFFFFFFu; return s->r[14]; }. batch_011.o rebuilt 5:59:37 (1,379,088B), exe relinked 5:59:56. Verification run P5D_OTFORCE=1 P5D_STEPFORCE=1 -> out80m_m1071workerforce.txt. Backup batch_011_patched_4545.cpp. NEXT: [JOBDONE2]/[JOBCOMP] in bulk -> [IDR] idx to 8 -> page1 ends -> FUN_8119810E -> setSequence(6) -> title page start -> title sequence object -> title draws; if ordering breaks, add countdown / init-only switch.
+
+LOOKUP: M1000, FUN_811db020, DAT_816cd9c0, DAT_816cd9c8, job[8] countdown, job[10] worker trampoline, job[0xb], job[0xc], FUN_811dad8c, 0x8116FA5C, 0x8116fa5d, 0x8116fa67, FUN_8116f748, FUN_8116f75e, blk_8116FA5C, batch_011.cpp, jobpool.txt, out80m_m1071workerforce.txt, batch_011_patched_4545.cpp -> §18.4544 [relevant: nested path], §18.4543 [relevant: batch patch]
