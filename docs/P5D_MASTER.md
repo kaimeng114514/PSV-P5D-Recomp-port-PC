@@ -1020,6 +1020,42 @@
 | M1002 | §18.4547: ★★★★★★★★★ **找到运行提前结束的确切原因：`[INDIRECT-MISS] at pc=0x8116F75E target=0x81027A56`（AOT 缺口，block 不存在）→ harness 中止运行**。`out80m_m1071workerforce.txt` 末尾：
 | M1003 | §18.4548: ★★★★★★★★★ **修复 INDIRECT-MISS 缺口（手写 2 个 AOT block）+ 实现 sceGxmSetViewport HLE（首次接线后端 viewport 状态机）**。
 | M1004 | §18.4549: ★★★★★★★★★★★ **补齐 initDataRead 完成回调 gap blocks —— 该回调直接 `setSequence(6,0,0,5)` = 标题场景切换！** 上一轮（M1003）修好 0x81027A56 后运行到 8 个 job 全部完成，然后下一个 indirect-miss：`reg1=811850DB target=811850DA`。反编译 0x811850DA（initDataRead 完成回调，17 条指令）：
+| M1005 | §18.4550: ★★★★★★★★★★ **INDIRECT-MISS 清零！11 个 job 全部完成、`setSequence(6,0,0,5)` 执行 → 标题序列 page=6 启动，引擎进入真实逐帧渲染循环（8 次 Present 成功、10,816 次 pass、40 次 draw，运行推进到 n=68.2M）**。证据（`out80m_m1073titlecall.txt`）：
+```
+[INDIRECT-MISS] 0                                   ← ★ 缺口修复成功
+[JOBCOMP] 11 次 / [JOBDONE2] 11 次                  ← ★ 11 个 job 完成
+   #8  poolnode=846180A0 n=59569413   node=85B846EC n=59569414   ← initDataRead 完成
+   #9  poolnode=84617D90 n=59569855   node=85A9E18C
+   #10 poolnode=84618030 n=59569987   node=85B843AC
+   #11 poolnode=84617CB0 n=59570205   node=85A8FCDC
+[SEQREQ] #1 page(r0)=00000001 a3=00000000 ...
+[SEQREQ] #2 page(r0)=00000006 a3=00000005 ...      ← ★★★ setSequence(6,0,0,5) 标题页启动！
+[ABIVP] 42 次（SetViewport 每帧调用；SetVertexProgram obj=8540C000）
+[ABIVTX] 40 次（vc=3 fullscreen triangle，n=59584512..59609600）
+[ABIRT]  8 次（disp 0..7：cd=8CF00000/8D300000/8D700000，rc=0 除第一个）
+[PRESENT] 8 次（imgIdx 0/1/2 循环，result=0 VK_SUCCESS）
+[ABIBEGIN] 10816 次（n=68001792..68017741 仍在渲染！）
+[FRAMEDUMP] 13647 次（n=…68235000，主循环持续推进）
+运行在 n≈68.235M 自行停止（无 indirect-miss/无崩溃标记；看门狗显示访客忙等 812B2880@811732C2 等）
+截图证据：
+p5d_swap_7.bmp   → P5D LOGO（"P5D GONA ST☆RLIGHT" 霓虹字 + 香槟杯）
+p5d_frame_4.bmp  → 标题画面美术（红天空/城市剪影/彩带）
+p5d_disp_1..7.bmp→ 仍全黑（引擎 RT 内容为空）
+```
+**关键判断**：`p5d_swap_*/p5d_frame_*` 中的可见内容目前很可能来自**宿主 movie 层**（[MOVIE] 已喂 frame 0..11，present_frame 每帧 blit 最后一帧），而 **引擎 RT（p5d_disp_*）仍黑** ⇒ 引擎自己画的仍只有全屏三角形（fade/clear）。但里程碑意义重大：
+1) job 系统 + AOT 缺口链全部打通（11 job 完成、0 indirect-miss）；
+2) **标题序列 page=6 真正启动**（SEQREQ #2）；
+3) 引擎进入**真实逐帧渲染循环**（8 presents、10k passes、主循环到 68M）。
+NEXT：
+```
+① 加 P5D_NOMOVIE 开关关闭宿主 movie 层 → 隔离引擎真实输出（再看 swap/RT 是否出现内容）
+② 查 p5d_disp_* 全黑原因：引擎 draw 全为 vc=3 全屏三角形（可能 fade 覆盖），需等 title UI/movie 纹理 draw
+③ 查运行在 68.2M 停止原因（看门狗显示访客忙等 812B2880@811732C2 / 811539FE；可能是我们的 HLE 忙等）
+④ 推进到 title 页 update（FUN_8116f900("title sequence")）→ 标题 UI 对象创建 → 引擎绘制标题元素
+```
+验证：`out80m_m1073titlecall.txt`、`p5d_swap_7.bmp`（logo）、`p5d_frame_4.bmp`（美术）、`p5d_disp_*.bmp`（黑）。
+证据保存：`C:\dev\p5d_build\evidence_p5d_logo_engine.png`、`evidence_p5d_title_movie_artwork.png`、`evidence_p5d_logo_engine_prev.png`。 |
+| §18.4550 | INDIRECT-MISS cleared! 11 jobs all completed, setSequence(6,0,0,5) executed -> title sequence page=6 started, and the engine entered a real per-frame render loop (8 successful Presents, 10,816 passes, 40 draws, run advanced to n=68.2M). Evidence out80m_m1073titlecall.txt: [INDIRECT-MISS] 0 (gap fix works); [JOBCOMP] 11 / [JOBDONE2] 11 (job #8 poolnode=846180A0 n=59569413 node=85B846EC n=59569414 = initDataRead done; #9 node=85A9E18C; #10 node=85B843AC; #11 node=85A8FCDC); [SEQREQ] #1 page(r0)=00000001 a3=0; [SEQREQ] #2 page(r0)=00000006 a3=00000005 (setSequence(6,0,0,5) - title page started!); [ABIVP] 42 (SetViewport each frame; SetVertexProgram obj=8540C000); [ABIVTX] 40 (vc=3 fullscreen triangles n=59584512..59609600); [ABIRT] 8 (disp 0..7 cd=8CF00000/8D300000/8D700000, rc=0 except first); [PRESENT] 8 (imgIdx 0/1/2 cycles, result=0 VK_SUCCESS); [ABIBEGIN] 10816 (n=68001792..68017741 still rendering!); [FRAMEDUMP] 13647 (n up to 68235000, main loop advancing); run stopped by itself at n≈68.235M (no indirect-miss/crash marker; watchdog shows guest busy-wait 812B2880@811732C2 etc.). Screenshots: p5d_swap_7.bmp = P5D LOGO ('P5D GONA ST☆RLIGHT' neon + champagne glass); p5d_frame_4.bmp = title artwork (red sky/city/confetti); p5d_disp_1..7.bmp still all black (engine RT empty). KEY JUDGMENT: the visible content in p5d_swap_*/p5d_frame_* most likely comes from the HOST movie layer ([MOVIE] fed frames 0..11; present_frame blits the last movie frame each present), while the engine RT (p5d_disp_*) is still black => the engine's own draws are only fullscreen triangles (fade/clear). Milestone meaning: (1) job system + AOT gap chain fully working (11 jobs done, 0 indirect-miss); (2) title sequence page=6 really started (SEQREQ #2); (3) engine entered a real per-frame render loop (8 presents, 10k passes, main loop to 68M). NEXT: add a P5D_NOMOVIE switch to disable the host movie layer and isolate engine output; investigate why p5d_disp_* is black (engine draws are all vc=3 fullscreen triangles = fade covers; need the title UI/movie texture draws); investigate the run stopping at 68.2M (guest busy-wait 812B2880@811732C2 / 811539FE in our HLE); advance the title page update (FUN_8116f900('title sequence')) -> title UI objects -> engine-drawn title elements. Evidence saved: C:\dev\p5d_build\evidence_p5d_logo_engine.png, evidence_p5d_title_movie_artwork.png, evidence_p5d_logo_engine_prev.png. |
 ```
 811850da  push {r4,lr}
 811850dc  bl 0x8116f8a8            ; 当前 job
@@ -493156,3 +493192,44 @@ NEXT（决定性）：
 ANTI-FORGETTING ENTRY. Keywords: M1004 filled initDataRead completion callback gap blocks - that callback directly issues setSequence(6,0,0,5) = title scene switch. Evidence out80m_m1072gapfix.txt: [INDIRECT-MISS] reg1=811850DB target=811850DA block=8116F75E after 8 job completions ([JOBCOMP] 8, [JOBDONE2] 8, last node=85B846EC n=59569414); [ABIVPE] mode=0 n=6151137 and [ABIVP] n=6151139 show the viewport HLE working. Decompiled 0x811850DA: push {r4,lr}; bl 0x8116f8a8; adds r4,r0,#0; bl 0x8115d614; adds r1,r4,#0; bl 0x8115d43c; movs r0,#0x6; movs r1,#0; movs r2,#0; movs r3,#0x5; bl 0x81185616 (setSequence(6,0,0,5) = title page 6); pop {r4,pc}. AOT coverage batch_012.cpp had E0/E6/EC/F8 but missing DA/DC/E2/E8; hand-wrote blk_811850DA (push -> DC), blk_811850DC (r14=0x811850E0; return 0x8116F8A8), blk_811850E2 (r14=0x811850E6; return 0x8115D614), blk_811850E8 (r14=0x811850EC; return 0x8115D43C) + declarations + table entries; compile exit 0, relink exit 0. Verification run P5D_OTFORCE=1 P5D_STEPFORCE=1 + VDEC -> out80m_m1073titlecall.txt. Backups batch_012_patched_4549.cpp, recomp_harness_4549.cpp. NEXT: run passes 59,569,415; setSequence(6,0,0,5) -> [SEQREQ] page=6; title page start -> title sequence object; draw>0 -> RT/swap show title screen elements.
 
 LOOKUP: M1004, 0x811850DA, 0x811850DB, initDataRead completion callback, setSequence(6,0,0,5), FUN_81185616, title page 6, blk_811850DA, blk_811850DC, blk_811850E2, blk_811850E8, batch_012.cpp, gap811850da.txt, out80m_m1072gapfix.txt, out80m_m1073titlecall.txt, batch_012_patched_4549.cpp -> §18.4548 [relevant: first gap fix + viewport HLE], §18.4540 [relevant: title page 6]
+### 18.4550 PORT M1005: INDIRECT-MISS 清零 + 标题序列启动 + 逐帧渲染循环
+
+1) `out80m_m1073titlecall.txt` 关键证据：
+```
+[INDIRECT-MISS] 0                                  ← 缺口修复成功
+[JOBCOMP] 11 次 / [JOBDONE2] 11 次                 ← 11 个 job 完成
+   #8  node=85B846EC n=59569414（initDataRead 完成）
+   #9  node=85A9E18C n=59569856
+   #10 node=85B843AC n=59569988
+   #11 node=85A8FCDC n=59570206
+[SEQREQ] #1 page=00000001 a3=0 ...
+[SEQREQ] #2 page=00000006 a3=00000005 ...          ← ★ setSequence(6,0,0,5) 标题页启动
+[ABIVP] 42 次（SetViewport 每帧；SetVertexProgram obj=8540C000）
+[ABIVTX] 40 次（vc=3 fullscreen triangle）
+[ABIRT]  8 次（disp 0..7，cd=8CF00000/8D300000/8D700000）
+[PRESENT] 8 次（VK_SUCCESS）
+[ABIBEGIN] 10816 次（n=68001792..68017741 仍在渲染）
+[FRAMEDUMP] 13647 次（主循环推进到 n≈68235000）
+运行在 n≈68.235M 自行停止（无崩溃标记；看门狗显示访客忙等 812B2880@811732C2）
+```
+2) 截图：
+- `p5d_swap_7.bmp` → P5D LOGO（霓虹字 + 香槟杯）
+- `p5d_frame_4.bmp` → 标题美术（红天空/城市/彩带）
+- `p5d_disp_1..7.bmp` → 全黑（引擎 RT）
+3) 判断：可见内容很可能来自**宿主 movie 层**（[MOVIE] frames 0..11 + present_frame blit），引擎 RT 仍黑（引擎自绘只有全屏三角形 fade）。
+4) 里程碑意义：
+- job 系统 + AOT 缺口链全部打通（11 job、0 indirect-miss）；
+- **标题序列 page=6 真正启动**；
+- 引擎进入**真实逐帧渲染循环**（8 presents / 10k passes / 主循环 68M）。
+NEXT：
+```
+① P5D_NOMOVIE 关闭宿主 movie 层 → 隔离引擎真实输出
+② 查 p5d_disp_* 全黑（等 title UI/movie 纹理 draw）
+③ 查 68.2M 停止原因（HLE 忙等）
+④ title 页 update（"title sequence"）→ title UI 对象 → 引擎绘制标题元素
+```
+证据保存：`evidence_p5d_logo_engine.png`、`evidence_p5d_title_movie_artwork.png`、`evidence_p5d_logo_engine_prev.png`。
+
+ANTI-FORGETTING ENTRY. Keywords: M1005 INDIRECT-MISS cleared! 11 jobs completed, setSequence(6,0,0,5) executed -> title sequence page=6 started, engine entered a real per-frame render loop. Evidence out80m_m1073titlecall.txt: [INDIRECT-MISS] 0; [JOBCOMP] 11 / [JOBDONE2] 11 (#8 node=85B846EC n=59569414 initDataRead done; #9 85A9E18C; #10 85B843AC; #11 85A8FCDC); [SEQREQ] #1 page=00000001 a3=0, [SEQREQ] #2 page=00000006 a3=00000005 (setSequence(6,0,0,5) title page started!); [ABIVP] 42 (SetViewport each frame); [ABIVTX] 40 (vc=3 fullscreen triangles); [ABIRT] 8 (disp 0..7 cd=8CF00000/8D300000/8D700000); [PRESENT] 8 (VK_SUCCESS); [ABIBEGIN] 10816; [FRAMEDUMP] 13647 up to n=68235000; run stopped by itself at n≈68.235M (no crash marker; watchdog shows guest busy-wait 812B2880@811732C2). Screenshots: p5d_swap_7.bmp = P5D LOGO (neon 'P5D GONA ST☆RLIGHT' + champagne glass); p5d_frame_4.bmp = title artwork (red sky/city/confetti); p5d_disp_1..7.bmp all black (engine RT). The visible content most likely comes from the HOST movie layer ([MOVIE] frames 0..11 + present_frame blit), while the engine RT is still black (engine draws are only fullscreen triangles). Milestones: job system + AOT gap chain fully working; title sequence page=6 started; engine in a real per-frame render loop. NEXT: add P5D_NOMOVIE to disable the host movie layer and isolate engine output; investigate black p5d_disp_* (waiting for title UI/movie texture draws); investigate the 68.2M stop (HLE busy-wait); advance the title page update (FUN_8116f900('title sequence')) -> title UI objects -> engine-drawn title elements. Evidence saved evidence_p5d_logo_engine.png, evidence_p5d_title_movie_artwork.png, evidence_p5d_logo_engine_prev.png.
+
+LOOKUP: M1005, [INDIRECT-MISS] 0, [JOBCOMP] 11, [JOBDONE2] 11, [SEQREQ] #2 page=6 a3=5, setSequence(6,0,0,5), [ABIVP] 42, [ABIVTX] 40, [ABIRT] 8, [PRESENT] 8, [ABIBEGIN] 10816, [FRAMEDUMP] 13647, n=68235000, p5d_swap_7.bmp P5D logo, p5d_frame_4.bmp title artwork, p5d_disp black, evidence_p5d_logo_engine.png, evidence_p5d_title_movie_artwork.png, out80m_m1073titlecall.txt -> §18.4549 [relevant: gap fix], §18.4540 [relevant: title page]
