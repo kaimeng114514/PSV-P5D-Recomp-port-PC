@@ -1024,6 +1024,44 @@
 | M1006 | §18.4551: ★★★★★★★★ **序列页表完整解析：page6 = "TITLE" 标题页（start=0x81185974 / update=0x81185986 / end=0x81185998）+ 新增 `P5D_NOMOVIE` 开关隔离宿主 movie 层**。从 `eboot_true.elf` 直接读取表 `0x813B01B4`（每项 0x50 字节，+0x44 start/+0x48 update/+0x4c end）：
 | M1007 | §18.4552: ★★★★★★★★★ **NOMOVIE 隔离实验证伪（可见画面全来自宿主 movie 层）+ 选择性 job 强制（只强制 init 系列 worker，放行 title/movie job 真正执行）**。`out80m_m1074nomovie.txt`（P5D_NOMOVIE=1）：
 | M1008 | §18.4553: **选择性 job 强制失败（回退全强制）+ 改为「强制 TITLE 页 update=1」让 page6 常驻**。M1007 的选择性强制运行（`out80m_m1075selectforce.txt`）结果：
+| M1009 | §18.4554: ★★★★★★★★ **找到 title 页恒黑的真正原因：M1008 强制 page6 update=1 只让页"活着"，但 title 的绘制/状态推进由 job "title sequence" 的 worker（0x81198172 状态机）驱动，而全强制把它跳过了 → 恒黑。新方案：全强制但放行 title worker（`0x81198173`）**。检查 AOT 覆盖：**title worker 0x81198172 存在于 batch_013.cpp**（无缺口）。反编译 `FUN_81198172`（286B 状态机）：
+```c
+puVar1 = FUN_8116f8a8();          // title sequence task 状态结构
+switch (*puVar1) {                 // state: 0..7
+ case 0: ... FUN_81178ce2(0)/FUN_81178f0a(); if (puVar1[1]==1) {*puVar1=6;} else {*puVar1=1;
+         FUN_81172470(); FUN_81172374(0); FUN_81160696(0);}   // 初始化 title 子系统
+ case 1: ... FUN_81178f0a(); *puVar1=2; ...
+ case 2: ... DAT_813b1b1c 检查；FUN_81193344 → *puVar1=3；FUN_811933b8(...)  → *puVar1=4
+ case 3: ...
+ case 4: *puVar1=5; FUN_811580cc(1); FUN_811581dc(1);
+ case 5: FUN_81158112(); if(!ret) *puVar1=6;
+ case 6: *puVar1=7; FUN_81193a00(param_1);
+ case 7: iVar3=FUN_81193a6a(puVar1[2]); if(iVar3){ FUN_81193a80(...);
+         switch(iVar3){case 1: *puVar1=4; break; case 2: FUN_810e8688(0); return -1;
+                       case 3/4/5: return -1;} } }
+return 0;                          // 未完成 → 下帧继续
+```
+⇒ title worker 是**标题流程状态机**（初始化 title 子系统 → 进入 → 等待 → 结束），必须真正运行才能创建/drive 标题对象。
+**M1009 实现（batch_011.cpp blk_8116FA5C）**：全强制，但 worker==0x81198173 时走原始 trampoline 真正执行：
+```cpp
+uint32_t _node = s->r[0] ? rd32(s, s->r[0] + 0x34u) : 0u;
+uint32_t _wf = _node ? rd32(s, _node) : 0u;
+if (_wf == 0x81198173u) {   // title worker → 真正执行
+    push lr/r4; s->r[0]=rd32(s, s->r[0]+0x34u); s->r[14]=0x8116FA64u; return 0x8116F748u; }
+s->r[0] = 0xFFFFFFFFu; return s->r[14];   // 其余 job 强制完成（维持 init 链行为）
+```
+（检测失败 _wf==0 时也走强制分支 → 与旧全强制行为一致，不会回归。）
+编译：`batch_011.o` 8:13:37、`recomp_harness.exe` 8:13:37，均 exit 0。
+验证运行：`P5D_NOMOVIE=1 P5D_OTFORCE=1 P5D_STEPFORCE=1` + VDEC → `out80m_m1077titleworker.txt`
+NEXT：
+```
+① [JOBEXEC] 是否出现 worker=81198173（title 状态机运行）
+② title 子系统初始化是否推进（FUN_81178ce2/FUN_81178f0a…）
+③ page6 保持（M1008 强制）+ title 对象创建 → title draw 是否出现（ABIVTX vc 变化 / RT 非黑）
+④ NOMOVIE 下 swap/RT 出现引擎自绘标题元素
+```
+这是"让 title 状态机真正跑起来"的关键一步：其他 job 维持强制以保证 init 链，只放行标题 worker。 |
+| §18.4554 | Found the real reason the title page stays black: M1008 forcing page6 update=1 only keeps the page alive, but the title drawing/state advancement is driven by the job 'title sequence' worker (0x81198172 state machine), which the all-force skipped => always black. New approach: force everything BUT let the title worker (0x81198173) run. AOT coverage: title worker 0x81198172 EXISTS in batch_013.cpp (no gap). Decompiled FUN_81198172 (286B state machine): puVar1=FUN_8116f8a8() (title sequence task state); switch(*puVar1) state 0..7: case 0: FUN_81178ce2(0)/FUN_81178f0a(); if (puVar1[1]==1) *puVar1=6; else { *puVar1=1; FUN_81172470(); FUN_81172374(0); FUN_81160696(0); } (init title subsystems); case 1: FUN_81178f0a(); *puVar1=2; case 2: DAT_813b1b1c check; FUN_81193344 -> *puVar1=3; FUN_811933b8 -> *puVar1=4; case 3; case 4: *puVar1=5; FUN_811580cc(1); FUN_811581dc(1); case 5: FUN_81158112(); if(!ret) *puVar1=6; case 6: *puVar1=7; FUN_81193a00(param_1); case 7: iVar3=FUN_81193a6a(puVar1[2]); if(iVar3){ FUN_81193a80; switch(iVar3){ case1: *puVar1=4; case2: FUN_810e8688(0); return -1; case3/4/5: return -1; } } return 0. So the title worker is the title-flow state machine (init title subsystems -> enter -> wait -> end) and must really run to create/drive the title object. M1009 implementation (batch_011.cpp blk_8116FA5C): force all, but when worker==0x81198173 run the original trampoline: _node=s->r[0]?rd32(s,s->r[0]+0x34):0; _wf=_node?rd32(s,_node):0; if(_wf==0x81198173){ push lr/r4; s->r[0]=rd32(s,s->r[0]+0x34); s->r[14]=0x8116FA64; return 0x8116F748; } else s->r[0]=0xFFFFFFFF; return s->r[14];. If detection fails (_wf==0) it falls into the force branch (same as old all-force, no regression). batch_011.o and exe rebuilt 8:13:37 exit 0. Verification run P5D_NOMOVIE=1 P5D_OTFORCE=1 P5D_STEPFORCE=1 + VDEC -> out80m_m1077titleworker.txt. NEXT: whether [JOBEXEC] shows worker=81198173 (title state machine running); title subsystem init progress (FUN_81178ce2/FUN_81178f0a...); page6 stays (M1008 force) + title object creation -> title draws appear (ABIVTX vc changes / RT non-black); NOMOVIE swap/RT shows engine-drawn title elements. This is the key step to make the title state machine really run: other jobs stay forced to keep the init chain, only the title worker is allowed through. |
 ```
 [JOBCOMP] 1（只剩 initDataRead）  [JOBDONE2] 1   [INITEXEC] 0
 [SEQREQ] 16（page=6 仍请求）  [ABIVTX] 1  [PRESENT] 1
@@ -493460,3 +493498,42 @@ NEXT：
 ANTI-FORGETTING ENTRY. Keywords: M1008 selective job forcing failed (revert to all-force) + force the TITLE page update=1 so page6 stays alive. out80m_m1075selectforce.txt: [JOBCOMP] 1 (only initDataRead), [JOBDONE2] 1, [INITEXEC] 0, [SEQREQ] 16 (page=6), [ABIVTX] 1, [PRESENT] 1, run ended early at n≈59.74M => selective forcing broke the init completion chain, only 1 job completed => revert to M1000 all-force. M1008: force page6 update 0x81185986: 81185988 bl 0x811980FC; 8118598C cmp r0,#0; if !=0 returns 1 => patch inserts s->r[0]=1u at the start of block 0x8118598C so the TITLE page stays resident regardless of the 'title sequence' object. Restored batch_011 blk_8116FA5C all-force: { g_cur_block=0x8116FA5Cu; s->r[0]=0xFFFFFFFFu; return s->r[14]; }. batch_011.o 1,379,088B and batch_012.o 1,851,826B compile exit 0; exe relinked exit 0. Verification run P5D_NOMOVIE=1 P5D_OTFORCE=1 P5D_STEPFORCE=1 + VDEC -> out80m_m1076titlekeep.txt. NEXT: page=6 title page stays (no longer ends within 5 frames); [ABITX]/[ABIBEGIN]/[PRESENT] keep growing; draws change from vc=3 fullscreen to UI/text (vc changes / RT non-black); NOMOVIE swap/RT shows engine-drawn content.
 
 LOOKUP: M1008, selective force failed, out80m_m1075selectforce.txt, [JOBCOMP] 1, page6 update 0x81185986, blk_8118598C, s->r[0]=1u, TITLE page stays, blk_8116FA5C all-force restored, batch_011.o, batch_012.o, out80m_m1076titlekeep.txt -> §18.4552 [relevant: selective force attempt], §18.4551 [relevant: page6 TITLE], §18.4545 [relevant: worker trampoline]
+### 18.4554 PORT M1009: title 状态机 worker 放行（其余 job 维持强制）
+
+1) M1008 强制 page6 update=1 只让页持续存在，但 **title 绘制/状态推进由 job "title sequence" worker（0x81198172 状态机）驱动** → 全强制跳过它 ⇒ 恒黑。
+2) AOT 覆盖：**0x81198172 存在于 batch_013.cpp**（无缺口）。
+3) 反编译 `FUN_81198172`（286B 状态机，state 0..7）：
+```
+case 0: FUN_81178ce2(0)/FUN_81178f0a(); if (puVar1[1]==1) *puVar1=6;
+        else { *puVar1=1; FUN_81172470(); FUN_81172374(0); FUN_81160696(0); }   // 初始化 title 子系统
+case 1: FUN_81178f0a(); *puVar1=2;
+case 2: DAT_813b1b1c 检查；FUN_81193344 → *puVar1=3；FUN_811933b8(...) → *puVar1=4
+case 4: *puVar1=5; FUN_811580cc(1); FUN_811581dc(1);
+case 5: FUN_81158112(); if(!ret) *puVar1=6;
+case 6: *puVar1=7; FUN_81193a00(param_1);
+case 7: FUN_81193a6a(puVar1[2]); 完成→FUN_81193a80；case 1→*puVar1=4；case 2/3/4/5→return -1
+默认 return 0（下帧继续）
+```
+4) M1009 patch（batch_011.cpp blk_8116FA5C）：
+```cpp
+uint32_t _node = s->r[0] ? rd32(s, s->r[0] + 0x34u) : 0u;
+uint32_t _wf = _node ? rd32(s, _node) : 0u;
+if (_wf == 0x81198173u) {  // title worker → 真正执行
+  s->r[13] -= 4; wr32(s,s->r[13],s->r[14]); s->r[13] -= 4; wr32(s,s->r[13],s->r[4]);
+  s->r[0] = rd32(s, s->r[0] + 0x34u); s->r[14] = 0x8116FA64u; return 0x8116F748u; }
+s->r[0] = 0xFFFFFFFFu; return s->r[14];
+```
+5) 编译：batch_011.o / recomp_harness.exe 8:13:37，exit 0。
+6) 验证运行：`P5D_NOMOVIE=1 P5D_OTFORCE=1 P5D_STEPFORCE=1` + VDEC → `out80m_m1077titleworker.txt`
+NEXT：
+```
+① [JOBEXEC] 出现 worker=81198173
+② title 子系统推进（FUN_81178ce2 等）
+③ page6 保持 + title draw（ABIVTX vc/RT 非黑）
+④ NOMOVIE swap/RT 出现引擎自绘标题元素
+```
+验证：`titleworker.txt`、`out80m_m1077titleworker.txt`（生成中）。
+
+ANTI-FORGETTING ENTRY. Keywords: M1009 title page stays black because M1008 forcing page6 update=1 only keeps the page alive while the title drawing/state advancement is driven by the job 'title sequence' worker (0x81198172), which all-force skipped. New approach: force everything BUT let the title worker 0x81198173 run. AOT coverage: 0x81198172 EXISTS in batch_013.cpp. Decompiled FUN_81198172 (286B state machine, state 0..7): case 0 FUN_81178ce2(0)/FUN_81178f0a(); if (puVar1[1]==1) *puVar1=6 else { *puVar1=1; FUN_81172470(); FUN_81172374(0); FUN_81160696(0); } (init title subsystems); case 1 FUN_81178f0a() -> state 2; case 2 DAT_813b1b1c check, FUN_81193344 -> state 3, FUN_811933b8 -> state 4; case 4 FUN_811580cc(1)/FUN_811581dc(1) -> state 5; case 5 FUN_81158112() -> state 6; case 6 FUN_81193a00(param_1) -> state 7; case 7 FUN_81193a6a(puVar1[2]); done -> FUN_81193a80; case1 -> state 4; case 2 -> FUN_810e8688(0) return -1; case 3/4/5 return -1; default return 0. M1009 patch batch_011.cpp blk_8116FA5C: _node=s->r[0]?rd32(s,s->r[0]+0x34):0; _wf=_node?rd32(s,_node):0; if(_wf==0x81198173u){ push lr/r4; s->r[0]=rd32(s,s->r[0]+0x34); s->r[14]=0x8116FA64u; return 0x8116F748u; } else { s->r[0]=0xFFFFFFFFu; return s->r[14]; }. If detection fails (_wf==0) it force-branches (no regression). batch_011.o/exe 8:13:37 exit 0. Verification run P5D_NOMOVIE=1 P5D_OTFORCE=1 P5D_STEPFORCE=1 + VDEC -> out80m_m1077titleworker.txt. NEXT: [JOBEXEC] shows worker=81198173; title subsystem init progress (FUN_81178ce2 etc.); page6 stays + title draws (ABIVTX vc / RT non-black); NOMOVIE swap/RT shows engine-drawn title elements.
+
+LOOKUP: M1009, title worker 0x81198172, 0x81198173, FUN_81198172 state machine, batch_013.cpp, blk_8116FA5C, force-all-except-title-worker, FUN_81178ce2, FUN_81178f0a, FUN_81193344, FUN_811933b8, FUN_811580cc, FUN_81158112, FUN_81193a00, FUN_81193a6a, page6 update force, out80m_m1077titleworker.txt, titleworker.txt -> §18.4553 [relevant: page6 update force], §18.4552 [relevant: title object creation], §18.4545 [relevant: worker trampoline]
