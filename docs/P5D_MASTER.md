@@ -1107,6 +1107,44 @@
 | M1089 | §18.4634: ★★★★★★★★ **修正上一轮的解释并定位到最可能的真实根因：`gbn_back` 的"块内目标 → 从块首执行"回退策略。0x8115D614/0x8115D43C 反编译后**不是** job 调度原语——0x8115D614 只是 `return DAT_813AF830`（appAllocator 全局读），0x8115D43C 是 appAllocatorHandler 的槽位计算函数（引用 "appAllocatorHandler.c"）；0x8116F75E 跳板里 +0x10/+0x14 字段操作是**双向链表指针**（str [lr,#0x14] 等），不是"保存 LR/恢复 PC"。⇒ "协作式 job 调度器 LR 协议"假设被否决。**
 | M1090 | §18.4635: ★★★★★★★ **m1134 [GBACK] 统计否决了"gbn_back 是 movie 崩溃真凶"的假设：到崩溃前共 400 次块内回退，只有 2 个唯一目标——`0x811E53D2→块0x811E53CC back=6`（395 次，热循环 worker 入口）和 `0x8120767C→块0x8120767A back=2`（5 次）。**没有任何 movie 路径目标（0x8115927x）出现** ⇒ gbn_back 只在固定的两个已知点生效，与 movie 崩溃无关。GBACK 假设被否决。⇒ 改为直接探针"谁调用了 FUN_81159276"：在 `id_reg`（寄存器间接跳转）里对 target==0x81159276/0x811DACFC/0x81178F10 打印调用点 block、LR、SP、fiber 与 PC ring（`[CB9276]`）。**
 | M1091 | §18.4636: ★★★★★★★★★★★ **找到 Movie 崩溃的最终根因：batch_034 生成的 `blx r2` 块漏设 LR！m1135 `[CB9276] reg2 target=81159276 from_blk=81158504 lr=81178F10 sp=84856290` + ring `81178F10 81178F18 81178F1E 81178F2A 81178F36 811584DE 811584E4 81158504` 证明调用点是 0x81158504（我们补块函数 FUN_8115849E 内），而 batch_034 该块代码为 `s->r[2]=s->r[1]; s->r[0]=1; s->r[1]=s->r[4]; return id_reg(2,s);`——**没有设置 `s->r[14]`（LR）**！ARM `blx r2` 的正确语义是"LR=下一条指令地址，然后跳到 r2"；漏设 LR 让 movie 完成回调 FUN_81159276 带着 stale LR=0x81178F10 进入，其 epilogue `pop {r4,r5,r6,pc}` 于是返回 0x81178F10（FUN_81178F0A 中段）→ 错位返回链 → 0x811DACFC → 崩溃。这与所有观察完全吻合。**
+| M1092 | §18.4637: ★★★★★★★★★★★★ **blx LR 修复验证成功！错位返回链彻底消失：`[CB9276] lr=8115850C`、`[MOVCB-ENT] lr=8115850C`、`[MOVCB-EPI]` 保存槽 = 0x8115850C（正确）、`[ACFC-SAFE]=0`。运行首次稳定越过 64,278,346（WD 显示 64,278,999），并进入**全新阶段：CRI 文件系统加载**（CRILOG/FIOSW 首次出现）。新崩溃是"下游"问题：`criFsLoader_Create has been called before the library initialization` → BADMEM va=0x30 @0x81299570（criFs 加载器）。⇒ **movie 阶段正式通关，进入标题资源加载！** 下一层是 criFs 库初始化 HLE。**
+m1136（`out80m_m1136blxfix.txt`，BLX 修复后）关键证据：
+```
+[CB9276] reg2 target=81159276 from_blk=81158504 lr=8115850C sp=84856290   ← ★ 修复前 81178F10 → 现在正确 8115850C
+[MOVCB-ENT] sp=84856290 lr=8115850C r6=0 fib=848463A0                     ← ★ 入口 LR 正确
+[MOVCB-EPI] sp=84856268 lr=81159298 r6=812B414C  stk: … 00000000 8115850C ← ★ 保存的 pc 槽 = 8115850C（正确），pop 会返回正确位置
+[ACFC-SAFE] = 0                                                            ← ★ 旧 misaligned 进入不再发生
+[WD] loop=2 cnt=1499999/977047913/64278999/0 total=1500000 blk=81299570    ← ★ 越过 64,278,346
+[FIOSW] #7 at=8128DEFC n=64278721 r0=85CF31FC r1=00000000 r2=00000204 r3=00000004 fib=848463A0
+[CRILOG] at=81278F96 n=64278725 r0=00000000 r1=8131C3DC … msg=E2008102820:criFsLoader_Create has been called before the library initialization.
+[CRILOG] at=81279176 n=64278897 … msg=E2010062300M
+[CRILOG] at=81279176 n=64278948 … msg=E2013052701M
+```
+**新崩溃（criFs 层）**：
+```
+[SNAP] blk=81299570 r0=0 r1=811546E1 r2=811546ED r4=85CF301C r5=85CF304C r7=812B414C r13=84856258 r14=812998DE
+[BADMEM] guest va=0x00000030 unmapped block=0x81299570 tid=0 stub=812B2410
+[WD] pcring: 812982DA 812982E8 811542CA 812998D8 812791E4 81282434 812791E8 81299570
+```
+**分析**：
+1. **movie 完成回调 FUN_81159276 现在以正确 LR=0x8115850C 进入/返回**，保存槽正确 → 不再跳到 FUN_81178F0A 中段 → 错位返回链断裂 → 旧 0x811DAC9C/0x811EFFD6 崩溃全部消失
+2. 运行越过 64,278,346 后进入 **criFs 文件系统**代码（地址段 0x81278xxx-0x81299xxx = criFs 库 + 0x81154xxx app 层）
+3. 游戏自己的日志明确报错：**"criFsLoader_Create has been called before the library initialization"** —— criFs 库在我们这条新路径上没有完成初始化（此前 title 资源加载从未走到，criFs 初始化流程从未执行过/被跳过）
+4. 随后 criFs 内部在未初始化状态下访问 null+0x30 → BADMEM va=0x30
+**⇒ 下一层目标：criFs 库初始化 HLE。** 需要：
+- 找到游戏/库的 criFs 初始化入口（如 criFs_Initialize / criFsLoader_Init 对应的导入 stub）
+- 检查我们的 HLE 是否拦截了这些函数；若未拦截或返回错误，则补齐
+- 若初始化由游戏在更早阶段调用而我们跳过 → 找到正确调用时机/修正 HLE 返回值
+NEXT：
+```
+① 反编译 0x81299570 所在函数与 criFs 初始化链（0x81278xxx/0x8128Dxxx/0x81299xxx）
+② 在 HLE 中查找 criFs 相关导入 stub（criFs_Initialize/criFsLoader_*）的拦截记录与返回值
+③ 实现/修正 criFs 初始化 HLE（本地目录/CPK 读取）→ 让 criFsLoader_Create 成功
+④ 之后：title 资源通过 criFs 加载 → 2D 上下文/视图 → array2 → GXM → 画面
+⑤ 记录：movie 阶段（S0→movie）正式通关
+```
+验证：`out80m_m1136blxfix.txt`（关键行）、m1135 对照、batch_034.cpp（blx 修复）。 |
+| §18.4637 | The blx LR fix is VERIFIED - the misaligned-return chain is completely gone: [CB9276] lr=8115850C, [MOVCB-ENT] lr=8115850C, [MOVCB-EPI] saved pc slot = 0x8115850C (correct), [ACFC-SAFE]=0. The run stably passed 64,278,346 for the first time (WD shows 64,278,999) and entered a COMPLETELY NEW STAGE: CRI filesystem loading (CRILOG/FIOSW appear for the first time). The new crash is a downstream issue: 'criFsLoader_Create has been called before the library initialization' -> BADMEM va=0x30 at 0x81299570 (criFs loader). So the movie stage is officially passed and the game enters title asset loading! The next layer is criFs library initialization HLE. m1136 evidence: [CB9276] reg2 target=81159276 from_blk=81158504 lr=8115850C sp=84856290 (was 81178F10, now correct); [MOVCB-ENT] sp=84856290 lr=8115850C r6=0 fib=848463A0; [MOVCB-EPI] sp=84856268 lr=81159298 r6=812B414C stack ... 00000000 8115850C (saved pc slot correct, pop returns correctly); [ACFC-SAFE]=0 (old misaligned entry no longer happens); [WD] loop=2 cnt=1499999/977047913/64278999/0 total=1500000 blk=81299570 (passed 64,278,346); [FIOSW] #7 at=8128DEFC n=64278721 r0=85CF31FC r1=0 r2=0x204 r3=4 fib=848463A0; [CRILOG] at=81278F96 n=64278725 r0=0 r1=8131C3DC msg=E2008102820:criFsLoader_Create has been called before the library initialization; [CRILOG] at=81279176 n=64278897 msg=E2010062300M; [CRILOG] at=81279176 n=64278948 msg=E2013052701M. New crash (criFs layer): [SNAP] blk=81299570 r0=0 r1=811546E1 r2=811546ED r4=85CF301C r5=85CF304C r7=812B414C r13=84856258 r14=812998DE; [BADMEM] guest va=0x30 unmapped block=0x81299570 tid=0 stub=812B2410; [WD] pcring 812982DA 812982E8 811542CA 812998D8 812791E4 81282434 812791E8 81299570. Analysis: (1) the movie completion callback FUN_81159276 now enters/returns with the correct LR=0x8115850C, the saved slot is correct, so it no longer jumps into the middle of FUN_81178F0A; the misaligned chain is broken and the old 0x811DAC9C/0x811EFFD6 crashes are all gone; (2) after passing 64,278,346 the run enters criFs filesystem code (0x81278xxx-0x81299xxx = criFs library plus 0x81154xxx app layer); (3) the game's own log explicitly reports 'criFsLoader_Create has been called before the library initialization' - the criFs library was not initialized on this new path (title asset loading was never reached before, so the criFs init flow never ran/was skipped); (4) the criFs internals then access null+0x30 -> BADMEM va=0x30. NEXT layer: criFs library initialization HLE - find the game/library criFs init entry points (criFs_Initialize / criFsLoader_Init import stubs), check whether our HLE intercepts them and with what return values, implement/fix the criFs init HLE (local dir/CPK reading) so criFsLoader_Create succeeds, then title assets load through criFs -> 2D context/views -> array2 -> GXM -> picture; record that the movie stage (S0->movie) is officially passed. |
 m1135（`out80m_m1135cb9276.txt`）决定性证据：
 ```
 [CB9276] reg2 target=81159276 from_blk=81158504 lr=81178F10 sp=84856290 fib=848463A0
@@ -499179,3 +499217,39 @@ NEXT：
 ANTI-FORGETTING ENTRY. Keywords: M1091 FINAL root cause of the movie crash - batch_034 generated `blx r2` blocks do not set LR. m1135 [CB9276] reg2 target=81159276 from_blk=81158504 lr=81178F10 sp=84856290 fib=848463A0 ring 81178F10 81178F18 81178F1E 81178F2A 81178F36 811584DE 811584E4 81158504; [MOVCB-ENT] sp=84856290 lr=81178F10 r6=0 fib=848463A0 stk 816CDA48 811DACFC 8116FA67 8116FA5D 00000000 ring ... 811584E4 81158504 81159276; [MOVCB-EPI] sp=84856268 lr=81159298 r6=812B414C ring 81157F4C 81157F6A 81159298 8115929E 811592AA 811592B4 811592B6 811592BE; [ACFC-SAFE] #1500000; [BADMEM] va=0xBF800008 at 0x811EFFD6. batch_034 block 0x81158504 code: s->r[2]=s->r[1]; s->r[0]=1; s->r[1]=s->r[4]; return id_reg(2,s); - it does NOT set s->r[14] (LR)! Correct ARM `blx r2` semantics: LR = next instruction address, then jump to r2. Missing LR makes movie completion callback FUN_81159276 start with stale LR=0x81178F10 so its pop {r4,r5,r6,pc} returns to 0x81178F10 (middle of FUN_81178F0A), causing the misaligned return chain -> 0x811DACFC -> crash. All 5 blx rN blocks in batch_034 were missing LR (capstone): 0x81158504 adds r2,r1,#0; movs r0,#1; adds r1,r4,#0; blx r2 -> LR=0x8115850C; 0x811585A8 movs r0,#3; adds r1,r4,#0; blx r2 -> LR=0x811585AE; 0x8115860E movs r0,#2; adds r1,r4,#0; blx r2 -> LR=0x81158614; 0x811586B6 adds r2,r1,#0; movs r0,#5; adds r1,r4,#0; blx r2 -> LR=0x811586BE; 0x81158700 adds r2,r1,#0; movs r0,#6; adds r1,r4,#0; blx r2 -> LR=0x81158708. M1091 fix in batch_034.cpp: before each `return id_reg(N,s);` insert `s->r[14] = <next instruction address>u;` (e.g. block 0x81158504: s->r[2]=s->r[1]; s->r[0]=1; s->r[1]=s->r[4]; s->r[14]=0x8115850Cu; return id_reg(2,s);). Build: batch_034 exit 0; harness exit 0; exe relink exit 0 (57,118,250B 07:23:33). Verification run out80m_m1136blxfix.txt started. EXPECTED: callback enters/returns with correct LR=0x8115850C, no stack misalignment, no 0x81178F10/0x811DACFC misaligned returns, ACFC-SAFE no longer triggers, GXM draw chain advances. NEXT: read m1136 whether [CB9276] lr=0x8115850C and entry LR correct; whether it passes n=64,278,346 without BADMEM/[ACFC-SAFE]; if crash gone watch FIOSFILL title-asset OPENs, [SCENE] head0F, [VIEWADD]/[CTX*], GXM calls; if other crashes persist audit every `return id_reg(` in all batches for missing s->r[14]; finally SceGxmDraw/BeginScene -> picture.
 
 LOOKUP: M1091 blx missing LR root cause, batch_034 block 0x81158504 return id_reg(2,s) without s->r[14], 5 blx blocks fixed with LR 0x8115850C 0x811585AE 0x81158614 0x811586BE 0x81158708, movie callback FUN_81159276 stale LR 0x81178F10, misaligned return chain 0x811DACFC, [CB9276] reg2 target=81159276 from_blk=81158504, [MOVCB-ENT] lr=81178F10, [MOVCB-EPI] lr=81159298, exe 57,118,250B 07:23:33, out80m_m1136blxfix.txt, next verify crash gone + audit other batches id_reg LR -> §18.4635 [relevant: CB9276 probe], §18.4634 [relevant: gbn_back rejected], §18.4633 [relevant: callback entry], §18.4630 [relevant: ACFC-SAFE]
+### 18.4637 PORT M1092: blx LR 修复验证成功——movie 阶段通关！首次稳定越过 64,278,346 并进入 CRI 文件系统（新崩溃=criFs 未初始化）
+
+1) m1136（BLX 修复后）关键行：
+```
+[CB9276] reg2 target=81159276 from_blk=81158504 lr=8115850C sp=84856290   ← 修复生效（原 81178F10）
+[MOVCB-ENT] sp=84856290 lr=8115850C r6=0 fib=848463A0                     ← 入口 LR 正确
+[MOVCB-EPI] sp=84856268 lr=81159298 r6=812B414C stk: … 8115850C          ← 保存 pc 槽正确
+[ACFC-SAFE] = 0
+[WD] loop=2 … 64278999/0 total=1500000 blk=81299570                        ← 越过 64,278,346
+[FIOSW] #7 at=8128DEFC n=64278721 r0=85CF31FC r2=00000204 r3=00000004
+[CRILOG] at=81278F96 n=64278725 msg=E2008102820:criFsLoader_Create has been called before the library initialization.
+[CRILOG] at=81279176 n=64278897 msg=E2010062300M / n=64278948 msg=E2013052701M
+```
+2) 新崩溃（criFs 层）：
+```
+[SNAP] blk=81299570 r0=0 r1=811546E1 r2=811546ED r4=85CF301C r5=85CF304C r7=812B414C r13=84856258 r14=812998DE
+[BADMEM] guest va=0x00000030 unmapped block=0x81299570 tid=0 stub=812B2410
+[WD] pcring: 812982DA 812982E8 811542CA 812998D8 812791E4 81282434 812791E8 81299570
+```
+3) 结论：
+- blx LR 修复彻底解决"错位返回/栈帧污染"链：旧 0x811DAC9C、0x811EFFD6 崩溃全部消失
+- **movie 阶段（S0→movie）正式通关**，游戏进入 **CRI 文件系统加载**（title 资源加载路径）
+- 游戏日志明确：criFsLoader_Create 在库初始化前被调用 → criFs 未初始化 → null+0x30 崩溃
+4) NEXT（criFs 初始化 HLE）：
+```
+① 反编译 0x81299570 与 criFs 初始化链（0x81278xxx/0x8128Dxxx/0x81299xxx）
+② 查 HLE 中 criFs 导入 stub 拦截与返回值
+③ 实现/修正 criFs 初始化（本地目录/CPK 读取）→ criFsLoader_Create 成功
+④ title 资源加载 → 2D 上下文/视图 → array2 → GXM → 画面
+⑤ 记录 movie 阶段通关
+```
+验证：`out80m_m1136blxfix.txt`、`batch_034.cpp`。
+
+ANTI-FORGETTING ENTRY. Keywords: M1092 blx LR fix VERIFIED - misaligned-return chain gone: [CB9276] lr=8115850C, [MOVCB-ENT] lr=8115850C, [MOVCB-EPI] saved pc slot 0x8115850C, [ACFC-SAFE]=0; run passed 64,278,346 for the first time (WD 64278999) and entered a COMPLETELY NEW STAGE: CRI filesystem loading (CRILOG/FIOSW first appear). New crash is downstream: 'criFsLoader_Create has been called before the library initialization' (game's own log E2008102820) -> BADMEM va=0x30 at block 0x81299570 stub=812B2410; [SNAP] blk=81299570 r0=0 r1=811546E1 r2=811546ED r4=85CF301C r5=85CF304C r7=812B414C r13=84856258 r14=812998DE; [WD] pcring 812982DA 812982E8 811542CA 812998D8 812791E4 81282434 812791E8 81299570; [FIOSW] #7 at=8128DEFC n=64278721 r0=85CF31FC r2=0x204 r3=4; [CRILOG] at=81278F96 n=64278725 msg=E2008102820:criFsLoader_Create has been called before the library initialization; [CRILOG] at=81279176 n=64278897 msg=E2010062300M and n=64278948 msg=E2013052701M. So the movie stage (S0->movie) is officially passed and the game enters title asset loading via CRI FS; the next layer is criFs library initialization HLE. The old 0x811DAC9C/0x811EFFD6 crashes are all gone. NEXT: decompile 0x81299570 and the criFs init chain (0x81278xxx/0x8128Dxxx/0x81299xxx); check HLE criFs import stub interception/return values; implement/fix criFs init HLE (local dir/CPK reading) so criFsLoader_Create succeeds; then title assets load through criFs -> 2D context/views -> array2 -> GXM -> picture; record movie stage passed.
+
+LOOKUP: M1092 blx LR fix verified, [CB9276] lr=8115850C, [MOVCB-ENT] lr=8115850C, [MOVCB-EPI] saved pc slot 8115850C, [ACFC-SAFE]=0, passed 64,278,346 WD 64278999, new stage CRI filesystem CRILOG FIOSW, criFsLoader_Create has been called before the library initialization E2008102820, BADMEM va=0x30 block 0x81299570 stub=812B2410, [SNAP] r0=0 r1=811546E1 r2=811546ED r14=812998DE, pcring 812982DA 812982E8 811542CA 812998D8 812791E4 81282434 812791E8 81299570, movie stage passed, next criFs init HLE -> §18.4636 [relevant: blx LR fix], §18.4635 [relevant: CB9276 probe], §18.4631 [relevant: GXM crash], §18.4630 [relevant: ACFC-SAFE]
