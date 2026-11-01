@@ -1033,6 +1033,33 @@
 | M1015 | §18.4560: ★★★★★★★★★ **参考 totk-pc-recomp（塞尔达：王国之泪静态重编译移植）架构 + 采纳其"覆盖率 oracle"做法：首次 AOT 全函数覆盖率审计，新增 batch_032 补齐 23 个缺失函数（Ghidra 12,532 函数中缺失 entry 从 38 → 20，剩余内部缺口仅 5 个）**。
 | M1016 | §18.4561: ★★★★★★★★★★ **AOT 内部函数覆盖率 100%：batch_033 补齐最后 5 个内部函数（Ghidra 12,532 函数全命中；缺失 entry 仅剩 14 个 HLE import + module_start = 预期无 block）**。原因：这 5 个函数在 `function_bounds.json` 里是 **size=1 的退化条目**（生成器跳过），但 Ghidra 知道真实尺寸：
 | M1017 | §18.4562: **batch_032 回归通过（无回退）+ 新 exe 合并 batch_032/033 + 新增 TTPROBE 探针追踪 title task 生命周期（定位 0xE5E5E5E5 释放者）**。`out80m_m1081batch32.txt`（batch_032 版 exe）结果与基线逐项一致：
+| M1018 | §18.4563: **TTPROBE（harness 级 pc 探针）0 命中：title 路径在 nested/interpreter 执行，不经过 job_probes → 改为 batch 级（AOT block 内）探针，直接追踪 title task 的创建与释放**。`out80m_m1082ttprobe.txt`：
+```
+[TT] 0 行          ← job_probes 的 0x811980B0/0x81198172/0x8115D43C/0x811DA094 全部未触发
+[BADMEM] 1（0xE5E5E5E9 @81178F18 照旧）  [JOBCOMP] 11  [SEQREQ] 16
+```
+**原因**：title 的 page6 start / worker 调用发生在 nested runner（`[PROC]/[PROCWR]/[EXEC2]/[SNAP]` 那套）里，而 `job_probes` 只挂在主 dispatch 循环上 ⇒ AOT block 内直接埋探针才可靠。
+**M1018 batch 级探针（已编译进 exe，57,048,472B 10:12:38）**：
+1) `batch_010.cpp`：新增**共享全局** `uint32_t g_p5d_tt_task = 0;` + free 探针：
+   - `blk_8115D43C`（appAllocatorHandler free 入口）→ 若 r0/r1/r±4 命中 task 打印 `[TTF] 43C ...`
+   - `blk_8115D968`（实际 free 内层）→ 同上 `[TTF] 968 ...`
+2) `batch_011.cpp`：hybrid title-worker 分支打印 `[TTW2] node=... arg=node[2]=...`
+3) `batch_013.cpp`：
+   - `blk_811980B0`（FUN_8119807C 内 `FUN_8115d3ce` 返回后）→ **记录 `g_p5d_tt_task`** 并打印 `[TTC] task=%08X`
+   - `blk_81198172`（title worker 入口）→ 打印 `[TTW] node=... arg=...`（worker 看到 node[2] 的实际值）
+4) `batch_016.cpp`：`blk_811DA094`（guest heap free）→ 命中 task 时打印 `[TTF] 94 ...`
+全部探针 cap 40 次、写 stderr。编译：batch_010/011/013/016 均 exit 0；`recomp_harness.exe` 重链 exit 0（57,048,472B，10:12:38）。
+**诊断运行**：`out80m_m1083batchprobe.txt`（常规 milestone env：NOMOVIE + OT/STEPFORCE + VDEC + delay=0 + hybrid force）已启动。
+NEXT：
+```
+① [TTC]：title task 指针（记录时刻）
+② [TTW]/[TTW2]：worker 入口时 node[2] 是否已 E5E5E5E5（判断是否 worker 前已 free）
+③ [TTF] 43C/968/94：哪个 free 路径、在什么时机释放了 title task
+④ 据此定位：page6 end 清理 / 强制完成回调 / allocator 复用 哪条路径误释放
+⑤ 修复后 title 状态机 case0→1→2… → title 对象 → 引擎自绘标题
+```
+验证：`out80m_m1082ttprobe.txt`（TT 0 行）、`recomp_harness.exe`（57,048,472B）、`out80m_m1083batchprobe.txt`（生成中）。 |
+| §18.4563 | TTPROBE (harness-level pc probe) had 0 hits: the title path executes in the nested/interpreter runner and does not pass through job_probes -> switched to batch-level (inside AOT block) probes to directly track title task creation and free. out80m_m1082ttprobe.txt: [TT] 0 lines (job_probes probes at 0x811980B0/0x81198172/0x8115D43C/0x811DA094 never fired); [BADMEM] 1 (0xE5E5E5E9 at 81178F18 unchanged); [JOBCOMP] 11; [SEQREQ] 16. Reason: the title page6 start / worker invocation happens inside the nested runner ([PROC]/[PROCWR]/[EXEC2]/[SNAP]) while job_probes is only hooked into the main dispatch loop => only probes embedded directly in AOT blocks are reliable. M1018 batch-level probes (compiled into exe 57,048,472B 10:12:38): (1) batch_010.cpp: new shared global uint32_t g_p5d_tt_task=0; + free probes - blk_8115D43C (appAllocatorHandler free entry) prints [TTF] 43C when r0/r1/r±4 matches task; blk_8115D968 (inner free) prints [TTF] 968; (2) batch_011.cpp: hybrid title-worker branch prints [TTW2] node=... arg=node[2]=...; (3) batch_013.cpp: blk_811980B0 (after FUN_8115d3ce inside FUN_8119807C) records g_p5d_tt_task and prints [TTC] task=%08X; blk_81198172 (title worker entry) prints [TTW] node=... arg=...; (4) batch_016.cpp: blk_811DA094 (guest heap free) prints [TTF] 94 when it matches task. All probes capped at 40 prints to stderr. batch_010/011/013/016 compile exit 0; recomp_harness.exe relink exit 0 (57,048,472B 10:12:38). Diagnostic run out80m_m1083batchprobe.txt (NOMOVIE + OT/STEPFORCE + VDEC + delay=0 + hybrid force) started. NEXT: read [TTC] task pointer; [TTW]/[TTW2] whether node[2] is already 0xE5E5E5E5 at worker entry; [TTF] 43C/968/94 which free path frees the title task and when; then locate page6 end cleanup / forced-completion callback / allocator reuse; after the fix the title state machine advances -> title object -> engine-drawn title. |
 ```
 [INDIRECT-MISS] 0        [JOBCOMP] 11 / [JOBDONE2] 11
 [SEQREQ] 16（page=6）     [WFDBG] #11 wf=81198173（title worker）
@@ -494045,3 +494072,37 @@ NEXT：
 ANTI-FORGETTING ENTRY. Keywords: M1017 batch_032 regression passed (no regression): out80m_m1081batch32.txt identical to baseline - [INDIRECT-MISS] 0, [JOBCOMP] 11/[JOBDONE2] 11, [SEQREQ] 16 (page=6), [WFDBG] #11 wf=81198173 (title worker), [BADMEM] 1 (still 0xE5E5E5E9 at block 81178F18, title task freed early). New exe recomp_harness.exe = 57,046,493B (9:54:24) first time including both batch_032 and batch_033 (batch_033's 5 internal functions). M1017 new probe P5D_TTPROBE=1 in job_probes: 0x811980B0 (after FUN_8115d3ce in FUN_8119807C) records title task pointer [TT] task=; 0x81198172 (title worker entry) prints node and node[2] (arg); 0x8115D43C/0x811DA094 (free candidates) print [TT] FREE only when r0==task||r1==task||r0==task+4||r1==task+4. Diagnostic run out80m_m1082ttprobe.txt (P5D_TTPROBE=1 + NOMOVIE + OT/STEPFORCE + VDEC + delay=0 + hybrid force) started. NEXT: read [TT] for the task pointer and whether node[2] is already 0xE5E5E5E5 at worker entry; read [TT] FREE for when/who frees it; if page6 end / FUN_8116fa30 cancel triggers it, keep the title page from ending or delay the free; after the fix the title state machine advances -> title object -> engine-drawn title.
 
 LOOKUP: M1017, out80m_m1081batch32.txt, batch_032 regression no regression, batch_033 linked, recomp_harness.exe 57,046,493B, P5D_TTPROBE, [TT] task, 0x811980B0, 0x81198172, 0x8115D43C, 0x811DA094, [TT] FREE, out80m_m1082ttprobe.txt, title task freed early -> §18.4561 [relevant: batch_033], §18.4559 [relevant: title task free]
+### 18.4563 PORT M1018: batch 级探针追踪 title task 生命周期
+
+1) `out80m_m1082ttprobe.txt`（harness 级 TTPROBE）：
+```
+[TT] 0 行（0x811980B0/0x81198172/0x8115D43C/0x811DA094 探针全部未触发）
+[BADMEM] 1（0xE5E5E5E9 @81178F18 照旧）  [JOBCOMP] 11  [SEQREQ] 16
+```
+原因：title 的 page6 start / worker 调用发生在 **nested runner**（`[PROC]/[PROCWR]/[EXEC2]/[SNAP]`）里，`job_probes` 只在主 dispatch 循环挂载 ⇒ 必须把探针埋进 AOT block。
+2) M1018 batch 级探针（已编入 exe 57,048,472B 10:12:38）：
+```
+batch_010.cpp：uint32_t g_p5d_tt_task = 0;（共享全局）
+              blk_8115D43C（appAllocatorHandler free 入口）→ [TTF] 43C ...
+              blk_8115D968（实际 free 内层）→ [TTF] 968 ...
+batch_011.cpp：hybrid title-worker 分支 → [TTW2] node=... arg=node[2]=...
+batch_013.cpp：blk_811980B0（FUN_8115d3ce 返回后）→ 记录 g_p5d_tt_task + [TTC] task=%08X
+              blk_81198172（title worker 入口）→ [TTW] node=... arg=...
+batch_016.cpp：blk_811DA094（guest heap free）→ [TTF] 94 ...
+（全部 cap 40 次，写 stderr）
+```
+3) 编译：batch_010/011/013/016 exit 0；exe 重链 exit 0。
+4) 诊断运行 `out80m_m1083batchprobe.txt` 已启动（NOMOVIE + OT/STEPFORCE + VDEC + delay=0 + hybrid force）。
+NEXT：
+```
+① [TTC] task 指针
+② [TTW]/[TTW2] worker 入口时 node[2] 是否 E5
+③ [TTF] 43C/968/94 谁在何时释放 title task
+④ 定位 page6 end / 强制完成 / allocator 复用 → 修复
+⑤ title 状态机继续 → title 对象 → 引擎自绘标题
+```
+验证：`out80m_m1082ttprobe.txt`、`recomp_harness.exe`（57,048,472B）、`out80m_m1083batchprobe.txt`（生成中）。
+
+ANTI-FORGETTING ENTRY. Keywords: M1018 TTPROBE (harness-level pc probe) had 0 hits because the title path executes in the nested/interpreter runner and never passes through job_probes -> switched to batch-level (inside AOT block) probes. out80m_m1082ttprobe.txt: [TT] 0 lines, [BADMEM] 1 (0xE5E5E5E9 at 81178F18), [JOBCOMP] 11, [SEQREQ] 16. M1018 batch-level probes compiled into exe 57,048,472B 10:12:38: (1) batch_010.cpp: shared global uint32_t g_p5d_tt_task=0; + free probes blk_8115D43C (appAllocatorHandler free entry, [TTF] 43C) and blk_8115D968 (inner free, [TTF] 968) printing when r0/r1/r±4 matches task; (2) batch_011.cpp hybrid title-worker branch prints [TTW2] node=... arg=node[2]=...; (3) batch_013.cpp blk_811980B0 records g_p5d_tt_task and prints [TTC] task=%08X, blk_81198172 prints [TTW] node=... arg=...; (4) batch_016.cpp blk_811DA094 (guest heap free) prints [TTF] 94 when matching task. All probes cap 40 prints to stderr. batch_010/011/013/016 compile exit 0; exe relink exit 0 (57,048,472B 10:12:38). Diagnostic run out80m_m1083batchprobe.txt (NOMOVIE + OT/STEPFORCE + VDEC + delay=0 + hybrid force) started. NEXT: [TTC] task pointer; [TTW]/[TTW2] whether node[2] already 0xE5E5E5E5 at worker entry; [TTF] 43C/968/94 which free path frees the title task; locate page6 end cleanup / forced-completion callback / allocator reuse; after fix title state machine advances -> title object -> engine-drawn title.
+
+LOOKUP: M1018, TTPROBE 0 hits, nested runner, job_probes main dispatch only, batch-level probes, batch_010 g_p5d_tt_task, blk_8115D43C, blk_8115D968, blk_811DA094, batch_013 blk_811980B0, blk_81198172, batch_011 [TTW2], batch_016 [TTF] 94, exe 57,048,472B, out80m_m1083batchprobe.txt, 0xE5E5E5E9 -> §18.4562 [relevant: TTPROBE], §18.4559 [relevant: title task free]
