@@ -1026,6 +1026,28 @@
 | M1008 | §18.4553: **选择性 job 强制失败（回退全强制）+ 改为「强制 TITLE 页 update=1」让 page6 常驻**。M1007 的选择性强制运行（`out80m_m1075selectforce.txt`）结果：
 | M1009 | §18.4554: ★★★★★★★★ **找到 title 页恒黑的真正原因：M1008 强制 page6 update=1 只让页"活着"，但 title 的绘制/状态推进由 job "title sequence" 的 worker（0x81198172 状态机）驱动，而全强制把它跳过了 → 恒黑。新方案：全强制但放行 title worker（`0x81198173`）**。检查 AOT 覆盖：**title worker 0x81198172 存在于 batch_013.cpp**（无缺口）。反编译 `FUN_81198172`（286B 状态机）：
 | M1010 | §18.4555: **Hybrid 强制首跑：行为与全强制完全一致（JOBEXEC 0 = title worker 未被调度）→ 加 WFDBG 诊断确认 worker 检测值**。`out80m_m1077titleworker.txt`（全强制但放行 title worker）：
+| M1011 | §18.4556: **WFDBG 诊断首跑无效（发现多个 recomp_harness 实例并存 → 日志/运行互相干扰），清理后单实例重跑**。检查 `out80m_m1078wfdbg.txt`（Start-Process 启动）：
+```
+out 文件最后写入 8:38:17（仅 3 分钟后停更），err 最后写入 8:35:37
+[WD] loop=0 cnt=472002/830/1718/0 total=472003 blk=81206832 fib=84836300 fex=1 ex=1
+[WDRING] 811F007C ... 8120682A 81206832 81198BF6
+[WDCTX] fib=84836300 pc=8120682A sp=84846368 r0=0
+```
+同时 `Get-Process` 显示**两个** recomp_harness 实例（31604 无 CPU / 50548 CPU 1003s）——旧的 m1077 实例未退出，与新 m1078 实例并存 ⇒ 日志文件被两个进程写、运行状态互相污染，诊断不可信。
+`[WFDBG]` 在 err 文件 0 行（符合预期：job trampoline 只在 page1 之后 n≥59M 才被调用，boot 阶段不会打印）。
+**处置**：
+1) `Stop-Process` 清理全部 recomp_harness（已做）；
+2) 确认 `[WFDBG]` 字符串已编入 `recomp_harness.exe`（count=1）；
+3) **单实例重跑**：`out80m_m1079wfdbg2.txt`（P5D_NOMOVIE=1 + OT/STEPFORCE + VDEC，正常 env）已作为受控后台任务启动。
+NEXT：
+```
+① 等待运行到 page1（n≥59.5M）后读 err80m_m1079wfdbg2.txt 的 [WFDBG] 行
+② 核对 ctx/node/wf 是否合理（node 应为 app job 节点如 85B86A1C，wf 应为 worker 如 81184809）
+③ 若 wf 合理但从未出现 0x81198173 → title job 没被调度 → 探针 0x8119807C / "title sequence" 登记路径
+④ 若 wf 全为 0 → 检测偏移错误 → 用 [JOBEXEC] 中已知 node 反推正确偏移
+```
+验证：`out80m_m1078wfdbg.txt`（无效，多实例）、`err80m_m1079wfdbg2.txt`（生成中）、exe 中 WFDBG 字符串。 |
+| §18.4556 | First WFDBG diagnostic run invalid (multiple recomp_harness instances found running concurrently -> logs/runs interfere); cleaned up and relaunched single-instance. out80m_m1078wfdbg.txt (Start-Process): out file last written 8:38:17 (stopped 3 min after start), err last written 8:35:37; [WD] loop=0 cnt=472002/830/1718/0 total=472003 blk=81206832 fib=84836300 fex=1 ex=1; [WDRING] 811F007C ... 8120682A 81206832 81198BF6; [WDCTX] fib=84836300 pc=8120682A. Meanwhile Get-Process showed TWO recomp_harness instances (31604 no CPU / 50548 CPU 1003s) - the old m1077 instance never exited, coexisting with the new m1078 instance => log files written by two processes, run states polluted, diagnostics unreliable. [WFDBG] 0 lines in err (as expected: job trampolines are only called after page1 when n≥59M; not during boot). Actions: (1) Stop-Process all recomp_harness; (2) confirmed the [WFDBG] string is in recomp_harness.exe (count=1); (3) single-instance rerun out80m_m1079wfdbg2.txt (P5D_NOMOVIE=1 + OT/STEPFORCE + VDEC, normal env) started as a controlled background job. NEXT: after the run reaches page1 (n≥59.5M), read [WFDBG] lines from err80m_m1079wfdbg2.txt; check ctx/node/wf sanity (node should be an app job node like 85B86A1C, wf a worker like 81184809); if wf is sane but 0x81198173 never appears -> the title job was not scheduled -> probe 0x8119807C / 'title sequence' registration path; if wf is always 0 -> detection offset wrong -> derive the correct offset from the known nodes in [JOBEXEC]. |
 ```
 [JOBCOMP] 11 / [JOBDONE2] 11（与全强制一致）
 [SEQREQ] 16（page=6 请求存在）
@@ -493598,3 +493620,27 @@ NEXT：
 ANTI-FORGETTING ENTRY. Keywords: M1010 hybrid-force first run identical to all-force: [JOBCOMP] 11 / [JOBDONE2] 11, [SEQREQ] 16 (page=6), [ABIVTX] 40 (vc=3 fullscreen), [PRESENT] 8, [ABIBEGIN] 10816, main loop n≈68.27M, [JOBEXEC] 0 (FUN_8116f748 never called), NOMOVIE all frames black (mean=0.00). The hybrid branch (title worker 0x81198173 allowed) never fired: either the title job was never scheduled (page6 start FUN_8119807C not executed / 'title sequence' job not queued) or worker detection failed (_wf=0 always forces). M1010 adds WFDBG logging in blk_8116FA5C (each distinct worker value once, cap 120, stderr): { static unsigned _lastwf=0xFFFFFFFFu; static int _dbg=0; if(_wf != _lastwf && _dbg++ < 120) { _lastwf=_wf; std::fprintf(stderr,'[WFDBG] #%d ctx=%08X node=%08X wf=%08X\n', _dbg, (unsigned)s->r[0], (unsigned)_node, (unsigned)_wf); std::fflush(stderr); } }. Compiled/linked exit 0; diagnostic run out80m_m1078wfdbg.txt (P5D_NOMOVIE=1 + OT/STEPFORCE) started. NEXT: read [WFDBG] to check the ctx/node/wf values; fix detection offset if wrong; if 0x81198173 never appears the title job was not scheduled -> probe 0x8119807C and the 'title sequence' registration; after fix the title worker runs -> title state machine -> engine-drawn title.
 
 LOOKUP: M1010, out80m_m1077titleworker.txt, [JOBEXEC] 0, [WFDBG], blk_8116FA5C, title worker 0x81198173, hybrid force, FUN_8119807C, 'title sequence' registration, out80m_m1078wfdbg.txt -> §18.4554 [relevant: hybrid force], §18.4553 [relevant: page6 force]
+### 18.4556 PORT M1011: WFDBG 诊断首跑无效（多实例并存）→ 单实例重跑
+
+1) `out80m_m1078wfdbg.txt`（Start-Process 启动）：
+```
+out 最后写入 8:38:17（3 分钟后停更）；err 最后写入 8:35:37
+[WD] loop=0 cnt=472002/830/1718/0 total=472003 blk=81206832 fib=84836300 fex=1 ex=1
+[WDRING] 811F007C ... 8120682A 81206832 81198BF6
+[WDCTX] fib=84836300 pc=8120682A sp=84846368 r0=0
+```
+2) `Get-Process` 发现**两个 recomp_harness 实例**（31604 无 CPU / 50548 CPU 1003s）——旧 m1077 实例未退出 ⇒ 日志被两个进程写、状态污染 ⇒ 诊断无效。
+3) `[WFDBG]` 在 err 为 0 行（符合预期：job trampoline 只在 page1 之后 n≥59M 被调用，boot 阶段不打印）。
+4) 处置：清理全部实例；确认 `[WFDBG]` 已编入 exe（count=1）；**单实例重跑** `out80m_m1079wfdbg2.txt`（P5D_NOMOVIE=1 + OT/STEPFORCE + VDEC）。
+NEXT：
+```
+① 运行到 page1 后读 err80m_m1079wfdbg2.txt 的 [WFDBG]
+② 核对 ctx/node/wf（node 应 85B86A1C 类，wf 应 81184809 类）
+③ 无 0x81198173 → title job 未调度 → 探针 0x8119807C / "title sequence" 登记
+④ wf 全 0 → 检测偏移错误 → 用 [JOBEXEC] 已知 node 反推偏移
+```
+验证：`out80m_m1078wfdbg.txt`（无效）、`err80m_m1079wfdbg2.txt`（生成中）。
+
+ANTI-FORGETTING ENTRY. Keywords: M1011 first WFDBG diagnostic run invalid because multiple recomp_harness instances ran concurrently (31604 no CPU, 50548 CPU 1003s); out80m_m1078wfdbg.txt out file stopped at 8:38:17, err at 8:35:37; [WD] loop=0 cnt=472002 total=472003 blk=81206832 fib=84836300 fex=1 ex=1, [WDRING] 811F007C ... 8120682A 81206832 81198BF6. [WFDBG] 0 lines in err (expected: job trampolines only after page1 n≥59M). Actions: killed all recomp_harness, confirmed [WFDBG] string in exe (count=1), relaunched single-instance run out80m_m1079wfdbg2.txt (P5D_NOMOVIE=1 + OT/STEPFORCE + VDEC). NEXT: read [WFDBG] from err80m_m1079wfdbg2.txt after page1; verify ctx/node/wf; if no 0x81198173 then the title job was not scheduled -> probe 0x8119807C / 'title sequence' registration; if wf always 0 -> wrong detection offset -> derive from [JOBEXEC] known nodes.
+
+LOOKUP: M1011, multiple recomp_harness instances, out80m_m1078wfdbg.txt invalid, [WFDBG], err80m_m1079wfdbg2.txt, WFDBG in exe count=1, out80m_m1079wfdbg2.txt -> §18.4555 [relevant: WFDBG diagnostic added], §18.4554 [relevant: hybrid force]
