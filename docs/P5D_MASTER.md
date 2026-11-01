@@ -1030,6 +1030,42 @@
 | M1012 | §18.4557: ★★★★★★★★★ **WFDBG 诊断成功：worker 检测完全正确，但发现 init 链 job 根本没被调用；title 页未启动的原因 = setSequence(6) 的 delay=5 依赖序列 update 帧（observer 任务未跑）→ patch delay 5→0 让标题页**立即启动**！** WFDBG 输出（`err80m_m1079wfdbg2.txt`，单实例）：
 | M1013 | §18.4558: ★★★★★★★★★★ **`setSequence(6) delay=0` 成功！title 状态机 worker（0x81198173）**真正运行**（WFDBG #11 / JOBEXEC #1）——但随即暴露下一个精确卡点：`FUN_8116f8a8()` 返回**已释放内存（0xE5E5E5E5 毒值）**导致 `[BADMEM] guest va=0xE5E5E5E9 @block=0x81178F18`**。证据（`out80m_m1080titlestart.txt` / `err80m_m1080titlestart.txt`）：
 | M1014 | §18.4559: **崩溃点精确定位：`FUN_8116f8a8` 语义 = `return *(u32*)(param_1 + 8)`（job 节点 [2] = 任务 arg 指针）；BADMEM 说明 title job 节点 85B8586C 的 [2]/arg = 0xE5E5E5E5（被 guest 分配器 free 填充毒值）——即 title task 已被提前释放**。反编译（`gettask.txt`）：
+| M1015 | §18.4560: ★★★★★★★★★ **参考 totk-pc-recomp（塞尔达：王国之泪静态重编译移植）架构 + 采纳其"覆盖率 oracle"做法：首次 AOT 全函数覆盖率审计，新增 batch_032 补齐 23 个缺失函数（Ghidra 12,532 函数中缺失 entry 从 38 → 20，剩余内部缺口仅 5 个）**。
+**TOTK Recomp 架构（参考源码 README/docs/architecture.md，MIT）**：
+```
+CPU：LAS Recomp 的 lifter：ARM64 → C（每 guest 函数一个 C 函数；BL 直接调用；间接分支用"地址索引表"）
+     + MacNativeGames 的 OS 边界定义：~163 个 nn::* SDK 函数按符号替换 + 38 个 SVC
+     + 覆盖率 oracle：NSO rewriter 列出所有触及 OS 的点（SVC/TLS/counter/x18/exclusive/jump table）
+       1.4.3 main 中共 68,968 个点，lifter 必须全部处理
+内存：guest 地址 == host 地址（<2^39），heap/stack/alias 用 MEM_WRITE_WATCH
+线程：真实宿主线程 + 虚拟 3 核 Horizon 调度模型（优先级/SVC 与间接调用处抢占/异步抢占）
+图形：NVN 前端 + Vulkan 后端（translator 输出 SPIR-V；pipeline library / 预编译着色器避免卡顿）
+工具链：MSYS2 UCRT64 clang+LLD（生成代码用 GNU 扩展）；Ghidra Switch loader + Capstone
+分发：installer 在玩家机器上构建游戏代码（不发行重编译产物）；AI agents 写代码、维护者把关
+```
+对我们的启示（本轮采纳/待办）：
+1) ✅ **覆盖率 oracle**：不要逐个补 block（whack-a-mole），先做"全函数/全入口覆盖率审计"→ 本轮已做；
+2) ✅ **机械式补缺**：我们**有 AOT 生成器**（`_gen_batch2.py` + `_gen_split.py`/`_gen_split_4031.py`，输入 `function_bounds.json`）→ 缺口可用生成器批量补齐（本轮即如此）；
+3) ⏳ **真实宿主线程 + 虚拟核调度**（TOTK 用真实线程 + 抢占模型；我们仍 fibers → 强制完成等 hack 的根源）；
+4) ⏳ **预编译着色器/pipeline library**（避免运行时卡顿）；
+5) ⏳ **运行时 probes / selftest 模式**做回归（我们已有 -probe 类似能力可扩展）。
+**本轮覆盖率审计与补齐（M1015 新增）**：
+- `P5DListFunctions.java` → `allfuncs.tsv`：Ghidra 全函数 **12,532** 个；
+- 现有 batch_000..031：**229,797** blocks；缺失 entry block 的函数 **38** 个（24 内部 + 13 SceLibm/SceNpActivity import + module_start）；
+- 用生成器补缺：`gap_bounds.json`（23 函数）→ `_gen_split_gap.py 24 1` → `recomp_gap/batch_000.cpp`（74,487B，compiled 70,574B）
+  → 改名 `batch_032.cpp`（batch_000→batch_032 / g_blocks_000→g_blocks_032 / find_block_000→find_block_032 / get_table_000→get_table_032）
+  → harness 注册：`FB(032)`、`get_table_032` 声明、`ALL_FINDERS[33]`（`find_block_031, find_block_032`）
+  → `batch_032.o` 编译 exit 0；`recomp_harness.exe` 重链 exit 0（56,870,752B，9:31）
+- 复核：missing entries **38 → 20**；剩余 = **5 个内部函数**（0x810108DE, 0x8112D9C8, 0x8112EA42, 0x8112F630, 0x811307D0——均在 function_bounds.json 中但生成器未 emit，下轮查原因）+ 14 个 HLE import + module_start（预期无 block）。
+NEXT：
+```
+① 5 个剩余内部函数：查生成器为何跳过（bounds 重叠/unsupported 指令/emit 失败）
+② 若 unsupported 指令 → 在生成器里补语义或手写 block（TOTK 用 Unicorn oracle 验证 lifter 覆盖）
+③ 长期：真实线程/虚拟核调度（替代强制完成 hack）→ 修复 title task 被提前释放问题
+④ 用 batch_032 跑一次完整回归（确认无回退）
+```
+验证：`allfuncs.tsv`、`gap_bounds.json`、`batch_032.cpp`、`batch_032.o`、`recomp_harness.exe`、`_gen_split_gap.py`。 |
+| §18.4560 | Studied totk-pc-recomp (Tears of the Kingdom static recompilation port) architecture and adopted its 'coverage oracle' practice: first full-function AOT coverage audit, new batch_032 filling 23 missing functions (Ghidra 12,532 functions; missing entry blocks 38 -> 20; only 5 remaining internal gaps). TOTK Recomp architecture (from README/docs/architecture.md, MIT): CPU = LAS Recomp lifter ARM64->C (one C function per guest function, direct calls for BL, address-keyed table for indirect branches) + MacNativeGames OS boundary (~163 nn::* SDK functions replaced by symbol + 38 SVCs) + coverage oracle (NSO rewriter lists every OS-touching site: SVC/TLS/counter/x18/exclusive/jump table; 68,968 sites in 1.4.3 main; lifter must handle all); memory: guest address == host address (<2^39), heap/stack/alias reserved with MEM_WRITE_WATCH; threads: real host threads + virtual 3-core Horizon scheduler model (priority, preemption at SVC and indirect calls, async preemption); graphics: NVN front end + Vulkan back end (translator emits SPIR-V; pipeline library / precompiled shaders); toolchain: MSYS2 UCRT64 clang+LLD (generated code uses GNU extensions), Ghidra Switch loader + Capstone; distribution: installer builds game code on the player's machine (no recompiled code distributed); AI agents write code under maintainer review. Lessons: (1) coverage oracle instead of whack-a-mole block patching; (2) mechanical gap filling - we HAVE the AOT generator (_gen_batch2.py + _gen_split.py/_gen_split_4031.py, input function_bounds.json); (3) real host threads + virtual core scheduling (TOTK uses them; our fibers are the root cause of the forced-completion hacks); (4) precompiled shaders/pipeline library; (5) runtime probes/selftest regression modes. This round's audit: P5DListFunctions.java -> allfuncs.tsv = 12,532 Ghidra functions; batch_000..031 = 229,797 blocks; 38 functions missing entry blocks (24 internal + 13 SceLibm/SceNpActivity imports + module_start); gap fill: gap_bounds.json (23 functions) -> _gen_split_gap.py 24 1 -> recomp_gap/batch_000.cpp (74,487B, compiled 70,574B) -> renamed batch_032.cpp -> harness registered FB(032), get_table_032, ALL_FINDERS[33] -> batch_032.o compile exit 0; exe relink exit 0 (56,870,752B 9:31). Re-check: missing entries 38 -> 20; remaining = 5 internal functions (0x810108DE, 0x8112D9C8, 0x8112EA42, 0x8112F630, 0x811307D0 - all in function_bounds.json but not emitted by the generator, investigate next) + 14 HLE imports + module_start (expected no blocks). NEXT: investigate the 5 remaining functions (bounds overlap/unsupported instruction/emit failure); add generator semantics or hand-write blocks if unsupported; long term real threads/virtual core scheduling (replacing forced-completion hacks, fixing early title task free); full regression run with batch_032. |
 ```c
 undefined4 FUN_8116f8a8(int param_1) { return *(undefined4 *)(param_1 + 8); }   // 仅 ldr r0,[r0,#8]; bx lr
 void FUN_8116f8ac(int param_1) { ...遍历 DAT_815554c4 找 node，取 node+0xc，调 FUN_8116fa30... }
@@ -493842,3 +493878,49 @@ NEXT：
 ANTI-FORGETTING ENTRY. Keywords: M1014 crash point precisely located: FUN_8116f8a8 = return *(u32*)(param_1 + 8) (job node [2] = task arg pointer); BADMEM means title job node 85B8586C's [2]/arg = 0xE5E5E5E5 (guest allocator free-fill poison) - the title task was freed early. Decompiled gettask.txt: undefined4 FUN_8116f8a8(int param_1){ return *(undefined4 *)(param_1 + 8); } (ldr r0,[r0,#8]; bx lr); void FUN_8116f8ac(int param_1){ ...walk DAT_815554c4 to find node, take node+0xc, call FUN_8116fa30... }. Call chain: FUN_8116f748(node): DAT_815554C0=node; r1=node[0](worker); blx r1 (r0 still=node) -> title worker FUN_81198172(r0=node): r5=node; bl FUN_8116f8a8 (=*(u32*)(node+8)=node[2]=task arg) -> r0=0xE5E5E5E5; bl FUN_81178F0A -> *(u32*)(0xE5E5E5E5+4)=0xE5E5E5E9 -> BADMEM. The title job node's arg (=iVar3 app task from FUN_8119807C) was freed before the worker ran (0xE5 is the original guest heap's free-fill pattern). Possible paths: sequence page end 0x81185998, the page-end path triggered by M1008 forcing page6 update=1, or FUN_8116fa30 cancel/free. NEXT: probe FUN_8116f7ca for name=='title sequence' printing the arg(task) pointer; probe FUN_8115d43c (task free) / FUN_811da094 (heap free) printing freed addresses; find when/who frees the title task; protect it from early free -> title state machine continues case0->1->2...
 
 LOOKUP: M1014, FUN_8116f8a8, return *(u32*)(param_1+8), job node [2] arg, node 85B8586C, 0xE5E5E5E5 poison, guest heap free fill, FUN_81178F0A, BADMEM 0xE5E5E5E9, FUN_8115d43c, FUN_811da094, FUN_8116fa30, FUN_8116f8ac, gettask.txt, out80m_m1080titlestart.txt -> §18.4558 [relevant: title worker crash], §18.4557 [relevant: delay=0 fix]
+### 18.4560 PORT M1015: 参考 TOTK Recomp + AOT 全函数覆盖率审计与 batch_032 补齐
+
+**参考项目**：`valentderah/totk-pc-recomp`（《塞尔达：王国之泪》静态重编译 → Windows x86-64 + Vulkan，MIT；README/docs/architecture.md）
+```
+CPU  ：LAS Recomp lifter：ARM64 → C（每 guest 函数一个 C 函数；BL 直接调用；间接分支地址索引表）
+       + MacNativeGames OS 边界：~163 个 nn::* SDK 函数按符号替换 + 38 个 SVC
+       + 覆盖率 oracle：列出所有触及 OS 的点（SVC/TLS/counter/x18/exclusive/jump table），1.4.3 main 共 68,968 点
+内存 ：guest 地址 == host 地址（<2^39）；heap/stack/alias 用 MEM_WRITE_WATCH
+线程 ：真实宿主线程 + 虚拟 3 核 Horizon 调度（优先级 / SVC 与间接调用处抢占 / 异步抢占）
+图形 ：NVN 前端 + Vulkan 后端（SPIR-V；pipeline library / 预编译着色器）
+工具 ：MSYS2 UCRT64 clang+LLD；Ghidra Switch loader + Capstone
+分发 ：installer 在玩家机器构建（不发行重编译代码）；AI agents 写代码、维护者把关
+```
+**采纳**：
+1) ✅ 覆盖率 oracle（本轮：全函数覆盖率审计）
+2) ✅ 机械式补缺（我们已有 AOT 生成器：`_gen_batch2.py` + `_gen_split.py`/`_gen_split_4031.py`，输入 `function_bounds.json`）
+3) ⏳ 真实宿主线程 + 虚拟核调度（替代 fibers/强制完成 hack）
+4) ⏳ 预编译 shader/pipeline library
+5) ⏳ 运行时 probes/selftest 回归
+
+**本轮覆盖率审计（M1015）**：
+```
+P5DListFunctions.java → allfuncs.tsv：Ghidra 全函数 12,532 个
+batch_000..031：229,797 blocks；缺失 entry block 的函数 38 个
+  （24 内部 + 13 SceLibm/SceNpActivity import + module_start）
+```
+**补齐流程（可复用）**：
+```
+gap_bounds.json（23 函数）→ py _gen_split_gap.py 24 1 → recomp_gap/batch_000.cpp（74,487B / .o 70,574B）
+→ 改名 batch_032.cpp：batch_000→batch_032 / g_blocks_000→g_blocks_032 / find_block_000→find_block_032 / get_table_000→get_table_032
+→ harness：FB(032) + get_table_032 声明 + ALL_FINDERS[33]（find_block_031, find_block_032）
+→ batch_032.o 编译 exit 0；recomp_harness.exe 重链 exit 0（56,870,752B, 9:31）
+```
+**复核结果**：missing entries **38 → 20**；剩余 = **5 个内部函数**（0x810108DE, 0x8112D9C8, 0x8112EA42, 0x8112F630, 0x811307D0，均在 function_bounds.json 中但生成器未 emit）+ 14 个 HLE import + module_start（预期无 block）。
+NEXT：
+```
+① 5 个剩余函数：查生成器 skip 原因（bounds 重叠/unsupported 指令/emit 失败）
+② unsupported → 补生成器语义或手写 block
+③ 长期：真实线程 + 虚拟核调度（修 title task 提前释放）
+④ 用 batch_032 跑完整回归
+```
+验证：`allfuncs.tsv`、`gap_bounds.json`、`batch_032.cpp`、`batch_032.o`、`recomp_harness.exe`。
+
+ANTI-FORGETTING ENTRY. Keywords: M1015 studied totk-pc-recomp (TOTK static recompilation port, MIT) and adopted its coverage-oracle practice. TOTK architecture: CPU = LAS Recomp lifter ARM64->C (one C function per guest function, direct BL calls, address-keyed table for indirect branches) + MacNativeGames OS boundary (~163 nn::* SDK functions by symbol + 38 SVCs) + coverage oracle (NSO rewriter lists every OS-touching site: SVC/TLS/counter/x18/exclusive/jump table; 68,968 sites in 1.4.3 main); memory guest address == host address (<2^39) with MEM_WRITE_WATCH; threads = real host threads + virtual 3-core Horizon scheduler (priority, preemption at SVC/indirect calls, async preemption); graphics NVN front end + Vulkan back end (SPIR-V, pipeline library, precompiled shaders); toolchain MSYS2 UCRT64 clang+LLD, Ghidra Switch loader + Capstone; installer builds on player machine. Lessons: coverage oracle instead of whack-a-mole; mechanical gap filling because we HAVE the AOT generator (_gen_batch2.py + _gen_split.py/_gen_split_4031.py with function_bounds.json); real host threads + virtual core scheduling (our fibers cause forced-completion hacks); precompiled shaders; runtime probes. This round: P5DListFunctions.java -> allfuncs.tsv = 12,532 Ghidra functions; batch_000..031 = 229,797 blocks; 38 functions missing entry blocks (24 internal + 13 SceLibm/SceNpActivity imports + module_start). Gap fill: gap_bounds.json (23 fns) -> _gen_split_gap.py 24 1 -> recomp_gap/batch_000.cpp (74,487B, .o 70,574B) -> renamed batch_032.cpp -> harness FB(032)+get_table_032+ALL_FINDERS[33] -> batch_032.o exit 0; exe relink exit 0 (56,870,752B 9:31). Recheck: missing 38 -> 20; remaining = 5 internal functions 0x810108DE, 0x8112D9C8, 0x8112EA42, 0x8112F630, 0x811307D0 (in function_bounds.json but not emitted) + 14 HLE imports + module_start. NEXT: investigate the 5 (bounds overlap/unsupported instruction/emit failure); add generator semantics or hand-write; long term real threads + virtual core scheduling; full regression with batch_032.
+
+LOOKUP: M1015, totk-pc-recomp, LAS Recomp, MacNativeGames, coverage oracle, 68,968 sites, virtual 3-core scheduler, NVN->Vulkan, P5DListFunctions.java, allfuncs.tsv, 12,532 functions, 229,797 blocks, 38 missing, gap_bounds.json, _gen_split_gap.py, batch_032.cpp, batch_032.o, FB(032), get_table_032, ALL_FINDERS[33], 0x810108DE, 0x8112D9C8, 0x8112EA42, 0x8112F630, 0x811307D0, function_bounds.json, _gen_batch2.py, _gen_split_4031.py -> §18.4559 [relevant: title task free], §18.4558 [relevant: title worker run], §18.4560 [this]
