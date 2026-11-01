@@ -1054,6 +1054,46 @@
 | M1036 | §18.4581: **m1095 结果：FORCETITLE 再次成功启动 TITLE 页（title task=85B8743C、appFade OK ×2、fade 对象取到），但我们的 M1035 null-sound 跳过方式有错误（跳 epilogue 会写 [r5+0x58]，r5=0 时 BADMEM va=0x58 @0x811723BA）→ M1036 改为手动退栈返回；同时 TRRET 探针给出第一批 job 调度数据：trophy step 以 -1 完成（通道 A，符合预期），未出现 TRSET（通道 B 未触发）**。`out80m_m1095titlepath.txt` / err：
 | M1037 | §18.4582: ★★★★★★★★★★ **重大发现：FORCETITLE 后 title 子系统创建了新的 logo 序列任务（job node=85B8750C worker=0x81193704），反编译确认这是 S0_LOGO 引擎自绘路径：加载 `title/logo.bin` + `atluslogo.tga`/`crilogo.tga`/`p-studio.tga`，按 69 帧间隔做淡入淡出序列！** m1096 证据：
 | M1038 | §18.4583: **S0_LOGO 任务已注册（`logoDrawProc`）但 title/logo.bin 的 Fios 打开请求从未到达 HLE：文件请求由 guest 侧请求管理器（FUN_81181A3C 队列）排队，需要一个 worker 线程/任务去消费并调用 Fios HLE——当前调度下该 worker 未被驱动，因此加载永不完成（自旋）。已启动 LOADPUMP/SCHEDFIX/THREADWEMU 组合运行尝试驱动请求队列**。m1096 证据：
+| M1039 | §18.4584: **参考项目 Project Nativ（`TheLostPantheon/nativ`）：通用 PS Vita 游戏静态重编译框架（Killzone/Uncharted/Unit 13/Shovel Knight 可玩）——与本项目同类但更完整的架构参照。已 git clone 到 `C:\dev\refs\nativ`（注意：**GPLv2 许可，只能作只读参考，不可复制代码**）。核心对照与可采纳项如下**。
+**Nativ 架构（docs/architecture.md 摘要）**：
+```
+GAME PACK   packs/<title>/pack.toml + hooks.c + shaders.txt（每游戏专属：版本 SHA-256、hook、shader 配方）
+GUEST CODE  游戏 + Sony 用户态库（libgxm/libc/libfios2 等）都从玩家固件重编译为 C（ARMv7/Thumb-2/VFP/NEON）
+RUNTIME     只替换系统调用边界：core/kernel.c（线程/同步/调度）、io.c、fios.c、sysmem.c、audio/ngs.c、
+            media/video.c（FFmpeg H.264）、input/、gfx/display.c
+GRAPHICS    gxm_sony.c 观察 libgxm 状态 → gfx_dispatch.c → gfx_gpu.c（SDL_GPU: Metal/Vulkan）或 gfx_soft.c
+            （USSE 指令解释器，精确参考）；usse_spirv.c 把 Vita USSE shader 翻译成 SPIR-V
+PLATFORM    SDL3：窗口/输入/音频/GPU；launcher（hub.cpp）+ 游戏内菜单（F10）+ headless runner
+验证        regression gate（跑到已知帧比较画面）、in-place instruction checker、gfx captures（帧可回放比较两个后端）
+分发        玩家自备游戏+固件，工具在玩家机器解密/重编译；仓库/发行不含游戏代码、数据、shader、生成的 C
+```
+**与本项目（P5D-PC）的关键差异**：
+| 维度 | Nativ | 我们（P5D） |
+|---|---|---|
+| 系统库 | **重编译 Sony 用户态库本体**（libgxm/libfios2/libc…） | **我们自己写 HLE 接管**（GXM→Vulkan、文件等） |
+| 线程 | **每个 guest 线程 = 真实 host 线程** + 可选 3 核严格优先级调度（RECOMP_SCHED=vita） | fibers + 强制完成 hack（当前调度 bug 的根源） |
+| 文件 | libfios2 作为重编译代码运行，runtime 提供内核 overlay 表 | 我们 HLE/CPK 直填（当前 logo.bin 卡在 FIOS 请求消费者未被调度） |
+| 图形 | libgxm 重编译 + 观察状态 → GPU/软件双后端 + USSE→SPIR-V | GXM HLE + realpipe（GXP→SPIR-V）+ 黑屏问题 |
+| 验证 | 帧级回归门 + 指令级检查器 + shader 双后端对照 | FRAMEDUMP/截图 + 探针（无自动帧回归） |
+| 分发 | launcher + BYO 游戏/固件 + 玩家机重编译 | 同类合规策略（RELEASE_COMPLIANCE）但未实现导入器 |
+**可立即采纳（按 ROI）**：
+1) **FIOS 同步完成**（解决当前 logo 卡点）：在请求管理器 FUN_81181A3C 创建请求节点处，由 HLE 探针直接读 name → `cpk_read_any_impl` → hle_malloc 数据 → 写 `[req+4]=0xC`、`[req+0xA0]=0`、`[req+0x88]=size`、`[req+0x94]=buf`，绕开未被调度的消费者（等价于 pending_req_scan 对另一队列做的事）
+2) **generator 级 hook 表**（代替手改 batch block）：Nativ 的 packs/hooks.c 模型——hook 命名 guest 地址，重编译时插入 host 调用；我们已有 30+ 处 batch 手补，迁移为 hook 表更可维护
+3) **真实 host 线程**（长期）：参考 core/kernel.c 的线程/同步/（可选）3 核调度；解决我们当前所有"任务失联/自旋"类问题
+4) **帧级回归门**：参考 regression gate——固定输入跑到已知帧，比较截帧；给我们每次 milestone 提供"画面无回退"证据
+5) **GXM/USSE 参照**：usse_spirv.c / gfx_soft.c 作为 shader 语义精确参考（我们 realpipe 正确性未证明）
+6) **launcher/BYO 导入器**：直接借鉴其 launcher 流程设计（解密→分析→重编译→构建→运行 + library 目录）
+**注意**：Nativ 为 **GPLv2**——我们只能阅读学习设计，不能复制代码（否则影响我们项目许可与发行）；游戏专属 pack/hook 模型是设计思想，可独立实现。
+本地参考：`C:\dev\refs\nativ`（git clone 可用；web_fetch 对本环境 GitHub 域名受限，git 协议可用）。
+NEXT：
+```
+① 用 Nativ 的 io/fios 设计实现"FIOS 同步完成"探针（M1040）→ 打通 title/logo.bin 与 TGA 加载
+② 阅读 runtime/core/kernel.c（线程/同步语义）与 gfx/gxm_sony.c+usse_spirv.c（GXM 状态与 shader）
+③ 设计 generator hook 表（把现有 batch 手补迁移）
+④ 引入帧级回归门
+```
+验证：`C:\dev\refs\nativ`（README/docs/architecture.md/runtime/core/*.c/recompiler/recomp.py/rt.h/packs/*）。 |
+| §18.4584 | Reference project Project Nativ (TheLostPantheon/nativ): a general PS Vita static-recompilation framework (Killzone/Uncharted/Unit 13/Shovel Knight playable) - an architecture reference for our project. Cloned to C:\dev\refs\nativ (GPLv2 - read-only reference, do NOT copy code). Nativ architecture (docs/architecture.md): GAME PACK packs/<title>/pack.toml + hooks.c + shaders.txt (per-game versions SHA-256, hooks, shader recipes); GUEST CODE: the game AND Sony user-mode libraries (libgxm/libc/libfios2) are all recompiled from the player's firmware into C (ARMv7/Thumb-2/VFP/NEON); RUNTIME replaces only the system-call boundary: core/kernel.c (threads/sync/scheduling), io.c, fios.c, sysmem.c, audio/ngs.c, media/video.c (FFmpeg H.264), input/, gfx/display.c; GRAPHICS: gxm_sony.c observes libgxm state -> gfx_dispatch.c -> gfx_gpu.c (SDL_GPU: Metal/Vulkan) or gfx_soft.c (USSE interpreter, exact reference), usse_spirv.c translates Vita USSE shaders to SPIR-V; PLATFORM SDL3; launcher (hub.cpp) + in-game menu (F10) + headless runner; verification: regression gate (play to a known frame and compare the picture), in-place instruction checker, gfx captures; distribution: player supplies game+firmware, tools decrypt/recompile on the player's machine, repo/releases contain no game code/data/shaders/generated C. Key differences vs our P5D-PC: (1) system libraries: Nativ RECOMPILES Sony's user-mode libraries themselves; we write our own HLE (GXM->Vulkan, files, etc.); (2) threads: Nativ has every guest thread = a real host thread + optional 3-core strict-priority scheduler (RECOMP_SCHED=vita); we use fibers + force-completion hacks (root of current scheduling bugs); (3) files: libfios2 runs as recompiled code with the runtime providing the kernel overlay table; we HLE/CPK-fill directly (current logo.bin blocker: FIOS request consumer not scheduled); (4) graphics: libgxm recompiled + state observation -> GPU/software dual backend + USSE->SPIR-V; our GXM HLE + realpipe with black frames; (5) verification: frame-level regression gate + instruction checker + shader dual-backend comparison; our FRAMEDUMP/screenshots/probes with no automated frame regression; (6) distribution: launcher + BYO game/firmware + player-side recompile; our compliance policy is similar but the importer is not implemented. Immediately adoptable (by ROI): (1) FIOS synchronous completion (fixes the current logo blocker): at the request-creator node in FUN_81181A3C, an HLE probe reads the name -> cpk_read_any_impl -> hle_malloc data -> writes [req+4]=0xC, [req+0xA0]=0, [req+0x88]=size, [req+0x94]=buf, bypassing the unscheduled consumer (equivalent to what pending_req_scan does for the other queue); (2) generator-level hook table (replace hand-edited batch blocks; like Nativ's packs/hooks.c model - hook names a guest address and the recompiler inserts a host call; we have 30+ hand patches); (3) real host threads (long term): reference core/kernel.c threads/sync/(optional) 3-core scheduling; (4) frame-level regression gate: fixed input to a known frame, compare screenshots -> evidence of no visual regression per milestone; (5) GXM/USSE reference: usse_spirv.c / gfx_soft.c as exact shader semantics reference (our realpipe correctness unproven); (6) launcher/BYO importer: borrow the launcher flow (decrypt->analyze->recompile->build->run + library folder). Note: Nativ is GPLv2 - read for design only, do NOT copy code (would affect our license and distribution); the per-game pack/hook model is a design idea that can be implemented independently. Local reference: C:\dev\refs\nativ (git clone works; web_fetch to GitHub domains is restricted in this environment, but git protocol works). NEXT: (1) implement the 'FIOS synchronous completion' probe (M1040) using the Nativ io/fios design -> unblock title/logo.bin and TGA loading; (2) read runtime/core/kernel.c (thread/sync semantics) and gfx/gxm_sony.c+usse_spirv.c (GXM state and shaders); (3) design the generator hook table (migrate the existing batch hand-patches); (4) introduce the frame-level regression gate. |
 ```
 [PROCREG] #13 name='logoDrawProc' arg=0 cb0=85B874BC cb1=0 obj=0   ← ★ S0 logo 绘制进程已注册
 [PROCREG] #10 'sequence observer'  #11 'initDataRead'  #12 'init trophy'  #14 'init sound'
@@ -495491,3 +495531,44 @@ NEXT：
 ANTI-FORGETTING ENTRY. Keywords: M1038 S0_LOGO task registered (PROCREG #13 name='logoDrawProc' cb0=85B874BC) but the Fios open request for title/logo.bin never reaches HLE. m1096: [FHOPEN57] 0, [FHREAD57] 0, [FIOS] OPEN 0, [REQFILL] 0, only [IO] OPEN 'sound/bgm/p5d_bgm.acb'. PROCREG: #10 sequence observer, #11 initDataRead, #12 init trophy, #14 init sound (no gamedata/msgwindow/mainmenu). File request layer: FUN_8115FBE6(name) -> FUN_8115FD22(name,0) -> FUN_81181C2A -> FUN_81181A3C(name,0,-1,&DAT_81309208); FUN_8115FC0E(req) -> FUN_81181CA0(req): req[+4]==0xC && req[+0xA0]==0 -> 1 done, req[+0xA0]!=0 -> -1 error, else 0 waiting; FUN_8115FC28(req,out) -> FUN_81181CE4(req,0,out) (data req[+0x94], size req[+0x88]); FUN_81181A3C is the guest request manager: path hash (FUN_8118192C+strlen), dedupe in DAT_816CDAC8 list, alloc 0xC8 node via FUN_8105ae7a, insert, FUN_81207454 wake waiters; the real IO consumer is another guest task. [PROCREG] has no file-loading worker => consumer not scheduled => spin. So blocker is thread/task scheduling semantics, not missing resources (title/logo.bin exists in data.cpk: [CPKNAME] title/logo.bin). M1038 experiment out80m_m1097logopump.txt (P5D_FORCETITLE=1 P5D_LOADPUMP=1 P5D_SCHEDFIX=1 P5D_THREADWEMU=1) started; LOADPUMP pumps FUN_811E5928 Fios task; SCHEDFIX/THREADWEMU existing scheduling-fix switches. NEXT: check for [FHOPEN57]/[FIOS] OPEN 'title/logo.bin'; if absent add [REQ] probe to FUN_81181A3C and find/pump the DAT_816CDAC8 consumer; then 3 TGA loads (logoTMX task, FUN_81174DBC); logoDrawProc should then draw ATLUS/CRI/P-STUDIO logos (engine-drawn S0_LOGO visible under NOMOVIE).
 
 LOOKUP: M1038, PROCREG #13 logoDrawProc, cb0=85B874BC, S0_LOGO, title/logo.bin in data.cpk, FHOPEN57 0, FHREAD57 0, REQFILL 0, IO OPEN sound/bgm/p5d_bgm.acb, FUN_8115FBE6, FUN_8115FD22, FUN_81181C2A, FUN_81181A3C request manager, DAT_816CDAC8, FUN_8105ae7a, FUN_81207454, FUN_81181CA0 req[+4]==0xC req[+0xA0], FUN_81181CE4 req[+0x94]/[+0x88], consumer not scheduled, thread scheduling gap, P5D_LOADPUMP, FUN_811E5928 Fios task pump, P5D_SCHEDFIX, P5D_THREADWEMU, out80m_m1097logopump.txt -> §18.4582 [relevant: S0_LOGO job], §18.4581 [relevant: title2], §18.4580 [relevant: FORCETITLE]
+### 18.4584 PORT M1039: 参考 Project Nativ（PS Vita 通用静态重编译框架）
+
+1) 本地参考：`C:\dev\refs\nativ`（git clone；web_fetch 受限但 git 可用）。**GPLv2 → 只读参考，禁止复制代码**。
+2) Nativ 架构（`docs/architecture.md`）：
+```
+GAME PACK   packs/<title>/pack.toml + hooks.c + shaders.txt（版本 SHA-256 / hook / shader 配方）
+GUEST CODE  游戏 + Sony 用户态库（libgxm/libc/libfios2…）全部从玩家固件重编译（ARMv7/Thumb-2/VFP/NEON）
+RUNTIME     只替换系统调用边界：core/kernel.c（线程/同步/调度）、io.c、fios.c、sysmem.c、audio/ngs.c、
+            media/video.c（FFmpeg H.264）、input/、gfx/display.c
+GRAPHICS    gxm_sony.c 观察 libgxm 状态 → gfx_dispatch.c → gfx_gpu.c（SDL_GPU）/ gfx_soft.c（USSE 精确参考）
+            usse_spirv.c：Vita USSE shader → SPIR-V
+验证        regression gate（已知帧比较画面）+ in-place 指令检查器 + gfx captures
+分发        玩家自备游戏+固件，工具在玩家机器解密/重编译；发行不含游戏内容
+```
+3) 与我们 P5D-PC 的关键差异：
+| 维度 | Nativ | 我们 |
+|---|---|---|
+| 系统库 | 重编译 Sony 用户态库本体 | 自写 HLE 接管 |
+| 线程 | 真实 host 线程 + 可选 3 核严格调度 | fibers + 强制完成（当前 bug 根源） |
+| 文件 | libfios2 重编译 + 内核 overlay 表 | HLE/CPK 直填（当前 logo 卡点） |
+| 图形 | libgxm 重编译 + 双后端 + USSE→SPIR-V | GXM HLE + realpipe（黑屏待解） |
+| 验证 | 帧级回归 + 指令级检查 | FRAMEDUMP/截图/探针 |
+4) 可立即采纳（ROI 排序）：
+1. **FIOS 同步完成**：在 FUN_81181A3C 请求节点创建处，HLE 探针读 name → cpk 读取 → hle_malloc → 写 req 字段（+4=0xC, +0xA0=0, +0x88=size, +0x94=buf）→ 绕开未调度消费者（M1040 实施）
+2. **generator 级 hook 表**（代替手改 batch block，Nativ packs/hooks.c 模型）
+3. **真实 host 线程**（参考 core/kernel.c；长期解决调度类 bug）
+4. **帧级回归门**（每 milestone 画面无回退证据）
+5. **GXM/USSE 参照**（usse_spirv.c / gfx_soft.c）
+6. **launcher/BYO 导入器**（解密→分析→重编译→构建→运行 + library）
+NEXT：
+```
+① M1040：FIOS 同步完成探针 → 打通 logo.bin + TGA 加载
+② 阅读 kernel.c / gxm_sony.c / usse_spirv.c
+③ 设计 generator hook 表
+④ 引入帧级回归门
+```
+验证：`C:\dev\refs\nativ`（README、docs/architecture.md、runtime/core/*.c、recompiler/*.py、packs/*）。
+
+ANTI-FORGETTING ENTRY. Keywords: M1039 reference project Nativ (TheLostPantheon/nativ) - general PS Vita static-recompilation framework, GPLv2 (read-only reference, do not copy code), cloned to C:\dev\refs\nativ. Architecture: game + Sony user-mode libraries (libgxm/libc/libfios2) all recompiled from player firmware to C; runtime replaces only the system-call boundary (core/kernel.c threads/sync/scheduling, io.c, fios.c, sysmem.c, audio/ngs.c, media/video.c FFmpeg H.264, gfx/display.c); graphics: gxm_sony.c observes libgxm state -> gfx_dispatch -> gfx_gpu.c (SDL_GPU Metal/Vulkan) or gfx_soft.c (USSE interpreter exact reference), usse_spirv.c translates USSE shaders to SPIR-V; platform SDL3; launcher hub.cpp + F10 overlay + headless runner; verification: regression gate (known frame picture compare), in-place instruction checker, gfx captures; distribution: BYO game+firmware, player-side decrypt/recompile, no game content in repo/releases. Differences vs us: they recompile Sony libraries, we HLE them; they use real host threads + optional 3-core strict scheduler (RECOMP_SCHED=vita), we use fibers + force-completion (root of current scheduling bugs); files: libfios2 recompiled with kernel overlay table vs our HLE/CPK direct fill (current logo.bin blocker = FIOS request consumer unscheduled); graphics libgxm recompiled + dual backend vs our GXM HLE + realpipe black frames; verification frame regression gate vs our FRAMEDUMP/screenshots/probes. Adopt by ROI: (1) FIOS synchronous completion at FUN_81181A3C request node (read name -> cpk_read_any_impl -> hle_malloc -> write [req+4]=0xC, [req+0xA0]=0, [req+0x88]=size, [req+0x94]=buf) bypassing unscheduled consumer; (2) generator-level hook table (replace hand-edited batch blocks, like Nativ packs/hooks.c; we have 30+ patches); (3) real host threads reference core/kernel.c; (4) frame-level regression gate; (5) GXM/USSE shader reference usse_spirv.c/gfx_soft.c; (6) launcher/BYO importer flow. Note GPLv2 - design ideas only, no code copying.
+
+LOOKUP: M1039, Project Nativ, TheLostPantheon/nativ, GPLv2 reference only, C:\dev\refs\nativ, docs/architecture.md, pack.toml/hooks.c/shaders.txt, recompile Sony user-mode libraries libgxm/libc/libfios2 from firmware, runtime core/kernel.c io.c fios.c sysmem.c audio/ngs.c media/video.c FFmpeg, gxm_sony.c gfx_dispatch.c gfx_gpu.c gfx_soft.c usse_spirv.c, SDL3, launcher hub.cpp, regression gate, in-place instruction checker, gfx captures, real host threads 3-core scheduler RECOMP_SCHED=vita, FIOS synchronous completion FUN_81181A3C req+4=0xC req+0xA0 req+0x88 req+0x94, generator hook table, frame-level regression -> §18.4583 [relevant: FIOS request consumer blocker], §18.4582 [relevant: S0 logo]
