@@ -1050,6 +1050,49 @@
 | M1032 | §18.4577: **第 1000 轮里程碑：实验"强制 driver step 推进"（不等 step job 完成），期望一帧走一步、8 帧走完 8 步 → driver 返回 -1 → 完成回调 setSequence(6,0,0,5) → page6 TITLE；同时加 driver 入口 DRIVIN 探针（打印 task 的 state/step）**。m1091 关键补充证据：
 | M1033 | §18.4578: **m1092 决定性结果：driver 只被调用 4 次（state 0→1→2→1 step0→1），即使在强制推进下，创建 step1（sound）后 driver 仍不再被调用 ⇒ 这不是"等待条件"问题，而是 initDataRead driver job 在调用 step 创建者后被移出调度。改用"DRIVDONE"捷径：driver 创建完 trophy+sound 两步后直接返回 -1 → 完成回调 setSequence(6,0,0,5) → page6 TITLE**。`out80m_m1092drvadvance.txt` / err：
 | M1034 | §18.4579: **m1093 证实 DRIVDONE 无法触发（driver 只在 step=1 后被移出调度，永远到不了 step=2）；改用更高层捷径：HLE 侧用 `call_guest_cb4` 直接调用 guest `FUN_81185616(6,0,0,0)`（= setSequence(page=6)）直达 TITLE 页，绕开卡死的 init 链**。`out80m_m1093drivdone.txt`：
+| M1035 | §18.4580: ★★★★★★★★★★ **重大进展：FORCETITLE 生效！HLE 直接调用 setSequence(6,0,0,0) 成功启动 TITLE 页（title task 创建、appFade 正常），崩溃仅剩 sound 对象 null；同时子代理完成"进程/Job 子系统静态 dossier"，用写集证明"创建子 job 不可能把父 job 摘出 ready 链"，并给出 A/B/C 三种候选与单断点判别法**。
+**m1094（FORCETITLE）证据**：
+```
+[FORCETITLE] invoke setSequence(6,0,0,0) n=59620001
+[FORCETITLE] returned r0=85B8746C n=59620001       ← setSequence 成功返回（page6 start 执行）
+[TTC] task=85B8743C                                 ← ★ title 任务创建
+[TTF8] g8a8ret=85A9E42C ×2                          ← ★ appFade 字段合法（M1022 修复有效）
+[BADMEM] guest va=0x00000004 @block=0x81172386      ← 仅剩 sound 对象 null（FUN_81172374）
+```
+⇒ **page6→title worker 链路已通**；只差 init 链的 sound 对象创建（被绕过）。
+**M1035 修复（batch_011.cpp blk_81172386）**：sound 查找返回 0 时安全跳过（跳到函数 epilogue 0x811723BA，正确恢复栈）：
+```cpp
+if (s->r[0] == 0u) return 0x811723BAu; /*M1035: sound object NULL -> skip request safely (epilogue)*/
+```
+**子代理 dossier（`C:\dev\p5d_build\ghidra_out\jobproc_dossier.md`，39KB/316 行）核心结论**：
+1) **API 原型还原（param_1 不是优先级，是父 node）**：
+```c
+node_t* appProcessCreate(void *parentNode, const char *name, int priority, int countdown, int grace,
+                         int (*worker)(node_t*), void (*completion)(node_t*), void *arg);  // 0x8116F7CA
+// param_1 经 0x8116F9F8 bl FUN_8116F728 在 DAT_815554C4 链里验证后取 node[3] 当 parentJob；不是活节点则父链静默不建立
+```
+2) **appProcess 节点 = 0x1C**：+0x00 worker / +0x04 completion / +0x08 user-arg（getter 0x8116F8A8）/ +0x0C job* / +0x10 older-link / +0x14 newer-link / +0x18 name-hash；DAT_815554C4=最新 head、DAT_815554C8=最旧 tail
+3) **job = 0x70**：+0x00 state(0/1/2/3=idle/timer/ready/release)、+0x08 priority、+0x20 countdown、+0x24 释放宽限 max(2,grace)、+0x28 trampoline、+0x30 销毁回调 0x8116FA67、+0x34 回指 node、+0x38/0x3C/0x40 parent/first-child/sibling、+0x44/0x48 timer∩release 链、+0x4C/0x50 ready 链、+0x54/0x58 次链、+0x64 abort 栈、+0x68/0x6C 64-bit id
+4) **写集证明**：FUN_811DAB8C 对父 job 只写 0x811DAC4E（parent->first_child）；ready 链 0x4C/0x50 全部写者只有 4 处；timer 链无插入型 API ⇒ **创建子 job 物理上无法把父 job 摘出 ready 链**
+5) **父 job 消失只剩 3 条通道**：A）worker 返回 **-1** → 正常 completion（state=3→摘 chain→销毁）；B）worker 返回"非 0 非 -1" → **`0x811DB258 str r3,[r5,#0x28]` 把 trampoline 槽改成数据指针** → 下帧 blx 跳飞（典型错误：`return appProcessCreate(...)` 返回 node 指针）；C）job 池块别名（子 job 0x70 块与父重叠 → 创建清零序列清掉父字段）
+6) **单断点判别**：`0x811DB24E`（trampoline 返回后）记录 r0 与 r5(job)；r0==-1 ⇒ A；r0 是 0x8155xxxx 堆指针 ⇒ B 前兆；配合 +0x28 期望 0x8116FA5D、+0x24 期望 2、父子 job 指针是否重叠可一次区分 A/B/C/D
+7) **两个坑**：Ghidra 伪代码 `(*(code*)piVar6[10])(param_1,piVar6)` 错误，真实是 `trampoline(job, dt)`（0x811DB246 adds r0,r5,#0 / vmov.f32 s0,s16 / blx r1）；`FUN_8116F748` 不恢复 r0 ⇒ **trampoline 返回值 = worker 返回值**（0/-1/其它语义的来源）
+**M1035 新增探针（batch_016.cpp）**：
+```cpp
+blk_811DB24E（trampoline 返回后）→ [TRRET] job/ret/tramp(node+0x28)/node，仅当 ret!=0 或 tramp!=0x8116FA5D 时打印
+blk_811DB258（trampoline 槽被改写点）→ [TRSET] job/r3
+```
+编译：batch_011/batch_016 exit 0；exe 重链 exit 0（57,055,185B，15:35:44）。
+验证运行：`out80m_m1095titlepath.txt`（P5D_FORCETITLE=1 + null-sound 跳过 + TRRET/TRSET）已启动。
+NEXT：
+```
+① title worker 越过 sound 请求 → title 状态机 case0/1/2…
+② [TRRET]/[TRSET]：捕获 A/B/C 哪种通道导致 job 失联（对 init 链修复同样关键）
+③ title 对象创建 → 引擎自绘标题画面（TTC/TTF8/TTO 探针继续监控）
+④ 若无新崩溃 → 检查截图（NOMOVIE 下引擎是否开始绘制 title 内容）
+```
+验证：`out80m_m1094forcetitle.txt`、`jobproc_dossier.md`、`recomp_harness.exe`（57,055,185B）、`out80m_m1095titlepath.txt`（生成中）。 |
+| §18.4580 | MAJOR PROGRESS: FORCETITLE works! The HLE call to setSequence(6,0,0,0) successfully started the TITLE page (title task created, appFade normal); the only crash left is the sound object being null; meanwhile a subagent completed the process/Job subsystem static dossier proving (by write-set) that creating a child job cannot remove the parent from the ready chain, and gave A/B/C candidates with a single-breakpoint discriminator. m1094 (FORCETITLE) evidence: [FORCETITLE] invoke setSequence(6,0,0,0) n=59620001; [FORCETITLE] returned r0=85B8746C n=59620001 (setSequence succeeded, page6 start executed); [TTC] task=85B8743C (title task created); [TTF8] g8a8ret=85A9E42C x2 (appFade fields valid, M1022 fix works); [BADMEM] guest va=0x00000004 at block=0x81172386 (only the sound object null remains). So the page6->title worker chain is connected; only the init-chain sound object creation is missing (bypassed). M1035 fix (batch_011.cpp blk_81172386): when the sound lookup returns 0, skip safely (jump to the function epilogue 0x811723BA which restores the stack): if (s->r[0] == 0u) return 0x811723BAu;. Subagent dossier (C:\dev\p5d_build\ghidra_out\jobproc_dossier.md, 39KB/316 lines) core findings: (1) API prototype restored (param_1 is NOT priority, it is parent node): node_t* appProcessCreate(void *parentNode, const char *name, int priority, int countdown, int grace, int (*worker)(node_t*), void (*completion)(node_t*), void *arg) @0x8116F7CA; param_1 is validated via 0x8116F9F8 bl FUN_8116F728 in the DAT_815554C4 chain and node[3] taken as parentJob; if not a live node the parent link is silently not established; (2) appProcess node = 0x1C: +0x00 worker / +0x04 completion / +0x08 user-arg (getter 0x8116F8A8) / +0x0C job* / +0x10 older-link / +0x14 newer-link / +0x18 name-hash; DAT_815554C4 = newest head, DAT_815554C8 = oldest tail; (3) job = 0x70: +0x00 state(0/1/2/3=idle/timer/ready/release), +0x08 priority, +0x20 countdown, +0x24 release grace max(2,grace), +0x28 trampoline, +0x30 destroy callback 0x8116FA67, +0x34 back-pointer to node, +0x38/0x3C/0x40 parent/first-child/sibling, +0x44/0x48 timer∩release chains, +0x4C/0x50 ready chain, +0x54/0x58 secondary chain, +0x64 abort stack, +0x68/0x6C 64-bit id; (4) write-set proof: FUN_811DAB8C only writes 0x811DAC4E (parent->first_child) for the parent job; ready chain 0x4C/0x50 has only 4 writers; timer chain has no insert-type API => creating a child job physically cannot remove the parent from the ready chain; (5) only 3 channels remain for the disappearing parent: A) worker returns -1 -> normal completion (state=3 -> unlink -> destroy); B) worker returns non-0 non--1 -> 0x811DB258 str r3,[r5,#0x28] overwrites the trampoline slot with a data pointer -> next frame blx jumps away (typical error: return appProcessCreate(...) which returns a node pointer); C) job pool block alias (child job 0x70 block overlapping the parent -> creation zeroing wipes parent fields); (6) single breakpoint discriminator: 0x811DB24E (after trampoline returns) records r0 and r5(job); r0==-1 => A; r0 is a 0x8155xxxx heap pointer => B precursor; plus +0x28 expected 0x8116FA5D, +0x24 expected 2, parent/child job pointer overlap to distinguish A/B/C/D; (7) two pitfalls: Ghidra pseudocode (*(code*)piVar6[10])(param_1,piVar6) is wrong, the real call is trampoline(job, dt) (0x811DB246 adds r0,r5,#0 / vmov.f32 s0,s16 / blx r1); FUN_8116F748 does not restore r0 => trampoline return value = worker return value. M1035 new probes (batch_016.cpp): blk_811DB24E -> [TRRET] job/ret/tramp(node+0x28)/node only when ret!=0 or tramp!=0x8116FA5D; blk_811DB258 -> [TRSET] job/r3. batch_011/batch_016 compile exit 0; exe relink exit 0 (57,055,185B 15:35:44). Verification run out80m_m1095titlepath.txt (P5D_FORCETITLE=1 + null-sound skip + TRRET/TRSET) started. NEXT: title worker passes the sound request -> title state machine case0/1/2...; [TRRET]/[TRSET] capture which A/B/C channel makes jobs disappear (equally key for the init-chain fix); title object creation -> engine-drawn title screen (TTC/TTF8/TTO probes); if no new crash check screenshots (whether the engine starts drawing title content under NOMOVIE). |
 ```
 [JOBCOMP] 1   [SEQREQ] 8（无 page=6）  [DRIVDONE] 0 条
 [DRIVIN] 4 条（state 0→1→2→1 step0→1，与 m1092 完全相同）
@@ -495189,3 +495232,42 @@ NEXT：
 ANTI-FORGETTING ENTRY. Keywords: M1034 m1093 confirmed DRIVDONE cannot trigger - the driver is removed from scheduling after step=1 and never reaches step=2 (out80m_m1093drivdone.txt: [JOBCOMP] 1; [SEQREQ] 8; [DRIVDONE] 0; [DRIVIN] 4 lines state 0->1->2->1 step0->1 identical to m1092). Switched to higher-level shortcut: HLE call_guest_cb4 invokes guest FUN_81185616(6,0,0,0) (= setSequence(page=6)) directly to jump to the TITLE page bypassing the stuck init chain. New 4-arg guest call helper call_guest_cb4(s, entry, a0..a3, maxblocks) (saves/restores registers, executes AOT blocks until return). job_probes adds P5D_FORCETITLE=1 probe: when g_main_n>59620000 call once call_guest_cb4(s, 0x81185616u, 6u, 0u, 0u, 0u, 1200000); printf('[FORCETITLE] invoke setSequence(6,0,0,0) n=%u ret=%08X'). harness exit 0; exe relink exit 0 (57,054,059B 15:18:00). Verification run out80m_m1094forcetitle.txt (P5D_FORCETITLE=1 + regular env) started. NEXT: [FORCETITLE] invoke -> ret; [SEQREQ] page=6 -> page6 start (FUN_8119807C); title worker really runs (WFDBG wf=81198173) -> appFade OK -> sound objects -> title case0/1 passes -> title state machine -> title object -> engine-drawn title screen; if crash use the probe suite. Value: validates the downstream chain page6->title state machine->engine drawing is reachable even with the init-chain scheduling bug unfixed; natural init-chain completion remains the formal fix target.
 
 LOOKUP: M1034, DRIVDONE not reachable, driver removed from scheduling after step1, out80m_m1093drivdone.txt, call_guest_cb4, FUN_81185616 setSequence(6,0,0,0), P5D_FORCETITLE, job_probes, g_main_n>59620000, [FORCETITLE], page6 start FUN_8119807C, title worker 0x81198173, appFade, out80m_m1094forcetitle.txt, exe 57,054,059B -> §18.4578 [relevant: DRIVDONE], §18.4577 [relevant: forced step advance], §18.4576 [relevant: driver freeze]
+### 18.4580 PORT M1035: FORCETITLE 成功启动 TITLE 页 + Job 子系统 dossier + A/B/C 判别探针
+
+1) m1094（FORCETITLE）：
+```
+[FORCETITLE] invoke setSequence(6,0,0,0) n=59620001
+[FORCETITLE] returned r0=85B8746C n=59620001     ← setSequence 成功
+[TTC] task=85B8743C                              ← title 任务创建
+[TTF8] g8a8ret=85A9E42C ×2                       ← appFade 合法
+[BADMEM] guest va=0x00000004 @81172386           ← 仅剩 sound 对象 null
+```
+2) M1035 修复（batch_011.cpp blk_81172386）：
+```cpp
+if (s->r[0] == 0u) return 0x811723BAu; /* sound NULL -> epilogue 安全跳过 */
+```
+3) 子代理 dossier（`jobproc_dossier.md`）核心：
+- `appProcessCreate(parentNode,name,priority,countdown,grace,worker,completion,arg)` @0x8116F7CA（param_1=父 node）
+- appProcess 0x1C：worker/completion/arg/job*/older/newer/hash
+- job 0x70：state/countdown/trampoline(+0x28)/node 回指(+0x34)/parent/first-child/sibling/ready 链(+0x4C/0x50)/abort 栈(+0x64)/id(+0x68)
+- **写集证明**：创建子 job 无法把父 job 摘出 ready 链
+- 父 job 消失只剩：A）worker 返回 -1；B）返回非 0 非 -1 → trampoline 槽被改写；C）job 池块别名
+- 单断点判别：0x811DB24E 记 r0/r5 + 检查 +0x28/+0x24/父子指针重叠
+4) M1035 探针（batch_016）：
+```
+blk_811DB24E → [TRRET] job/ret/tramp/node（条件：ret!=0 或 tramp!=0x8116FA5D）
+blk_811DB258 → [TRSET] job/r3
+```
+5) 编译：batch_011/batch_016 exit 0；exe 57,055,185B（15:35:44）
+6) 验证运行 `out80m_m1095titlepath.txt` 已启动
+NEXT：
+```
+① title worker 越过 sound → title 状态机 case0/1/2…
+② [TRRET]/[TRSET] 捕获 A/B/C（对 init 链修复同样关键）
+③ title 对象 → 引擎自绘标题（截图检查）
+```
+验证：`out80m_m1094forcetitle.txt`、`jobproc_dossier.md`、`out80m_m1095titlepath.txt`（生成中）。
+
+ANTI-FORGETTING ENTRY. Keywords: M1035 MAJOR PROGRESS - FORCETITLE works: HLE setSequence(6,0,0,0) started the TITLE page (m1094: [FORCETITLE] invoke n=59620001; returned r0=85B8746C; [TTC] task=85B8743C; [TTF8] g8a8ret=85A9E42C x2 appFade OK; [BADMEM] va=0x4 at 0x81172386 only the sound object null remains) => page6->title worker chain connected; only init-chain sound objects missing (bypassed). M1035 fix batch_011.cpp blk_81172386: if(s->r[0]==0u) return 0x811723BAu; (safe skip to function epilogue). Subagent dossier C:\dev\p5d_build\ghidra_out\jobproc_dossier.md (39KB/316 lines): appProcessCreate(parentNode,name,priority,countdown,grace,worker,completion,arg) @0x8116F7CA (param_1 = parent node, NOT priority; validated via 0x8116F9F8 bl FUN_8116F728 in DAT_815554C4 chain, node[3] = parentJob); appProcess node 0x1C (+0x00 worker/+0x04 completion/+0x08 user-arg getter 0x8116F8A8/+0x0C job*/+0x10 older/+0x14 newer/+0x18 hash; DAT_815554C4 newest head, DAT_815554C8 oldest tail); job 0x70 (+0x00 state 0/1/2/3, +0x08 priority, +0x20 countdown, +0x24 grace max(2,grace), +0x28 trampoline, +0x30 destroy 0x8116FA67, +0x34 back-pointer node, +0x38/0x3C/0x40 parent/first-child/sibling, +0x44/0x48 timer∩release, +0x4C/0x50 ready, +0x54/0x58 secondary, +0x64 abort stack, +0x68/0x6C id). Write-set proof: FUN_811DAB8C only writes 0x811DAC4E parent->first_child; ready chain 0x4C/0x50 only 4 writers; timer chain has no insert API => child creation cannot unlink parent. Remaining channels: A) worker returns -1 -> completion; B) non-0 non--1 -> 0x811DB258 str r3,[r5,#0x28] overwrites trampoline slot (typical bug return appProcessCreate(...)); C) job pool block alias. Single breakpoint discriminator: 0x811DB24E records r0 and r5(job) (+0x28 expected 0x8116FA5D, +0x24 expected 2). Pitfalls: real call is trampoline(job,dt) (0x811DB246 adds r0,r5,#0 / vmov.f32 s0,s16 / blx r1); FUN_8116F748 does not restore r0 => trampoline return = worker return. M1035 probes batch_016: blk_811DB24E [TRRET] job/ret/tramp/node (only ret!=0 or tramp!=0x8116FA5D); blk_811DB258 [TRSET] job/r3. batch_011/batch_016 exit 0; exe 57,055,185B 15:35:44. Verification run out80m_m1095titlepath.txt started. NEXT: title worker passes sound -> title state machine case0/1/2; [TRRET]/[TRSET] identify A/B/C; title object -> engine-drawn title (screenshots).
+
+LOOKUP: M1035, FORCETITLE success, m1094, [FORCETITLE] invoke n=59620001, returned r0=85B8746C, [TTC] task=85B8743C, [TTF8] 85A9E42C, [BADMEM] 0x4 81172386 sound null, blk_81172386 null-sound skip 0x811723BA, jobproc_dossier.md, appProcessCreate parent node, appProcess 0x1C, job 0x70, ready chain 0x4C/0x50 writers, channel A/B/C, 0x811DB258 trampoline overwrite, 0x811DB24E breakpoint, trampoline(job,dt), TRRET/TRSET probes batch_016, exe 57,055,185B, out80m_m1095titlepath.txt -> §18.4579 [relevant: FORCETITLE], §18.4578 [relevant: DRIVDONE], §18.4574 [relevant: driver table]
