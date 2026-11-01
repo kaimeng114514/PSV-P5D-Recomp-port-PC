@@ -1034,6 +1034,49 @@
 | M1016 | §18.4561: ★★★★★★★★★★ **AOT 内部函数覆盖率 100%：batch_033 补齐最后 5 个内部函数（Ghidra 12,532 函数全命中；缺失 entry 仅剩 14 个 HLE import + module_start = 预期无 block）**。原因：这 5 个函数在 `function_bounds.json` 里是 **size=1 的退化条目**（生成器跳过），但 Ghidra 知道真实尺寸：
 | M1017 | §18.4562: **batch_032 回归通过（无回退）+ 新 exe 合并 batch_032/033 + 新增 TTPROBE 探针追踪 title task 生命周期（定位 0xE5E5E5E5 释放者）**。`out80m_m1081batch32.txt`（batch_032 版 exe）结果与基线逐项一致：
 | M1018 | §18.4563: **TTPROBE（harness 级 pc 探针）0 命中：title 路径在 nested/interpreter 执行，不经过 job_probes → 改为 batch 级（AOT block 内）探针，直接追踪 title task 的创建与释放**。`out80m_m1082ttprobe.txt`：
+| M1019 | §18.4564: ★★★★★★★★★★ **关键真相：title task 没有被提前释放！worker 入口 node[2]=85B8583C 是合法 task 指针——崩溃在 appFade 路径深处：`FUN_81178F0A` 用 worker 的残留 r0 调 `FUN_8116f8a8` 得到 **0xE5E5E5E5**（某个"fade 对象"字段是毒值）**。batch 级探针结果（`out80m_m1083batchprobe.txt` / err）：
+```
+[TTC] task=85B8583C          ← FUN_8119807C 中 FUN_8115d3ce 创建的 title task 指针
+[TTW2] node=85B8586C arg=85B8583C   ← hybrid trampoline 放行时 node[2] = 合法 task（不是 E5！）
+[TTW] node=85B8586C arg=85B8583C    ← title worker 入口同样合法
+[TTF] 43C/968/94 : 0 条             ← 三个 free 探针都没命中 ⇒ task 没有被释放
+[BADMEM] guest va=0xE5E5E5E9 @81178F18（同一处）
+```
+**重新反编译 appFade 链路**：
+```c
+// FUN_81178BA8(count, list, count2) = appFade 管理器创建（appFade.c:0x1f/0x26）
+iVar5 = count*4 + count2*4 + 0x10;
+piVar3 = FUN_8115d36a(...);              // 分配管理器
+SceLibc_6DC1F0D8(piVar3,0,iVar5);        // memset 0
+piVar3[1] = count;                       // +4 count
+piVar3[0] = piVar4 = piVar3+4;           // +0 fade 对象指针数组
+piVar3[2] = piVar4 + count;              // +8 回调表
+SceLibc_7205BFDB(piVar4+count, list, count2*4);  // memcpy 回调表
+piVar3[3] = count2;                      // +0xc count2
+DAT_813afe00 = piVar3;                   // 全局管理器
+// FUN_81178CE2(param): return *(u32*)(*DAT_813afe00 + param*4);   // 取 fade 对象指针
+// FUN_81178F0A():  FUN_8116f8a8(r0残留) → *(u32*)(fadeObj+8) 判定状态
+```
+⇒ **崩溃机制**：`FUN_81178F0A` 的 `FUN_8116f8a8` 实际参数是 **worker 中上一条调用的残留 r0**（ARM 无参约定），即 `FUN_81178CE2(0)` 返回的 fade 对象指针；该对象 +8 字段 = 0xE5E5E5E5 ⇒ **appFade 的 fade 对象未初始化/未创建**（管理器可能已创建，但对象数组项未填）。
+**M1019 已加 appFade 定向探针（exe 57,049,751B 10:29:36）**：
+```
+batch_012：blk_81178BA8（管理器创建）→ [TTMI] mgrcall p0/p1/p2
+          blk_81178CE2（取 fade 对象）→ [TTM] ce2 p=... mgr=...
+          blk_81178F10（FUN_8116f8a8 返回后）→ [TTF8] g8a8ret=...
+batch_013：blk_8119819A（worker 调 FUN_81178CE2(0) 前）→ [TTM] worker mgr=...
+          blk_811981A0（FUN_81178CE2 返回后）→ [TTO] fadeobj=...
+```
+诊断运行：`out80m_m1084fadeprobe.txt` 已启动（常规 milestone env）。
+NEXT：
+```
+① [TTMI]：appFade 管理器是否被创建（FUN_81178BA8 是否执行过）
+② [TTM] worker mgr / ce2 p：mgr 是否非空；[TTO] fadeobj 返回什么
+③ [TTF8] g8a8ret：确认 E5 来自哪个字段
+④ 若 fade 对象未创建 → 找 fade 对象的创建者（FUN_81178C44?）是否在跳过的 init 里
+⑤ 补上初始化（或按 appFade 语义在 title 页前创建 fade 对象）→ title 状态机继续
+```
+验证：`out80m_m1083batchprobe.txt`、`fadeinit.txt`、`fade_refs.txt`、`recomp_harness.exe`（57,049,751B）、`out80m_m1084fadeprobe.txt`（生成中）。 |
+| §18.4564 | KEY REVELATION: the title task was NOT freed early! At the worker entry node[2]=85B8583C is a valid task pointer - the crash happens deep in the appFade path: FUN_81178F0A uses the worker's leftover r0 to call FUN_8116f8a8 and gets 0xE5E5E5E5 (some 'fade object' field is poison). Batch-level probe results (out80m_m1083batchprobe.txt / err): [TTC] task=85B8583C (title task created in FUN_8119807C via FUN_8115d3ce); [TTW2] node=85B8586C arg=85B8583C (hybrid trampoline passes a valid task, not E5); [TTW] node=85B8586C arg=85B8583C (same at title worker entry); [TTF] 43C/968/94: 0 lines - none of the three free probes fired, so the task was NOT freed; [BADMEM] guest va=0xE5E5E5E9 at 81178F18 (same place). Re-decompiled appFade chain: FUN_81178BA8(count,list,count2) = appFade manager creation (appFade.c:0x1f/0x26): iVar5=count*4+count2*4+0x10; piVar3=FUN_8115d36a(...); SceLibc_6DC1F0D8(piVar3,0,iVar5) memset 0; piVar3[1]=count; piVar3[0]=piVar4=piVar3+4 (fade object pointer array); piVar3[2]=piVar4+count (callback table); SceLibc_7205BFDB(piVar4+count, list, count2*4) memcpy callbacks; piVar3[3]=count2; DAT_813afe00=piVar3. FUN_81178CE2(param): return *(u32*)(*DAT_813afe00 + param*4) (get fade object pointer). FUN_81178F0A(): FUN_8116f8a8(leftover r0) -> *(u32*)(fadeObj+8) to determine state. So the crash mechanism: FUN_81178F0A's FUN_8116f8a8 actually receives the leftover r0 from the previous call in the worker, i.e. the fade object pointer returned by FUN_81178CE2(0); that object's +8 field = 0xE5E5E5E5 => the appFade fade object is uninitialized/not created (the manager may exist but the object array entries are not filled). M1019 added appFade-directed probes (exe 57,049,751B 10:29:36): batch_012 blk_81178BA8 (manager creation) -> [TTMI] mgrcall p0/p1/p2; blk_81178CE2 -> [TTM] ce2 p=... mgr=...; blk_81178F10 (after FUN_8116f8a8) -> [TTF8] g8a8ret=...; batch_013 blk_8119819A (before worker calls FUN_81178CE2(0)) -> [TTM] worker mgr=...; blk_811981A0 (after FUN_81178CE2) -> [TTO] fadeobj=.... Diagnostic run out80m_m1084fadeprobe.txt started. NEXT: [TTMI] whether the appFade manager was created; [TTM] worker mgr / ce2 p; [TTO] fadeobj; [TTF8] which field is E5; if the fade object is not created find its creator (FUN_81178C44?) and whether it was in the skipped init; proper init before the title page -> title state machine continues. |
 ```
 [TT] 0 行          ← job_probes 的 0x811980B0/0x81198172/0x8115D43C/0x811DA094 全部未触发
 [BADMEM] 1（0xE5E5E5E9 @81178F18 照旧）  [JOBCOMP] 11  [SEQREQ] 16
@@ -494106,3 +494149,49 @@ NEXT：
 ANTI-FORGETTING ENTRY. Keywords: M1018 TTPROBE (harness-level pc probe) had 0 hits because the title path executes in the nested/interpreter runner and never passes through job_probes -> switched to batch-level (inside AOT block) probes. out80m_m1082ttprobe.txt: [TT] 0 lines, [BADMEM] 1 (0xE5E5E5E9 at 81178F18), [JOBCOMP] 11, [SEQREQ] 16. M1018 batch-level probes compiled into exe 57,048,472B 10:12:38: (1) batch_010.cpp: shared global uint32_t g_p5d_tt_task=0; + free probes blk_8115D43C (appAllocatorHandler free entry, [TTF] 43C) and blk_8115D968 (inner free, [TTF] 968) printing when r0/r1/r±4 matches task; (2) batch_011.cpp hybrid title-worker branch prints [TTW2] node=... arg=node[2]=...; (3) batch_013.cpp blk_811980B0 records g_p5d_tt_task and prints [TTC] task=%08X, blk_81198172 prints [TTW] node=... arg=...; (4) batch_016.cpp blk_811DA094 (guest heap free) prints [TTF] 94 when matching task. All probes cap 40 prints to stderr. batch_010/011/013/016 compile exit 0; exe relink exit 0 (57,048,472B 10:12:38). Diagnostic run out80m_m1083batchprobe.txt (NOMOVIE + OT/STEPFORCE + VDEC + delay=0 + hybrid force) started. NEXT: [TTC] task pointer; [TTW]/[TTW2] whether node[2] already 0xE5E5E5E5 at worker entry; [TTF] 43C/968/94 which free path frees the title task; locate page6 end cleanup / forced-completion callback / allocator reuse; after fix title state machine advances -> title object -> engine-drawn title.
 
 LOOKUP: M1018, TTPROBE 0 hits, nested runner, job_probes main dispatch only, batch-level probes, batch_010 g_p5d_tt_task, blk_8115D43C, blk_8115D968, blk_811DA094, batch_013 blk_811980B0, blk_81198172, batch_011 [TTW2], batch_016 [TTF] 94, exe 57,048,472B, out80m_m1083batchprobe.txt, 0xE5E5E5E9 -> §18.4562 [relevant: TTPROBE], §18.4559 [relevant: title task free]
+### 18.4564 PORT M1019: title task 没被释放——崩溃在 appFade 对象未初始化
+
+1) batch 级探针结果（`out80m_m1083batchprobe.txt` / err）：
+```
+[TTC] task=85B8583C
+[TTW2] node=85B8586C arg=85B8583C     ← node[2] = 合法 task（不是 E5）
+[TTW] node=85B8586C arg=85B8583C
+[TTF] 43C/968/94 : 0 条               ← 三个 free 探针都没命中 ⇒ task 未被释放
+[BADMEM] guest va=0xE5E5E5E9 @81178F18（同一处）
+```
+2) 重新反编译 appFade 链路（`fadeinit.txt`/`fade_refs.txt`）：
+```c
+FUN_81178BA8(count,list,count2):        // appFade 管理器创建（appFade.c:0x1f/0x26）
+  iVar5 = count*4 + count2*4 + 0x10;
+  piVar3 = FUN_8115d36a(...);           // 分配
+  SceLibc_6DC1F0D8(piVar3,0,iVar5);     // memset 0
+  piVar3[1]=count;  piVar3[0]=piVar4=piVar3+4;   // fade 对象指针数组
+  piVar3[2]=piVar4+count;                        // 回调表
+  SceLibc_7205BFDB(piVar4+count,list,count2*4);  // memcpy 回调
+  piVar3[3]=count2;  DAT_813afe00=piVar3;
+FUN_81178CE2(param): return *(u32*)(*DAT_813afe00 + param*4);   // 取 fade 对象
+FUN_81178F0A(): FUN_8116f8a8(r0 残留) → *(u32*)(fadeObj+8)      // 判状态
+```
+3) 崩溃机制：FUN_81178F0A 的 FUN_8116f8a8 实际用 **worker 中上一条调用的残留 r0** = `FUN_81178CE2(0)` 返回的 fade 对象；该对象 +8 = 0xE5E5E5E5 ⇒ **fade 对象未初始化/未创建**。
+4) M1019 定向探针（exe 57,049,751B 10:29:36）：
+```
+batch_012：blk_81178BA8 → [TTMI] mgrcall p0/p1/p2
+          blk_81178CE2 → [TTM] ce2 p=... mgr=...
+          blk_81178F10 → [TTF8] g8a8ret=...
+batch_013：blk_8119819A → [TTM] worker mgr=...
+          blk_811981A0 → [TTO] fadeobj=...
+```
+5) 诊断运行 `out80m_m1084fadeprobe.txt` 已启动。
+NEXT：
+```
+① [TTMI] appFade 管理器是否创建
+② [TTM]/[TTO] mgr 与 fadeobj 值
+③ [TTF8] E5 来自哪个字段
+④ 找 fade 对象创建者（FUN_81178C44?）是否在跳过的 init 中
+⑤ 补初始化 → title 状态机继续 → 引擎自绘标题
+```
+验证：`out80m_m1083batchprobe.txt`、`fadeinit.txt`、`fade_refs.txt`、`recomp_harness.exe`、`out80m_m1084fadeprobe.txt`（生成中）。
+
+ANTI-FORGETTING ENTRY. Keywords: M1019 KEY REVELATION - the title task was NOT freed early: at title worker entry node[2]=85B8583C is a valid task pointer, and the three free probes never fired. The crash is deep in the appFade path: FUN_81178F0A uses the worker's leftover r0 to call FUN_8116f8a8, which reads *(fadeObj+8) = 0xE5E5E5E5 (the appFade fade object is uninitialized/not created). Evidence out80m_m1083batchprobe.txt: [TTC] task=85B8583C; [TTW2] node=85B8586C arg=85B8583C; [TTW] node=85B8586C arg=85B8583C; [TTF] 43C/968/94 = 0 lines; [BADMEM] guest va=0xE5E5E5E9 at 81178F18. appFade chain decompiled: FUN_81178BA8(count,list,count2) = manager creation (appFade.c:0x1f/0x26): iVar5=count*4+count2*4+0x10; piVar3=FUN_8115d36a; memset 0 (SceLibc_6DC1F0D8); piVar3[1]=count; piVar3[0]=piVar4=piVar3+4 (fade object pointer array); piVar3[2]=piVar4+count (callback table); memcpy callbacks (SceLibc_7205BFDB); piVar3[3]=count2; DAT_813afe00=piVar3. FUN_81178CE2(param)=*(u32*)(*DAT_813afe00+param*4) returns a fade object pointer. FUN_81178F0A(): FUN_8116f8a8(leftover r0) -> *(u32*)(fadeObj+8). DAT_813AFE00 refs: WRITE at 0x81178c3a in FUN_81178ba8; READ in FUN_81179240, FUN_81178c80, FUN_81178ce2, FUN_81178c44. FUN_81178BA8's only caller = FUN_81030F98 at 0x81030FD0 (app init chain). M1019 probes (exe 57,049,751B 10:29:36): batch_012 blk_81178BA8 [TTMI] mgrcall p0/p1/p2; blk_81178CE2 [TTM] ce2 p/mgr; blk_81178F10 [TTF8] g8a8ret; batch_013 blk_8119819A [TTM] worker mgr; blk_811981A0 [TTO] fadeobj. Diagnostic run out80m_m1084fadeprobe.txt started. NEXT: check whether appFade manager was created; mgr/fadeobj values; which field is E5; find the fade object creator (FUN_81178C44?) and whether it was in a skipped init; add the missing init -> title state machine continues.
+
+LOOKUP: M1019, [TTC] task=85B8583C, [TTW2] node=85B8586C, [TTW], [TTF] 0 lines, task NOT freed, appFade, DAT_813AFE00, FUN_81178BA8, FUN_81178CE2, FUN_81178F0A, FUN_8116f8a8 leftover r0, fade object uninitialized, 0xE5E5E5E5, FUN_81178C44, FUN_81030F98, fadeinit.txt, fade_refs.txt, [TTMI], [TTM], [TTO], [TTF8], out80m_m1084fadeprobe.txt -> §18.4563 [relevant: batch probes], §18.4559 [relevant: crash point], §18.4558 [relevant: title worker]
