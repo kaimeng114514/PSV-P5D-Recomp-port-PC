@@ -1059,6 +1059,34 @@
 | M1041 | §18.4586: **m1098 证据表明 FIOSFILL 已生效（第一笔：`app_system/font/c_font_p5.fnt` size=1,167,652 成功直填！），但 fake handle 是小整数导致 guest 直接把它当指针解引用 → BADMEM va=5 @0x81181CBE。M1041 改为返回完整 guest 请求对象（对象内含 [obj+4]=0xC/[obj+0xA0]=0/[obj+0x88]=size/[obj+0x94]=buf/[obj+0]=0），让 guest 自己的完成/取数据函数可以正常读取**。m1098：
 | M1042 | §18.4587: ★★★★★★★★★★ **重大突破：FIOSFILL 完整请求对象生效——`title/logo.bin`（2,101,012 字节）成功提供给 S0_LOGO 加载器，3 个 `logoTMX` 任务全部注册，且 logoTMX worker（wf=0x811933F1）真实执行；引擎开始渲染 960x544 场景（BSIMG doClear=1）且无任何 BADMEM**。m1099 证据：
 | M1043 | §18.4588: **为下一阶段加 [LOGO]/[TMX]/[TMA] 探针：追踪 S0_LOGO 状态机（FUN_81193704 case）、logoTMX worker（0x811933F0）与 TMX 容器解析（FUN_81174DBC），以确认 logo.bin→TGA→纹理上传链路**。改动：`batch_013.cpp` blk_81193718（[LOGO] state）、blk_81193738（case0/1 open logo.bin）、blk_811933F0（[TMX] worker arg）、blk_8119341E（[TMX] completion）；`batch_011.cpp` blk_81174DBC（[TMA] data/name/flags）。编译：batch_011/batch_013 exit 0；exe 重链 exit 0（57,059,576B，17:18:35）。验证运行：`out80m_m1100logoprobe.txt`（FORCETITLE + FIOSFILL + 新探针）已启动。NEXT：① [LOGO] state 序列（2→3→4→5…）② [TMA] 调用与返回值（TMX 容器解析）③ [TMX] completion（3 个任务是否完成）④ [TEXUPLOAD]/[TEXBIND] 纹理上传 → logoDrawProc 绘制。验证：`out80m_m1100logoprobe.txt`（生成中）、exe（57,059,576B）。 |
+| M1044 | §18.4589: **m1100 关键证据：S0_LOGO 状态机已从 state=0 推进到 state=3（logo.bin 成功解析、3 个 logoTMX 任务创建），logoTMX worker 真实运行 6 次，FUN_81174DBC（TMX 容器解析）以我们的 logo.bin 缓冲（99C67790）为输入处理 3 个 TGA 名称——但卡在 state=3：等 3 个 TGA 任务完成（FUN_8116f8d2 + task state==3），而纹理上传（[TEXUPLOAD] 0）尚未发生。M1044 为上传链（FUN_81174DBC→FUN_8116332A→FUN_81163FA4→FUN_811CA9F0/FUN_811CA6B6）加一排探针定位。** m1100 证据：
+```
+[LOGO] #1 state=0 task=85B8754C
+[LOGO] case0/1 open logo.bin task=85B8754C
+[LOGO] #2 state=3 task=85B8754C                      ← ★ state 0→3（logo.bin 解析成功）
+[TMA] FUN_81174DBC data=99C67790 name=8130AC14 flags=0   ← ★ 用我们的缓冲解析 3 个 TGA
+[TMA] FUN_81174DBC data=99C67790 name=8130AC24 flags=0
+[TMA] FUN_81174DBC data=99C67790 name=8130AC30 flags=0
+[TMX] worker arg=85B8777C/85C07C9C/85C07D7C ×2（logoTMX worker 真跑 6 次）
+[FIOSFILL] OPEN 'title/logo.bin' size=2101012 -> obj=85B875D0
+[TEXUPLOAD] 0   [BADMEM] 0
+```
+**上传链反编译（`tmx_upload.txt`/`tmx_check.txt`）**：
+```c
+FUN_8119343A: iVar4 = FUN_81174DBC(container_data, tga_name, 0);   // ARC 容器解析 → 返回 entry data ptr
+              puVar3[1] = FUN_8116332A(iVar4);                    // 创建纹理对象（格式检测 + FUN_811641D2→FUN_811CA6B6）
+              job "logoTMX" worker=0x811933F1
+FUN_811933F0(worker): state<2 → state=2; iVar2 = FUN_81163170(task[1]);  // 等纹理上传完成
+              if (iVar2 != 0) state=3
+FUN_81163170 → FUN_81163FA4(handle->[0]) → FUN_811CA9F0(...)          // 纹理上传（GXM）
+FUN_81174DBC: 'ARC' 魔数容器解析（entry size 在 +0x20，entry data 在 +0x24）
+```
+**M1044 新增探针**：`[TMX] arch->entry`（FUN_81174DBC 返回值）、`[TMX] texobj`（FUN_8116332A 返回）、`[TMX] upload begin/ret`（FUN_81163FA4/0x81163FAA）、`[TMX] gxm_tex_create/gxm_tex_upload`（FUN_811CA6B6/FUN_811CA9F0）、`[TMA] return ptr`（FUN_81174DBC epilogue 0x81174E4E）。
+编译：batch_010/011/013/015 exit 0；exe 重链 exit 0（57,061,469B，17:39:48）。
+验证运行：`out80m_m1101tmxupload.txt`（FORCETITLE + FIOSFILL + 上传链探针）已启动。
+NEXT：① FUN_81174DBC 是否找到 3 个 TGA entry（返回非 0）② FUN_8116332A 纹理对象是否创建 ③ FUN_81163FA4/FUN_811CA9F0 是否走到 GXM HLE（[TEXUPLOAD]/[TEXBIND]）④ 3 个任务完成 → [LOGO] state=4 淡入 → logoDrawProc 绘制。
+验证：`out80m_m1100logoprobe.txt`、`out80m_m1101tmxupload.txt`（生成中）、`tmx_worker.txt`、`tmx_check.txt`、`tmx_upload.txt`。 |
+| §18.4589 | m1100 shows the S0_LOGO state machine reached state=3 (logo.bin parsed, 3 logoTMX tasks created), logoTMX worker ran 6 times, FUN_81174DBC parsed our logo.bin buffer (99C67790) for 3 TGA names - but stuck at state=3 waiting for the 3 TGA tasks (FUN_8116f8d2 + task state==3) because texture upload ([TEXUPLOAD] 0) never happens. m1100: [LOGO] #1 state=0 task=85B8754C; case0/1 open logo.bin; [LOGO] #2 state=3; [TMA] FUN_81174DBC data=99C67790 name=8130AC14/AC24/AC30 flags=0; [TMX] worker arg=85B8777C/85C07C9C/85C07D7C x2; [FIOSFILL] OPEN title/logo.bin 2101012 obj=85B875D0; [TEXUPLOAD] 0; [BADMEM] 0. Upload chain (tmx_check.txt/tmx_upload.txt): FUN_8119343A: iVar4=FUN_81174DBC(container,tga_name,0) (ARC container: entry size at +0x20, data at +0x24); puVar3[1]=FUN_8116332A(iVar4) (format detect + FUN_811641D2->FUN_811CA6B6); job logoTMX worker=0x811933F1. FUN_811933F0(worker): state<2->state=2; iVar2=FUN_81163170(task[1]); if !=0 state=3. FUN_81163170->FUN_81163FA4(handle->[0])->FUN_811CA9F0 (GXM texture upload). M1044 probes: [TMX] arch->entry (FUN_81174DBC return), [TMX] texobj (FUN_8116332A return), [TMX] upload begin/ret (FUN_81163FA4/0x81163FAA), [TMX] gxm_tex_create (FUN_811CA6B6), [TMX] gxm_tex_upload (FUN_811CA9F0), [TMA] return ptr (FUN_81174DBC epilogue 0x81174E4E). batch_010/011/013/015 compile exit 0; exe relink exit 0 (57,061,469B 17:39:48). Verification run out80m_m1101tmxupload.txt started. NEXT: whether FUN_81174DBC finds the 3 TGA entries (nonzero return), whether FUN_8116332A creates texture objects, whether FUN_81163FA4/FUN_811CA9F0 reach the GXM HLE ([TEXUPLOAD]/[TEXBIND]), then 3 tasks complete -> [LOGO] state=4 fade-in -> logoDrawProc drawing. |
 ```
 [FIOSFILL] OPEN 'app_system/font/c_font_p5.fnt' size=1167652 -> obj=85B1E6D0
 [FIOSFILL] OPEN 'app_system/font/font_staff.fnt' size=28176  -> obj=85B312D0
@@ -495803,4 +495831,36 @@ NEXT：
 ANTI-FORGETTING ENTRY. Keywords: M1043 added [LOGO]/[TMX]/[TMA] probes to trace the S0_LOGO state machine (FUN_81193704 case), logoTMX worker 0x811933F0 and TMX container parse FUN_81174DBC. batch_013.cpp blk_81193718 [LOGO] state, blk_81193738 case0/1 open logo.bin, blk_811933F0 [TMX] worker arg, blk_8119341E [TMX] completion; batch_011.cpp blk_81174DBC [TMA] data/name/flags. batch_011/batch_013 compile exit 0; exe relink exit 0 (57,059,576B 17:18:35). Verification run out80m_m1100logoprobe.txt (FORCETITLE + FIOSFILL + new probes) started. NEXT: [LOGO] state sequence 2->3->4->5; [TMA] calls and returns (TMX container parse); [TMX] completion (3 tasks); [TEXUPLOAD]/[TEXBIND] texture upload -> logoDrawProc drawing.
 
 LOOKUP: M1043, [LOGO] probe blk_81193718, blk_81193738, [TMX] probe blk_811933F0, blk_8119341E, [TMA] probe blk_81174DBC batch_011, FUN_81193704 state machine, logoTMX worker 0x811933F0, FUN_81174DBC TMX container, exe 57,059,576B, out80m_m1100logoprobe.txt -> §18.4587 [relevant: logo.bin loaded], §18.4582 [relevant: S0 logo job]
+### 18.4589 PORT M1044: S0_LOGO 已到 state=3，TMX 上传链探针
 
+1) m1100 证据：
+```
+[LOGO] #1 state=0 task=85B8754C
+[LOGO] case0/1 open logo.bin task=85B8754C
+[LOGO] #2 state=3 task=85B8754C                      ← state 0→3
+[TMA] FUN_81174DBC data=99C67790 name=8130AC14/AC24/AC30  ← 用我们的缓冲解析 3 个 TGA
+[TMX] worker arg=85B8777C/85C07C9C/85C07D7C ×2        ← logoTMX worker 真跑
+[TEXUPLOAD] 0   [BADMEM] 0
+```
+2) 调用链（tmx_check/tmx_upload 反编译）：
+```c
+FUN_8119343A: iVar4 = FUN_81174DBC(container, tga_name, 0);  // ARC 容器解析
+              puVar3[1] = FUN_8116332A(iVar4);               // 纹理对象（格式检测 + FUN_811641D2→FUN_811CA6B6）
+FUN_811933F0(worker): state<2 → state=2; FUN_81163170(task[1]); if(!=0) state=3
+FUN_81163170 → FUN_81163FA4(handle->[0]) → FUN_811CA9F0   // 纹理上传（GXM）
+```
+3) M1044 探针：`[TMX] arch->entry`、`[TMX] texobj`、`[TMX] upload begin/ret`、`[TMX] gxm_tex_create/upload`、`[TMA] return ptr`
+4) 编译：batch_010/011/013/015 exit 0；exe 57,061,469B（17:39:48）
+5) 验证运行 `out80m_m1101tmxupload.txt` 已启动
+NEXT：
+```
+① FUN_81174DBC 返回 entry（非 0）
+② FUN_8116332A 纹理对象
+③ FUN_81163FA4/FUN_811CA9F0 → GXM HLE（[TEXUPLOAD]/[TEXBIND]）
+④ 任务完成 → [LOGO] state=4 淡入 → logoDrawProc 绘制
+```
+验证：`out80m_m1100logoprobe.txt`、`out80m_m1101tmxupload.txt`（生成中）、`tmx_worker.txt`、`tmx_check.txt`、`tmx_upload.txt`。
+
+ANTI-FORGETTING ENTRY. Keywords: M1044 m1100 shows the S0_LOGO state machine reached state=3 (logo.bin parsed, 3 logoTMX tasks created), logoTMX worker ran 6 times, FUN_81174DBC parsed our logo.bin buffer (99C67790) for 3 TGA names - but stuck at state=3 waiting for the 3 TGA tasks (FUN_8116f8d2 + task state==3) because texture upload ([TEXUPLOAD] 0) never happens. m1100: [LOGO] #1 state=0 task=85B8754C; case0/1 open logo.bin; [LOGO] #2 state=3; [TMA] FUN_81174DBC data=99C67790 name=8130AC14/AC24/AC30 flags=0; [TMX] worker arg=85B8777C/85C07C9C/85C07D7C x2; [FIOSFILL] OPEN title/logo.bin 2101012 obj=85B875D0; [TEXUPLOAD] 0; [BADMEM] 0. Upload chain: FUN_8119343A: iVar4=FUN_81174DBC(container,tga_name,0) (ARC container: entry size at +0x20, data at +0x24); puVar3[1]=FUN_8116332A(iVar4) (format detect + FUN_811641D2->FUN_811CA6B6); logoTMX worker 0x811933F1. FUN_811933F0: state<2->state=2; FUN_81163170(task[1]); if !=0 state=3. FUN_81163170->FUN_81163FA4(handle->[0])->FUN_811CA9F0 (GXM upload). M1044 probes: [TMX] arch->entry (FUN_81174DBC return), [TMX] texobj (FUN_8116332A return), [TMX] upload begin/ret (FUN_81163FA4/0x81163FAA), [TMX] gxm_tex_create (FUN_811CA6B6), [TMX] gxm_tex_upload (FUN_811CA9F0), [TMA] return ptr (FUN_81174DBC epilogue). batch_010/011/013/015 compile exit 0; exe relink exit 0 (57,061,469B 17:39:48). Verification run out80m_m1101tmxupload.txt started. NEXT: FUN_81174DBC finds the 3 TGA entries, FUN_8116332A creates texture objects, FUN_81163FA4/FUN_811CA9F0 reach GXM HLE ([TEXUPLOAD]/[TEXBIND]), 3 tasks complete -> [LOGO] state=4 fade-in -> logoDrawProc drawing.
+
+LOOKUP: M1044, [LOGO] state=3, logo.bin parsed, logoTMX worker 6 runs, FUN_81174DBC data=99C67790 names 8130AC14/AC24/AC30, [TMX] worker args 85B8777C/85C07C9C/85C07D7C, FUN_8116332A texture object, FUN_81163FA4 upload, FUN_811CA9F0, FUN_811CA6B6, FUN_811641D2, ARC container entry size +0x20 data +0x24, FUN_81163170 -> FUN_81163FA4, [TEXUPLOAD] 0, exe 57,061,469B, out80m_m1100logoprobe.txt, out80m_m1101tmxupload.txt -> §18.4588 [relevant: LOGO/TMX probes], §18.4587 [relevant: logo.bin loaded]
