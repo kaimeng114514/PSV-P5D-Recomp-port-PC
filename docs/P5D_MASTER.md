@@ -1036,6 +1036,35 @@
 | M1018 | §18.4563: **TTPROBE（harness 级 pc 探针）0 命中：title 路径在 nested/interpreter 执行，不经过 job_probes → 改为 batch 级（AOT block 内）探针，直接追踪 title task 的创建与释放**。`out80m_m1082ttprobe.txt`：
 | M1019 | §18.4564: ★★★★★★★★★★ **关键真相：title task 没有被提前释放！worker 入口 node[2]=85B8583C 是合法 task 指针——崩溃在 appFade 路径深处：`FUN_81178F0A` 用 worker 的残留 r0 调 `FUN_8116f8a8` 得到 **0xE5E5E5E5**（某个"fade 对象"字段是毒值）**。batch 级探针结果（`out80m_m1083batchprobe.txt` / err）：
 | M1020 | §18.4565: ★★★★★★★★★★ **appFade 真相闭环：管理器创建正常、fade 对象来自被"全强制完成"的周期 job 节点——对象 +8 字段（job arg）已被 completion 回调释放成 0xE5。根因 = 我们的 all-force worker 强制策略破坏了 appFade/序列等周期 job 的状态；修复方向改为"只强制 boot init 系列 job，放行周期 job"**。`out80m_m1084fadeprobe.txt` / err：
+| M1021 | §18.4566: **按 M1020 结论实施"只强制 6 个 init worker、其余 job 全部真跑"的选择性强制（batch_011 blk_8116FA5C），并加 JOBNORM 探针记录每个真跑 worker——用于验证 appFade/序列周期 job 的状态是否恢复正常**。新 blk_8116FA5C：
+```cpp
+uint32_t blk_8116FA5C(RecState* s) { g_cur_block = 0x8116FA5Cu;
+  uint32_t _node = s->r[0] ? rd32(s, s->r[0] + 0x34u) : 0u;
+  uint32_t _wf = _node ? rd32(s, _node) : 0u;
+  { /* WFDBG: 每个不同 worker 打印一次 */ }
+  if (_wf == 0x81184809u || _wf == 0x811848B7u || _wf == 0x81184965u ||
+      _wf == 0x81184A89u || _wf == 0x81184B39u || _wf == 0x81184FFFu) {
+    s->r[0] = 0xFFFFFFFFu; return s->r[14]; }          // 只强制 6 个 boot init job
+  { static int _run=0; if(_run++<40){ fprintf(stderr,"[JOBNORM] wf=%08X node=%08X\n",...);} }
+  push lr/r4; s->r[0]=_node; s->r[14]=0x8116FA64u; return 0x8116F748u;  // 其余 job 真跑
+}
+```
+- 强制列表：trophy 0x81184809 / sound 0x811848B7 / gamedata 0x81184965 / msgwindow 0x81184A89 / mainmenu 0x81184B39 / initDataRead 0x81184FFF
+- 放行：appFade 0x811792B3、sequence 0x811857C3、title 0x81198173 等全部周期 job
+- 新增 `[JOBNORM]` 探针：记录前 40 个真实执行的 worker（验证周期 job 是否被调度）
+编译：batch_011 exit 0；`recomp_harness.exe` 重链 exit 0（57,049,753B，10:50:23）。
+验证运行：`out80m_m1085selforce.txt`（常规 milestone env：NOMOVIE + OT/STEPFORCE + VDEC + delay=0）已启动。
+NEXT：
+```
+① [JOBNORM] 是否出现 appFade 0x811792B3 / sequence 0x811857C3 / title 0x81198173（周期 job 真跑）
+② err 尾部第一个失败点（可能是周期 worker 撞上的 HLE 缺口/BADMEM）
+③ [JOBCOMP] 数量与 initDataRead 完成回调（page6 切换）
+④ title worker 这次能否通过 appFade（[TTF8] 不再是 E5 / [BADMEM] 消失）
+⑤ title 状态机 case0→1→2… → title 对象 → 引擎自绘标题
+```
+※ M1007 第一次选择性强制失败（n≈59.74M 提前结束、1 JOBCOMP）；本轮已有完整探针，可直接看到真跑 worker 的第一个失败点。
+验证：`recomp_harness.exe`（57,049,753B）、`out80m_m1085selforce.txt`（生成中）、`out80m_m1084fadeprobe.txt`。 |
+| §18.4566 | Implemented the selective force from the M1020 conclusion: force ONLY the 6 boot-init workers, let every other job really run (batch_011 blk_8116FA5C), plus a JOBNORM probe recording each really-run worker - to verify whether the appFade/sequence periodic job state recovers. New blk_8116FA5C: _node=s->r[0]?rd32(s,s->r[0]+0x34):0; _wf=_node?rd32(s,_node):0; WFDBG prints each distinct worker; if(_wf==0x81184809||0x811848B7||0x81184965||0x81184A89||0x81184B39||0x81184FFF){ s->r[0]=0xFFFFFFFF; return s->r[14]; } else { static int _run=0; if(_run++<40) fprintf(stderr,'[JOBNORM] wf=%08X node=%08X'); push lr/r4; s->r[0]=_node; s->r[14]=0x8116FA64; return 0x8116F748; }. Force list: trophy 0x81184809 / sound 0x811848B7 / gamedata 0x81184965 / msgwindow 0x81184A89 / mainmenu 0x81184B39 / initDataRead 0x81184FFF. Allowed to run: appFade 0x811792B3, sequence 0x811857C3, title 0x81198173, etc. New [JOBNORM] probe records the first 40 really-executed workers. batch_011 compile exit 0; recomp_harness.exe relink exit 0 (57,049,753B 10:50:23). Verification run out80m_m1085selforce.txt (NOMOVIE + OT/STEPFORCE + VDEC + delay=0) started. NEXT: whether [JOBNORM] shows the appFade 0x811792B3 / sequence 0x811857C3 / title 0x81198173 workers really running; the first failure point in the err tail (a real periodic worker may hit an HLE gap/BADMEM); [JOBCOMP] count and the initDataRead completion callback (page6 switch); whether the title worker now passes appFade ([TTF8] no longer E5, no BADMEM); title state machine advances -> title object -> engine-drawn title. Note M1007's first selective-force attempt ended early at n≈59.74M with 1 JOBCOMP; now with full probes we can see the first failure directly. |
 ```
 [TTMI] mgrcall p0=00000002 p1=848563D8 p2=00000004   ← appFade 管理器创建（count=2, 回调表, count2=4）✅
 [TTC] task=85B8583C                                   ← title task 合法
@@ -494266,3 +494295,37 @@ NEXT：
 ANTI-FORGETTING ENTRY. Keywords: M1020 appFade truth loop closed - the manager is created normally and the fade 'object' comes from a PERIODIC JOB NODE (85A9E46C) that our all-force already completed; the node's +8 field (job arg) was freed by the completion callback into 0xE5, so the title worker's FUN_8116f8a8(node)=node[2]=E5 crashes at 81178F18. Evidence out80m_m1084fadeprobe.txt: [TTMI] mgrcall p0=00000002 p1=848563D8 p2=00000004 (appFade manager created count=2); [TTC] task=85B8583C; [TTW2]/[TTW] node=85B8586C arg=85B8583C; [TTM] worker mgr=85A9E3DC; [TTM] ce2 p=0 mgr=85A9E3DC; [TTO] fadeobj=85A9E46C; [TTF8] g8a8ret=E5E5E5E5; [BADMEM] 0xE5E5E5E9 at 81178F18. Cross-validation: 85A9E46C is a job node in WFDBG/JOBCOMP (worker=0x811792B3, periodic update job): [WFDBG] #4 ctx=84617E00 node=85A9E46C wf=811792B3. The appFade getter FUN_81178CE2 returns the appFade periodic job node; FUN_8116f8a8(node)=node[2] (job arg) should be the fade task structure but the job was all-force-completed and its arg freed (guest heap fills 0xE5). Root cause = all-force worker policy destroys periodic job state (appFade/sequence). Fix = selective force: force only the 6 boot-init workers (trophy 0x81184809 / sound 0x811848B7 / gamedata 0x81184965 / msgwindow 0x81184A89 / mainmenu 0x81184B39 / initDataRead 0x81184FFF) and let periodic jobs (appFade 0x811792B3, sequence 0x811857C3, etc.) run normally. M1007 tried selective force once but the run ended early at n≈59.74M with only 1 JOBCOMP - redo next round and inspect the err tail. NEXT: restore selective force in batch_011 blk_8116FA5C; run and find the first failure of a real periodic worker; fix it -> appFade/sequence state valid -> title worker case0 passes -> title state machine advances -> engine-drawn title.
 
 LOOKUP: M1020, appFade, [TTMI], [TTC], [TTW2], [TTW], [TTM], [TTO] fadeobj=85A9E46C, [TTF8] g8a8ret=E5E5E5E5, 85A9E46C, 811792B3, periodic job node, all-force destroys periodic job state, selective force, init workers 0x81184809/0x811848B7/0x81184965/0x81184A89/0x81184B39/0x81184FFF, out80m_m1084fadeprobe.txt, out80m_m1077titleworker.txt -> §18.4564 [relevant: appFade revelation], §18.4554 [relevant: hybrid force], §18.4553 [relevant: page6 force]
+### 18.4566 PORT M1021: 选择性强制（只强制 6 个 init worker，其余 job 真跑）
+
+1) 新 `blk_8116FA5C`（batch_011.cpp）：
+```cpp
+uint32_t blk_8116FA5C(RecState* s) { g_cur_block = 0x8116FA5Cu;
+  uint32_t _node = s->r[0] ? rd32(s, s->r[0] + 0x34u) : 0u;
+  uint32_t _wf = _node ? rd32(s, _node) : 0u;
+  { static unsigned _lastwf=0xFFFFFFFFu; static int _dbg=0;
+    if(_wf!=_lastwf && _dbg++<120){ _lastwf=_wf;
+      fprintf(stderr,"[WFDBG] #%d ctx=%08X node=%08X wf=%08X\n",...); fflush(stderr);} }
+  if (_wf == 0x81184809u || _wf == 0x811848B7u || _wf == 0x81184965u ||
+      _wf == 0x81184A89u || _wf == 0x81184B39u || _wf == 0x81184FFFu) {
+    s->r[0] = 0xFFFFFFFFu; return s->r[14]; }
+  { static int _run=0; if(_run++<40){ fprintf(stderr,"[JOBNORM] wf=%08X node=%08X\n",...);} }
+  s->r[13] -= 4; wr32(s, s->r[13], s->r[14]);
+  s->r[13] -= 4; wr32(s, s->r[13], s->r[4]);
+  s->r[0] = _node; s->r[14] = 0x8116FA64u; return 0x8116F748u; }
+```
+2) 语义：强制 6 个 boot init job（trophy/sound/gamedata/msgwindow/mainmenu/initDataRead）；appFade/sequence/title 等周期 job **真正执行 worker**；`[JOBNORM]` 记录前 40 个真跑 worker。
+3) 编译：batch_011 exit 0；exe 重链 exit 0（57,049,753B 10:50:23）。
+4) 验证运行 `out80m_m1085selforce.txt` 已启动。
+NEXT：
+```
+① [JOBNORM] 出现 appFade 0x811792B3 / sequence 0x811857C3 / title 0x81198173
+② err 尾部第一个失败点（HLE 缺口/BADMEM）
+③ [JOBCOMP] 与 page6 切换
+④ title worker 通过 appFade（[TTF8] 非 E5 / 无 BADMEM）
+⑤ title 状态机继续 → title 对象 → 引擎自绘
+```
+验证：`recomp_harness.exe`（57,049,753B）、`out80m_m1085selforce.txt`（生成中）。
+
+ANTI-FORGETTING ENTRY. Keywords: M1021 implemented selective force per M1020 - force ONLY the 6 boot-init workers and let every other job really run. batch_011 blk_8116FA5C: _node=s->r[0]?rd32(s,s->r[0]+0x34):0; _wf=_node?rd32(s,_node):0; WFDBG prints each distinct worker; if(_wf==0x81184809||0x811848B7||0x81184965||0x81184A89||0x81184B39||0x81184FFF){ s->r[0]=0xFFFFFFFF; return s->r[14]; } else { [JOBNORM] log first 40; push lr/r4; s->r[0]=_node; s->r[14]=0x8116FA64; return 0x8116F748; }. Force list trophy 0x81184809 / sound 0x811848B7 / gamedata 0x81184965 / msgwindow 0x81184A89 / mainmenu 0x81184B39 / initDataRead 0x81184FFF; allowed appFade 0x811792B3, sequence 0x811857C3, title 0x81198173. batch_011 compile exit 0; exe relink exit 0 (57,049,753B 10:50:23). Verification run out80m_m1085selforce.txt (NOMOVIE + OT/STEPFORCE + VDEC + delay=0) started. NEXT: whether [JOBNORM] shows appFade/sequence/title workers really running; first failure point in err tail; [JOBCOMP] and page6 switch; whether title worker passes appFade ([TTF8] not E5, no BADMEM); title state machine advances -> title object -> engine-drawn title. M1007's first selective-force attempt ended early at n≈59.74M with 1 JOBCOMP.
+
+LOOKUP: M1021, selective force, batch_011 blk_8116FA5C, 6 init workers, trophy 0x81184809, sound 0x811848B7, gamedata 0x81184965, msgwindow 0x81184A89, mainmenu 0x81184B39, initDataRead 0x81184FFF, appFade 0x811792B3, sequence 0x811857C3, title 0x81198173, JOBNORM, WFDBG, out80m_m1085selforce.txt, exe 57,049,753B -> §18.4565 [relevant: appFade root cause], §18.4564 [relevant: appFade probes], §18.4553 [relevant: selective force history]
