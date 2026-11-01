@@ -1536,7 +1536,9 @@ static void job_probes(uint32_t pcv, RecState* s) {
     g_movie_played = 1; g_movie_probe_n = 0;
     static int _msp = 0; if (_msp++ < 6) { printf("[MOVIEPLAY] FUN_8115922C PLAY MOVIE seen (blk=%08X fib=%08X) - will fake completion after movie object exists\n", g_cur_block, g_cur_fiber); fflush(stdout); }
   }
-  if (g_movie_played && !g_movie_done && ++g_movie_probe_n > 20000) {
+  static int _movie_fin_env = -1;
+  if (_movie_fin_env < 0) { const char* _e = getenv("P5D_MOVIEFIN"); _movie_fin_env = (_e && atoi(_e)) ? 1 : 0; }
+  if (_movie_fin_env && g_movie_played && !g_movie_done && ++g_movie_probe_n > 20000) {
     uint32_t _mv = 0; uint8_t* _mq = GP(0x813AF6B4u); if (_mq) std::memcpy(&_mv, _mq, 4);
     if (_mv) {
       g_movie_done = 1;

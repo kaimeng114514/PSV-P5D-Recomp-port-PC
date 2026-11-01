@@ -1097,6 +1097,48 @@
 | M1079 | §18.4624: ★★★★★★★★★★★ **补上缺失函数：用现有 gap 生成器（`_gen_split_gap2.py` 语义 + capstone）为 Ghidra 漏识别的函数 **0x8115849E 生成 82 个 AOT block**，组装成 `batch_034.cpp` 并接入 harness（FB(034)/ALL_FINDERS[35]/build_all_blocks 扩展）——这是让运行越过 64,278,346 blocks 死亡点的关键补丁。**
 | M1080 | §18.4625: ★★★★★★★★★★★ **历史性突破：运行首次越过 64,278,346 blocks 死亡点！batch_034 补块生效——新函数 0x8115849E 正常执行（PC ring：8115849E→8116F8A8→811584B8/BC0/C6），流程推进到**movie play/标题电影阶段**（[MOVIEPLAY] FUN_8115922C、[MOVIEFIN] 假完成、[PROCREG] 'movie play'）。随后出现新崩溃：BADMEM va=0 @ block 0x811DAC9C（FUN_811DAB8C 内）——节点分配器 FUN_811D9F4A(DAT_816CDA48) 返回 0（r6=0），属新一层的运行时缺口。**
 | M1081 | §18.4626: ★★★★★★★★ **池层已正常（FUN_811DA584 池初始化在 n=0 由 FUN_81198E2E 调用，池结构合法：pool=846001E0/84617AE0，w4=16 w8=512 wC=128 w10=16 w18=84600230；DAT_816CDA48 在 27 次 appProcessCreate 中始终为合法 0x84617AE0）——所以之前的"池未初始化"假设被排除。崩溃仍有：BADMEM va=0 @ 0x811DAC9C，WDRING 显示路径 81178F10→81178F14→81178F36→811DACFC→811DAD4A→811DAC9C（0x811DAD4A: `movs r4,#2; b 0x811DAC9C`；0x811DAC9C 把 r4 写入 [r6+0]），此时 r6=0。r6 在 FUN_811DAB8C 内只在 0x811DABC2 由 `adds r6,r0`（池分配返回值）赋值，函数其余部分不写 r6 → 说明**节点分配器**返回值或寄存器上下文在 0x811DABC2 之后变 0。M1081 加 [R6-ALLOC]/[R6-ACFC]/[R6-AD4A]/[R6-AC9C] 探针追踪 r6 在四个关键块的取值（运行 m1127）。**
+| M1082 | §18.4627: ★★★★★★★★★★ **崩溃根因锁定：不是池、不是 r6 生命周期，而是我们自己的 [MOVIEFIN] 假完成 hack 破坏了 guest 栈/寄存器上下文！m1127 r6 追踪给出决定性证据：前 27 次 FUN_811DAB8C 调用 r6 全部合法（84617B60→846186C0，步长 0x70），第 28 次（lr=81159298，来自 FUN_81159276 回调栈帧）r6=0 并立即崩溃。rg_ring 显示程序从 0x811592BE `pop {r4,r5,r6,pc}` 返回到了 0x81178F10（FUN_81178F0A 中间的 cmp 指令）而不是正常返回点，然后再跳到 0x811DACFC —— 典型的"栈/返回地址被 hack 注入的回调污染"轨迹。**
+m1127（`out80m_m1127r6.txt`）证据：
+```
+# 前 27 次（正常）：
+[R6-ALLOC] r6=...（旧值） r4=816CDA48 r5=85C7xxxx sp=84856xxx
+[R6-ACFC]  r6=84617B60 84617BD0 84617C40 ... 846186C0   ← 合法节点指针，步长 0x70
+[R6-AD4A]  r6=84617B60 ...                              ← 同
+[R6-AC9C]  r6=84617B60 ... r4=00000002                  ← 正常写入 [node]=2 无崩溃
+# 第 28 次（崩溃）：
+[R6-ACFC]  r6=00000000 r4=816CDA48 r5=85CF304C r7=812B414C sp=84856298 lr=81159298
+[R6-AD4A]  r6=00000000 ... lr=81159298
+[R6-AC9C]  r6=00000000 r4=00000002 ... lr=81159298
+[BADMEM] guest va=0x00000000 unmapped block=0x811DAC9C
+[SNAP] blk=811DAC9C r0=0 r4=2 r5=85CF304C r7=812B414C sp=84856298 r14=81159298
+rg_ring(pc/r0/sp): [811592AA/0/84856268] [811592B4/0] [811592B6/0] [811592BE/0] [81178F10/0/84856290] [81178F14/0] [81178F36/1/84856290] [811DACFC/1/84856298] [811DAD4A/0/84856298] [811DAC9C/0/84856298]
+```
+**rg_ring 解读**：
+- 0x811592BE 是 FUN_81159276（movie 完成回调）的 `add sp,#0x18; pop {r4,r5,r6,pc}`（正常返回）
+- 但它返回到了 **0x81178F10**（FUN_81178F0A 函数体中间的 `cmp r0,#0` 处，而不是正常返回点）→ 栈上返回地址被污染
+- 0x81178F0A 的 `pop {r4,pc}`（0x81178F36）又返回到了 **0x811DACFC**（FUN_811DAB8C 中间）→ 连续错位返回
+- 最终执行到 0x811DAC9C 时 r6=0（该上下文没有经历 FUN_811DAB8C 的分配路径）→ BADMEM va=0
+**⇒ 根因 = `[MOVIEFIN] invoke FUN_81159276(state=1, movie=...)` 这行 hack**（harness 中 `call_guest_cb2(s, 0x81159276u, 1u, _mv, 300000)`）：它在我们的 HLE 分发中途以不完整的调用帧**同步**调用 guest 回调，污染了被打断的 guest 函数栈（保存的 LR/寄存器槽位），所以 64.28M 处进入 movie 完成路径时错位返回并崩溃。前 27 次正常调用证明池/节点/r6 逻辑本身完全正常。
+**M1082 修复（第一步）**：把 [MOVIEFIN] hack 默认关闭（仅 `P5D_MOVIEFIN=1` 时启用）：
+```cpp
+static int _movie_fin_env = -1;
+if (_movie_fin_env < 0) { const char* _e = getenv("P5D_MOVIEFIN"); _movie_fin_env = (_e && atoi(_e)) ? 1 : 0; }
+if (_movie_fin_env && g_movie_played && !g_movie_done && ++g_movie_probe_n > 20000) { ... }
+```
+编译：harness exit 0；exe 57,113,739B（05:01:32）。验证运行 `out80m_m1128nomoviefin.txt` 已启动（不设 P5D_MOVIEFIN → hack 不执行）。
+**正确的 movie 完成方案（NEXT）**：
+1. 让游戏自己的 movie 任务完成：HLE 电影播放状态 API（FUN_81157E70 注册回调 0x81159277；movie task 通过 get status/frame 推进）→ 由游戏在正确上下文调用 FUN_81159276
+2. 或在 HLE 电影状态 stub 内用**完整的 call_guest_cb 帧**（保存/恢复整套 guest 上下文、正确栈）调用回调
+3. 若用 VDEC（title_c_p5d001 NV12 raw）走真实解码路径，movie task 自然完成
+NEXT：
+```
+① 验证 m1128：禁用 MOVIEFIN 后 64.28M 处是否还崩溃（预期：不再崩溃）
+② 若不崩溃 → 游戏停在等待 movie 完成（title 内容不加载）→ 实现正确 movie 完成（上面 1/2/3）
+③ 若仍崩溃 → 检查其它 hack（CALLBACK 注入类）是否同样污染栈
+④ 之后：title 资源加载 → 2D 上下文 → array2 → GXM → 画面
+```
+验证：`out80m_m1127r6.txt`、`rg_ring`、`out80m_m1128nomoviefin.txt`（生成中）、m1125/m1126 对照。 |
+| §18.4627 | Crash root cause locked: it is neither the pool nor r6 lifetime - it is OUR OWN [MOVIEFIN] fake-completion hack corrupting the guest stack/register context! m1127 r6 trace gives decisive evidence: the first 27 FUN_811DAB8C calls all have valid r6 (84617B60->846186C0, step 0x70); the 28th call (lr=81159298, coming from the FUN_81159276 callback frame) has r6=0 and crashes immediately. rg_ring shows the program returned from 0x811592BE pop {r4,r5,r6,pc} (FUN_81159276 epilogue) to 0x81178F10 (a cmp inside FUN_81178F0A) instead of its normal return point, then jumped to 0x811DACFC - the classic signature of a return address corrupted by the injected callback. m1127 evidence: first 27 calls [R6-ACFC]/[R6-AD4A]/[R6-AC9C] r6=84617B60,84617BD0,84617C40,...,846186C0 with r4=2 and no crash; 28th call [R6-ACFC] r6=0 r4=816CDA48 r5=85CF304C r7=812B414C sp=84856298 lr=81159298; [BADMEM] guest va=0 unmapped block=0x811DAC9C; [SNAP] blk=811DAC9C r0=0 r4=2 r5=85CF304C r7=812B414C sp=84856298 r14=81159298; rg_ring: 811592AA/0/84856268, 811592B4/0, 811592B6/0, 811592BE/0, 81178F10/0/84856290, 81178F14/0, 81178F36/1/84856290, 811DACFC/1/84856298, 811DAD4A/0/84856298, 811DAC9C/0/84856298. Interpretation: 0x811592BE is FUN_81159276 (movie completion callback) add sp,#0x18; pop {r4,r5,r6,pc} (normal return) but it returned to 0x81178F10 (middle of FUN_81178F0A, cmp r0,#0) instead of its real caller -> stack return address corrupted; then FUN_81178F0A's pop {r4,pc} at 0x81178F36 returned to 0x811DACFC (middle of FUN_811DAB8C) -> chained misaligned returns; finally 0x811DAC9C executes with r6=0 (that context never went through the FUN_811DAB8C allocation path) -> BADMEM va=0. So the root cause is the `[MOVIEFIN] invoke FUN_81159276(state=1, movie=...)` hack (call_guest_cb2(s, 0x81159276u, 1u, _mv, 300000)): it synchronously calls the guest callback in the middle of our HLE dispatch with an incomplete call frame, corrupting the interrupted guest function's stack (saved LR/register slots), so when the movie completion path is reached at 64.28M it returns misaligned and crashes. The first 27 normal calls prove the pool/node/r6 logic itself is completely fine. M1082 fix (step 1): the [MOVIEFIN] hack is now default-OFF (only active with P5D_MOVIEFIN=1): static int _movie_fin_env = -1; if (_movie_fin_env < 0) { const char* _e = getenv("P5D_MOVIEFIN"); _movie_fin_env = (_e && atoi(_e)) ? 1 : 0; } if (_movie_fin_env && g_movie_played && !g_movie_done && ++g_movie_probe_n > 20000) { ... }. Build: harness exit 0; exe 57,113,739B 05:01:32. Verification run out80m_m1128nomoviefin.txt started (P5D_MOVIEFIN not set -> hack disabled). Correct movie completion plan: (1) let the game's own movie task finish - HLE the movie player status API (FUN_81157E70 registers callback 0x81159277; the movie task advances via get status/frame) so the game calls FUN_81159276 in the right context; (2) or call the callback from inside the HLE movie status stub with a complete call_guest_cb frame (save/restore whole guest context, proper stack); (3) or use VDEC (title_c_p5d001 NV12 raw) so the real decode path completes the movie. NEXT: verify m1128 no longer crashes at 64.28M; if no crash the game stops waiting for movie completion -> implement proper completion; if still crashing check other callback-injection hacks for the same stack corruption; then title asset load -> 2D context -> array2 -> GXM -> picture. |
 m1126（`out80m_m1126pool.txt`）证据：
 ```
 [POOLINIT] #1 tid=00000000 lr=81198EFE n=0            ← 池初始化确实执行
@@ -498467,3 +498509,47 @@ NEXT：
 ANTI-FORGETTING ENTRY. Keywords: M1081 pool layer is fine - FUN_811DA584 pool init runs at n=0 from FUN_81198E2E; [POOLALLOC] pool=846001E0 w4=16 w8=512 wC=128 w10=16 w18=84600230; [PROCCREATE] #1..#27 poolmgr=84617AE0 (DAT_816CDA48 valid across all 27 appProcessCreate calls) - so the pool-uninitialized hypothesis is ruled out. Crash remains: BADMEM va=0 at 0x811DAC9C, WDRING 81178F10 81178F14 81178F36 811DACFC 811DAD4A 811DAC9C (0x811DAD4A movs r4,#2; b 0x811DAC9C; 0x811DAC9C str r4,[r6,#0]) with r6=0. r6 is assigned only once in FUN_811DAB8C at 0x811DABC2 adds r6,r0 (pool alloc return) and never written elsewhere -> either allocator returned 0 or the register context got zeroed after 0x811DABC2. [SNAP] blk=811DAC9C r0=0 r1=812B4150 r2=812B4150 r4=2 r5=85CF304C r7=812B414C r13=84856298 r14=81159298. Disassembly: 811DABBA ldr r0,[r4] (r4=0x816CDA48); 811DABBE bl 0x811D9F4A; 811DABC2 adds r6,r0; 811DABC4 movs r0,#0; 811DABC6 str r0,[r6,#0x10] (would fault va=0x10 first if r6=0); 811DAC9C movs r1,#0; str r4,[r6,#0]; adds r0,r6,#0; str r1,[r6,#4]; b 0x811DAD86; 811DAD4A movs r4,#2; b 0x811DAC9C; 811DAD86 add sp,#0x1c; pop.w {r4,r5,r6,r7,r8,sb,sl,fp,pc}. Contradiction: actual fault va=0 at 0x811DAC9C (not va=0x10) -> r6 may have been non-zero at 0x811DABC2 and got zeroed later near 0x811DACFC/0x811DAD4A by HLE mutex stub calls (0x811DACF8 bl 0x81207352, 0x811DAD46 bl 0x81207352) or by fiber/thread register save-restore. M1081 probes in batch_016: [R6-ALLOC] @0x811DABC2, [R6-ACFC] @0x811DACFC, [R6-AD4A] @0x811DAD4A, [R6-AC9C] @0x811DAC9C print r6/r4/r5/r7/sp/lr; exe 57,114,188B 04:43:21; run out80m_m1127r6.txt started. NEXT: read m1127 probes to see if r6 is zero at 0x811DABC2 (alloc failure) or non-zero then zeroed; if alloc returns 0 check FUN_811D9F4A return-0 branch (bitmap full + FUN_811DA534 malloc failure) and HLE malloc; if zeroed later focus on HLE calls 0x81207344/0x81207352 between 0x811DACFC and 0x811DAD4A and fiber_save/fiber_resume register corruption; then continue movie play -> title content -> 2D context -> array2 -> GXM -> picture.
 
 LOOKUP: M1081 pool fine, [POOLINIT] lr=81198EFE, [POOLALLOC] pool=846001E0 w4=16 w8=512 wC=128 w10=16, [PROCCREATE] poolmgr=84617AE0, DAT_816CDA48 valid 27 calls, BADMEM va=0 0x811DAC9C, r6 only assigned 0x811DABC2 adds r6,r0, 0x811DABC6 str r0,[r6,#0x10] would fault va=0x10, contradiction, WDRING 811DACFC 811DAD4A 811DAC9C, 0x811DAD4A movs r4,#2, HLE mutex stubs 0x81207344 0x81207352, fiber register restore, M1081 probes [R6-ALLOC] [R6-ACFC] [R6-AD4A] [R6-AC9C], exe 57,114,188B, m1127 out80m_m1127r6.txt, movie play stage -> §18.4625 [relevant: crossing death point + new crash], §18.4624 [relevant: batch_034], §18.4623 [relevant: indirect miss]
+### 18.4627 PORT M1082: 崩溃根因 = 我们自己的 [MOVIEFIN] 假回调污染 guest 栈（池/r6 逻辑本身完全正常）
+
+1) m1127 r6 追踪（`out80m_m1127r6.txt`）：
+```
+前 27 次正常：
+  [R6-ACFC] r6=84617B60 84617BD0 84617C40 … 846186C0   ← 合法节点指针，步长 0x70
+  [R6-AC9C] r6=… r4=00000002                            ← 写 [node]=2 成功
+第 28 次崩溃：
+  [R6-ACFC] r6=00000000 lr=81159298 r5=85CF304C sp=84856298
+  [BADMEM] guest va=0 @0x811DAC9C
+rg_ring: 811592AA 811592B4 811592B6 811592BE 81178F10 81178F14 81178F36 811DACFC 811DAD4A 811DAC9C
+```
+2) rg_ring 解读：
+- 0x811592BE = FUN_81159276（movie 完成回调）的 `add sp,#0x18; pop {r4,r5,r6,pc}`
+- 它返回到了 0x81178F10（FUN_81178F0A 中间的 `cmp r0,#0`）→ **栈返回地址被污染**
+- 0x81178F36 的 `pop {r4,pc}` 又返回 0x811DACFC（FUN_811DAB8C 中间）→ 连续错位返回
+- 0x811DAC9C 执行时 r6=0 → BADMEM va=0
+3) 根因：harness 中 `[MOVIEFIN] call_guest_cb2(s, 0x81159276u, 1u, _mv, 300000)` 在 HLE 分发中途同步调用 guest 回调，**调用帧不完整** → 污染被打断 guest 函数的栈（保存的 LR/寄存器槽）
+4) M1082 修复第一步：MOVIEFIN hack 默认关闭（仅 `P5D_MOVIEFIN=1` 时启用）：
+```cpp
+static int _movie_fin_env = -1;
+if (_movie_fin_env < 0) { const char* _e = getenv("P5D_MOVIEFIN"); _movie_fin_env = (_e && atoi(_e)) ? 1 : 0; }
+if (_movie_fin_env && g_movie_played && !g_movie_done && ++g_movie_probe_n > 20000) { … }
+```
+5) 编译：harness exit 0；exe 57,113,739B（05:01:32）
+6) 验证运行 `out80m_m1128nomoviefin.txt`（不设 P5D_MOVIEFIN）已启动
+正确的 movie 完成方案：
+```
+① 让游戏自己的 movie 任务完成：HLE 播放状态 API（FUN_81157E70 注册 0x81159277 回调）
+② 或在 HLE 状态 stub 内用完整 call_guest_cb 帧调用回调
+③ 或走 VDEC（title_c_p5d001 NV12 raw）让真实解码路径完成
+```
+NEXT：
+```
+① m1128 是否还崩溃（预期不崩）
+② 不崩则游戏等待 movie 完成 → 实现正确完成
+③ 仍崩 → 查其它回调注入 hack
+④ title 资源 → 2D 上下文 → array2 → GXM → 画面
+```
+验证：`out80m_m1127r6.txt`、`out80m_m1128nomoviefin.txt`（生成中）。
+
+ANTI-FORGETTING ENTRY. Keywords: M1082 crash root cause = our own [MOVIEFIN] fake-completion hack corrupting the guest stack; the pool/node/r6 logic is fine. m1127 r6 trace: first 27 FUN_811DAB8C calls have valid r6 (84617B60->846186C0 step 0x70) and write r4=2 at [node] successfully; the 28th call (lr=81159298 from the FUN_81159276 callback frame) has r6=0 and crashes. rg_ring: 811592AA/0/84856268, 811592B4/0, 811592B6/0, 811592BE/0, 81178F10/0/84856290, 81178F14/0, 81178F36/1/84856290, 811DACFC/1/84856298, 811DAD4A/0/84856298, 811DAC9C/0/84856298 - the 0x811592BE epilogue (FUN_81159276 add sp,#0x18; pop {r4,r5,r6,pc}) returned to 0x81178F10 (middle of FUN_81178F0A, cmp r0,#0) instead of its real caller -> corrupted stack return address; then FUN_81178F0A pop {r4,pc} at 0x81178F36 returned to 0x811DACFC (middle of FUN_811DAB8C) -> chained misaligned returns; 0x811DAC9C then runs with r6=0 -> BADMEM va=0. Root cause = harness code `[MOVIEFIN] invoke FUN_81159276(state=1, movie=...)` using call_guest_cb2(s, 0x81159276u, 1u, _mv, 300000) which synchronously calls a guest callback mid-dispatch with an incomplete call frame, corrupting the interrupted guest function's stack (saved LR/register slots). M1082 fix step 1: gate the hack behind P5D_MOVIEFIN (default off): static int _movie_fin_env = -1; if (_movie_fin_env < 0) { const char* _e = getenv("P5D_MOVIEFIN"); _movie_fin_env = (_e && atoi(_e)) ? 1 : 0; } if (_movie_fin_env && g_movie_played && !g_movie_done && ++g_movie_probe_n > 20000) { ... }. Build: harness exit 0; exe 57,113,739B 05:01:32. Verification run out80m_m1128nomoviefin.txt started with P5D_MOVIEFIN unset. Correct movie completion plan: (1) let the game's own movie task finish by HLE-ing the movie player status API (FUN_81157E70 registers callback 0x81159277); (2) or call the callback from inside the HLE movie status stub with a complete call_guest_cb frame; (3) or use VDEC (title_c_p5d001 NV12 raw) for the real decode path. NEXT: verify m1128 no longer crashes at 64.28M; if no crash the game waits for movie completion -> implement proper completion; if still crashing check other callback-injection hacks; then title asset load -> 2D context -> array2 -> GXM -> picture.
+
+LOOKUP: M1082 MOVIEFIN hack corrupts guest stack, r6 trace first 27 valid 84617B60..846186C0 step 0x70, 28th r6=0 lr=81159298, rg_ring 811592BE -> 81178F10 -> 811DACFC, FUN_81159276 movie callback epilogue pop corruption, call_guest_cb2(s,0x81159276u,1u,_mv,300000) incomplete frame, P5D_MOVIEFIN gate default off, exe 57,113,739B 05:01:32, out80m_m1128nomoviefin.txt, proper movie completion via HLE status API FUN_81157E70 callback 0x81159277 or VDEC title_c_p5d001 -> §18.4626 [relevant: pool/r6 probes], §18.4625 [relevant: crash introduced], §18.4624 [relevant: batch_034]
