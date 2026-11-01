@@ -1028,6 +1028,41 @@
 | M1010 | §18.4555: **Hybrid 强制首跑：行为与全强制完全一致（JOBEXEC 0 = title worker 未被调度）→ 加 WFDBG 诊断确认 worker 检测值**。`out80m_m1077titleworker.txt`（全强制但放行 title worker）：
 | M1011 | §18.4556: **WFDBG 诊断首跑无效（发现多个 recomp_harness 实例并存 → 日志/运行互相干扰），清理后单实例重跑**。检查 `out80m_m1078wfdbg.txt`（Start-Process 启动）：
 | M1012 | §18.4557: ★★★★★★★★★ **WFDBG 诊断成功：worker 检测完全正确，但发现 init 链 job 根本没被调用；title 页未启动的原因 = setSequence(6) 的 delay=5 依赖序列 update 帧（observer 任务未跑）→ patch delay 5→0 让标题页**立即启动**！** WFDBG 输出（`err80m_m1079wfdbg2.txt`，单实例）：
+| M1013 | §18.4558: ★★★★★★★★★★ **`setSequence(6) delay=0` 成功！title 状态机 worker（0x81198173）**真正运行**（WFDBG #11 / JOBEXEC #1）——但随即暴露下一个精确卡点：`FUN_8116f8a8()` 返回**已释放内存（0xE5E5E5E5 毒值）**导致 `[BADMEM] guest va=0xE5E5E5E9 @block=0x81178F18`**。证据（`out80m_m1080titlestart.txt` / `err80m_m1080titlestart.txt`）：
+```
+[SEQREQ] #2 page(r0)=00000006 a3=00000000          ← ★ delay 5→0 生效（a3=0）
+[WFDBG] #11 ctx=84618110 node=85B8586C wf=81198173  ← ★★★ TITLE WORKER 首次被调度！
+[JOBEXEC] #1 node=85B8586C worker=81198173 completion=811982A9 n=59571556
+[PROC] exec p=85B8586C cb0=81198173 cb1=811982A9 nameptr=00007935
+[PROCWR] a=815554C0 v=85B8586C blk=8116F748
+[SNAP] blk=81178F18 r0=E5E5E5E5 r1=85A9E3DC r2=812B4150 r4=85B8583C r5=85B8586C
+[BADMEM] guest va=0xE5E5E5E9 unmapped block=0x81178F18 tid=0 stub=812B1840
+   rg_ring: [81178F0A/85A9E46C] [8116F8A8/85A9E46C] [81178F10/E5E5E5E5] [81178F18/E5E5E5E5]
+```
+**反编译定位**：
+```c
+// FUN_81178CE2(param) = appFade 管理器取对象（appFade.c:0x40）
+if (DAT_813AFE00 == 0) ASSERT("appFade.c",0x40);
+if (DAT_813AFE00[1] <= param) ASSERT("appFade.c",0x41);
+return *(u32*)(*DAT_813AFE00 + param*4);       // fade 对象指针数组
+// FUN_81178F0A() = 取 title 任务状态
+iVar1 = FUN_8116f8a8();                        // ← 返回 0xE5E5E5E5（已释放）
+switch (*(u32*)(iVar1+4)) { case 0:1; case 3:2; case 1/2/4/5:0; default:1; }
+```
+⇒ 崩溃点：**`FUN_8116f8a8()` 返回了已释放的 task 指针（HLE free 毒值 0xE5E5E5E5）**，`ldr [r0,#4]` 访问 0xE5E5E5E9 触发 BADMEM、运行终止于 n≈59,571,570。
+**这同时确认**：
+1) delay=0 修复完美生效（page6 start 立即执行，title job 提交：node=85B8586C，worker=0x81198173，completion=0x811982A9）；
+2) hybrid trampoline 正确放行 title worker（走 FUN_8116f748 真正执行）；
+3) title worker 进入 FUN_81178CE2(appFade)/FUN_81178F0A 后因 task 指针被释放而失败 ⇒ **下一个修复点 = FUN_8116f8a8 返回值的生命周期**（谁释放了 title task：可能是我们强制完成其它 job 时的 FUN_8115d43c(free)，或 appFade 管理器未初始化 DAT_813AFE00）。
+NEXT：
+```
+① 反编译 FUN_8116f8a8：确认它返回什么（current task 指针 DAT_815554C0 链？）
+② 追踪 title task（FUN_8119807C 里 FUN_8115d3ce 分配）被谁 free（HLE 打印 free 日志/加探针）
+③ 若是强制完成路径误 free → 让 title 相关 task 不被强制的 job 完成路径释放
+④ 修好后 title 状态机继续 case 0→1→2…（FUN_81178CE2/FUN_81193344…）→ title 对象创建 → 引擎自绘
+```
+验证：`out80m_m1080titlestart.txt`、`err80m_m1080titlestart.txt`、`title_sub.txt`。 |
+| §18.4558 | setSequence(6) delay=0 WORKED: the title state-machine worker (0x81198173) REALLY RAN (WFDBG #11 / JOBEXEC #1) - but it immediately exposed the next precise blocker: FUN_8116f8a8() returned FREED memory (0xE5E5E5E5 HLE poison) causing [BADMEM] guest va=0xE5E5E5E9 @block=0x81178F18. Evidence out80m_m1080titlestart.txt / err80m_m1080titlestart.txt: [SEQREQ] #2 page(r0)=00000006 a3=00000000 (delay 5->0 effective); [WFDBG] #11 ctx=84618110 node=85B8586C wf=81198173 (TITLE WORKER first scheduled!); [JOBEXEC] #1 node=85B8586C worker=81198173 completion=811982A9 n=59571556; [PROC] exec p=85B8586C cb0=81198173 cb1=811982A9 nameptr=00007935; [PROCWR] a=815554C0 v=85B8586C blk=8116F748; [SNAP] blk=81178F18 r0=E5E5E5E5 r1=85A9E3DC r2=812B4150 r4=85B8583C r5=85B8586C; [BADMEM] guest va=0xE5E5E5E9 unmapped block=0x81178F18 tid=0 stub=812B1840; rg_ring [81178F0A/85A9E46C] [8116F8A8/85A9E46C] [81178F10/E5E5E5E5] [81178F18/E5E5E5E5]. Decompiled: FUN_81178CE2(param) = appFade manager getter (appFade.c:0x40): if (DAT_813AFE00 == 0) ASSERT; if (DAT_813AFE00[1] <= param) ASSERT; return *(u32*)(*DAT_813AFE00 + param*4). FUN_81178F0A() = title task state getter: iVar1=FUN_8116f8a8(); switch(*(u32*)(iVar1+4)){case0:1; case3:2; case1/2/4/5:0; default:1}. So the crash point is FUN_8116f8a8() returning a freed task pointer (HLE free poison 0xE5E5E5E5), ldr [r0,#4] accessing 0xE5E5E5E9 triggers BADMEM and the run terminates at n≈59,571,570. This also confirms: (1) the delay=0 fix works perfectly (page6 start executes immediately, title job submitted: node=85B8586C, worker=0x81198173, completion=0x811982A9); (2) the hybrid trampoline correctly lets the title worker through (via FUN_8116f748); (3) the title worker reaches FUN_81178CE2(appFade)/FUN_81178F0A and fails because the task pointer was freed => next fix point = FUN_8116f8a8 return-value lifetime (who freed the title task: possibly FUN_8115d43c(free) in our forced-completion path of other jobs, or the appFade manager DAT_813AFE00 not initialized). NEXT: decompile FUN_8116f8a8 to see what it returns; trace who frees the title task (FUN_8119807C's FUN_8115d3ce allocation); if the forced-completion path wrongly frees title-related tasks, prevent it; after the fix the title state machine continues case 0->1->2... (FUN_81178CE2/FUN_81193344...) -> title object creation -> engine-drawn. |
 ```
 [WFDBG] #1  ctx=84617C40 node=85A8FC8C wf=81159CB1
 [WFDBG] #2  ctx=84617D20 node=85A9E13C wf=81185309
@@ -493716,3 +493751,42 @@ NEXT：
 ANTI-FORGETTING ENTRY. Keywords: M1012 WFDBG diagnostics succeeded - worker detection is correct. WFDBG output from err80m_m1079wfdbg2.txt: #1 ctx=84617C40 node=85A8FC8C wf=81159CB1; #2 ctx=84617D20 node=85A9E13C wf=81185309; #3 ctx=84617EE0 node=85A9E65C wf=810222F9; #4 ctx=84617E00 node=85A9E46C wf=811792B3; #5 ctx=84617F50 node=85B428AC wf=8102A501; #6 ctx=84617FC0 node=85B42A3C wf=810274E9; #7 ctx=846180A0 node=85B846EC wf=81184FFF (initDataRead); #8 ctx=84617D90 node=85A9E18C wf=811853C3; #9 ctx=84618030 node=85B843AC wf=811857C3; #10 ctx=84617CB0 node=85A8FCDC wf=81159CCB. The 11 JOBCOMP = these 10 + initDataRead. Init-chain jobs (trophy 0x81184809 / sound 0x811848B7 / gamedata / msgwindow / mainmenu) never appear because page1 update is forced 0 (finishes early) so the init state machine no longer drives them. Title transition comes from the initDataRead completion callback (#8) -> setSequence(6,0,0,5). Page6 start (FUN_8119807C -> submit 'title sequence' job) never ran because setSequence's delay=5 depends on sequence update frames (FUN_811857c2 delay--) and the observer task is not scheduled. M1012 fix batch_012.cpp blk_811850EC: s->r[3]=0x0u (delay 5->0) so FUN_81185616 with param_4==0 calls the start fn (FUN_8119807C) immediately -> submits the 'title sequence' job -> hybrid trampoline lets worker 0x81198173 through -> title state machine starts. batch_012.o/exe rebuilt exit 0. Verification run out80m_m1080titlestart.txt. NEXT: page=6 start immediate; WFDBG shows wf=81198173; title state machine advances -> title object; draws change (vc≠3 / RT non-black) -> engine-drawn title.
 
 LOOKUP: M1012, [WFDBG], err80m_m1079wfdbg2.txt, worker detection correct, initDataRead #8, node 85B846EC, wf 81184FFF, setSequence(6,0,0,5), delay 5, blk_811850EC, s->r[3]=0x0u, delay 0 immediate start, FUN_8119807C, title worker 0x81198173, batch_012.cpp, out80m_m1080titlestart.txt -> §18.4555 [relevant: WFDBG], §18.4557 [relevant: title page start semantics], §18.4554 [relevant: hybrid force]
+### 18.4558 PORT M1013: delay=0 成功 → title worker 真正运行 → 精确卡点：FUN_8116f8a8 返回已释放内存
+
+1) 证据（`out80m_m1080titlestart.txt` / `err80m_m1080titlestart.txt`）：
+```
+[SEQREQ] #2 page(r0)=00000006 a3=00000000           ← delay 5→0 生效
+[WFDBG] #11 ctx=84618110 node=85B8586C wf=81198173  ← ★ TITLE WORKER 被调度
+[JOBEXEC] #1 node=85B8586C worker=81198173 completion=811982A9 n=59571556
+[PROC] exec p=85B8586C cb0=81198173 cb1=811982A9 nameptr=00007935
+[SNAP] blk=81178F18 r0=E5E5E5E5 r1=85A9E3DC r2=812B4150 r4=85B8583C r5=85B8586C
+[BADMEM] guest va=0xE5E5E5E9 unmapped block=0x81178F18 tid=0 stub=812B1840
+rg_ring: [81178F0A/85A9E46C] [8116F8A8/85A9E46C] [81178F10/E5E5E5E5] [81178F18/E5E5E5E5]
+```
+2) 反编译（`title_sub.txt`）：
+```c
+// appFade 管理器取对象（appFade.c:0x40/0x41）
+undefined4 FUN_81178CE2(uint param_1) {
+  if (DAT_813AFE00 == 0) ASSERT;
+  if ((uint)DAT_813AFE00[1] <= param_1) ASSERT;
+  return *(u32*)(*DAT_813AFE00 + param_1*4); }
+
+// title 任务状态
+undefined4 FUN_81178F0A(void) {
+  iVar1 = FUN_8116f8a8();          // ← 返回 0xE5E5E5E5（已释放）
+  switch (*(u32*)(iVar1+4)) { case 0: 1; case 3: 2; case 1/2/4/5: 0; default: 1; } }
+```
+3) 崩溃点：`FUN_8116f8a8()` 返回已释放 task 指针（HLE free 毒值 0xE5E5E5E5）→ `ldr [r0,#4]` 访问 0xE5E5E5E9 → BADMEM → 运行在 n≈59,571,570 终止。
+4) 同时确认：delay=0 修复生效（page6 start 立即执行、title job 提交 node=85B8586C worker=0x81198173 completion=0x811982A9）；hybrid trampoline 正确放行 title worker。
+NEXT：
+```
+① 反编译 FUN_8116f8a8：确认返回的 current task 指针来源
+② 追踪 title task（FUN_8119807C 中 FUN_8115d3ce 分配）被谁 free
+③ 若强制完成路径误 free → 禁止释放 title task
+④ title 状态机继续 case0→1→2→… → title 对象 → 引擎自绘
+```
+验证：`out80m_m1080titlestart.txt`、`err80m_m1080titlestart.txt`、`title_sub.txt`。
+
+ANTI-FORGETTING ENTRY. Keywords: M1013 setSequence(6) delay=0 worked - the title state-machine worker 0x81198173 REALLY RAN for the first time, but it exposed the next blocker: FUN_8116f8a8() returned FREED memory (HLE poison 0xE5E5E5E5) causing [BADMEM] guest va=0xE5E5E5E9 at block 0x81178F18. Evidence out80m_m1080titlestart.txt / err80m_m1080titlestart.txt: [SEQREQ] #2 page(r0)=00000006 a3=00000000 (delay 5->0 effective); [WFDBG] #11 ctx=84618110 node=85B8586C wf=81198173; [JOBEXEC] #1 node=85B8586C worker=81198173 completion=811982A9 n=59571556; [PROC] exec p=85B8586C; [SNAP] blk=81178F18 r0=E5E5E5E5; [BADMEM] guest va=0xE5E5E5E9 unmapped block=0x81178F18; rg_ring [81178F0A/85A9E46C] [8116F8A8/85A9E46C] [81178F10/E5E5E5E5] [81178F18/E5E5E5E5]. Decompiled title_sub.txt: FUN_81178CE2(param) = appFade manager getter (appFade.c:0x40): if (DAT_813AFE00 == 0) ASSERT; if (DAT_813AFE00[1] <= param) ASSERT; return *(u32*)(*DAT_813AFE00 + param*4). FUN_81178F0A() = title task state getter: iVar1=FUN_8116f8a8(); switch(*(u32*)(iVar1+4)){case0:1; case3:2; case1/2/4/5:0; default:1}. The crash is FUN_8116f8a8() returning a freed task pointer (poison 0xE5E5E5E5), ldr [r0,#4] accessing 0xE5E5E5E9 -> BADMEM, run terminates at n≈59,571,570. Confirmed: (1) delay=0 fix works (page6 start executes immediately, title job submitted node=85B8586C worker=0x81198173 completion=0x811982A9); (2) hybrid trampoline lets the title worker through correctly; (3) title worker reaches FUN_81178CE2(appFade)/FUN_81178F0A and fails because the task pointer was freed => next fix point = FUN_8116f8a8 return-value lifetime (who freed the title task: possibly FUN_8115d43c(free) in the forced-completion path, or DAT_813AFE00 appFade manager uninitialized). NEXT: decompile FUN_8116f8a8; trace who frees the title task (FUN_8119807C's FUN_8115d3ce allocation); if the forced path wrongly frees title tasks, prevent it; after the fix the title state machine continues case 0->1->2... -> title object -> engine-drawn.
+
+LOOKUP: M1013, out80m_m1080titlestart.txt, SEQREQ page6 a3=0, WFDBG #11, node 85B8586C, worker 81198173, completion 811982A9, [BADMEM] 0xE5E5E5E9, block 81178F18, FUN_8116f8a8, FUN_81178CE2, FUN_81178F0A, appFade.c, DAT_813AFE00, title_sub.txt -> §18.4557 [relevant: delay 5->0], §18.4554 [relevant: hybrid force]
