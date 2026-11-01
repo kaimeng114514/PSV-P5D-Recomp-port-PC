@@ -1039,6 +1039,35 @@
 | M1021 | §18.4566: **按 M1020 结论实施"只强制 6 个 init worker、其余 job 全部真跑"的选择性强制（batch_011 blk_8116FA5C），并加 JOBNORM 探针记录每个真跑 worker——用于验证 appFade/序列周期 job 的状态是否恢复正常**。新 blk_8116FA5C：
 | M1022 | §18.4567: ★★★★★★★★★★ **选择性强制成功！周期 job 全部真跑（JOBNORM 28 条，含 appFade 0x811792B3 ×2、sequence 0x811857C3、title 0x81198173）+ appFade 状态修复（`[TTF8] g8a8ret=85A9E42C`，不再是 0xE5E5E5E5）→ title 状态机推进到 case1/2，并在**声音对象查找**上撞到新缺口：`FUN_81171BEA` 返回 0（sound object 未创建，因为 init-sound worker 0x811848B7 仍被强制跳过）**。`out80m_m1085selforce.txt` / err：
 | M1023 | §18.4568: **关键发现：init 链的 sound 等 worker 根本没被调度（JOBNORM 28 条里没有 wf=811848B7），因为 M998 强制 page1 update=0 让 init 状态机在 initDataRead 处就提前结束。新方案：移除 page1 提前结束强制 + 取消全部 worker 强制，让真实 init 链跑完（STEPFORCE 只让各 worker 的完成检查通过）**。`out80m_m1086soundrun.txt`（放行 sound worker 后）与 m1085 完全一致：
+| M1024 | §18.4569: ★★★★★★★★ **真实 init 链启动成功！M1023 移除 page1 提前结束强制后，trophy/sound/initDataRead worker 全部真实被调度（WFDBG #49 `node=85B8861C wf=811848B7` = init-sound worker 首次调度！），运行突破 n=60.1M 且无 BADMEM**。`out80m_m1087realinit.txt` / err：
+```
+[FRAMEDUMP] last n=60095000（运行仍在继续，旧配置都在 59.57M 崩溃停止）
+[JOBCOMP] 1（#1 poolnode=84618110 n=59626141）
+[SEQREQ] 8（尚无 page=6 —— init 链仍在进行中）
+[PRESENT] 1  [ABIVTX] 1  [BADMEM] 0
+[JOBNORM] 40 条（cap）包含：
+   wf=81184FFF node=85B846EC（initDataRead）  wf=81184809 node=85B86A1C（★ trophy worker 真跑）
+[WFDBG] 53 条，含新增：
+   #48 ctx=846180A0 node=85B846EC wf=81184FFF   （initDataRead）
+   #49 ctx=846181F0 node=85B8861C wf=811848B7   （★ init-sound worker 首次被调度！）
+   #50-#53 周期 job 继续
+```
+**意义**：
+1) M1023 的"移除 page1 提前结束 + 取消 worker 强制"让 **init 状态机真正开始推进**（trophy→sound→…）；
+2) init-sound worker（0x811848B7）首次进入调度 ⇒ 将要创建 BGM/COMSE/EVENT/EVENT_ENV/DCOMMON 声音对象（title 声音缺口的数据前提）；
+3) 运行不再在 59.57M 崩溃，说明 title 崩溃路径未再触发（title 页还没启动，init 链尚未完成）；
+4) 下一步只需让 init 链继续跑完（8 步 + initDataRead 完成）→ page1 真实结束 → setSequence(6,0,0,0) → page6 → title worker → 声音对象存在 → title case0/1 通过。
+**观察点**：init 链每步 worker 完成可能需要多帧（STEPFORCE 只强制检查通过）；运行速度变慢（真实 init 工作更多，~1.5–2M blocks/min）。
+NEXT：
+```
+① 继续观察 m1087：[JOBCOMP] 增加（trophy/sound/gamedata/msgwindow/mainmenu 逐个完成）
+② [SEQREQ] 出现 page=6（initDataRead 完成回调）
+③ page6 start → [TTC]/[TWF] 探针 → title worker
+④ 声音对象创建（FUN_81171BEA 非 0）→ title case0/1 通过 → title 状态机推进
+⑤ title 对象 → 引擎自绘标题
+```
+验证：`out80m_m1087realinit.txt`、`err80m_m1087realinit.txt`（WFDBG #49）、`out80m_m1086soundrun.txt`。 |
+| §18.4569 | Real init chain finally started: after M1023 removed the page1 early-finish force, the trophy/sound/initDataRead workers are all really scheduled (WFDBG #49 node=85B8861C wf=811848B7 = the init-sound worker first scheduled), the run passes n=60.1M with no BADMEM. out80m_m1087realinit.txt / err: [FRAMEDUMP] last n=60095000 (run still going; old configs crashed at 59.57M); [JOBCOMP] 1 (#1 poolnode=84618110 n=59626141); [SEQREQ] 8 (no page=6 yet - the init chain is still progressing); [PRESENT] 1; [ABIVTX] 1; [BADMEM] 0; [JOBNORM] 40 (cap) includes wf=81184FFF node=85B846EC (initDataRead) and wf=81184809 node=85B86A1C (trophy worker really running); [WFDBG] 53 entries with new: #48 ctx=846180A0 node=85B846EC wf=81184FFF (initDataRead); #49 ctx=846181F0 node=85B8861C wf=811848B7 (init-sound worker first scheduled!); #50-#53 periodic jobs. Meaning: (1) M1023's removal of the page1 early-finish force + clearing the worker force list lets the init state machine really advance (trophy->sound->...); (2) the init-sound worker (0x811848B7) enters scheduling for the first time => it will create BGM/COMSE/EVENT/EVENT_ENV/DCOMMON sound objects (the data prerequisite for the title sound gap); (3) the run no longer crashes at 59.57M, so the title crash path is not triggered (the title page hasn't started; the init chain is not finished); (4) next we just need the init chain to finish (8 steps + initDataRead completion) -> page1 really ends -> setSequence(6,0,0,0) -> page6 -> title worker -> sound objects exist -> title case0/1 passes. Observation: each init worker may need several frames to complete (STEPFORCE only forces the checks to pass); the run is slower (~1.5-2M blocks/min due to real init work). NEXT: watch [JOBCOMP] grow (trophy/sound/gamedata/msgwindow/mainmenu complete one by one); [SEQREQ] page=6 appears (initDataRead completion callback); page6 start -> [TTC]/[TWF] probes -> title worker; sound objects created (FUN_81171BEA non-zero) -> title case0/1 passes -> title state machine advances -> title object -> engine-drawn title. |
 ```
 [JOBNORM] 28 条：只有 10 个周期 job ×3 + title worker ×1 —— **没有 wf=811848B7（sound worker 未被调度）**
 [TTF8] g8a8ret=85A9E42C（appFade 正常）  [TTC] task=85B869FC
@@ -494471,3 +494500,37 @@ NEXT：
 ANTI-FORGETTING ENTRY. Keywords: M1023 KEY FINDING - the init-chain workers (sound 0x811848B7 etc.) are never scheduled because the M998 force page1 update=0 makes the init state machine finish early at initDataRead. out80m_m1086soundrun.txt (after allowing the sound worker) identical to m1085: [JOBNORM] 28 lines = only the 10 periodic jobs x3 + title worker x1, NO wf=811848B7; [TTF8] g8a8ret=85A9E42C; [TTC] task=85B869FC; [BADMEM] guest va=0x00000004 at 81172386 (FUN_81172374 sound object null); [JOBCOMP] 1 (only initDataRead). Root cause: M998's page1 update=0 force makes page1 end right after initDataRead and the init state machine stops advancing => sound objects never created => title sound request null. M1023 fix: (1) batch_012.cpp blk_81185936 remove the M998 force (drop s->r[0]=0u) so page1 update uses the real FUN_8116F900('initDataRead') result; (2) batch_011.cpp blk_8116FA5C clear the force list (no forced workers - all init jobs really run); STEPFORCE still forces each worker's internal completion checks (0x811848D6/0x811848DA/0x811849A4.../0x81184AA8/0x81184B6C/0x81184D1A) so they return -1 after doing the real init. batch_011/batch_012 exit 0; exe relink exit 0 (57,049,753B 11:42:27). Verification run out80m_m1087realinit.txt started. NEXT: [JOBNORM] shows the init-chain workers; [JOBCOMP] full 8-step chain; page1 really ends after initDataRead -> setSequence(6,0,0,0) -> page6 start; sound objects created (FUN_81171BEA non-zero) -> title case0/1 passes; title state machine advances -> title object -> engine-drawn title.
 
 LOOKUP: M1023, init chain workers never scheduled, JOBNORM no wf=811848B7, M998 page1 update=0 force, page1 early finish, batch_012 blk_81185936 force removed, batch_011 force list cleared, real init chain, STEPFORCE checks 0x811848D6/0x811848DA/0x811849A4/0x81184AA8/0x81184B6C/0x81184D1A, out80m_m1087realinit.txt, out80m_m1086soundrun.txt, exe 57,049,753B -> §18.4567 [relevant: sound worker], §18.4550 [relevant: page1 finish force], §18.4553 [relevant: selective force]
+### 18.4569 PORT M1024: 真实 init 链启动（trophy/sound/initDataRead worker 真实调度）
+
+1) `out80m_m1087realinit.txt` / err：
+```
+[FRAMEDUMP] last n=60095000（运行仍在继续；旧配置都在 59.57M 崩溃停止）
+[JOBCOMP] 1（#1 poolnode=84618110 n=59626141）
+[SEQREQ] 8（尚无 page=6，init 链进行中）
+[PRESENT] 1  [ABIVTX] 1  [BADMEM] 0
+[JOBNORM] 40 条（cap）：wf=81184FFF node=85B846EC（initDataRead）
+                        wf=81184809 node=85B86A1C（★ trophy worker 真跑）
+[WFDBG] 53 条，含：
+  #48 ctx=846180A0 node=85B846EC wf=81184FFF   （initDataRead）
+  #49 ctx=846181F0 node=85B8861C wf=811848B7   （★ init-sound worker 首次调度）
+  #50–#53 周期 job
+```
+2) 意义：
+- M1023 方案（移除 page1 提前结束 + 取消 worker 强制）让 **init 状态机真正推进**；
+- init-sound worker 0x811848B7 首次调度 → 将创建 BGM/COMSE/EVENT/EVENT_ENV/DCOMMON 声音对象；
+- 运行不再在 59.57M 崩溃（title 崩溃路径未触发，title 页尚未启动）；
+- 下一步：init 链跑完 → page1 真实结束 → setSequence(6,0,0,0) → page6 → title worker → 声音对象存在 → title case0/1 通过。
+3) 注意：init worker 可能需多帧完成（STEPFORCE 只强制检查通过）；运行变慢（~1.5–2M blocks/min，真实 init 工作更多）。
+NEXT：
+```
+① [JOBCOMP] 增加（各 init 步骤逐个完成）
+② [SEQREQ] 出现 page=6
+③ page6 start → [TTC]/[TWF] → title worker
+④ 声音对象创建 → title case0/1 通过
+⑤ title 状态机推进 → title 对象 → 引擎自绘标题
+```
+验证：`out80m_m1087realinit.txt`、`err80m_m1087realinit.txt`（WFDBG #49）、`out80m_m1086soundrun.txt`。
+
+ANTI-FORGETTING ENTRY. Keywords: M1024 real init chain finally started - after M1023 removed the page1 early-finish force, the trophy/sound/initDataRead workers are all really scheduled. out80m_m1087realinit.txt / err: [FRAMEDUMP] last n=60095000 (run still going; old configs crashed at 59.57M); [JOBCOMP] 1 (#1 poolnode=84618110 n=59626141); [SEQREQ] 8 (no page=6 yet); [PRESENT] 1; [ABIVTX] 1; [BADMEM] 0; [JOBNORM] 40 (cap) includes wf=81184FFF node=85B846EC (initDataRead) and wf=81184809 node=85B86A1C (trophy worker really running); [WFDBG] 53 entries including NEW: #48 ctx=846180A0 node=85B846EC wf=81184FFF; #49 ctx=846181F0 node=85B8861C wf=811848B7 (init-sound worker first scheduled!); #50-#53 periodic jobs. Meaning: M1023's fix lets the init state machine really advance (trophy->sound->...); the init-sound worker will create BGM/COMSE/EVENT/EVENT_ENV/DCOMMON sound objects; the run no longer crashes at 59.57M; next the init chain must finish (8 steps + initDataRead) -> page1 really ends -> setSequence(6,0,0,0) -> page6 -> title worker -> sound objects exist -> title case0/1 passes. Note init workers may need several frames each (STEPFORCE only forces checks); run slower ~1.5-2M blocks/min. NEXT: watch [JOBCOMP] grow; [SEQREQ] page=6; [TTC]/[TWF] probes; sound objects created (FUN_81171BEA non-zero); title case0/1 passes -> title state machine advances -> title object -> engine-drawn title.
+
+LOOKUP: M1024, real init chain started, out80m_m1087realinit.txt, n=60095000, [JOBCOMP] 1, [SEQREQ] 8, no page6 yet, JOBNORM 81184809 trophy, 81184FFF initDataRead, WFDBG #49 node=85B8861C wf=811848B7 init-sound worker first scheduled, no BADMEM, M1023 page1 force removed, STEPFORCE -> §18.4568 [relevant: M1023 fix], §18.4567 [relevant: sound objects], §18.4566 [relevant: selective force]
