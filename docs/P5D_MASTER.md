@@ -1098,6 +1098,34 @@
 | M1080 | §18.4625: ★★★★★★★★★★★ **历史性突破：运行首次越过 64,278,346 blocks 死亡点！batch_034 补块生效——新函数 0x8115849E 正常执行（PC ring：8115849E→8116F8A8→811584B8/BC0/C6），流程推进到**movie play/标题电影阶段**（[MOVIEPLAY] FUN_8115922C、[MOVIEFIN] 假完成、[PROCREG] 'movie play'）。随后出现新崩溃：BADMEM va=0 @ block 0x811DAC9C（FUN_811DAB8C 内）——节点分配器 FUN_811D9F4A(DAT_816CDA48) 返回 0（r6=0），属新一层的运行时缺口。**
 | M1081 | §18.4626: ★★★★★★★★ **池层已正常（FUN_811DA584 池初始化在 n=0 由 FUN_81198E2E 调用，池结构合法：pool=846001E0/84617AE0，w4=16 w8=512 wC=128 w10=16 w18=84600230；DAT_816CDA48 在 27 次 appProcessCreate 中始终为合法 0x84617AE0）——所以之前的"池未初始化"假设被排除。崩溃仍有：BADMEM va=0 @ 0x811DAC9C，WDRING 显示路径 81178F10→81178F14→81178F36→811DACFC→811DAD4A→811DAC9C（0x811DAD4A: `movs r4,#2; b 0x811DAC9C`；0x811DAC9C 把 r4 写入 [r6+0]），此时 r6=0。r6 在 FUN_811DAB8C 内只在 0x811DABC2 由 `adds r6,r0`（池分配返回值）赋值，函数其余部分不写 r6 → 说明**节点分配器**返回值或寄存器上下文在 0x811DABC2 之后变 0。M1081 加 [R6-ALLOC]/[R6-ACFC]/[R6-AD4A]/[R6-AC9C] 探针追踪 r6 在四个关键块的取值（运行 m1127）。**
 | M1082 | §18.4627: ★★★★★★★★★★ **崩溃根因锁定：不是池、不是 r6 生命周期，而是我们自己的 [MOVIEFIN] 假完成 hack 破坏了 guest 栈/寄存器上下文！m1127 r6 追踪给出决定性证据：前 27 次 FUN_811DAB8C 调用 r6 全部合法（84617B60→846186C0，步长 0x70），第 28 次（lr=81159298，来自 FUN_81159276 回调栈帧）r6=0 并立即崩溃。rg_ring 显示程序从 0x811592BE `pop {r4,r5,r6,pc}` 返回到了 0x81178F10（FUN_81178F0A 中间的 cmp 指令）而不是正常返回点，然后再跳到 0x811DACFC —— 典型的"栈/返回地址被 hack 注入的回调污染"轨迹。**
+| M1083 | §18.4628: ★★★★★★★★ **M1082 的"MOVIEFIN 污染栈"结论被 m1128 否决：不设 P5D_MOVIEFIN（hack 不执行）时崩溃完全相同（同一 SNAP/同一 rg_ring：811592BE→81178F10→811DACFC→811DAD4A→811DAC9C，r6=0，BADMEM va=0）。真正的证据来自 m1128 BADMEM 前的探针交错顺序：崩溃调用的 [R6-ALLOC]（r5=85CF304C r7=81306538 sp=84856298）之后，先出现一次**正常**调用的 [R6-ACFC]/[R6-AD4A]/[R6-AC9C]（r6=846186C0），随后才出现**崩溃**调用的 [R6-ACFC]（r6=0，lr=81159298）——说明 FUN_811DAB8C 执行期间发生了**任务/纤程切换**，切回来时 r6 没有被正确恢复。⇒ 根因转向我们的 guest 线程/纤程上下文保存恢复（HLE 互斥锁 stub 0x81207344/0x81207352 内部可触发切换）。**
+m1128（`out80m_m1128nomoviefin.txt`，MOVIEFIN 关闭）证据：
+```
+[MOVIEFIN]=0（hack 未执行）
+[BADMEM] guest va=0x00000000 unmapped block=0x811DAC9C tid=0 stub=812B2200
+[SNAP] blk=811DAC9C r0=0 r1=812B4150 r2=812B4150 r4=2 r5=85CF304C r7=812B414C r13=84856298 r14=81159298
+rg_ring: 811592AA 811592B4 811592B6 811592BE 81178F10 81178F14 81178F36 811DACFC 811DAD4A 811DAC9C
+BADMEM 前探针顺序（关键）：
+  [PROCCREATE] #27 poolmgr=84617AE0 lr=8116FA26
+  [R6-ALLOC ] r6=0 r4=816CDA48 r5=85CF304C r7=81306538 sp=84856298 lr=8120735C   ← 崩溃调用的分配入口
+  [R6-ACFC  ] r6=846186C0 r5=0 r7=816CD9F0 sp=84856298 lr=8120735C               ← 正常调用（先完成）
+  [R6-AD4A  ] r6=846186C0 …
+  [R6-AC9C  ] r6=846186C0 r4=2 …
+  [R6-ACFC  ] r6=00000000 r4=816CDA48 r5=85CF304C r7=812B414C sp=84856298 lr=81159298  ← 崩溃调用（恢复后 r6=0）
+  [R6-AD4A  ] r6=0 … [R6-AC9C] r6=0 … → BADMEM
+```
+**解释**：同一函数 FUN_811DAB8C 的两个调用**交错执行**（A 进分配 → 切到 B 完成整段 → 切回 A 时 r6 丢失=0）；崩溃调用 lr=81159298 = FUN_81159276（movie 完成回调）内 `bl 0x81157F4C` 的返回地址，说明这是 movie 路径下正常调用的 appProcessCreate；r6 在切换后为 0 → 我们的 fiber/线程上下文保存恢复不完整。
+**M1083 探针**：新增 harness hook `harness_cur_fiber2()`（返回 g_cur_fiber），batch_016 的 [R6-*] 探针改为打印 `fib=… thr=…` 双身份。编译：batch_016 exit 0；harness exit 0；exe 57,113,794B（05:18:01）。验证运行 `out80m_m1129fiber.txt` 已启动。
+NEXT：
+```
+① 读 m1129：崩溃调用的 fib/thr 与正常调用是否相同；若不同 = 跨纤程问题
+② 检查 HLE stub 0x81207344/0x81207352（互斥锁 lock/unlock）实现里是否调用 hle_thr_pump / 触发切换
+③ 检查 fiber 保存恢复路径（g_fctx/fiber_save）是否覆盖 r4-r11（callee-saved）全部寄存器
+④ 修复恢复遗漏后重跑：movie 路径应能正常创建 appProcess 并继续
+⑤ 之后：title 资源加载 → 2D 上下文 → array2 → GXM → 画面
+```
+验证：`out80m_m1128nomoviefin.txt`、`out80m_m1127r6.txt`、`out80m_m1129fiber.txt`（生成中）。 |
+| §18.4628 | M1082's 'MOVIEFIN corrupts the stack' conclusion is REFUTED by m1128: with P5D_MOVIEFIN unset (hack not executed) the crash is completely identical (same SNAP, same rg_ring 811592BE->81178F10->811DACFC->811DAD4A->811DAC9C, r6=0, BADMEM va=0). The real evidence is the probe interleaving just before BADMEM in m1128: after the crashing call's [R6-ALLOC] (r5=85CF304C r7=81306538 sp=84856298) there is first a NORMAL call's [R6-ACFC]/[R6-AD4A]/[R6-AC9C] with r6=846186C0, and only then the CRASHING call's [R6-ACFC] with r6=0 and lr=81159298 - meaning a task/fiber switch happened while FUN_811DAB8C was executing and r6 was not restored correctly when switching back. m1128 evidence: [MOVIEFIN]=0 (hack not executed); [BADMEM] guest va=0 unmapped block=0x811DAC9C tid=0 stub=812B2200; [SNAP] blk=811DAC9C r0=0 r1=812B4150 r2=812B4150 r4=2 r5=85CF304C r7=812B414C r13=84856298 r14=81159298; rg_ring 811592AA 811592B4 811592B6 811592BE 81178F10 81178F14 81178F36 811DACFC 811DAD4A 811DAC9C; probe order before BADMEM: [PROCCREATE] #27 poolmgr=84617AE0 lr=8116FA26; [R6-ALLOC] r6=0 r4=816CDA48 r5=85CF304C r7=81306538 sp=84856298 lr=8120735C (crashing call alloc entry); [R6-ACFC] r6=846186C0 r5=0 r7=816CD9F0 sp=84856298 lr=8120735C (normal call completes first); [R6-AD4A] r6=846186C0; [R6-AC9C] r6=846186C0 r4=2; [R6-ACFC] r6=00000000 r4=816CDA48 r5=85CF304C r7=812B414C sp=84856298 lr=81159298 (crashing call after resume, r6=0); [R6-AD4A] r6=0; [R6-AC9C] r6=0; BADMEM. Interpretation: two calls of the same function FUN_811DAB8C interleave (A enters alloc, switches to B which completes the whole path, switches back to A with r6 lost=0); the crashing call's lr=81159298 = the return address of bl 0x81157F4C inside FUN_81159276 (movie completion callback) so this is the normal appProcessCreate on the movie path; r6 is 0 after the switch -> our fiber/thread context save/restore is incomplete. M1083 probes: added harness hook harness_cur_fiber2() (returns g_cur_fiber); batch_016 [R6-*] probes now print fib= and thr=. Build: batch_016 exit 0; harness exit 0; exe 57,113,794B 05:18:01. Verification run out80m_m1129fiber.txt started. NEXT: (1) read m1129: is the crashing call's fib/thr different from the normal call's (cross-fiber problem); (2) inspect the HLE stubs 0x81207344/0x81207352 (mutex lock/unlock) whether they call hle_thr_pump / trigger a switch; (3) check the fiber save/restore path (g_fctx/fiber_save) covers all callee-saved registers r4-r11; (4) after fixing the restore gap rerun: the movie path should create appProcess normally and continue; (5) then title asset load -> 2D context -> array2 -> GXM -> picture. |
 m1127（`out80m_m1127r6.txt`）证据：
 ```
 # 前 27 次（正常）：
@@ -498553,3 +498581,37 @@ NEXT：
 ANTI-FORGETTING ENTRY. Keywords: M1082 crash root cause = our own [MOVIEFIN] fake-completion hack corrupting the guest stack; the pool/node/r6 logic is fine. m1127 r6 trace: first 27 FUN_811DAB8C calls have valid r6 (84617B60->846186C0 step 0x70) and write r4=2 at [node] successfully; the 28th call (lr=81159298 from the FUN_81159276 callback frame) has r6=0 and crashes. rg_ring: 811592AA/0/84856268, 811592B4/0, 811592B6/0, 811592BE/0, 81178F10/0/84856290, 81178F14/0, 81178F36/1/84856290, 811DACFC/1/84856298, 811DAD4A/0/84856298, 811DAC9C/0/84856298 - the 0x811592BE epilogue (FUN_81159276 add sp,#0x18; pop {r4,r5,r6,pc}) returned to 0x81178F10 (middle of FUN_81178F0A, cmp r0,#0) instead of its real caller -> corrupted stack return address; then FUN_81178F0A pop {r4,pc} at 0x81178F36 returned to 0x811DACFC (middle of FUN_811DAB8C) -> chained misaligned returns; 0x811DAC9C then runs with r6=0 -> BADMEM va=0. Root cause = harness code `[MOVIEFIN] invoke FUN_81159276(state=1, movie=...)` using call_guest_cb2(s, 0x81159276u, 1u, _mv, 300000) which synchronously calls a guest callback mid-dispatch with an incomplete call frame, corrupting the interrupted guest function's stack (saved LR/register slots). M1082 fix step 1: gate the hack behind P5D_MOVIEFIN (default off): static int _movie_fin_env = -1; if (_movie_fin_env < 0) { const char* _e = getenv("P5D_MOVIEFIN"); _movie_fin_env = (_e && atoi(_e)) ? 1 : 0; } if (_movie_fin_env && g_movie_played && !g_movie_done && ++g_movie_probe_n > 20000) { ... }. Build: harness exit 0; exe 57,113,739B 05:01:32. Verification run out80m_m1128nomoviefin.txt started with P5D_MOVIEFIN unset. Correct movie completion plan: (1) let the game's own movie task finish by HLE-ing the movie player status API (FUN_81157E70 registers callback 0x81159277); (2) or call the callback from inside the HLE movie status stub with a complete call_guest_cb frame; (3) or use VDEC (title_c_p5d001 NV12 raw) for the real decode path. NEXT: verify m1128 no longer crashes at 64.28M; if no crash the game waits for movie completion -> implement proper completion; if still crashing check other callback-injection hacks; then title asset load -> 2D context -> array2 -> GXM -> picture.
 
 LOOKUP: M1082 MOVIEFIN hack corrupts guest stack, r6 trace first 27 valid 84617B60..846186C0 step 0x70, 28th r6=0 lr=81159298, rg_ring 811592BE -> 81178F10 -> 811DACFC, FUN_81159276 movie callback epilogue pop corruption, call_guest_cb2(s,0x81159276u,1u,_mv,300000) incomplete frame, P5D_MOVIEFIN gate default off, exe 57,113,739B 05:01:32, out80m_m1128nomoviefin.txt, proper movie completion via HLE status API FUN_81157E70 callback 0x81159277 or VDEC title_c_p5d001 -> §18.4626 [relevant: pool/r6 probes], §18.4625 [relevant: crash introduced], §18.4624 [relevant: batch_034]
+### 18.4628 PORT M1083: MOVIEFIN 结论被否决 → 真因指向 fiber/线程上下文恢复（r6 跨切换丢失）
+
+1) m1128（MOVIEFIN 关闭）崩溃完全相同：
+```
+[MOVIEFIN]=0
+[BADMEM] guest va=0x00000000 unmapped block=0x811DAC9C
+[SNAP] blk=811DAC9C r0=0 r4=2 r5=85CF304C r7=812B414C sp=84856298 r14=81159298
+rg_ring: … 811592BE 81178F10 81178F14 81178F36 811DACFC 811DAD4A 811DAC9C
+```
+2) BADMEM 前探针交错（决定性）：
+```
+[R6-ALLOC] r6=0 r5=85CF304C r7=81306538 sp=84856298 lr=8120735C   ← 崩溃调用分配入口
+[R6-ACFC ] r6=846186C0 r5=0 r7=816CD9F0 sp=84856298               ← 正常调用先完成
+[R6-AD4A ] r6=846186C0
+[R6-AC9C ] r6=846186C0 r4=2
+[R6-ACFC ] r6=00000000 r5=85CF304C r7=812B414C sp=84856298 lr=81159298 ← 切换回来后 r6=0
+[R6-AD4A ] r6=0 [R6-AC9C] r6=0 → BADMEM
+```
+3) 结论：FUN_811DAB8C 的两个调用**交错执行**；切回崩溃调用时 r6 丢失 → 我们的 fiber/线程上下文保存恢复不完整（callee-saved r4-r11 未完整恢复，或 HLE 锁 stub 内部切换时未保存）
+4) M1083 探针：`harness_cur_fiber2()` hook + [R6-*] 打印 fib/thr；exe 57,113,794B（05:18:01）
+5) 验证运行 `out80m_m1129fiber.txt` 已启动
+NEXT：
+```
+① 崩溃调用 fib/thr 与正常调用是否不同
+② 查 0x81207344/0x81207352 锁 stub 是否触发切换
+③ 查 fiber_save/g_fctx 是否覆盖 r4-r11 全部
+④ 修复后 movie 路径 appProcessCreate 正常
+⑤ title 资源 → 2D 上下文 → array2 → GXM → 画面
+```
+验证：`out80m_m1128nomoviefin.txt`、`out80m_m1127r6.txt`、`out80m_m1129fiber.txt`（生成中）。
+
+ANTI-FORGETTING ENTRY. Keywords: M1083 refutes M1082 (MOVIEFIN hack not the cause: m1128 with P5D_MOVIEFIN unset has the identical crash - same SNAP r0=0 r4=2 r5=85CF304C r7=812B414C sp=84856298 r14=81159298, same rg_ring 811592BE 81178F10 81178F14 81178F36 811DACFC 811DAD4A 811DAC9C, same BADMEM va=0 at 0x811DAC9C). Decisive probe interleaving before BADMEM: [R6-ALLOC] r6=0 r5=85CF304C r7=81306538 sp=84856298 lr=8120735C (crashing call's alloc entry) then a NORMAL call's [R6-ACFC] r6=846186C0 r5=0 r7=816CD9F0, [R6-AD4A] r6=846186C0, [R6-AC9C] r6=846186C0 r4=2, and only then the CRASHING call's [R6-ACFC] r6=0 r5=85CF304C r7=812B414C sp=84856298 lr=81159298, [R6-AD4A] r6=0, [R6-AC9C] r6=0 -> two calls of FUN_811DAB8C interleave; while A is inside the alloc path the scheduler switches to B (which completes the whole path normally) and when it switches back to A, r6 has been lost (=0). The crashing call's lr=81159298 is the return address of bl 0x81157F4C inside FUN_81159276 (movie completion callback), i.e. this is the normal appProcessCreate on the movie path. Root cause direction: our guest thread/fiber context save/restore is incomplete (callee-saved r4-r11 not fully preserved, or HLE mutex stubs 0x81207344/0x81207352 trigger a switch without full save). M1083 probes: harness hook harness_cur_fiber2() returning g_cur_fiber; batch_016 [R6-*] probes print fib/thr; build batch_016 exit 0, harness exit 0, exe 57,113,794B 05:18:01; run out80m_m1129fiber.txt started. NEXT: read m1129 whether crashing call's fib/thr differs (cross-fiber); inspect HLE stubs 0x81207344/0x81207352 for pump/switch; check fiber_save/g_fctx covers r4-r11; fix and rerun so movie path appProcessCreate works; then title asset load -> 2D context -> array2 -> GXM -> picture.
+
+LOOKUP: M1083 MOVIEFIN refuted, m1128 identical crash with hack off, probe interleaving two FUN_811DAB8C calls, [R6-ALLOC] r5=85CF304C r7=81306538, normal [R6-ACFC] r6=846186C0, crash [R6-ACFC] r6=0 lr=81159298 sp=84856298, rg_ring 811592BE 81178F10 81178F14 81178F36 811DACFC 811DAD4A 811DAC9C, fiber/thread context restore incomplete r4-r11, HLE mutex stubs 0x81207344 0x81207352, harness_cur_fiber2 hook, batch_016 fib thr probes, exe 57,113,794B 05:18:01, out80m_m1129fiber.txt -> §18.4627 [relevant: earlier wrong conclusion], §18.4626 [relevant: r6 probes], §18.4625 [relevant: crash point]

@@ -372,6 +372,7 @@ static int g_thryield_env = -1;   // 18.4454 M909
 static std::map<uint32_t,uint64_t> g_thr_wake_vt;
 static void hle_thr_pump(RecState* s, int quantum);
 static uint32_t g_cur_fiber = 0;
+extern "C" uint32_t harness_cur_fiber2(void) { return g_cur_fiber; }
 static int g_winchk_n = 0;
 static uint32_t g_last_fiber = 0;
 static uint32_t g_prev_block = 0;
