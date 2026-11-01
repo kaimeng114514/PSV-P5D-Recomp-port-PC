@@ -1060,6 +1060,40 @@
 | M1042 | §18.4587: ★★★★★★★★★★ **重大突破：FIOSFILL 完整请求对象生效——`title/logo.bin`（2,101,012 字节）成功提供给 S0_LOGO 加载器，3 个 `logoTMX` 任务全部注册，且 logoTMX worker（wf=0x811933F1）真实执行；引擎开始渲染 960x544 场景（BSIMG doClear=1）且无任何 BADMEM**。m1099 证据：
 | M1043 | §18.4588: **为下一阶段加 [LOGO]/[TMX]/[TMA] 探针：追踪 S0_LOGO 状态机（FUN_81193704 case）、logoTMX worker（0x811933F0）与 TMX 容器解析（FUN_81174DBC），以确认 logo.bin→TGA→纹理上传链路**。改动：`batch_013.cpp` blk_81193718（[LOGO] state）、blk_81193738（case0/1 open logo.bin）、blk_811933F0（[TMX] worker arg）、blk_8119341E（[TMX] completion）；`batch_011.cpp` blk_81174DBC（[TMA] data/name/flags）。编译：batch_011/batch_013 exit 0；exe 重链 exit 0（57,059,576B，17:18:35）。验证运行：`out80m_m1100logoprobe.txt`（FORCETITLE + FIOSFILL + 新探针）已启动。NEXT：① [LOGO] state 序列（2→3→4→5…）② [TMA] 调用与返回值（TMX 容器解析）③ [TMX] completion（3 个任务是否完成）④ [TEXUPLOAD]/[TEXBIND] 纹理上传 → logoDrawProc 绘制。验证：`out80m_m1100logoprobe.txt`（生成中）、exe（57,059,576B）。 |
 | M1044 | §18.4589: **m1100 关键证据：S0_LOGO 状态机已从 state=0 推进到 state=3（logo.bin 成功解析、3 个 logoTMX 任务创建），logoTMX worker 真实运行 6 次，FUN_81174DBC（TMX 容器解析）以我们的 logo.bin 缓冲（99C67790）为输入处理 3 个 TGA 名称——但卡在 state=3：等 3 个 TGA 任务完成（FUN_8116f8d2 + task state==3），而纹理上传（[TEXUPLOAD] 0）尚未发生。M1044 为上传链（FUN_81174DBC→FUN_8116332A→FUN_81163FA4→FUN_811CA9F0/FUN_811CA6B6）加一排探针定位。** m1100 证据：
+| M1045 | §18.4590: **m1101 证据：TMX 上传链全部走通——FUN_81174DBC 在 logo.bin 中找到全部 3 个 TGA（arch->entry=99C677B8/99D67F40/99DE8384）、纹理对象创建（texobj=85B8771C/85C07C3C/85C07D1C）、GXM 纹理创建（FUN_811CA6B6）、上传调用（FUN_811CA9F0）全部执行；但 guest 的"上传完成"判定依赖纹理对象 +0x28 的 bit31（FUN_811CA9F0: `return ([tex+0x28] & 0x80000000) == 0`），我们的 HLE 从不清除该位 → worker 永远停在 state=2 → S0_LOGO 卡在 state=3。M1045 在 FUN_811CA9F0 处强制"上传完成"（清 bit31 并返回 1）**。m1101：
+```
+[TMX] arch->entry=99C677B8/99D67F40/99DE8384      ← ★ 3 个 TGA 全部在 logo.bin 中找到
+[TMX] gxm_tex_create r0=99C677B8 r1=00080312 r2=2
+[TMX] texobj=85B8771C / 85C07C3C / 85C07D1C        ← 纹理对象创建
+[TMX] upload begin tex=85B87730 / 85C07C50 / 85C07D30
+[TMX] gxm_tex_upload r0=85B87730 …
+[TMX] upload ret=00000000                          ← ★ 返回 0 = "未完成"（bit31 未清）
+[LOGO] #2 state=3（无后续）  [TEXUPLOAD] 0  [BADMEM] 0
+```
+**FUN_811CA9F0 反编译（`tmx_uitext.txt`）**：
+```c
+bool FUN_811ca9f0(int param_1) { return (*(uint *)(param_1 + 0x28) & 0x80000000) == 0; }
+// 即 [tex+0x28] 的 bit31 = "上传中" 标志；清除后返回 1 = 完成
+```
+**M1045 修改（`batch_015.cpp` blk_811CA9F0 入口）**：
+```cpp
+{ uint32_t _p = s->r[0];
+  if (_p) { uint32_t _v = rd32(s, _p + 0x28u); wr32(s, _p + 0x28u, _v & 0x7FFFFFFFu); }
+  fprintf(stderr,"[TMX] upload-done forced tex=%08X\n",...);
+  s->r[0] = 1u; return s->r[14]; }
+```
+⇒ worker 看到"上传完成" → state=3 → job 完成条件满足 → FUN_81193704 case3 通过 → state=4 淡入 → logo 序列推进。
+编译：batch_015 exit 0；exe 重链 exit 0（57,061,469B，17:58:43）。
+验证运行：`out80m_m1102tmxdone.txt`（FORCETITLE + FIOSFILL + 上传完成强制）已启动。
+NEXT：
+```
+① [LOGO] state=4（case4：淡入 + 播放 SE）→ state=5…（69 帧计数）
+② logoDrawProc 开始绘制（GXM 绘制调用 → [TEXBIND]/[BSIMG]/[PRESENT]）
+③ 截帧应出现 ATLUS logo（NOMOVIE 下）
+④ 若绘制仍黑 → 检查 GXM 纹理数据/copy 路径（TGA→TMX→GXM texture HLE）
+```
+验证：`out80m_m1101tmxupload.txt`、`out80m_m1102tmxdone.txt`（生成中）、`tmx_uitext.txt`。 |
+| §18.4590 | m1101 evidence: the whole TMX upload chain works - FUN_81174DBC found all 3 TGAs in logo.bin (arch->entry=99C677B8/99D67F40/99DE8384), texture objects created (texobj=85B8771C/85C07C3C/85C07D1C), GXM texture create (FUN_811CA6B6) and upload calls (FUN_811CA9F0) all executed; but the guest's upload-done test reads bit31 of the texture object word at +0x28 (FUN_811CA9F0: return ([tex+0x28] & 0x80000000) == 0) and our HLE never clears it -> the worker stays at state=2 -> S0_LOGO stalls at state=3. M1045 forces 'upload done' in FUN_811CA9F0 (clear bit31 and return 1). m1101: [TMX] arch->entry=99C677B8/99D67F40/99DE8384 (all 3 TGAs found in logo.bin!); gxm_tex_create r0=99C677B8 r1=00080312 r2=2; texobj=85B8771C/85C07C3C/85C07D1C; upload begin tex=85B87730/85C07C50/85C07D30; gxm_tex_upload r0=85B87730; upload ret=00000000 (return 0 = not done, bit31 not cleared); [LOGO] #2 state=3 (no further); [TEXUPLOAD] 0; [BADMEM] 0. FUN_811CA9F0 decompiled (tmx_uitext.txt): bool FUN_811ca9f0(int param_1) { return (*(uint *)(param_1 + 0x28) & 0x80000000) == 0; } - i.e. bit31 of [tex+0x28] is the 'uploading' flag; clearing it returns 1 = done. M1045 change (batch_015.cpp blk_811CA9F0 entry): { uint32_t _p=s->r[0]; if(_p){ uint32_t _v=rd32(s,_p+0x28u); wr32(s,_p+0x28u,_v&0x7FFFFFFFu); } fprintf(stderr,'[TMX] upload-done forced tex=%08X'); s->r[0]=1u; return s->r[14]; } => worker sees 'upload done' -> state=3 -> job completion condition satisfied -> FUN_81193704 case3 passes -> state=4 fade-in -> logo sequence advances. batch_015 compile exit 0; exe relink exit 0 (57,061,469B 17:58:43). Verification run out80m_m1102tmxdone.txt (FORCETITLE + FIOSFILL + forced upload-done) started. NEXT: [LOGO] state=4 (case4 fade-in + SE) -> state=5... (69-frame counter); logoDrawProc begins drawing (GXM draw calls -> [TEXBIND]/[BSIMG]/[PRESENT]); frames should show the ATLUS logo under NOMOVIE; if still black check the GXM texture data/copy path (TGA->TMX->GXM texture HLE). |
 ```
 [LOGO] #1 state=0 task=85B8754C
 [LOGO] case0/1 open logo.bin task=85B8754C
@@ -495864,3 +495898,41 @@ NEXT：
 ANTI-FORGETTING ENTRY. Keywords: M1044 m1100 shows the S0_LOGO state machine reached state=3 (logo.bin parsed, 3 logoTMX tasks created), logoTMX worker ran 6 times, FUN_81174DBC parsed our logo.bin buffer (99C67790) for 3 TGA names - but stuck at state=3 waiting for the 3 TGA tasks (FUN_8116f8d2 + task state==3) because texture upload ([TEXUPLOAD] 0) never happens. m1100: [LOGO] #1 state=0 task=85B8754C; case0/1 open logo.bin; [LOGO] #2 state=3; [TMA] FUN_81174DBC data=99C67790 name=8130AC14/AC24/AC30 flags=0; [TMX] worker arg=85B8777C/85C07C9C/85C07D7C x2; [FIOSFILL] OPEN title/logo.bin 2101012 obj=85B875D0; [TEXUPLOAD] 0; [BADMEM] 0. Upload chain: FUN_8119343A: iVar4=FUN_81174DBC(container,tga_name,0) (ARC container: entry size at +0x20, data at +0x24); puVar3[1]=FUN_8116332A(iVar4) (format detect + FUN_811641D2->FUN_811CA6B6); logoTMX worker 0x811933F1. FUN_811933F0: state<2->state=2; FUN_81163170(task[1]); if !=0 state=3. FUN_81163170->FUN_81163FA4(handle->[0])->FUN_811CA9F0 (GXM upload). M1044 probes: [TMX] arch->entry (FUN_81174DBC return), [TMX] texobj (FUN_8116332A return), [TMX] upload begin/ret (FUN_81163FA4/0x81163FAA), [TMX] gxm_tex_create (FUN_811CA6B6), [TMX] gxm_tex_upload (FUN_811CA9F0), [TMA] return ptr (FUN_81174DBC epilogue). batch_010/011/013/015 compile exit 0; exe relink exit 0 (57,061,469B 17:39:48). Verification run out80m_m1101tmxupload.txt started. NEXT: FUN_81174DBC finds the 3 TGA entries, FUN_8116332A creates texture objects, FUN_81163FA4/FUN_811CA9F0 reach GXM HLE ([TEXUPLOAD]/[TEXBIND]), 3 tasks complete -> [LOGO] state=4 fade-in -> logoDrawProc drawing.
 
 LOOKUP: M1044, [LOGO] state=3, logo.bin parsed, logoTMX worker 6 runs, FUN_81174DBC data=99C67790 names 8130AC14/AC24/AC30, [TMX] worker args 85B8777C/85C07C9C/85C07D7C, FUN_8116332A texture object, FUN_81163FA4 upload, FUN_811CA9F0, FUN_811CA6B6, FUN_811641D2, ARC container entry size +0x20 data +0x24, FUN_81163170 -> FUN_81163FA4, [TEXUPLOAD] 0, exe 57,061,469B, out80m_m1100logoprobe.txt, out80m_m1101tmxupload.txt -> §18.4588 [relevant: LOGO/TMX probes], §18.4587 [relevant: logo.bin loaded]
+### 18.4590 PORT M1045: TMX 上传链全通 + 强制"上传完成"标志
+
+1) m1101 证据：
+```
+[TMX] arch->entry=99C677B8/99D67F40/99DE8384      ← 3 个 TGA 全部在 logo.bin 中找到
+[TMX] gxm_tex_create r0=99C677B8 r1=00080312 r2=2
+[TMX] texobj=85B8771C / 85C07C3C / 85C07D1C        ← 纹理对象
+[TMX] upload begin tex=85B87730 / 85C07C50 / 85C07D30
+[TMX] gxm_tex_upload r0=85B87730 …
+[TMX] upload ret=00000000                          ← 0 = 未完成（bit31 未清）
+[LOGO] #2 state=3   [TEXUPLOAD] 0   [BADMEM] 0
+```
+2) FUN_811CA9F0（`tmx_uitext.txt`）：
+```c
+bool FUN_811ca9f0(int param_1) { return (*(uint *)(param_1 + 0x28) & 0x80000000) == 0; }
+// [tex+0x28] bit31 = 上传中；清除后返回 1 = 完成
+```
+3) M1045 修改（batch_015.cpp blk_811CA9F0 入口）：
+```cpp
+{ uint32_t _p = s->r[0];
+  if (_p) { uint32_t _v = rd32(s, _p + 0x28u); wr32(s, _p + 0x28u, _v & 0x7FFFFFFFu); }
+  fprintf(stderr,"[TMX] upload-done forced tex=%08X\n",...);
+  s->r[0] = 1u; return s->r[14]; }
+```
+4) 编译：batch_015 exit 0；exe 57,061,469B（17:58:43）
+5) 验证运行 `out80m_m1102tmxdone.txt` 已启动
+NEXT：
+```
+① [LOGO] state=4（淡入 + SE）→ 5…（69 帧计数）
+② logoDrawProc 绘制（[TEXBIND]/[BSIMG]/[PRESENT]）
+③ 截帧出现 ATLUS logo
+④ 仍黑 → 检查 TGA→TMX→GXM 纹理数据路径
+```
+验证：`out80m_m1101tmxupload.txt`、`out80m_m1102tmxdone.txt`（生成中）、`tmx_uitext.txt`。
+
+ANTI-FORGETTING ENTRY. Keywords: M1045 m1101 proved the whole TMX upload chain works: FUN_81174DBC found all 3 TGAs in logo.bin (arch->entry=99C677B8/99D67F40/99DE8384), texture objects created (texobj=85B8771C/85C07C3C/85C07D1C), GXM texture create (FUN_811CA6B6) and upload (FUN_811CA9F0) executed, but the guest's upload-done test is bit31 of the texture object word at +0x28 (FUN_811CA9F0: return ([tex+0x28] & 0x80000000)==0) which our HLE never clears -> worker stuck at state=2 -> S0_LOGO stuck at state=3. M1045 forces upload-done in FUN_811CA9F0: { uint32_t _p=s->r[0]; if(_p){ uint32_t _v=rd32(s,_p+0x28u); wr32(s,_p+0x28u,_v&0x7FFFFFFFu); } fprintf(stderr,'[TMX] upload-done forced tex=%08X'); s->r[0]=1u; return s->r[14]; } (batch_015.cpp blk_811CA9F0). batch_015 compile exit 0; exe relink exit 0 (57,061,469B 17:58:43). Verification run out80m_m1102tmxdone.txt (FORCETITLE + FIOSFILL) started. NEXT: [LOGO] state=4 (case4 fade-in + SE) -> state=5 (69-frame counter); logoDrawProc draws (GXM draw -> [TEXBIND]/[BSIMG]/[PRESENT]); frames should show ATLUS logo under NOMOVIE; if black check the TGA->TMX->GXM texture data path.
+
+LOOKUP: M1045, TMX upload chain complete, arch->entry=99C677B8/99D67F40/99DE8384, texobj=85B8771C/85C07C3C/85C07D1C, gxm_tex_create r1=00080312, upload begin tex=85B87730/85C07C50/85C07D30, upload ret=0, FUN_811CA9F0 bit31 [tex+0x28], upload-done force, blk_811CA9F0 batch_015, [LOGO] state=3, exe 57,061,469B, out80m_m1102tmxdone.txt -> §18.4589 [relevant: upload chain probes], §18.4587 [relevant: logo.bin loaded]
