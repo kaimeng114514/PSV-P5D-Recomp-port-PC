@@ -1040,6 +1040,37 @@
 | M1022 | §18.4567: ★★★★★★★★★★ **选择性强制成功！周期 job 全部真跑（JOBNORM 28 条，含 appFade 0x811792B3 ×2、sequence 0x811857C3、title 0x81198173）+ appFade 状态修复（`[TTF8] g8a8ret=85A9E42C`，不再是 0xE5E5E5E5）→ title 状态机推进到 case1/2，并在**声音对象查找**上撞到新缺口：`FUN_81171BEA` 返回 0（sound object 未创建，因为 init-sound worker 0x811848B7 仍被强制跳过）**。`out80m_m1085selforce.txt` / err：
 | M1023 | §18.4568: **关键发现：init 链的 sound 等 worker 根本没被调度（JOBNORM 28 条里没有 wf=811848B7），因为 M998 强制 page1 update=0 让 init 状态机在 initDataRead 处就提前结束。新方案：移除 page1 提前结束强制 + 取消全部 worker 强制，让真实 init 链跑完（STEPFORCE 只让各 worker 的完成检查通过）**。`out80m_m1086soundrun.txt`（放行 sound worker 后）与 m1085 完全一致：
 | M1024 | §18.4569: ★★★★★★★★ **真实 init 链启动成功！M1023 移除 page1 提前结束强制后，trophy/sound/initDataRead worker 全部真实被调度（WFDBG #49 `node=85B8861C wf=811848B7` = init-sound worker 首次调度！），运行突破 n=60.1M 且无 BADMEM**。`out80m_m1087realinit.txt` / err：
+| M1025 | §18.4570: **真实 init 链卡在 step0 trophy：反编译发现每个 init worker 都是「state 0→1 调初始化函数 + 每次调完成检查函数，检查非 0 → return -1」；STEPFORCE 缺 trophy 的检查 block（0x8118482C `cmp r0,#0` 后 beq pending），已补强制 r0=1**。反编译证据（`initsteps2.txt`）：
+```c
+// trophy worker FUN_81184808（node 0x81184809）
+iVar2 = FUN_8102d544();           // 检查：trophy 初始化完成？
+if (iVar2 == 0) return 0;         // ← 未完成 → 返回 0（pending）
+return 0xffffffff;                // 完成 → -1
+// 汇编：81184828 bl 0x8102d544; 8118482c cmp r0,#0; 8118482e beq 0x81184836(pending)
+//       → 需在 block 0x8118482C 强制 r0=1
+// 同结构：
+//  sound worker FUN_811848B6: bl 0x8115487a @0x811848D6; cmp @0x811848DA（已强制）
+//  gamedata FUN_81184964: 7 个检查 @0x811849A4..E0（已强制）
+//  msgwindow FUN_81184A88: bl 0x81031904 @0x81184AA8（已强制）
+//  mainmenu FUN_81184B38: @0x81184B6C 等（已强制）
+//  step5 FUN_81184CF8: bl 0x81049a76 @0x81184D1A（已强制）
+```
+⇒ **init 链在 step0 trophy 处等待**（检查未被强制 → worker 永远返回 0 → JOBCOMP 一直 1、SEQREQ 无 page=6）。
+**M1025 修复**：`recomp_harness.cpp` job_probes STEPFORCE 新增：
+```cpp
+case 0x8118482Cu: s->r[0] = 1u; break;   // M1025: init trophy check FUN_8102d544 != 0 (done)
+```
+编译：harness exit 0；exe 重链 exit 0（57,049,241B，12:24:57）。
+验证运行：`out80m_m1088trophyfix.txt` 已启动。
+NEXT：
+```
+① [JOBCOMP] 逐个增加（trophy→sound→gamedata→msgwindow→mainmenu→step5→initDataRead）
+② [SEQREQ] 出现 page=6（initDataRead 完成回调）
+③ page6 start → title worker → 声音对象已创建 → title case0/1 通过
+④ title 状态机推进 → title 对象 → 引擎自绘标题
+```
+验证：`out80m_m1087realinit.txt`（trophy worker 真跑但卡 pending）、`initsteps2.txt`、`recomp_harness.exe`（57,049,241B）、`out80m_m1088trophyfix.txt`（生成中）。 |
+| §18.4570 | The real init chain is stuck at step0 trophy: decompilation shows every init worker follows the pattern 'state 0->1 call init function + call completion-check each time, check non-zero -> return -1'; STEPFORCE was missing the trophy check block (0x8118482C cmp r0,#0 then beq pending) - added a force r0=1. Decompilation evidence (initsteps2.txt): trophy worker FUN_81184808 (node 0x81184809): iVar2=FUN_8102d544(); if (iVar2==0) return 0; return 0xffffffff; assembly 81184828 bl 0x8102d544; 8118482c cmp r0,#0; 8118482e beq 0x81184836 (pending) => must force r0=1 at block 0x8118482C. Same structure: sound worker FUN_811848B6 bl 0x8115487a @0x811848D6, cmp @0x811848DA (already forced); gamedata FUN_81184964 seven checks @0x811849A4..E0 (already forced); msgwindow FUN_81184A88 bl 0x81031904 @0x81184AA8 (already forced); mainmenu FUN_81184B38 @0x81184B6C etc (already forced); step5 FUN_81184CF8 bl 0x81049a76 @0x81184D1A (already forced). So the init chain waits at step0 trophy (check not forced => worker always returns 0 => JOBCOMP stays 1, no SEQREQ page=6). M1025 fix: recomp_harness.cpp job_probes STEPFORCE adds: case 0x8118482Cu: s->r[0]=1u; break; // init trophy check FUN_8102d544 != 0 (done). harness compile exit 0; exe relink exit 0 (57,049,241B 12:24:57). Verification run out80m_m1088trophyfix.txt started. NEXT: [JOBCOMP] grows one by one (trophy->sound->gamedata->msgwindow->mainmenu->step5->initDataRead); [SEQREQ] page=6 appears; page6 start -> title worker -> sound objects exist -> title case0/1 passes; title state machine advances -> title object -> engine-drawn title. |
 ```
 [FRAMEDUMP] last n=60095000（运行仍在继续，旧配置都在 59.57M 崩溃停止）
 [JOBCOMP] 1（#1 poolnode=84618110 n=59626141）
@@ -494534,3 +494565,40 @@ NEXT：
 ANTI-FORGETTING ENTRY. Keywords: M1024 real init chain finally started - after M1023 removed the page1 early-finish force, the trophy/sound/initDataRead workers are all really scheduled. out80m_m1087realinit.txt / err: [FRAMEDUMP] last n=60095000 (run still going; old configs crashed at 59.57M); [JOBCOMP] 1 (#1 poolnode=84618110 n=59626141); [SEQREQ] 8 (no page=6 yet); [PRESENT] 1; [ABIVTX] 1; [BADMEM] 0; [JOBNORM] 40 (cap) includes wf=81184FFF node=85B846EC (initDataRead) and wf=81184809 node=85B86A1C (trophy worker really running); [WFDBG] 53 entries including NEW: #48 ctx=846180A0 node=85B846EC wf=81184FFF; #49 ctx=846181F0 node=85B8861C wf=811848B7 (init-sound worker first scheduled!); #50-#53 periodic jobs. Meaning: M1023's fix lets the init state machine really advance (trophy->sound->...); the init-sound worker will create BGM/COMSE/EVENT/EVENT_ENV/DCOMMON sound objects; the run no longer crashes at 59.57M; next the init chain must finish (8 steps + initDataRead) -> page1 really ends -> setSequence(6,0,0,0) -> page6 -> title worker -> sound objects exist -> title case0/1 passes. Note init workers may need several frames each (STEPFORCE only forces checks); run slower ~1.5-2M blocks/min. NEXT: watch [JOBCOMP] grow; [SEQREQ] page=6; [TTC]/[TWF] probes; sound objects created (FUN_81171BEA non-zero); title case0/1 passes -> title state machine advances -> title object -> engine-drawn title.
 
 LOOKUP: M1024, real init chain started, out80m_m1087realinit.txt, n=60095000, [JOBCOMP] 1, [SEQREQ] 8, no page6 yet, JOBNORM 81184809 trophy, 81184FFF initDataRead, WFDBG #49 node=85B8861C wf=811848B7 init-sound worker first scheduled, no BADMEM, M1023 page1 force removed, STEPFORCE -> §18.4568 [relevant: M1023 fix], §18.4567 [relevant: sound objects], §18.4566 [relevant: selective force]
+### 18.4570 PORT M1025: 真实 init 链卡在 step0 trophy（补完成检查强制）
+
+1) `initsteps2.txt` 反编译：init worker 统一模式
+```c
+// trophy worker FUN_81184808（node 0x81184809）
+iVar2 = FUN_8102d544();
+if (iVar2 == 0) return 0;      // 未完成 → pending
+return 0xffffffff;             // 完成 → -1
+// 81184828 bl 0x8102d544; 8118482c cmp r0,#0; 8118482e beq pending
+// → 需强制 block 0x8118482C: r0=1
+```
+| worker | 检查函数 | 检查 block | STEPFORCE |
+|---|---|---|---|
+| trophy `FUN_81184808` | `FUN_8102d544` | 0x8118482C | **M1025 新增** |
+| sound `FUN_811848B6` | `FUN_8115487a` | 0x811848DA | 已有 |
+| gamedata `FUN_81184964` | 7 检查 | 0x811849A4..E0 | 已有 |
+| msgwindow `FUN_81184A88` | `FUN_81031904` | 0x81184AA8 | 已有 |
+| mainmenu `FUN_81184B38` | 多检查 | 0x81184B6C… | 已有 |
+| step5 `FUN_81184CF8` | `FUN_81049a76` | 0x81184D1A | 已有 |
+2) M1025 修复（recomp_harness.cpp STEPFORCE）：
+```cpp
+case 0x8118482Cu: s->r[0] = 1u; break;   // init trophy check FUN_8102d544 != 0 (done)
+```
+3) 编译：harness exit 0；exe 重链 exit 0（57,049,241B 12:24:57）。
+4) 验证运行 `out80m_m1088trophyfix.txt` 已启动。
+NEXT：
+```
+① [JOBCOMP] 逐个增加
+② [SEQREQ] page=6
+③ page6 start → title worker → 声音对象存在 → title case0/1 通过
+④ title 状态机推进 → title 对象 → 引擎自绘标题
+```
+验证：`out80m_m1087realinit.txt`、`initsteps2.txt`、`out80m_m1088trophyfix.txt`（生成中）。
+
+ANTI-FORGETTING ENTRY. Keywords: M1025 real init chain stuck at step0 trophy. Decompiled initsteps2.txt: every init worker follows 'state 0->1 call init function + call completion-check each time, check non-zero -> return -1'. Trophy worker FUN_81184808 (node 0x81184809): iVar2=FUN_8102d544(); if(iVar2==0) return 0; return 0xffffffff; assembly 81184828 bl 0x8102d544; 8118482c cmp r0,#0; 8118482e beq pending => must force r0=1 at block 0x8118482C. Other workers' check blocks: sound 0x811848D6/0x811848DA; gamedata 0x811849A4..E0; msgwindow 0x81184AA8; mainmenu 0x81184B6C; step5 0x81184D1A (all already forced). STEPFORCE was missing the trophy case, so the init chain waited at step0 (JOBCOMP stayed 1, no SEQREQ page=6). M1025 fix in recomp_harness.cpp job_probes STEPFORCE: case 0x8118482Cu: s->r[0]=1u; break; // init trophy check FUN_8102d544 != 0 (done). harness compile exit 0; exe relink exit 0 (57,049,241B 12:24:57). Verification run out80m_m1088trophyfix.txt started. NEXT: [JOBCOMP] grows one by one (trophy->sound->gamedata->msgwindow->mainmenu->step5->initDataRead); [SEQREQ] page=6 appears; page6 start -> title worker -> sound objects exist -> title case0/1 passes; title state machine advances -> title object -> engine-drawn title.
+
+LOOKUP: M1025, init chain stuck step0 trophy, initsteps2.txt, FUN_81184808, FUN_8102d544, check block 0x8118482C, STEPFORCE case 0x8118482C, sound 0x811848DA, gamedata 0x811849A4, msgwindow 0x81184AA8, mainmenu 0x81184B6C, step5 0x81184D1A, out80m_m1087realinit.txt stuck JOBCOMP 1, out80m_m1088trophyfix.txt, exe 57,049,241B -> §18.4569 [relevant: real init chain started], §18.4568 [relevant: M1023]

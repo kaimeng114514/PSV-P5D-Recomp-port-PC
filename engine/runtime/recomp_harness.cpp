@@ -1179,6 +1179,7 @@ static void job_probes(uint32_t pcv, RecState* s) {
     if (_sf) {
       const uint32_t _p = pcv & ~1u;
       switch (_p) {
+        case 0x8118482Cu: s->r[0] = 1u; break;   // M1025: init trophy check FUN_8102d544 != 0 (done) -> worker returns -1
         case 0x811848D6u: s->r[0] = 1u; break;   // init sound: FUN_8115487a done
         // 18.4541 M996: the real post-call block of bl FUN_8115487a in the init-sound worker is
         // 0x811848DA (cmp r0,#0) - force its result to 1 there so the worker returns -1 (done).
