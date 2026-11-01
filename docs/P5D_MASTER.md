@@ -1102,6 +1102,39 @@
 | M1084 | §18.4629: ★★★★★★★ **fiber/线程身份探针结果：崩溃调用与正常调用在【同一纤程 848463A0、同一线程 0、同一 SP 84856298】上——排除"跨纤程恢复"假设。更诡异的现象：同一函数 FUN_811DAB8C 的尾段块（0x811DACFC/0x811DAD4A/0x811DAC9C）在崩溃前被执行【两次】：第一次 r6=846186C0（正常完成），紧接着第二次 r6=0（同一 SP / r4 / r5 / r7 / lr=81159298）→ BADMEM。这说明不是线程切换丢寄存器，而是**同一个调用路径被重放/重入**，且第二次进入时 r6 已被清零。M1084 加 pc-ring 前驱探针（harness_pc_ring hook，打印进入每个关键块前最后 6-8 个 PC）以确定第二次进入的直接前驱。**
 | M1085 | §18.4630: ★★★★★★★★★ **pc-ring 直接抓到第二次入口的前驱链：`81178F36 (pop {r4,pc}) → 811DACFC`。即 FUN_81178F0A 的 `pop {r4,pc}` 从栈上弹出了 0x811DACFC 作为返回地址，使执行直接落在 FUN_811DAB8C 的中段 0x811DACFC（跳过 0x811DABC2 的 r6 池分配），r6 保持调用者遗留的 0。正常调用的 ring 是 `811DAD6A→811DAD6E→811DAD80→811DACF6→81207352→812B28A0→8120735C→811DACFC`（完整函数路径），崩溃调用则是 `811592AA→811592B4→811592B6→811592BE→81178F10→81178F14→81178F36→811DACFC`——跨函数错位返回链。M1085 先用**手动块安全覆盖 0x811DACFC**（r6==0 时跳过节点插入、走正常 epilogue 返回 NULL）阻止 BADMEM，验证能否越过该点继续流程。**
 | M1086 | §18.4631: ★★★★★★★★★★ **ACFC-SAFE 覆盖生效！运行首次越过 movie 崩溃点并进入 GXM 绘制代码（FUN_811EFE9E 调用 SceGxm_A949A803 / SceGxm_2B528462 / SceGxm_4ED2E49D）——但随后出现第二个栈帧错位崩溃：BADMEM va=0xBF800008 @ block 0x811EFFD6，lr=0x3F800000（float 1.0 被当作返回地址），[SNAP] r0=3F800000 r1=8130CB20 sp=84856150。说明 movie 路径的栈污染并没有被根治（ACFC-SAFE 只是绕过第一个症状），污染继续传播到 GXM 绘制路径。**
+| M1087 | §18.4632: ★★★★★★★ **m1132 栈转储结果：GXM 路径早期调用（movie 之前）一切正常——[EFF9E-ENT] sp=848561A8 lr=811C56D0、[EFFCC]/[EFFD6] sp=84856150（帧 0x58 正确递减），说明 FUN_811EFE9E 本身和常规调用栈都正常；之前 0x811EFFD6 的 float 1.0 崩溃是 ACFC-SAFE 返回 NULL 后调用者未检查、用垃圾数据继续构建 GXM 批次导致的**下游后果**，不是独立 bug。⇒ 真正要解决的是最初 FUN_81159276 栈帧错位（返回 0x81178F10）的根因。M1087 改为在 movie 完成回调 FUN_81159276 的入口（0x81159276）与出口（0x811592BE）转储栈帧 + PC ring，直接观察被污染的那次调用。**
+m1132（`out80m_m1132effd6.txt`）证据（早期正常调用，cap 30）：
+```
+[EFF9E-ENT] sp=848561A8 lr=811C56D0 r0=84856204 r1=8153A74C/8153DECC/... fib=848463A0
+[EFFCC]     sp=84856150 lr=811EFFA0 r0=00000000 r1=8130CB20 fib=848463A0
+[EFFD6]     sp=84856150 lr=00000000 r0=00000000 r1=8130CB20 fib=848463A0
+             stk: 00000000 00000000 8...（帧结构正常：0x848561A8-0x58=0x84856150）
+[BADMEM]=0 [ACFC-SAFE]=0（该运行尚未到崩溃点）
+```
+**判断**：
+1. FUN_811EFE9E 的入口/中途栈帧正常（sp 变化与 push+sub 0x58 帧一致）
+2. 0x811EFFD6 的 float 1.0 崩溃发生在 ACFC-SAFE 触发（返回 NULL）之后：调用者用 NULL 节点继续构建 GXM 绘制批次 → 读到 float 数据当指针
+3. ⇒ ACFC-SAFE 是"绕过症状"而不是修复；真正的根因仍是 **FUN_81159276 返回地址被改成 0x81178F10**（movie 完成回调栈帧错位）
+**M1087 探针（batch_010，包含 FUN_81159276）**：
+```
+[MOVCB-ENT] @0x81159276 入口：n/sp/lr/r6/fib + 栈前 8 字 + PC ring(8)
+[MOVCB-EPI] @0x811592BE 出口（add sp,#0x18; pop {r4,r5,r6,pc} 前）：栈前 10 字 + PC ring(8)
+（cap 300，覆盖到崩溃那次调用）
+```
+编译：batch_010 exit 0；harness exit 0；exe 57,117,097B（06:20:55）。验证运行 `out80m_m1133movcb.txt` 已启动。
+NEXT：
+```
+① 读 m1133 最后几行 [MOVCB-ENT]/[MOVCB-EPI]：
+   • 崩溃那次调用的入口 lr 是什么（正常应为 movie player 调用点，如 0x81157xxx）
+   • 出口前栈上 [sp]..[sp+0x0C]（保存的 r4,r5,r6,pc）中 pc 槽是否为 0x81178F10
+② 若入口 lr 就是 0x81178F10 附近 → 调用者来源错（谁调用 callback 时 LR 错）
+③ 若入口 lr 正常但出口栈被改 → 回调体内某指令/某 HLE 调用覆盖了保存槽
+   → 用栈写监视（wr32_watch）定位写入者
+④ 修复后恢复 ACFC-SAFE（或移除），验证 movie 流程自然完成
+⑤ 之后 GXM 绘制批次继续 → SceGxmDraw/BeginScene → 画面
+```
+验证：`out80m_m1132effd6.txt`、`out80m_m1133movcb.txt`（生成中）、batch_010。 |
+| §18.4632 | m1132 stack dumps show the GXM path's early calls (before the movie) are all normal - [EFF9E-ENT] sp=848561A8 lr=811C56D0, [EFFCC]/[EFFD6] sp=84856150 (frame 0x58 decremented correctly) - so FUN_811EFE9E itself and the regular call stack are fine; the earlier 0x811EFFD6 float-1.0 crash is a DOWNSTREAM consequence of ACFC-SAFE returning NULL (the caller did not check and continued building GXM batches with garbage), not an independent bug. So the real target remains the original FUN_81159276 stack frame misalignment (return to 0x81178F10). M1087 now dumps the stack frame + PC ring at the movie completion callback FUN_81159276 entry (0x81159276) and exit (0x811592BE) to directly observe the corrupted invocation. m1132 evidence (early normal calls, cap 30): [EFF9E-ENT] sp=848561A8 lr=811C56D0 r0=84856204 r1=8153A74C/8153DECC/... fib=848463A0; [EFFCC] sp=84856150 lr=811EFFA0 r0=0 r1=8130CB20; [EFFD6] sp=84856150 lr=0 r0=0 r1=8130CB20; stack frame decrement 0x848561A8-0x58=0x84856150 correct; [BADMEM]=0 [ACFC-SAFE]=0 (that run had not reached the crash point). Conclusion: (1) FUN_811EFE9E entry/mid stack frames are normal; (2) the 0x811EFFD6 float-1.0 crash occurs after ACFC-SAFE triggered (returned NULL): the caller continued building GXM draw batches with a NULL node -> read float data as pointer; (3) so ACFC-SAFE bypassed the symptom rather than fixing it; the real root cause is still the FUN_81159276 return address being changed to 0x81178F10 (movie completion callback stack frame misalignment). M1087 probes (batch_010 which contains FUN_81159276): [MOVCB-ENT] @0x81159276 entry: n/sp/lr/r6/fib + first 8 stack words + PC ring(8); [MOVCB-EPI] @0x811592BE exit (before add sp,#0x18; pop {r4,r5,r6,pc}): first 10 stack words + PC ring(8); cap 300 to cover the crashing invocation. Build: batch_010 exit 0; harness exit 0; exe 57,117,097B 06:20:55. Verification run out80m_m1133movcb.txt started. NEXT: (1) read m1133 last [MOVCB-ENT]/[MOVCB-EPI] lines: what is the crashing invocation's entry lr (normally a movie-player call site like 0x81157xxx); are the saved slots [sp]..[sp+0x0C] (r4,r5,r6,pc) such that the pc slot is 0x81178F10; (2) if the entry lr is already near 0x81178F10 then the caller is wrong (who calls the callback with a wrong LR); (3) if the entry lr is normal but the exit stack was modified then some instruction/HLE call inside the callback overwrote the saved slots -> use wr32_watch to find the writer; (4) after the fix restore/remove ACFC-SAFE and verify the movie flow completes naturally; (5) then GXM draw batches continue -> SceGxmDraw/BeginScene -> picture. |
 m1131（`out80m_m1131acfcsafe.txt`）证据：
 ```
 [ACFC-SAFE] #1500000 r6=0 -> skip insert, go epilogue lr=81159298 sp=84856298 fib=848463A0
@@ -498822,3 +498855,37 @@ NEXT：
 ANTI-FORGETTING ENTRY. Keywords: M1086 ACFC-SAFE override works - the run passed the movie crash point for the first time ([ACFC-SAFE] #1500000 r6=0 -> skip insert, go epilogue lr=81159298 sp=84856298 fib=848463A0, override triggered once) and entered GXM drawing code: FUN_811EFE9E calls SceGxm_A949A803 / SceGxm_2B528462 / SceGxm_4ED2E49D (real GXM draw/texture batch building) - FIRST entry into GXM drawing code. But then a second stack-frame corruption crash: [BADMEM] guest va=0xBF800008 unmapped block=0x811EFFD6 tid=0 stub=812B12A0; [SNAP] blk=811EFFD6 r0=3F800000 r1=8130CB20 r2=00000001 r4=8130CB20 r5=00000000 r7=81514C80 r8=00000022 r9=0000000A r13=84856150 r14=3F800000 - lr=0x3F800000 (float 1.0) used as a return address. 0x811EFFD6 is inside FUN_811EFE9E (542B); the crashing block does ldrd r1,r0,[sp,#0x20] then r0=rd32(r1+r0); actual r0=0x3F800000. FUN_811EFE9E prologue is push.w {r4,r5,r6,r7,r8,sb,sl,fp,lr} (9x4=36B) + sub sp,#0x34 (52B) = 88B frame and the generated block matches, but [sp+0x14]/[sp+0x20..] contain float 1.0 (0x3F800000) instead of pointers -> stack contents polluted by float data or the stack was already misaligned upstream (movie completion path). So the movie-path stack corruption was not cured (ACFC-SAFE only bypassed the first symptom) and propagated into the GXM path. M1086 probes (batch_017): [EFF9E-ENT] @0x811EFE9E entry prints sp/lr/r0/r1/fib/thr + first 24 stack words; [EFFCC] @0x811EFFCC (before ldr r0,[sp,#0x14]); [EFFD6] @0x811EFFD6 (before ldrd r1,r0,[sp,#0x20]). Build: batch_017 exit 0; harness exit 0; exe 57,115,971B 06:13:08; run out80m_m1132effd6.txt started. NEXT: compare [EFF9E-ENT] and [EFFD6] stack dumps to find which slots are overwritten by float 0x3F800000; trace the writer (local variable mapping / VFP instruction / leftover movie-path misalignment); if AOT generation error fix that block with a manual block; if upstream movie-path misalignment trace the FUN_81159276 stack frame corruption source; then GXM draw batches continue -> first real draw calls (SceGxmDraw/BeginScene) -> picture.
 
 LOOKUP: M1086 ACFC-SAFE works, first entry into GXM drawing code, FUN_811EFE9E calls SceGxm_A949A803 SceGxm_2B528462 SceGxm_4ED2E49D, second crash BADMEM va=0xBF800008 block 0x811EFFD6 lr=0x3F800000 float 1.0, [SNAP] r0=3F800000 r1=8130CB20 r13=84856150, prologue push.w 9 regs + sub sp,#0x34 = 88B frame, generated block matches push/sub, [sp+0x14] [sp+0x20] contain 0x3F800000 instead of pointers, stack pollution propagated from movie path, batch_017 probes [EFF9E-ENT] [EFFCC] [EFFD6] stack dumps 24 words, exe 57,115,971B 06:13:08, out80m_m1132effd6.txt, next find float 1.0 writer/VFP error/upstream misalignment -> §18.4630 [relevant: ACFC-SAFE patch], §18.4629 [relevant: pc-ring], §18.4628 [relevant: fiber]
+### 18.4632 PORT M1087: FUN_811EFE9E 栈帧正常 → 0x811EFFD6 崩溃是 ACFC-SAFE 返回 NULL 的下游后果；改为探针 movie 回调 FUN_81159276 入口/出口栈帧
+
+1) m1132 早期栈转储（正常）：
+```
+[EFF9E-ENT] sp=848561A8 lr=811C56D0 r0=84856204 r1=8153A74C fib=848463A0
+[EFFCC]     sp=84856150 lr=811EFFA0 r0=0 r1=8130CB20
+[EFFD6]     sp=84856150 lr=0 r0=0 r1=8130CB20  stk: 0 0 8…
+             ↑ 帧 0x848561A8 - 0x58 = 0x84856150，正确
+```
+2) 判断：
+- FUN_811EFE9E 及常规调用栈正常
+- 0x811EFFD6 的 float 1.0 崩溃是 ACFC-SAFE 返回 NULL 后下游继续用垃圾数据构建 GXM 批次的结果
+- ⇒ 真正根因：FUN_81159276 返回地址被改成 0x81178F10（movie 完成回调栈帧错位）
+3) M1087 探针（batch_010）：
+```
+[MOVCB-ENT] @0x81159276 入口：n/sp/lr/r6/fib + 栈前 8 字 + PC ring(8)
+[MOVCB-EPI] @0x811592BE 出口（pop {r4,r5,r6,pc} 前）：栈前 10 字 + PC ring(8)
+cap 300（覆盖崩溃那次调用）
+```
+4) 编译：batch_010 exit 0；harness exit 0；exe 57,117,097B（06:20:55）
+5) 验证运行 `out80m_m1133movcb.txt` 已启动
+NEXT：
+```
+① 崩溃调用入口 lr 值（正常应为 0x81157xxx movie player 调用点）
+② 出口前栈槽 pc 是否为 0x81178F10
+③ 入口 lr 错 → 查调用者；栈内被改 → wr32_watch 找写入者
+④ 修复后恢复/移除 ACFC-SAFE
+⑤ GXM 绘制批次继续 → SceGxmDraw/BeginScene → 画面
+```
+验证：`out80m_m1132effd6.txt`、`out80m_m1133movcb.txt`（生成中）、batch_010。
+
+ANTI-FORGETTING ENTRY. Keywords: M1087 m1132 stack dumps show the GXM path's early calls are all normal - [EFF9E-ENT] sp=848561A8 lr=811C56D0 r0=84856204 r1=8153A74C/8153DECC fib=848463A0; [EFFCC] sp=84856150 lr=811EFFA0 r0=0 r1=8130CB20; [EFFD6] sp=84856150 lr=0 r0=0 r1=8130CB20; frame 0x848561A8-0x58=0x84856150 correct; [BADMEM]=0 [ACFC-SAFE]=0 in that run. So FUN_811EFE9E itself and the regular call stack are fine; the earlier 0x811EFFD6 float-1.0 crash is a DOWNSTREAM consequence of ACFC-SAFE returning NULL (the caller did not check and continued building GXM batches with garbage). The real target remains the original FUN_81159276 stack frame misalignment (return to 0x81178F10). M1087 probes (batch_010): [MOVCB-ENT] @0x81159276 entry prints n/sp/lr/r6/fib + first 8 stack words + PC ring(8); [MOVCB-EPI] @0x811592BE exit (before add sp,#0x18; pop {r4,r5,r6,pc}) prints first 10 stack words + PC ring(8); cap 300 to cover the crashing invocation. Build: batch_010 exit 0; harness exit 0; exe 57,117,097B 06:20:55. Verification run out80m_m1133movcb.txt started. NEXT: read m1133 last [MOVCB-ENT]/[MOVCB-EPI]: what is the crashing invocation's entry lr (normally a movie-player call site like 0x81157xxx); whether the saved slots [sp]..[sp+0x0C] (r4,r5,r6,pc) have pc=0x81178F10; if entry lr is already near 0x81178F10 the caller is wrong; if entry lr is normal but the exit stack was modified some instruction/HLE call inside the callback overwrote the saved slots -> use wr32_watch to find the writer; after the fix restore/remove ACFC-SAFE and verify the movie flow completes naturally; then GXM draw batches continue -> SceGxmDraw/BeginScene -> picture.
+
+LOOKUP: M1087 FUN_811EFE9E stack frames normal, early GXM calls sp=848561A8 lr=811C56D0, EFFCC/EFFD6 sp=84856150 frame 0x58 correct, 0x811EFFD6 float 1.0 crash is downstream of ACFC-SAFE NULL return, real root remains FUN_81159276 return to 0x81178F10, M1087 probes [MOVCB-ENT] @0x81159276 [MOVCB-EPI] @0x811592BE stack 8-10 words + pc ring cap 300, batch_010, exe 57,117,097B 06:20:55, out80m_m1133movcb.txt, next find who corrupts saved r4/r5/r6/pc slots or wrong caller LR -> §18.4631 [relevant: second crash], §18.4630 [relevant: ACFC-SAFE], §18.4629 [relevant: pc-ring]
