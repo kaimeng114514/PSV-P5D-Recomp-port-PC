@@ -1025,6 +1025,35 @@
 | M1007 | §18.4552: ★★★★★★★★★ **NOMOVIE 隔离实验证伪（可见画面全来自宿主 movie 层）+ 选择性 job 强制（只强制 init 系列 worker，放行 title/movie job 真正执行）**。`out80m_m1074nomovie.txt`（P5D_NOMOVIE=1）：
 | M1008 | §18.4553: **选择性 job 强制失败（回退全强制）+ 改为「强制 TITLE 页 update=1」让 page6 常驻**。M1007 的选择性强制运行（`out80m_m1075selectforce.txt`）结果：
 | M1009 | §18.4554: ★★★★★★★★ **找到 title 页恒黑的真正原因：M1008 强制 page6 update=1 只让页"活着"，但 title 的绘制/状态推进由 job "title sequence" 的 worker（0x81198172 状态机）驱动，而全强制把它跳过了 → 恒黑。新方案：全强制但放行 title worker（`0x81198173`）**。检查 AOT 覆盖：**title worker 0x81198172 存在于 batch_013.cpp**（无缺口）。反编译 `FUN_81198172`（286B 状态机）：
+| M1010 | §18.4555: **Hybrid 强制首跑：行为与全强制完全一致（JOBEXEC 0 = title worker 未被调度）→ 加 WFDBG 诊断确认 worker 检测值**。`out80m_m1077titleworker.txt`（全强制但放行 title worker）：
+```
+[JOBCOMP] 11 / [JOBDONE2] 11（与全强制一致）
+[SEQREQ] 16（page=6 请求存在）
+[ABIVTX] 40（仍全 vc=3 fullscreen triangle）
+[PRESENT] 8  [ABIBEGIN] 10816  主循环到 n≈68.27M
+[JOBEXEC] 0                     ← ★ FUN_8116f748 一次都没被调用
+NOMOVIE=1：所有截帧仍 mean=0.00（全黑）
+```
+**分析**：hybrid 分支一次都没触发（若 title worker 经 trampoline 会走原路径 → FUN_8116F748 被调用 → [JOBEXEC] 应有输出）。⇒ 两种可能：
+1) title job 根本没被调度（page6 start=FUN_8119807C 未执行，或 "title sequence" job 未入队）；
+2) 我们的 worker 检测读取失败（_wf=0）→ 总是走强制分支。
+**M1010 诊断**：在 blk_8116FA5C 加 **WFDBG** 日志（每个**不同 worker 值**打印一次，cap 120，写 stderr）：
+```cpp
+{ static unsigned _lastwf=0xFFFFFFFFu; static int _dbg=0;
+  if(_wf != _lastwf && _dbg++ < 120) { _lastwf=_wf;
+    std::fprintf(stderr,"[WFDBG] #%d ctx=%08X node=%08X wf=%08X\n", _dbg, (unsigned)s->r[0], (unsigned)_node, (unsigned)_wf);
+    std::fflush(stderr); } }
+```
+编译 exit 0、链接 exit 0；诊断运行 `out80m_m1078wfdbg.txt`（P5D_NOMOVIE=1 + OT/STEPFORCE）已启动。
+NEXT：
+```
+① 读 [WFDBG]：确认检测读到的 ctx/node/wf 是否合理（对比 JOBEXEC 的 node/worker）
+② 若 wf 值与实际 worker 不符 → 修正检测偏移（可能不是 [ctx+0x34]）
+③ 若 wf 列表里从未出现 0x81198173 → title job 没被调度 → 探针页6 start FUN_8119807C（0x8119807C）与 FUN_8116f7CA 的 "title sequence" 登记
+④ 修正后 title worker 真正运行 → title 状态机初始化 → 引擎自绘标题
+```
+验证：`out80m_m1077titleworker.txt`、`err80m_m1078wfdbg.txt`（生成中）。 |
+| §18.4555 | First hybrid-force run: behavior identical to all-force (JOBEXEC 0 = title worker was never scheduled) -> add WFDBG diagnostics to confirm the worker detection value. out80m_m1077titleworker.txt (force all but let title worker through): [JOBCOMP] 11 / [JOBDONE2] 11 (same as all-force); [SEQREQ] 16 (page=6 request present); [ABIVTX] 40 (still all vc=3 fullscreen triangles); [PRESENT] 8; [ABIBEGIN] 10816; main loop to n≈68.27M; [JOBEXEC] 0 (FUN_8116f748 was never called!); NOMOVIE=1: all captured frames still mean=0.00 (black). Analysis: the hybrid branch never fired (if the title worker went through the trampoline it would take the original path -> FUN_8116F748 called -> JOBEXEC output). So either (1) the title job was never scheduled (page6 start=FUN_8119807C did not run, or the 'title sequence' job was never queued) or (2) our worker detection failed (_wf=0) so it always took the force branch. M1010 diagnostics: add WFDBG logging in blk_8116FA5C (print each DISTINCT worker value once, cap 120, to stderr): { static unsigned _lastwf=0xFFFFFFFFu; static int _dbg=0; if(_wf != _lastwf && _dbg++ < 120) { _lastwf=_wf; std::fprintf(stderr,'[WFDBG] #%d ctx=%08X node=%08X wf=%08X\n', _dbg, (unsigned)s->r[0], (unsigned)_node, (unsigned)_wf); std::fflush(stderr); } }. Compiled/linked exit 0; diagnostic run out80m_m1078wfdbg.txt (P5D_NOMOVIE=1 + OT/STEPFORCE) started. NEXT: read [WFDBG] to confirm the ctx/node/wf values are sane (compare with JOBEXEC node/worker); if wf does not match the actual worker, fix the detection offset (maybe not [ctx+0x34]); if 0x81198173 never appears, the title job was not scheduled -> probe page6 start FUN_8119807C (0x8119807C) and the FUN_8116f7CA 'title sequence' registration; after the fix the title worker really runs -> title state machine init -> engine-drawn title. |
 ```c
 puVar1 = FUN_8116f8a8();          // title sequence task 状态结构
 switch (*puVar1) {                 // state: 0..7
@@ -493537,3 +493566,35 @@ NEXT：
 ANTI-FORGETTING ENTRY. Keywords: M1009 title page stays black because M1008 forcing page6 update=1 only keeps the page alive while the title drawing/state advancement is driven by the job 'title sequence' worker (0x81198172), which all-force skipped. New approach: force everything BUT let the title worker 0x81198173 run. AOT coverage: 0x81198172 EXISTS in batch_013.cpp. Decompiled FUN_81198172 (286B state machine, state 0..7): case 0 FUN_81178ce2(0)/FUN_81178f0a(); if (puVar1[1]==1) *puVar1=6 else { *puVar1=1; FUN_81172470(); FUN_81172374(0); FUN_81160696(0); } (init title subsystems); case 1 FUN_81178f0a() -> state 2; case 2 DAT_813b1b1c check, FUN_81193344 -> state 3, FUN_811933b8 -> state 4; case 4 FUN_811580cc(1)/FUN_811581dc(1) -> state 5; case 5 FUN_81158112() -> state 6; case 6 FUN_81193a00(param_1) -> state 7; case 7 FUN_81193a6a(puVar1[2]); done -> FUN_81193a80; case1 -> state 4; case 2 -> FUN_810e8688(0) return -1; case 3/4/5 return -1; default return 0. M1009 patch batch_011.cpp blk_8116FA5C: _node=s->r[0]?rd32(s,s->r[0]+0x34):0; _wf=_node?rd32(s,_node):0; if(_wf==0x81198173u){ push lr/r4; s->r[0]=rd32(s,s->r[0]+0x34); s->r[14]=0x8116FA64u; return 0x8116F748u; } else { s->r[0]=0xFFFFFFFFu; return s->r[14]; }. If detection fails (_wf==0) it force-branches (no regression). batch_011.o/exe 8:13:37 exit 0. Verification run P5D_NOMOVIE=1 P5D_OTFORCE=1 P5D_STEPFORCE=1 + VDEC -> out80m_m1077titleworker.txt. NEXT: [JOBEXEC] shows worker=81198173; title subsystem init progress (FUN_81178ce2 etc.); page6 stays + title draws (ABIVTX vc / RT non-black); NOMOVIE swap/RT shows engine-drawn title elements.
 
 LOOKUP: M1009, title worker 0x81198172, 0x81198173, FUN_81198172 state machine, batch_013.cpp, blk_8116FA5C, force-all-except-title-worker, FUN_81178ce2, FUN_81178f0a, FUN_81193344, FUN_811933b8, FUN_811580cc, FUN_81158112, FUN_81193a00, FUN_81193a6a, page6 update force, out80m_m1077titleworker.txt, titleworker.txt -> §18.4553 [relevant: page6 update force], §18.4552 [relevant: title object creation], §18.4545 [relevant: worker trampoline]
+### 18.4555 PORT M1010: Hybrid 强制首跑诊断（WFDBG）
+
+1) `out80m_m1077titleworker.txt`（全强制但放行 title worker 0x81198173）：
+```
+[JOBCOMP] 11 / [JOBDONE2] 11（与全强制一致）
+[SEQREQ] 16（page=6）
+[ABIVTX] 40（全 vc=3 fullscreen triangle）
+[PRESENT] 8  [ABIBEGIN] 10816  主循环 n≈68.27M
+[JOBEXEC] 0                    ← FUN_8116f748 从未被调用
+NOMOVIE=1：所有截帧 mean=0.00（全黑）
+```
+2) 分析：hybrid 分支从未触发 ⇒ 要么 title job 未被调度（page6 start FUN_8119807C 未执行/未入队），要么 worker 检测读取失败（_wf=0 总走强制）。
+3) M1010 诊断：blk_8116FA5C 加 WFDBG（每个不同 worker 值打印一次，cap 120，写 stderr）：
+```cpp
+{ static unsigned _lastwf=0xFFFFFFFFu; static int _dbg=0;
+  if(_wf != _lastwf && _dbg++ < 120) { _lastwf=_wf;
+    std::fprintf(stderr,"[WFDBG] #%d ctx=%08X node=%08X wf=%08X\n", _dbg, (unsigned)s->r[0], (unsigned)_node, (unsigned)_wf);
+    std::fflush(stderr); } }
+```
+4) 编译/链接 exit 0；诊断运行 `out80m_m1078wfdbg.txt`（P5D_NOMOVIE=1 + OT/STEPFORCE）已启动。
+NEXT：
+```
+① 读 [WFDBG]：ctx/node/wf 是否合理（对照 JOBEXEC 的 node/worker）
+② 若偏移不对 → 修正检测偏移
+③ 若无 0x81198173 → title job 没被调度 → 探针 0x8119807C / "title sequence" 登记
+④ 修正后 title worker 运行 → title 状态机 → 引擎自绘标题
+```
+验证：`out80m_m1077titleworker.txt`、`err80m_m1078wfdbg.txt`（生成中）。
+
+ANTI-FORGETTING ENTRY. Keywords: M1010 hybrid-force first run identical to all-force: [JOBCOMP] 11 / [JOBDONE2] 11, [SEQREQ] 16 (page=6), [ABIVTX] 40 (vc=3 fullscreen), [PRESENT] 8, [ABIBEGIN] 10816, main loop n≈68.27M, [JOBEXEC] 0 (FUN_8116f748 never called), NOMOVIE all frames black (mean=0.00). The hybrid branch (title worker 0x81198173 allowed) never fired: either the title job was never scheduled (page6 start FUN_8119807C not executed / 'title sequence' job not queued) or worker detection failed (_wf=0 always forces). M1010 adds WFDBG logging in blk_8116FA5C (each distinct worker value once, cap 120, stderr): { static unsigned _lastwf=0xFFFFFFFFu; static int _dbg=0; if(_wf != _lastwf && _dbg++ < 120) { _lastwf=_wf; std::fprintf(stderr,'[WFDBG] #%d ctx=%08X node=%08X wf=%08X\n', _dbg, (unsigned)s->r[0], (unsigned)_node, (unsigned)_wf); std::fflush(stderr); } }. Compiled/linked exit 0; diagnostic run out80m_m1078wfdbg.txt (P5D_NOMOVIE=1 + OT/STEPFORCE) started. NEXT: read [WFDBG] to check the ctx/node/wf values; fix detection offset if wrong; if 0x81198173 never appears the title job was not scheduled -> probe 0x8119807C and the 'title sequence' registration; after fix the title worker runs -> title state machine -> engine-drawn title.
+
+LOOKUP: M1010, out80m_m1077titleworker.txt, [JOBEXEC] 0, [WFDBG], blk_8116FA5C, title worker 0x81198173, hybrid force, FUN_8119807C, 'title sequence' registration, out80m_m1078wfdbg.txt -> §18.4554 [relevant: hybrid force], §18.4553 [relevant: page6 force]
