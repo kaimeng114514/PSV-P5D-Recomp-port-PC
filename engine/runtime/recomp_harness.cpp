@@ -4913,7 +4913,20 @@ static uint32_t gbn_back(uint32_t t, int* pback) {
     if (gbn(q0)) { if (pback) *pback = 0; return q0; } }
   for (int b = 2; b <= 16; b += 2) {
     uint32_t q = (t - (uint32_t)b) & ~1u;
-    if (gbn(q)) { if (pback) *pback = b; return q; }
+    if (gbn(q)) {
+      if (pback) *pback = b;
+      // M1089: log unsafe-start re-execution (target inside a block -> execute block start)
+      static int _gb_n = 0;
+      if (_gb_n++ < 400) {
+        uint32_t _b0 = 0, _b1 = 0;
+        uint8_t* _q0 = GP(q); if (_q0) std::memcpy(&_b0, _q0, 4);
+        uint8_t* _q1 = GP(q + 4u); if (_q1) std::memcpy(&_b1, _q1, 4);
+        printf("[GBACK] #%d target=%08X -> block=%08X back=%d skipped_bytes=%08X %04X blk=%08X\n",
+               _gb_n - 1, t, q, b, _b0, _b1 & 0xFFFFu, g_cur_block);
+        fflush(stdout);
+      }
+      return q;
+    }
   }
   return 0;
 }
