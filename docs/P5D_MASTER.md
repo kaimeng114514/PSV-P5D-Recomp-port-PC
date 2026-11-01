@@ -1055,6 +1055,43 @@
 | M1037 | §18.4582: ★★★★★★★★★★ **重大发现：FORCETITLE 后 title 子系统创建了新的 logo 序列任务（job node=85B8750C worker=0x81193704），反编译确认这是 S0_LOGO 引擎自绘路径：加载 `title/logo.bin` + `atluslogo.tga`/`crilogo.tga`/`p-studio.tga`，按 69 帧间隔做淡入淡出序列！** m1096 证据：
 | M1038 | §18.4583: **S0_LOGO 任务已注册（`logoDrawProc`）但 title/logo.bin 的 Fios 打开请求从未到达 HLE：文件请求由 guest 侧请求管理器（FUN_81181A3C 队列）排队，需要一个 worker 线程/任务去消费并调用 Fios HLE——当前调度下该 worker 未被驱动，因此加载永不完成（自旋）。已启动 LOADPUMP/SCHEDFIX/THREADWEMU 组合运行尝试驱动请求队列**。m1096 证据：
 | M1039 | §18.4584: **参考项目 Project Nativ（`TheLostPantheon/nativ`）：通用 PS Vita 游戏静态重编译框架（Killzone/Uncharted/Unit 13/Shovel Knight 可玩）——与本项目同类但更完整的架构参照。已 git clone 到 `C:\dev\refs\nativ`（注意：**GPLv2 许可，只能作只读参考，不可复制代码**）。核心对照与可采纳项如下**。
+| M1040 | §18.4585: **实现"FIOS 同步完成"探针（P5D_FIOSFILL=1）：在应用层文件包装函数 `FUN_8115FBE6/FC0E/FC28/FC20` 入口直接由 HLE 从 CPK 提供文件数据，绕开未被调度的 guest 请求队列消费者——目标：让 S0_LOGO 加载 `title/logo.bin` + 3 个 TGA 并进入绘制**。实现：
+**harness 侧（`recomp_harness.cpp`，fiOSFILL hooks）**：
+```cpp
+static std::map<uint32_t, std::pair<uint32_t,uint32_t>> g_fakefile;  // handle -> (guest buf, size)
+extern "C" uint32_t harness_fios_open(const char* name) {
+  static int _on=-1; if(_on<0){ const char* e=getenv("P5D_FIOSFILL"); _on=(e&&atoi(e))?1:0; }
+  if(!_on||!name) return 0;
+  fios_ensure_cpk();
+  std::vector<uint8_t> data;
+  if(!cpk_read_any_impl(name,data)||data.empty()){ miss_log; return 0; }
+  uint32_t buf=hle_malloc(data.size()); memcpy(GP(buf),data.data(),data.size());
+  uint32_t h=++g_fakefile_id; g_fakefile[h]={buf,size};
+  printf("[FIOSFILL] OPEN '%s' size=%u -> h=%u buf=%08X\n",...); return h; }
+extern "C" uint32_t harness_fios_ready(h);  extern "C" uint32_t harness_fios_ptr(h);
+extern "C" uint32_t harness_fios_size(h);    extern "C" void harness_fios_close(h);
+```
+**batch_010.cpp 四个包装函数入口拦截**：
+```cpp
+blk_8115FBE6: { uint32_t _h=harness_fios_open((const char*)P(s,s->r[0])); if(_h){ s->r[0]=_h; return s->r[14]; } }
+blk_8115FC0E: { if(harness_fios_ready(s->r[0])){ s->r[0]=1u; return s->r[14]; } }
+blk_8115FC28: { if(harness_fios_ready(s->r[0])){ uint32_t _dp=harness_fios_ptr(s->r[0]);
+                if(s->r[1]) wr32(s,s->r[1],harness_fios_size(s->r[0])); s->r[0]=_dp; return s->r[14]; } }
+blk_8115FC20: { if(harness_fios_ready(s->r[0])){ harness_fios_close(s->r[0]); s->r[0]=0u; return s->r[14]; } }
+```
+**依据**（M1038/M1039 分析）：FUN_8115FBE6→FUN_81181C2A→FUN_81181A3C 的请求队列需要未被调度的消费者；而 FUN_81181CA0 判断 `[req+4]==0xC && [req+0xA0]==0`、FUN_81181CE4 从 `[req+0x94]` 取数据/`[req+0x88]` 取大小——我们的 fake handle 直接满足这些语义（`FUN_8115FC28` 返回数据指针并在 r1 非空时写出大小）。
+编译：harness exit 0；batch_010 exit 0；exe 重链 exit 0（57,058,809B，16:36:56）。
+验证运行：`out80m_m1098fiosfill.txt`（`P5D_FORCETITLE=1 P5D_FIOSFILL=1`）已启动。
+NEXT：
+```
+① [FIOSFILL] OPEN 'title/logo.bin' 出现 → 继续 [FIOSFILL] OPEN 'atluslogo.tga'/…（若 TGA 也走此路径）
+② [LOGO] 状态推进：FUN_81193704 case2→3→4（fade in）→ 69 帧切换
+③ logoDrawProc 绘制 → 截帧应出现 ATLUS/CRI/P-STUDIO logo（NOMOVIE 下）
+④ 若 TGA 走 FUN_81174DBC 的容器内部路径 → 需让容器数据可解析（我们已提供整个 logo.bin）
+⑤ 若仍自旋 → 加 [TGA] 探针看 FUN_81174DBC/FUN_811933F1 执行情况
+```
+验证：`out80m_m1098fiosfill.txt`（生成中）、`recomp_harness.exe`（57,058,809B）、`fios_req2.txt`、`fs_wrap.txt`。 |
+| §18.4585 | Implemented the 'FIOS synchronous completion' provider (P5D_FIOSFILL=1): at the app-level file wrapper functions FUN_8115FBE6/FC0E/FC28/FC20 the HLE serves the file data straight from the CPK, bypassing the unscheduled guest request-queue consumer - goal: let S0_LOGO load title/logo.bin + 3 TGAs and start drawing. Implementation: harness side (recomp_harness.cpp) static std::map<uint32_t,std::pair<uint32_t,uint32_t>> g_fakefile (handle -> guest buf,size); extern "C" uint32_t harness_fios_open(const char* name) { lazy P5D_FIOSFILL flag; fios_ensure_cpk(); cpk_read_any_impl(name,data); hle_malloc buf; copy to GP(buf); handle=++g_fakefile_id; map[handle]={buf,size}; printf('[FIOSFILL] OPEN %s size=%u -> h=%u buf=%08X'); return handle; }; harness_fios_ready/ptr/size/close. batch_010.cpp intercepts four wrapper entry blocks: blk_8115FBE6 -> harness_fios_open((const char*)P(s,s->r[0])) and if handle set r0 + return lr; blk_8115FC0E -> ready => r0=1, return lr; blk_8115FC28 -> ready => data ptr in r0, if r1 then wr32(s,r1,size), return lr; blk_8115FC20 -> ready => close, r0=0, return lr. Rationale (M1038/M1039): FUN_8115FBE6 -> FUN_81181C2A -> FUN_81181A3C request queue needs an unscheduled consumer; FUN_81181CA0 checks [req+4]==0xC && [req+0xA0]==0 and FUN_81181CE4 reads data from [req+0x94] and size from [req+0x88] - the fake handle satisfies these semantics (FUN_8115FC28 returns the data pointer and writes the size when r1 != 0). harness compile exit 0; batch_010 compile exit 0; exe relink exit 0 (57,058,809B 16:36:56). Verification run out80m_m1098fiosfill.txt (P5D_FORCETITLE=1 P5D_FIOSFILL=1) started. NEXT: [FIOSFILL] OPEN 'title/logo.bin' appears -> then the TGA opens (atluslogo/crilogo/p-studio) if they also go through this path; [LOGO] state advances FUN_81193704 case2->3->4 (fade in) -> 69-frame switching; logoDrawProc draws -> frames should show ATLUS/CRI/P-STUDIO logos under NOMOVIE; if the TGAs go through FUN_81174DBC's container-internal path we must let the container data parse (we already provide the whole logo.bin); if it still spins add [TGA] probes to FUN_81174DBC/FUN_811933F1. |
 **Nativ 架构（docs/architecture.md 摘要）**：
 ```
 GAME PACK   packs/<title>/pack.toml + hooks.c + shaders.txt（每游戏专属：版本 SHA-256、hook、shader 配方）
@@ -495572,3 +495609,46 @@ NEXT：
 ANTI-FORGETTING ENTRY. Keywords: M1039 reference project Nativ (TheLostPantheon/nativ) - general PS Vita static-recompilation framework, GPLv2 (read-only reference, do not copy code), cloned to C:\dev\refs\nativ. Architecture: game + Sony user-mode libraries (libgxm/libc/libfios2) all recompiled from player firmware to C; runtime replaces only the system-call boundary (core/kernel.c threads/sync/scheduling, io.c, fios.c, sysmem.c, audio/ngs.c, media/video.c FFmpeg H.264, gfx/display.c); graphics: gxm_sony.c observes libgxm state -> gfx_dispatch -> gfx_gpu.c (SDL_GPU Metal/Vulkan) or gfx_soft.c (USSE interpreter exact reference), usse_spirv.c translates USSE shaders to SPIR-V; platform SDL3; launcher hub.cpp + F10 overlay + headless runner; verification: regression gate (known frame picture compare), in-place instruction checker, gfx captures; distribution: BYO game+firmware, player-side decrypt/recompile, no game content in repo/releases. Differences vs us: they recompile Sony libraries, we HLE them; they use real host threads + optional 3-core strict scheduler (RECOMP_SCHED=vita), we use fibers + force-completion (root of current scheduling bugs); files: libfios2 recompiled with kernel overlay table vs our HLE/CPK direct fill (current logo.bin blocker = FIOS request consumer unscheduled); graphics libgxm recompiled + dual backend vs our GXM HLE + realpipe black frames; verification frame regression gate vs our FRAMEDUMP/screenshots/probes. Adopt by ROI: (1) FIOS synchronous completion at FUN_81181A3C request node (read name -> cpk_read_any_impl -> hle_malloc -> write [req+4]=0xC, [req+0xA0]=0, [req+0x88]=size, [req+0x94]=buf) bypassing unscheduled consumer; (2) generator-level hook table (replace hand-edited batch blocks, like Nativ packs/hooks.c; we have 30+ patches); (3) real host threads reference core/kernel.c; (4) frame-level regression gate; (5) GXM/USSE shader reference usse_spirv.c/gfx_soft.c; (6) launcher/BYO importer flow. Note GPLv2 - design ideas only, no code copying.
 
 LOOKUP: M1039, Project Nativ, TheLostPantheon/nativ, GPLv2 reference only, C:\dev\refs\nativ, docs/architecture.md, pack.toml/hooks.c/shaders.txt, recompile Sony user-mode libraries libgxm/libc/libfios2 from firmware, runtime core/kernel.c io.c fios.c sysmem.c audio/ngs.c media/video.c FFmpeg, gxm_sony.c gfx_dispatch.c gfx_gpu.c gfx_soft.c usse_spirv.c, SDL3, launcher hub.cpp, regression gate, in-place instruction checker, gfx captures, real host threads 3-core scheduler RECOMP_SCHED=vita, FIOS synchronous completion FUN_81181A3C req+4=0xC req+0xA0 req+0x88 req+0x94, generator hook table, frame-level regression -> §18.4583 [relevant: FIOS request consumer blocker], §18.4582 [relevant: S0 logo]
+### 18.4585 PORT M1040: FIOS 同步完成（P5D_FIOSFILL）——直填 title/logo.bin
+
+1) 背景：M1038/M1039 证明 title/logo.bin 的请求在 guest 队列里等一个未被调度的消费者；改为由 HLE 直接满足应用层包装函数。
+2) harness 侧 hooks：
+```cpp
+static std::map<uint32_t, std::pair<uint32_t,uint32_t>> g_fakefile;   // handle -> (guest buf,size)
+extern "C" uint32_t harness_fios_open(const char* name) {
+  static int _on=-1; if(_on<0){ const char* e=getenv("P5D_FIOSFILL"); _on=(e&&atoi(e))?1:0; }
+  if(!_on||!name) return 0;
+  fios_ensure_cpk(); std::vector<uint8_t> data;
+  if(!cpk_read_any_impl(name,data)||data.empty()){ miss; return 0; }
+  uint32_t buf=hle_malloc(data.size()); memcpy(GP(buf),data.data(),data.size());
+  uint32_t h=++g_fakefile_id; g_fakefile[h]={buf,(uint32_t)data.size()};
+  printf("[FIOSFILL] OPEN '%s' size=%u -> h=%u buf=%08X\n",name,(unsigned)data.size(),h,buf); return h; }
+extern "C" uint32_t harness_fios_ready/ptr/size; extern "C" void harness_fios_close;
+```
+3) batch_010.cpp 拦截：
+```cpp
+// blk_8115FBE6（打开）
+{ uint32_t _h = harness_fios_open((const char*)P(s, s->r[0]));
+  if (_h) { s->r[0] = _h; return s->r[14]; } }
+// blk_8115FC0E（检查完成）
+{ if (harness_fios_ready(s->r[0])) { s->r[0] = 1u; return s->r[14]; } }
+// blk_8115FC28（取数据指针 + 大小）
+{ if (harness_fios_ready(s->r[0])) { uint32_t _dp = harness_fios_ptr(s->r[0]);
+  if (s->r[1]) wr32(s, s->r[1], harness_fios_size(s->r[0])); s->r[0] = _dp; return s->r[14]; } }
+// blk_8115FC20（关闭）
+{ if (harness_fios_ready(s->r[0])) { harness_fios_close(s->r[0]); s->r[0] = 0u; return s->r[14]; } }
+```
+4) 编译：harness exit 0；batch_010 exit 0；exe 57,058,809B（16:36:56）
+5) 验证运行 `out80m_m1098fiosfill.txt`（FORCETITLE + FIOSFILL）已启动
+NEXT：
+```
+① [FIOSFILL] OPEN 'title/logo.bin' → TGA OPEN
+② [LOGO] case2→3→4 → 69 帧切换
+③ logoDrawProc 绘制 → 截帧可见 ATLUS/CRI/P-STUDIO logo
+④ TGA 若走容器内部路径 → 检查 FUN_81174DBC
+```
+验证：`out80m_m1098fiosfill.txt`、`recomp_harness.exe`（57,058,809B）。
+
+ANTI-FORGETTING ENTRY. Keywords: M1040 implemented the FIOS synchronous completion provider P5D_FIOSFILL=1 for the S0_LOGO loader - HLE serves files directly from the CPK at the app-level wrappers FUN_8115FBE6/FC0E/FC28/FC20, bypassing the unscheduled guest request-queue consumer. Harness: static g_fakefile map handle->(guest buf,size); extern "C" harness_fios_open(name) with lazy P5D_FIOSFILL flag, fios_ensure_cpk, cpk_read_any_impl, hle_malloc + copy to GP(buf), printf('[FIOSFILL] OPEN %s size=%u -> h=%u buf=%08X'); harness_fios_ready/ptr/size/close. batch_010.cpp blocks: blk_8115FBE6 -> harness_fios_open((const char*)P(s,s->r[0])); if handle set r0 and return lr; blk_8115FC0E -> ready => r0=1 return lr; blk_8115FC28 -> ready => r0=data ptr, if r1 wr32(s,r1,size), return lr; blk_8115FC20 -> ready => close r0=0 return lr. Rationale: FUN_81181CA0 checks [req+4]==0xC && [req+0xA0]==0, FUN_81181CE4 reads data [req+0x94] size [req+0x88]; fake handle satisfies that. harness exit 0; batch_010 exit 0; exe relink exit 0 (57,058,809B 16:36:56). Verification run out80m_m1098fiosfill.txt (P5D_FORCETITLE=1 P5D_FIOSFILL=1) started. NEXT: [FIOSFILL] OPEN 'title/logo.bin' then TGA opens; [LOGO] state FUN_81193704 case2->3->4 (fade in) 69-frame switching; logoDrawProc draws ATLUS/CRI/P-STUDIO logos under NOMOVIE; if TGAs go through FUN_81174DBC container-internal path check container parsing; if still spins add [TGA] probes to FUN_81174DBC/FUN_811933F1.
+
+LOOKUP: M1040, FIOS synchronous completion, P5D_FIOSFILL, harness_fios_open, g_fakefile, cpk_read_any_impl, hle_malloc, GP, batch_010 intercepts blk_8115FBE6 blk_8115FC0E blk_8115FC28 blk_8115FC20, FUN_8115FD22, FUN_81181C2A, FUN_81181A3C, FUN_81181CA0 req+4==0xC req+0xA0==0, FUN_81181CE4 req+0x94 req+0x88, title/logo.bin, atluslogo.tga crilogo.tga p-studio.tga, S0_LOGO, FUN_81193704, FUN_81174DBC, exe 57,058,809B, out80m_m1098fiosfill.txt -> §18.4584 [relevant: Nativ reference], §18.4583 [relevant: FIOS consumer blocker]

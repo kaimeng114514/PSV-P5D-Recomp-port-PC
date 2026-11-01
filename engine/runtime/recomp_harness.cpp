@@ -1075,6 +1075,36 @@ static void hw_check(uint32_t pcv);
 static std::map<uint32_t,std::string> g_pending_reqs;
 static char g_last_open_name[256] = {0};
 static int g_reqfill_n = 0, g_reqfill_miss_n = 0, g_openret_n = 0;
+// M1040: synchronous fake-file provider for the guest request-manager path (FIOSFILL).
+// The guest request manager (FUN_81181A3C) queues file opens for a consumer task that is not
+// scheduled yet; these hooks serve the app-level wrappers FUN_8115FBE6/FC0E/FC28/FC20 directly
+// from the CPK so the S0_LOGO loader (title/logo.bin + TGA) can make progress.
+static std::map<uint32_t, std::pair<uint32_t, uint32_t>> g_fakefile;  // handle -> (guest buf, size)
+static uint32_t g_fakefile_id = 0;
+extern "C" uint32_t harness_fios_open(const char* name) {
+  static int _on = -1;
+  if (_on < 0) { const char* _e = getenv("P5D_FIOSFILL"); _on = (_e && atoi(_e) != 0) ? 1 : 0; }
+  if (!_on || !name) return 0;
+  fios_ensure_cpk();
+  std::string nm(name);
+  std::vector<uint8_t> data;
+  if (!cpk_read_any_impl(nm, data) || data.empty()) {
+    static int _miss = 0; if (_miss++ < 40) { printf("[FIOSFILL-MISS] '%s'\n", name); fflush(stdout); }
+    return 0;
+  }
+  uint32_t buf = hle_malloc((uint32_t)data.size());
+  if (!buf) return 0;
+  std::memcpy(GP(buf), data.data(), data.size());
+  uint32_t hnd = ++g_fakefile_id;
+  g_fakefile[hnd] = std::make_pair(buf, (uint32_t)data.size());
+  if (g_fakefile_id <= 80) { printf("[FIOSFILL] OPEN '%s' size=%u -> h=%u buf=%08X\n", name, (unsigned)data.size(), hnd, buf); fflush(stdout); }
+  return hnd;
+}
+extern "C" uint32_t harness_fios_ready(uint32_t hnd) { return g_fakefile.count(hnd) ? 1u : 0u; }
+extern "C" uint32_t harness_fios_ptr(uint32_t hnd) { auto it = g_fakefile.find(hnd); return (it == g_fakefile.end()) ? 0u : it->second.first; }
+extern "C" uint32_t harness_fios_size(uint32_t hnd) { auto it = g_fakefile.find(hnd); return (it == g_fakefile.end()) ? 0u : it->second.second; }
+extern "C" void harness_fios_close(uint32_t hnd) { g_fakefile.erase(hnd); }
+
 static void pending_req_scan() {
   if (g_pending_reqs.empty()) return;
   for (auto it = g_pending_reqs.begin(); it != g_pending_reqs.end(); ) {
