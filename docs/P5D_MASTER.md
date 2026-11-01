@@ -1044,6 +1044,43 @@
 | M1026 | §18.4571: **发现 STEPFORCE 对 init worker 无效的原因：init worker 经 nested runner 执行，不经过 job_probes → 把 18 个 init 完成检查 block 的强制从 harness 探针移到 batch_012 的 AOT block 内**。证据（m1088，trophy 检查已加 STEPFORCE）：
 | M1027 | §18.4572: **init 链仍不推进的下一层原因分析：`FUN_8116F748` 丢弃 worker 返回值（`(*(code*)*param_1)();` 不取返回值）；completion 由 job[8] countdown（200 帧）到期触发；worker 只有返回 -1 才会立即完成。batch 级检查强制已加但 JOBCOMP 仍 1 ⇒ 怀疑 trophy worker 卡在 state0 的初始化调用（`FUN_8102d53c`）而非检查 block。已加 EXECRET/TPATH 探针验证执行路径**。m1089（batch_012 18 个检查强制后）结果：
 | M1028 | §18.4573: **EXECRET/TPATH 探针给出决定性数据：trophy worker 确实走到检查 block 并返回 -1 路径；trampoline 30 次返回中绝大部分 0、有 1 次 -1 ⇒ 完成机制有被触发，但 init 链仍不推进 → 下一步必须反编译 page1 init 主状态机（FUN_8118479C）搞清"推进条件"**。`out80m_m1090execpath.txt` / err：
+| M1029 | §18.4574: ★★★★★★★★★★ **找到 8 步 init 链驱动器本体：`FUN_81184FFE`（= "initDataRead" worker 0x81184FFF）内含 9 项函数指针表 + 状态机，逐步创建并等待各 step job**。反编译（`idr_worker.txt`）：
+```c
+// FUN_81184FFE = initDataRead worker = 8 步 init 链驱动状态机
+piVar1 = FUN_8116f8a8();           // task 状态结构
+state = piVar1[0];
+if (state == 0) { piVar1[0]=1; piVar1[1]=0; }          // 初始化：step 索引 0
+else if (state == 1) {
+    // 9 项函数表（step 创建者）
+    table[0] = 0x8118484E;  table[1] = 0x811848FC;  table[2] = 0x81184A06;
+    table[3] = 0x81184ACE;  table[4] = 0x81184D40;  table[5] = 0x81184BBE;
+    table[6] = 0x81184E40;  table[7] = 0x81184F7A;  table[8] = 0x81184C74;
+    table[9] = 0;                                        // 终止符 → 返回 -1（全部完成）
+    if (table[piVar1[1]] == 0) return 0xFFFFFFFF;        // ★ 完成
+    iVar3 = table[piVar1[1]](param_1);                   // 创建该 step 的 job
+    piVar1[2] = iVar3; piVar1[0] = 2;
+}
+else if (state == 2) {
+    if (FUN_8116f8d2(piVar1[2]) == 0) { piVar1[0]=1; piVar1[1]++; }  // 该 step job 完成 → 下一步
+}
+return 0;
+```
+**关键函数**：
+- `FUN_8118479C`（page1 start 0x8118591E 调用）= 仅创建 "initDataRead" job（driver 本身）
+- `FUN_811848FC` = 创建 "init sound" job（completion 0x811848E8）
+- `FUN_81184A06` = 创建 "init gamedata" job（completion 0x811849F2）
+- `FUN_811850DA`（driver 完成回调）= `FUN_8116f8a8()` 取 task → `FUN_8115d43c` 释放 → **setSequence(6,0,0,5)**
+⇒ **推进条件 = `FUN_8116F8D2(step_job)==0`**（step job 完成的标志），不是 worker 返回值本身！
+已有证据链：WFDBG #18 trophy job 创建（node=85B86A1C）→ #49 sound job 创建（node=85B8861C）⇒ driver **已越过 step0 trophy，卡在 step1 sound**；sound worker 被调用一次但未让 driver 前进 ⇒ 需要确认 sound job 的完成标志（FUN_8116F8D2）是否被设置。
+NEXT：
+```
+① 给 sound step 加探针：blk_811848D6（bl FUN_8115487a）、blk_811848DA（cmp）、blk_811848DE（返回 -1）→ 确认 sound worker 走到/返回
+② 给 driver 加探针：blk_811850B2（state==2 检查 FUN_8116F8D2）、blk_811850BC/0x811850C2（step 索引递增）→ 看停在哪一步
+③ 检查 FUN_8116F8D2 的完成标志（job+0xC）在 sound 完成后是否真的为 0
+④ 修复后 driver 依次创建 gamedata→msgwindow→mainmenu→step5…→ 返回 -1 → setSequence(6) → page6 标题页
+```
+验证：`initmaster.txt`、`idr_worker.txt`、`out80m_m1090execpath.txt`（WFDBG #18/#49）。 |
+| §18.4574 | Found the 8-step init chain driver itself: FUN_81184FFE (= 'initDataRead' worker 0x81184FFF) contains a 9-entry function pointer table + state machine that creates and waits for each step job. Decompiled idr_worker.txt: FUN_81184FFE = initDataRead worker = 8-step init chain driver state machine: piVar1=FUN_8116f8a8() (task state); state=piVar1[0]; if (state==0){ piVar1[0]=1; piVar1[1]=0; } (step index 0); else if (state==1){ table[0]=0x8118484E; table[1]=0x811848FC; table[2]=0x81184A06; table[3]=0x81184ACE; table[4]=0x81184D40; table[5]=0x81184BBE; table[6]=0x81184E40; table[7]=0x81184F7A; table[8]=0x81184C74; table[9]=0 terminator -> return 0xFFFFFFFF (all done); if(table[piVar1[1]]==0) return 0xFFFFFFFF; iVar3=table[piVar1[1]](param_1) (create that step's job); piVar1[2]=iVar3; piVar1[0]=2; } else if (state==2){ if(FUN_8116f8d2(piVar1[2])==0){ piVar1[0]=1; piVar1[1]++; } } return 0. Key functions: FUN_8118479C (called by page1 start 0x8118591E) just creates the 'initDataRead' job (the driver itself); FUN_811848FC creates the 'init sound' job (completion 0x811848E8); FUN_81184A06 creates the 'init gamedata' job (completion 0x811849F2); FUN_811850DA (driver completion callback) = FUN_8116f8a8() get task -> FUN_8115d43c free -> setSequence(6,0,0,5). So the advancement condition is FUN_8116F8D2(step_job)==0 (the step job's completion flag), not the worker return value itself. Evidence chain so far: WFDBG #18 trophy job created (node=85B86A1C) -> #49 sound job created (node=85B8861C) => the driver has passed step0 trophy and is stuck at step1 sound; the sound worker was invoked once but the driver did not advance => need to verify whether the sound job's completion flag (FUN_8116F8D2) is actually set. NEXT: (1) add probes for the sound step: blk_811848D6 (bl FUN_8115487a), blk_811848DA (cmp), blk_811848DE (return -1); (2) add driver probes: blk_811850B2 (state==2 FUN_8116F8D2 check), blk_811850BC/0x811850C2 (step index increment) to see where it stops; (3) check the FUN_8116F8D2 completion flag (job+0xC) after sound completes; (4) after the fix the driver creates gamedata->msgwindow->mainmenu->step5... -> returns -1 -> setSequence(6) -> page6 title page. |
 ```
 [TPATH820] lr=8118480E r0=85B869FC      ← trophy worker state 路径
 [TPATH828] lr=8120735C r0=84618180      ← 调 FUN_8102d544 前
@@ -494783,3 +494820,43 @@ NEXT：
 ANTI-FORGETTING ENTRY. Keywords: M1028 EXECRET/TPATH probes decisive: the trophy worker really reaches its check block and the return -1 path executes; of 30 trampoline returns most are 0 and one is -1 => the completion mechanism is triggered at least once, but the init chain still does not advance => next decompile the page1 init master state machine FUN_8118479C. out80m_m1090execpath.txt: [TPATH820] lr=8118480E r0=85B869FC; [TPATH828] lr=8120735C r0=84618180; [TPATH82C] lr=8102D564 r0=00000001; [TPATH830] lr=8102D564 r0=00000001; [EXECRET] 30 lines: 29 x 0, 1 x FFFFFFFF; [JOBCOMP] 1; [SEQREQ] 8 (no page=6); [BADMEM] 0; n=60415000. Executor semantics (jobmgr2.txt FUN_811DB020): running list job[8]--; at 0 move to ready list *job=2; ready list: iVar4=(*(code*)piVar6[10])(param_1,piVar6); if (iVar4==-1) FUN_811dad8c(piVar6); else if (iVar4!=0) piVar6[10]=iVar4. The single -1 proves at least one job completed but [JOBCOMP] stays 1 => the init chain advancement depends on something else (page state machine may observe FUN_8116F900(name) objects/step states, not job completion). NEXT: decompile the page1 init master state machine FUN_8118479C (called by page1 start) and FUN_8118484C: how the 8 steps advance (job completion? object appearance? flags?); whether worker completions update step state; after finding the blocker force it at batch level.
 
 LOOKUP: M1028, EXECRET 29x0 1xFFFFFFFF, TPATH820 8118480E, TPATH828 8120735C, TPATH82C 8102D564 r0=1, TPATH830 r0=1, trophy worker returns -1, JOBCOMP 1, SEQREQ 8, FUN_811DB020 ready list trampoline semantics, FUN_8118479C page1 init master, FUN_8118484C, out80m_m1090execpath.txt, jobmgr2.txt -> §18.4572 [relevant: EXECRET/TPATH], §18.4570 [relevant: init workers], §18.4569 [relevant: init chain]
+### 18.4574 PORT M1029: 找到 8 步 init 链驱动器 FUN_81184FFE（initDataRead worker）
+
+1) 反编译 `idr_worker.txt`：
+```c
+FUN_81184FFE = initDataRead worker = 8 步 init 链驱动状态机
+piVar1 = FUN_8116f8a8();               // task
+state = piVar1[0];
+if (state == 0) { piVar1[0]=1; piVar1[1]=0; }        // 初始化 step 索引
+else if (state == 1) {
+    table[0]=0x8118484E  table[1]=0x811848FC  table[2]=0x81184A06
+    table[3]=0x81184ACE  table[4]=0x81184D40  table[5]=0x81184BBE
+    table[6]=0x81184E40  table[7]=0x81184F7A  table[8]=0x81184C74  table[9]=0
+    if (table[piVar1[1]] == 0) return 0xFFFFFFFF;    // ★ 全部完成 → -1
+    iVar3 = table[piVar1[1]](param_1);               // 创建 step job
+    piVar1[2] = iVar3; piVar1[0] = 2;
+}
+else if (state == 2) {
+    if (FUN_8116f8d2(piVar1[2]) == 0) { piVar1[0]=1; piVar1[1]++; }   // step job 完成 → 下一步
+}
+return 0;
+```
+2) 关键函数：
+- `FUN_8118479C`（page1 start 0x8118591E）= 创建 "initDataRead" job（driver 本身）
+- `FUN_811848FC` = 创建 "init sound" job（completion 0x811848E8）
+- `FUN_81184A06` = 创建 "init gamedata" job（completion 0x811849F2）
+- `FUN_811850DA`（driver 完成回调）= 取 task → FUN_8115d43c 释放 → **setSequence(6,0,0,5)**
+3) 推进条件 = **`FUN_8116F8D2(step_job)==0`**（step job 完成标志）
+4) 已有证据：WFDBG #18 trophy job 创建（85B86A1C）→ #49 sound job 创建（85B8861C）⇒ driver 已越过 step0，**卡在 step1 sound**
+NEXT：
+```
+① sound step 探针：blk_811848D6/DA/DE
+② driver 探针：blk_811850B2（state==2 检查）、blk_811850BC/0x811850C2（step 递增）
+③ 检查 FUN_8116F8D2 完成标志（job+0xC）
+④ 修复后 driver 依次创建 gamedata→msgwindow→mainmenu→step5 → -1 → setSequence(6) → page6
+```
+验证：`initmaster.txt`、`idr_worker.txt`、`out80m_m1090execpath.txt`。
+
+ANTI-FORGETTING ENTRY. Keywords: M1029 found the 8-step init chain driver FUN_81184FFE = 'initDataRead' worker 0x81184FFF: 9-entry function table + state machine. Decompiled idr_worker.txt: piVar1=FUN_8116f8a8(); state=piVar1[0]; if state==0 { piVar1[0]=1; piVar1[1]=0; } else if state==1 { table[0]=0x8118484E trophy; table[1]=0x811848FC sound; table[2]=0x81184A06 gamedata; table[3]=0x81184ACE; table[4]=0x81184D40; table[5]=0x81184BBE; table[6]=0x81184E40; table[7]=0x81184F7A; table[8]=0x81184C74; table[9]=0 terminator -> return 0xFFFFFFFF; if(table[piVar1[1]]==0) return 0xFFFFFFFF; iVar3=table[piVar1[1]](param_1); piVar1[2]=iVar3; piVar1[0]=2; } else if state==2 { if(FUN_8116f8d2(piVar1[2])==0){ piVar1[0]=1; piVar1[1]++; } } return 0. FUN_8118479C (called by page1 start 0x8118591E) only creates the initDataRead job (the driver). FUN_811848FC creates 'init sound' job (completion 0x811848E8); FUN_81184A06 creates 'init gamedata' job (completion 0x811849F2); FUN_811850DA (driver completion) = FUN_8116f8a8() task -> FUN_8115d43c free -> setSequence(6,0,0,5). Advancement condition = FUN_8116F8D2(step_job)==0 (step job completion flag), not the worker return itself. Evidence: WFDBG #18 trophy job created node=85B86A1C; #49 sound job created node=85B8861C => driver passed step0 and is stuck at step1 sound. NEXT: probes for sound step blk_811848D6/DA/DE; driver probes blk_811850B2 (state==2 check) and blk_811850BC/0x811850C2 (step increment); check FUN_8116F8D2 flag (job+0xC); after fix the driver creates gamedata->msgwindow->mainmenu->step5 -> returns -1 -> setSequence(6) -> page6 title page.
+
+LOOKUP: M1029, init chain driver, FUN_81184FFE, initDataRead worker 0x81184FFF, 9-entry table, table[0]=0x8118484E trophy, table[1]=0x811848FC sound, table[2]=0x81184A06 gamedata, table[3]=0x81184ACE, table[4]=0x81184D40, table[5]=0x81184BBE, table[6]=0x81184E40, table[7]=0x81184F7A, table[8]=0x81184C74, terminator 0 -> -1, FUN_8116f8d2(step_job)==0 advancement, FUN_8118479C creates initDataRead job, FUN_811848FC init sound job completion 0x811848E8, FUN_81184A06 init gamedata completion 0x811849F2, FUN_811850DA setSequence(6,0,0,5), WFDBG #18 trophy 85B86A1C, WFDBG #49 sound 85B8861C, idr_worker.txt, initmaster.txt -> §18.4573 [relevant: init chain stuck], §18.4569 [relevant: real init chain], §18.4567 [relevant: sound worker]
