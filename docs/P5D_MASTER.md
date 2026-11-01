@@ -1047,6 +1047,34 @@
 | M1029 | §18.4574: ★★★★★★★★★★ **找到 8 步 init 链驱动器本体：`FUN_81184FFE`（= "initDataRead" worker 0x81184FFF）内含 9 项函数指针表 + 状态机，逐步创建并等待各 step job**。反编译（`idr_worker.txt`）：
 | M1030 | §18.4575: **推进条件语义确认 + 用户外部审计回应：`FUN_8116f8d2(step_job)` 的"完成"定义 = step job 的 appProcess 节点从 DAT_815554C4 链表移除或 node[0xC]==0；trophy 已完成（sound step 已创建），卡点确定在 step1 sound。新增 SSTEP/DRV 探针精确定位**。`jobdone.txt` 反编译：
 | M1031 | §18.4576: ★★★★★★★★ **SSTEP/DRV 探针决定性结果：sound worker 完整返回 -1；driver 已从 step0 推进到 step1（trophy→sound），但调用 sound 创建者后 driver 不再被调用 → 链冻结在 step1。同步 README 到 M1030（外部审计建议项）**。`out80m_m1091drvprobe.txt` / err：
+| M1032 | §18.4577: **第 1000 轮里程碑：实验"强制 driver step 推进"（不等 step job 完成），期望一帧走一步、8 帧走完 8 步 → driver 返回 -1 → 完成回调 setSequence(6,0,0,5) → page6 TITLE；同时加 driver 入口 DRIVIN 探针（打印 task 的 state/step）**。m1091 关键补充证据：
+```
+[JOBEXEC] #8 node=85B846EC worker=81184FFF completion=811850DB n=59584015   ← initDataRead driver job
+[JOBDONE2] #1 node=85B86A1C n=59626142   ← trophy step job（85B86A1C）完成
+[DRVB2] r0=85B846BC ...                  ← driver 查询的是 trophy step 的 appProcess 节点 85B846BC
+```
+⇒ trophy step 完成 → driver 正确推进到 step1（sound）。卡点 = step1 之后 driver 不再被调用（前面 SSTEP 证明 sound worker 正常返回 -1）。
+**M1032 修改（batch_012.cpp）**：
+1) `blk_81184FFE` 入口加 DRIVIN 探针（cap 120）：
+```cpp
+uint32_t _task = s->r[0] ? rd32(s, s->r[0] + 8u) : 0u;   // FUN_8116f8a8(node)=node[2]
+uint32_t _st = _task ? rd32(s, _task) : 0xFFFFFFFF;      // state
+uint32_t _step = _task ? rd32(s, _task + 4u) : 0xFFFFFFFF;
+fprintf(stderr,"[DRIVIN] #%d task=%08X state=%X step=%X\n",...);
+```
+2) `blk_811850B8`（FUN_8116F8D2 返回后的 `cmp r0,#0`）强制 `s->r[0]=0` → **driver 每次被调用都推进一个 step**（跳过"等待 step job 完成"）。
+编译：batch_012 exit 0；exe 重链 exit 0（57,052,925B，14:42:47）。
+验证运行：`out80m_m1092drvadvance.txt` 已启动。
+NEXT：
+```
+① [DRIVIN]：driver 调用次数、state/step 序列（应 0,0→1→2→…→9）
+② step=9 时 table 终止符 → 返回 -1 → JOBCOMP 增加 → 完成回调
+③ [SEQREQ] 出现 page=6 → page6 start → title worker → 声音对象已创建 → title case0/1 通过
+④ title 状态机推进 → title 对象 → 引擎自绘标题
+```
+※ 这是"先打通链路、再回补真实等待条件"的工程策略：强制推进让 init 链走完（各 step 创建者仍真实创建 job/模块），验证整条链到 page6 的可达性；随后再逐个恢复真实等待条件。
+验证：`out80m_m1091drvprobe.txt`、`out80m_m1092drvadvance.txt`（生成中）、`recomp_harness.exe`（57,052,925B）。 |
+| §18.4577 | Round-1000 milestone: experimental 'force driver step advancement' (do not wait for step jobs), expecting one step per frame, 8 frames to finish all steps -> driver returns -1 -> completion callback setSequence(6,0,0,5) -> page6 TITLE. Also added the DRIVIN driver-entry probe (prints task state/step). m1091 supplementary evidence: [JOBEXEC] #8 node=85B846EC worker=81184FFF completion=811850DB n=59584015 (initDataRead driver job); [JOBDONE2] #1 node=85B86A1C n=59626142 (trophy step job completed); [DRVB2] r0=85B846BC (driver queries the trophy step's appProcess node 85B846BC). So the trophy step completed and the driver correctly advanced to step1 (sound); the blocker is that after step1 the driver is no longer invoked (SSTEP proved the sound worker returns -1 normally). M1032 changes (batch_012.cpp): (1) blk_81184FFE entry adds the DRIVIN probe (cap 120): _task=s->r[0]?rd32(s,s->r[0]+8):0; _st=_task?rd32(s,_task):0xFFFFFFFF; _step=_task?rd32(s,_task+4):0xFFFFFFFF; fprintf(stderr,'[DRIVIN] #%d task=%08X state=%X step=%X'); (2) blk_811850B8 (cmp r0,#0 after FUN_8116F8D2) forces s->r[0]=0 => the driver advances one step on every invocation (skipping the wait for step-job completion). batch_012 compile exit 0; exe relink exit 0 (57,052,925B 14:42:47). Verification run out80m_m1092drvadvance.txt started. NEXT: [DRIVIN] driver invocation count and state/step sequence (should be 0,0->1->2->...->9); at step=9 the table terminator -> returns -1 -> JOBCOMP grows -> completion callback; [SEQREQ] page=6 appears -> page6 start -> title worker -> sound objects exist -> title case0/1 passes; title state machine advances -> title object -> engine-drawn title. Note: this is the engineering strategy 'open the path first, then restore the real waiting conditions' - forced advancement lets the init chain complete (each step creator still creates real jobs/modules) and verifies reachability of page6; afterwards the real wait conditions are restored one by one. |
 ```
 [SSTEPD6] r0=00000001 r1=813061A4     ← sound worker state 路径
 [SSTEPDA] r0=00000001 r1=812B4150     ← 检查 block 执行（强制 r0=1）
@@ -494995,3 +495023,36 @@ NEXT：
 ANTI-FORGETTING ENTRY. Keywords: M1031 SSTEP/DRV probes decisive: the sound worker fully returns -1; the driver advanced from step0 to step1 (trophy->sound) but after calling the sound creator the driver is no longer invoked => chain freezes at step1. out80m_m1091drvprobe.txt: [SSTEPD6] r0=1 r1=813061A4; [SSTEPDA] r0=1 r1=812B4150; [SSTEPDE] r0=1 r1=812B4150; [DRVA6] r0=8118484F r1=8118484F step=0 (trophy creator 0x8118484E); [DRVB2] r0=85B846BC r1=2 step=0; [DRVBC] r0=0 step=0 (advance); [DRVA6] r0=8118484F r1=811848FD step=1 (sound creator 0x811848FC); no DRVB2 after. [JOBCOMP] 1; [SEQREQ] 8; [BADMEM] 0; [EXECRET] 29x0+1xFFFFFFFF. The initDataRead driver job is unexpectedly ended/removed after executing step1's creator (JOBCOMP #1 n=59626141 likely its early completion). README synced (C:\dev\P5D-PC\README.md): status M940->M1030, latest milestones M1000-M1030, updated blockers. NEXT: probe driver entry 0x81184FFE printing state/step; find the initDataRead job removal path; after fix driver continues step2 gamedata -> ... -> step8 -> returns -1 -> setSequence(6) -> page6.
 
 LOOKUP: M1031, SSTEPD6/DA/DE, sound worker returns -1, DRVA6 trophy creator 0x8118484E, DRVB2 handle 85B846BC, DRVBC advance, DRVA6 sound creator 0x811848FC step=1, driver no longer invoked, initDataRead job early completion, JOBCOMP 1 n=59626141, README sync M940->M1030, out80m_m1091drvprobe.txt -> §18.4575 [relevant: SSTEP/DRV probes], §18.4574 [relevant: init chain driver], §18.4573 [relevant: init chain stuck]
+### 18.4577 PORT M1032: 强制 driver step 推进（第 1000 轮里程碑)
+
+1) m1091 补充证据：
+```
+[JOBEXEC] #8 node=85B846EC worker=81184FFF completion=811850DB n=59584015  ← initDataRead driver job
+[JOBDONE2] #1 node=85B86A1C n=59626142   ← trophy step job 完成
+[DRVB2] r0=85B846BC                      ← driver 查询 trophy step 的 appProcess 节点
+```
+⇒ trophy step 完成；driver 正确推进到 step1（sound）；卡点在 step1 之后 driver 不再被调用
+2) M1032 修改（batch_012.cpp）：
+```cpp
+// (1) blk_81184FFE 入口 DRIVIN 探针
+uint32_t _task = s->r[0] ? rd32(s, s->r[0] + 8u) : 0u;
+uint32_t _st   = _task ? rd32(s, _task) : 0xFFFFFFFFu;
+uint32_t _step = _task ? rd32(s, _task + 4u) : 0xFFFFFFFFu;
+fprintf(stderr,"[DRIVIN] #%d task=%08X state=%X step=%X\n",...);
+// (2) blk_811850B8 强制推进
+s->r[0] = 0u;   /* force driver step advance (FUN_8116f8d2 -> 0) */
+```
+3) 编译：batch_012 exit 0；exe 重链 exit 0（57,052,925B 14:42:47）。
+4) 验证运行 `out80m_m1092drvadvance.txt` 已启动。
+NEXT：
+```
+① [DRIVIN] driver 调用次数、state/step 序列
+② step=9 → 终止符 → 返回 -1 → JOBCOMP 增长 → 完成回调
+③ [SEQREQ] page=6 → page6 start → title worker
+④ title 状态机推进 → title 对象 → 引擎自绘标题
+```
+验证：`out80m_m1091drvprobe.txt`、`out80m_m1092drvadvance.txt`（生成中）。
+
+ANTI-FORGETTING ENTRY. Keywords: M1032 round-1000 milestone - experimental force driver step advancement (do not wait for step jobs) expecting one step per frame then driver returns -1 -> completion callback setSequence(6,0,0,5) -> page6 TITLE; plus DRIVIN driver-entry probe. m1091 evidence: [JOBEXEC] #8 node=85B846EC worker=81184FFF completion=811850DB n=59584015 (initDataRead driver job); [JOBDONE2] #1 node=85B86A1C n=59626142 (trophy step job completed); [DRVB2] r0=85B846BC (driver queries the trophy step's appProcess node). So the trophy step completed and the driver advanced to step1 (sound); blocker is that after step1 the driver is no longer invoked. M1032 changes batch_012.cpp: blk_81184FFE entry adds DRIVIN probe (_task=s->r[0]?rd32(s,s->r[0]+8):0; _st=_task?rd32(s,_task):0xFFFFFFFF; _step=_task?rd32(s,_task+4):0xFFFFFFFF; fprintf(stderr,'[DRIVIN] #%d task=%08X state=%X step=%X')); blk_811850B8 (cmp r0,#0 after FUN_8116F8D2) forces s->r[0]=0 => driver advances one step per invocation. batch_012 compile exit 0; exe relink exit 0 (57,052,925B 14:42:47). Verification run out80m_m1092drvadvance.txt started. NEXT: [DRIVIN] driver invocation count and state/step sequence (0,0->1->2->...->9); at step=9 terminator -> returns -1 -> JOBCOMP grows -> completion callback; [SEQREQ] page=6 appears -> page6 start -> title worker -> sound objects exist -> title case0/1 passes; title state machine advances -> title object -> engine-drawn title. Note the strategy 'open the path first, then restore the real waiting conditions'.
+
+LOOKUP: M1032, round 1000, force driver step advancement, blk_811850B8 s->r[0]=0, DRIVIN probe blk_81184FFE, task state/step, JOBEXEC #8 node=85B846EC worker=81184FFF completion=811850DB, JOBDONE2 #1 node=85B86A1C, DRVB2 r0=85B846BC, trophy step completed, step1 sound freeze, out80m_m1092drvadvance.txt, exe 57,052,925B -> §18.4576 [relevant: SSTEP/DRV results], §18.4575 [relevant: advancement semantics], §18.4574 [relevant: driver table]
