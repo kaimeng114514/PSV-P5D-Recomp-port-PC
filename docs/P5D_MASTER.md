@@ -1103,6 +1103,50 @@
 | M1085 | §18.4630: ★★★★★★★★★ **pc-ring 直接抓到第二次入口的前驱链：`81178F36 (pop {r4,pc}) → 811DACFC`。即 FUN_81178F0A 的 `pop {r4,pc}` 从栈上弹出了 0x811DACFC 作为返回地址，使执行直接落在 FUN_811DAB8C 的中段 0x811DACFC（跳过 0x811DABC2 的 r6 池分配），r6 保持调用者遗留的 0。正常调用的 ring 是 `811DAD6A→811DAD6E→811DAD80→811DACF6→81207352→812B28A0→8120735C→811DACFC`（完整函数路径），崩溃调用则是 `811592AA→811592B4→811592B6→811592BE→81178F10→81178F14→81178F36→811DACFC`——跨函数错位返回链。M1085 先用**手动块安全覆盖 0x811DACFC**（r6==0 时跳过节点插入、走正常 epilogue 返回 NULL）阻止 BADMEM，验证能否越过该点继续流程。**
 | M1086 | §18.4631: ★★★★★★★★★★ **ACFC-SAFE 覆盖生效！运行首次越过 movie 崩溃点并进入 GXM 绘制代码（FUN_811EFE9E 调用 SceGxm_A949A803 / SceGxm_2B528462 / SceGxm_4ED2E49D）——但随后出现第二个栈帧错位崩溃：BADMEM va=0xBF800008 @ block 0x811EFFD6，lr=0x3F800000（float 1.0 被当作返回地址），[SNAP] r0=3F800000 r1=8130CB20 sp=84856150。说明 movie 路径的栈污染并没有被根治（ACFC-SAFE 只是绕过第一个症状），污染继续传播到 GXM 绘制路径。**
 | M1087 | §18.4632: ★★★★★★★ **m1132 栈转储结果：GXM 路径早期调用（movie 之前）一切正常——[EFF9E-ENT] sp=848561A8 lr=811C56D0、[EFFCC]/[EFFD6] sp=84856150（帧 0x58 正确递减），说明 FUN_811EFE9E 本身和常规调用栈都正常；之前 0x811EFFD6 的 float 1.0 崩溃是 ACFC-SAFE 返回 NULL 后调用者未检查、用垃圾数据继续构建 GXM 批次导致的**下游后果**，不是独立 bug。⇒ 真正要解决的是最初 FUN_81159276 栈帧错位（返回 0x81178F10）的根因。M1087 改为在 movie 完成回调 FUN_81159276 的入口（0x81159276）与出口（0x811592BE）转储栈帧 + PC ring，直接观察被污染的那次调用。**
+| M1088 | §18.4633: ★★★★★★★★★ **m1133 抓到崩溃那次 movie 回调的入口现场：FUN_81159276 被以 LR=0x81178F10 进入，sp=0x84856290，入口栈为 [0]=0x816CDA48 [4]=0x811DACFC [8]=0x8116FA67 [0xC]=0x8116FA5D。其中 0x8116FA67/0x8116FA5D 是 appJob 跳板的 **Thumb 函数指针**（0x8116FA66|1、0x8116FA5C|1），0x811DACFC 正是之前见过的"错位地址"。⇒ 游戏自身的**协作式 job 调度器**在操纵 LR/恢复地址：0x8116F75E 跳板把 job 结构字段 +0x10/+0x14 当作"保存的 LR / 恢复 PC"来回倒换（`ldr.w lr,[r4,#0x10]; str.w lr,[r1,#0x10]; mov ip,lr; ... bl 0x8115D614; bl 0x8115D43C`），而 0x8115D614/0x8115D43C 就是 job 切换原语。LR=0x81178F10 是 FUN_81178F0A 里 `bl 0x8116F8A8` 的返回地址——说明某个 job 的"恢复地址"字段被错误地设成了这个值，随后该 job 以错误 LR 恢复了另一个任务（movie 回调）→ 栈帧错位 → 0x811DACFC 乱跳 → 崩溃。**
+m1133（`out80m_m1133movcb.txt`）探针（修正 printf 参数错位后的真实值）：
+```
+[MOVCB-ENT] #0  n(栈错位)=sp? 真实：sp=0x84856290  lr=0x81178F10  r6=0  fiber=0x848463A0
+        入口栈: [sp+0]=0x816CDA48 [sp+4]=0x811DACFC [sp+8]=0x8116FA67 [sp+0xC]=0x8116FA5D [sp+0x10]=0
+[MOVCB-EPI] #0  真实：sp=0x84856268  lr=0x81159298（正常，bl 0x81157F4C 返回地址）  r6=0x812B414C（canary 地址）
+[ACFC-SAFE] #1500000 r6=0 -> skip insert …（同 m1131）
+[BADMEM] guest va=0xBF800008 unmapped block=0x811EFFD6（ACFC-SAFE 的下游后果，同 m1131）
+```
+**关键反汇编（appJob 跳板与调度协议）**：
+```
+8116F75E: push {r4,r5,r6,lr}
+8116F760: movw r5,#0x54c0; movt r5,#0x8155     ; r5 = 全局调度器状态 0x815554C0
+8116F768: adds r4,r0,#0                        ; r4 = job 对象
+8116F76A: str r4,[r5]
+8116F76C: ldr r1,[r4,#4]; blx r1               ; ★ 调用 job->[4] 回调（LR=0x8116F770）
+8116F774: ldr.w lr,[r4,#0x10]                  ; ★ 从 job+0x10 读"保存的 LR/恢复地址"
+8116F778: cmp.w lr,#0
+8116F77C: ldr r1,[r4,#0x14]                    ; job+0x14 = 链/父
+8116F77E: ldr r3,[r5,#4]; ldr r2,[r5,#8]
+8116F782: beq 0x8116F78E
+8116F784: str.w r1,[lr,#0x14]
+8116F78A: ldr.w lr,[r4,#0x10]
+8116F78E: mov ip,lr
+8116F790: cbz r1,0x8116F79C
+8116F792: str.w lr,[r1,#0x10]
+8116F7A0/AC: 比较 r3/r2 与 r4，更新全局字段
+8116F7BA: bl 0x8115D614                          ; ★ job 切换/保存原语
+8116F7BE: adds r1,r4,#0
+8116F7C0: bl 0x8115D43C                          ; ★ job 切换/恢复原语
+8116F7C4: pop {r4,r5,r6,pc}
+```
+⇒ **0x8115D614 / 0x8115D43C 是游戏内协作式调度原语**（AOT batch_034 的生成代码也引用过它们），LR 在 job 字段 +0x10 中保存/恢复。
+NEXT：
+```
+① 反编译 0x8115D614 与 0x8115D43C，检查其 AOT 块生成是否正确
+   （是否用 blx/bx/mov pc 把 LR/ip 当恢复 PC；生成代码是否错误地把 LR 当返回值）
+② 追踪 LR=0x81178F10 写入 job+0x10 的时刻（wr32_watch 0x... 或探针 0x8116F78A/0x8116F792）
+③ 若 AOT 生成错 → 手动块重写这两个原语
+④ 修复后 movie 回调应以正确 LR 进入/返回，栈帧不再错位
+⑤ 之后 GXM 绘制链继续 → SceGxmDraw/BeginScene → 画面
+```
+验证：`out80m_m1133movcb.txt`、`out80m_m1132effd6.txt`、FUN_8116F75E/FUN_8116F748 反汇编、batch_010。 |
+| §18.4633 | m1133 caught the crashing movie-callback invocation's entry state: FUN_81159276 was entered with LR=0x81178F10, sp=0x84856290, and entry stack [0]=0x816CDA48 [4]=0x811DACFC [8]=0x8116FA67 [0xC]=0x8116FA5D. 0x8116FA67/0x8116FA5D are Thumb function pointers (0x8116FA66|1, 0x8116FA5C|1) of appJob trampolines, and 0x811DACFC is the previously seen 'misaligned address'. So the game's own cooperative job scheduler manipulates LR/resume addresses: the trampoline at 0x8116F75E treats job struct fields +0x10/+0x14 as 'saved LR / resume PC' and swaps them (ldr.w lr,[r4,#0x10]; str.w lr,[r1,#0x10]; mov ip,lr; ... bl 0x8115D614; bl 0x8115D43C), and 0x8115D614/0x8115D43C are the job switch primitives. LR=0x81178F10 is the return address of bl 0x8116F8A8 inside FUN_81178F0A - so some job's resume-address field was wrongly set to this value, and that job then resumed another task (the movie callback) with a wrong LR -> stack frame misalignment -> 0x811DACFC misjump -> crash. m1133 evidence (after correcting the printf arg shift): [MOVCB-ENT] sp=0x84856290 lr=0x81178F10 r6=0 fiber=0x848463A0, entry stack [sp]=0x816CDA48 [sp+4]=0x811DACFC [sp+8]=0x8116FA67 [sp+0xC]=0x8116FA5D [sp+0x10]=0; [MOVCB-EPI] sp=0x84856268 lr=0x81159298 (normal, return address of bl 0x81157F4C) r6=0x812B414C (canary address); [ACFC-SAFE] #1500000 r6=0 -> skip insert; [BADMEM] va=0xBF800008 at 0x811EFFD6 (downstream of ACFC-SAFE, same as m1131). Key disassembly: 8116F75E push {r4,r5,r6,lr}; 8116F760 movw r5,#0x54c0; movt r5,#0x8155 (global scheduler state 0x815554C0); 8116F768 adds r4,r0,#0 (job object); 8116F76A str r4,[r5]; 8116F76C ldr r1,[r4,#4]; blx r1 (call job->[4] callback with LR=0x8116F770); 8116F774 ldr.w lr,[r4,#0x10] (read saved LR/resume address); 8116F778 cmp.w lr,#0; 8116F77C ldr r1,[r4,#0x14]; 8116F77E ldr r3,[r5,#4]; ldr r2,[r5,#8]; 8116F782 beq 0x8116F78E; 8116F784 str.w r1,[lr,#0x14]; 8116F78A ldr.w lr,[r4,#0x10]; 8116F78E mov ip,lr; 8116F790 cbz r1,0x8116F79C; 8116F792 str.w lr,[r1,#0x10]; 8116F7A0/AC update globals; 8116F7BA bl 0x8115D614 (job switch/save primitive); 8116F7BE adds r1,r4,#0; 8116F7C0 bl 0x8115D43C (job switch/resume primitive); 8116F7C4 pop {r4,r5,r6,pc}. So 0x8115D614/0x8115D43C are the in-game cooperative scheduling primitives (batch_034 generated code also references them) and LR is saved/restored via job field +0x10. NEXT: decompile 0x8115D614 and 0x8115D43C and check whether their AOT blocks are correct (do they use blx/bx/mov pc to treat LR/ip as resume PC; does the generated code wrongly treat LR as a return value); trace when LR=0x81178F10 is written into job+0x10 (wr32 watch or probes at 0x8116F78A/0x8116F792); if AOT generation is wrong rewrite those primitives as manual blocks; after the fix the movie callback should enter/return with a correct LR and the stack frame will no longer be misaligned; then the GXM draw chain continues -> SceGxmDraw/BeginScene -> picture. |
 m1132（`out80m_m1132effd6.txt`）证据（早期正常调用，cap 30）：
 ```
 [EFF9E-ENT] sp=848561A8 lr=811C56D0 r0=84856204 r1=8153A74C/8153DECC/... fib=848463A0
@@ -498889,3 +498933,45 @@ NEXT：
 ANTI-FORGETTING ENTRY. Keywords: M1087 m1132 stack dumps show the GXM path's early calls are all normal - [EFF9E-ENT] sp=848561A8 lr=811C56D0 r0=84856204 r1=8153A74C/8153DECC fib=848463A0; [EFFCC] sp=84856150 lr=811EFFA0 r0=0 r1=8130CB20; [EFFD6] sp=84856150 lr=0 r0=0 r1=8130CB20; frame 0x848561A8-0x58=0x84856150 correct; [BADMEM]=0 [ACFC-SAFE]=0 in that run. So FUN_811EFE9E itself and the regular call stack are fine; the earlier 0x811EFFD6 float-1.0 crash is a DOWNSTREAM consequence of ACFC-SAFE returning NULL (the caller did not check and continued building GXM batches with garbage). The real target remains the original FUN_81159276 stack frame misalignment (return to 0x81178F10). M1087 probes (batch_010): [MOVCB-ENT] @0x81159276 entry prints n/sp/lr/r6/fib + first 8 stack words + PC ring(8); [MOVCB-EPI] @0x811592BE exit (before add sp,#0x18; pop {r4,r5,r6,pc}) prints first 10 stack words + PC ring(8); cap 300 to cover the crashing invocation. Build: batch_010 exit 0; harness exit 0; exe 57,117,097B 06:20:55. Verification run out80m_m1133movcb.txt started. NEXT: read m1133 last [MOVCB-ENT]/[MOVCB-EPI]: what is the crashing invocation's entry lr (normally a movie-player call site like 0x81157xxx); whether the saved slots [sp]..[sp+0x0C] (r4,r5,r6,pc) have pc=0x81178F10; if entry lr is already near 0x81178F10 the caller is wrong; if entry lr is normal but the exit stack was modified some instruction/HLE call inside the callback overwrote the saved slots -> use wr32_watch to find the writer; after the fix restore/remove ACFC-SAFE and verify the movie flow completes naturally; then GXM draw batches continue -> SceGxmDraw/BeginScene -> picture.
 
 LOOKUP: M1087 FUN_811EFE9E stack frames normal, early GXM calls sp=848561A8 lr=811C56D0, EFFCC/EFFD6 sp=84856150 frame 0x58 correct, 0x811EFFD6 float 1.0 crash is downstream of ACFC-SAFE NULL return, real root remains FUN_81159276 return to 0x81178F10, M1087 probes [MOVCB-ENT] @0x81159276 [MOVCB-EPI] @0x811592BE stack 8-10 words + pc ring cap 300, batch_010, exe 57,117,097B 06:20:55, out80m_m1133movcb.txt, next find who corrupts saved r4/r5/r6/pc slots or wrong caller LR -> §18.4631 [relevant: second crash], §18.4630 [relevant: ACFC-SAFE], §18.4629 [relevant: pc-ring]
+### 18.4633 PORT M1088: 崩溃 movie 回调入口 = LR 0x81178F10 + appJob Thumb 函数指针栈 → 游戏协作式 job 调度器（LR 恢复协议）被错误执行
+
+1) m1133 探针（真实值）：
+```
+[MOVCB-ENT] sp=0x84856290 lr=0x81178F10 r6=0 fiber=0x848463A0
+            entry stack: 816CDA48 811DACFC 8116FA67 8116FA5D 00000000
+[MOVCB-EPI] sp=0x84856268 lr=0x81159298 r6=0x812B414C
+[ACFC-SAFE] #1500000 r6=0 -> skip insert
+[BADMEM] va=0xBF800008 @0x811EFFD6（ACFC-SAFE 下游后果）
+```
+2) appJob 跳板反汇编（0x8116F75E）：
+```
+8116F75E: push {r4,r5,r6,lr}
+8116F760: movw r5,#0x54c0; movt r5,#0x8155     ; 全局调度状态 0x815554C0
+8116F768: adds r4,r0,#0                        ; r4 = job
+8116F76A: str r4,[r5]
+8116F76C: ldr r1,[r4,#4]; blx r1               ; 调 job->[4] 回调（LR=0x8116F770）
+8116F774: ldr.w lr,[r4,#0x10]                  ; ★ job+0x10 = 保存的 LR/恢复地址
+8116F778: cmp.w lr,#0
+8116F77C: ldr r1,[r4,#0x14]                    ; job+0x14 = 链
+8116F792: str.w lr,[r1,#0x10]
+8116F78E: mov ip,lr
+8116F7BA: bl 0x8115D614                          ; ★ job 切换/保存
+8116F7C0: bl 0x8115D43C                          ; ★ job 切换/恢复
+8116F7C4: pop {r4,r5,r6,pc}
+```
+3) 结论：
+- 崩溃回调 FUN_81159276 以 **LR=0x81178F10**（FUN_81178F0A 中 `bl 0x8116F8A8` 的返回地址）进入，栈上是 appJob 跳板的 Thumb 函数指针（0x8116FA67=0x8116FA66|1、0x8116FA5D=0x8116FA5C|1）和错位地址 0x811DACFC
+- ⇒ 游戏自己的协作式 job 调度（LR 作为恢复 PC 保存在 job+0x10，再由 0x8115D614/0x8115D43C 切换）在我们的 AOT 执行下出错：某个 job 的恢复地址字段错误地是 0x81178F10，之后该 job 恢复了 movie 回调任务但 LR 不对 → 栈帧错位 → 0x811DACFC 乱跳 → 崩溃
+4) NEXT：
+```
+① 反编译 0x8115D614 / 0x8115D43C，检查 AOT 块生成（blx/bx/mov pc 恢复语义）
+② 追踪 LR=0x81178F10 写入 job+0x10 的时刻
+③ AOT 错误 → 手动块重写这两个调度原语
+④ 修复后 movie 回调 LR 正常、栈帧不再错位
+⑤ GXM 绘制链继续 → SceGxmDraw/BeginScene → 画面
+```
+验证：`out80m_m1133movcb.txt`、`out80m_m1132effd6.txt`、0x8116F75E 反汇编。
+
+ANTI-FORGETTING ENTRY. Keywords: M1088 the crashing movie callback FUN_81159276 was entered with LR=0x81178F10, sp=0x84856290, entry stack [0]=0x816CDA48 [4]=0x811DACFC [8]=0x8116FA67 [0xC]=0x8116FA5D [0x10]=0; 0x8116FA67/0x8116FA5D are Thumb function pointers (0x8116FA66|1, 0x8116FA5C|1) of appJob trampolines and 0x811DACFC is the previously known misaligned address. The game's own cooperative job scheduler manipulates LR/resume addresses: trampoline 0x8116F75E treats job struct fields +0x10/+0x14 as saved LR/resume PC and swaps them (8116F75E push {r4,r5,r6,lr}; 8116F760 movw r5,#0x54c0; movt r5,#0x8155 = global scheduler state 0x815554C0; 8116F768 adds r4,r0,#0 = job; 8116F76A str r4,[r5]; 8116F76C ldr r1,[r4,#4]; blx r1 = call job->[4] callback with LR=0x8116F770; 8116F774 ldr.w lr,[r4,#0x10] = saved LR/resume address; 8116F778 cmp.w lr,#0; 8116F77C ldr r1,[r4,#0x14]; 8116F77E ldr r3,[r5,#4]; ldr r2,[r5,#8]; 8116F782 beq 0x8116F78E; 8116F784 str.w r1,[lr,#0x14]; 8116F78A ldr.w lr,[r4,#0x10]; 8116F78E mov ip,lr; 8116F790 cbz r1,0x8116F79C; 8116F792 str.w lr,[r1,#0x10]; 8116F7A0/AC update globals; 8116F7BA bl 0x8115D614 (job switch/save primitive); 8116F7BE adds r1,r4,#0; 8116F7C0 bl 0x8115D43C (job switch/resume primitive); 8116F7C4 pop {r4,r5,r6,pc}). So 0x8115D614/0x8115D43C are the in-game cooperative scheduling primitives and LR is saved/restored via job field +0x10. LR=0x81178F10 is the return address of bl 0x8116F8A8 inside FUN_81178F0A - so some job's resume-address field was wrongly set to this value, and that job resumed another task (the movie callback) with a wrong LR -> stack frame misalignment -> 0x811DACFC misjump -> crash. m1133 also: [MOVCB-EPI] sp=0x84856268 lr=0x81159298 (normal return address of bl 0x81157F4C) r6=0x812B414C; [ACFC-SAFE] #1500000 r6=0 -> skip insert; [BADMEM] va=0xBF800008 at 0x811EFFD6 (downstream of ACFC-SAFE). NEXT: decompile 0x8115D614 and 0x8115D43C and check whether their AOT blocks are correct (do they use blx/bx/mov pc to treat LR/ip as resume PC; does the generated code wrongly treat LR as a return value); trace when LR=0x81178F10 is written into job+0x10 (wr32 watch or probes at 0x8116F78A/0x8116F792); if AOT generation is wrong rewrite those primitives as manual blocks; after the fix the movie callback should enter/return with a correct LR and the stack frame will no longer be misaligned; then the GXM draw chain continues -> SceGxmDraw/BeginScene -> picture.
+
+LOOKUP: M1088 movie callback entry LR=0x81178F10 sp=0x84856290 stack 816CDA48 811DACFC 8116FA67 8116FA5D, appJob trampoline 0x8116F75E job+0x10 saved LR protocol, global scheduler state 0x815554C0, 8116F76C blx r1 job->[4], 8116F774 ldr.w lr,[r4,#0x10], 8116F78E mov ip,lr, 8115D614 and 8115D43C job switch primitives, Thumb pointers 0x8116FA66|1 0x8116FA5C|1, 0x811DACFC misaligned address, ACFC-SAFE downstream BADMEM 0xBF800008 0x811EFFD6, next decompile 8115D614/8115D43C check AOT blocks -> §18.4632 [relevant: MOVCB probes], §18.4631 [relevant: GXM crash], §18.4630 [relevant: ACFC-SAFE]
