@@ -1063,6 +1063,38 @@
 | M1045 | §18.4590: **m1101 证据：TMX 上传链全部走通——FUN_81174DBC 在 logo.bin 中找到全部 3 个 TGA（arch->entry=99C677B8/99D67F40/99DE8384）、纹理对象创建（texobj=85B8771C/85C07C3C/85C07D1C）、GXM 纹理创建（FUN_811CA6B6）、上传调用（FUN_811CA9F0）全部执行；但 guest 的"上传完成"判定依赖纹理对象 +0x28 的 bit31（FUN_811CA9F0: `return ([tex+0x28] & 0x80000000) == 0`），我们的 HLE 从不清除该位 → worker 永远停在 state=2 → S0_LOGO 卡在 state=3。M1045 在 FUN_811CA9F0 处强制"上传完成"（清 bit31 并返回 1）**。m1101：
 | M1046 | §18.4591: **m1102 结果：强制上传完成生效（3 个 TGA 的 upload ret=1），但 [LOGO] 仍停在 state=3——不是单帧逻辑问题，而是主循环进入 app 显示管理器等待循环：`FUN_8128EA20` 每 1ms 休眠一次，等待 `[param+0xBC] != 1`（显示队列完成状态）；该状态由显示队列回调处理器 `FUN_8127B7C8`（队列 `DAT_8153FD64`，`DAT_8153FDA8` 控制）清除。即：title 代码在等"显示队列回调"完成，而我们的 HLE DisplayQueue 捕获路径可能绕过了 app 自己的队列登记，导致状态永不清除 → 主循环空转、S0_LOGO 不再被调度**。m1102 证据（`out80m_m1102tmxdone.txt`/err）：
 | M1047 | §18.4592: **为定位"显示队列等待"卡点加 [WAITLOOP]/[DQPROC] 探针：在 FUN_8128EA20 等待循环打印 `[+0xBC]` 状态、`DAT_8153FD60/FDA8`、`DAT_8153FD64` 队列槽、以及 HLE 侧 `dispq/present/endscene/displaycb` 计数；在显示队列回调处理器 FUN_8127B7C8 / 忙分支 FUN_8127B36A 打印队列状态**。m1102 关键补充：title 启动后 **只有 1 次 [ABIBEGIN]（n=59.585M），没有 EndScene/DisplayQueueAddEntry** ⇒ 主循环在等待一个"显示队列完成"状态，但显示提交路径未再被触发。实现：
+| M1048 | §18.4593: ★★★★★★★★ **m1103 决定性数据：等待循环参数 p=84D8D368、`[p+0xBC]` 恒为 1、`DAT_8153FD60=1`、`DAT_8153FDA8=0x816A0AC0`（busy 指针永不清）、`DAT_8153FD64` 队列槽 q0=**0x812264B5**（待执行回调！）、q1=0；HLE 侧 dispq/present/endscene 全 0。⇒ app 显示队列里有一个待执行回调 0x812264B5，但 `DAT_8153FDA8 != 0` 让 FUN_8127B7C8 永远走 busy 分支（调用 0x816A0AC0 的注册回调），**从不处理自己的队列槽** → 状态永不清除。M1048 实施 DQFORCE 实验：队列有回调（q0 != 0）且 busy 标志非 0 时，把 `DAT_8153FDA8` 清 0，让 FUN_8127B7C8 走正常路径处理回调队列**。m1103 证据：
+```
+[WAITLOOP] #1 st=1 p=84D8D368 disq60=00000001 a8=816A0AC0 q=812264B5/00000000 dispq=0 present=0 end=0 cb=1
+（cap 60 全部相同：st=1、q0=0x812264B5 一直挂着）
+[DQPROC] 60 条 d60=1 a8=816A0AC0 q0=0 q1=0
+[DQPROC2] 30 条 busy d60=1 a8=816A0AC0
+[LOGO] #2 state=3（无后续）  [TMX] 上传全部 ret=1  [BADMEM] 0
+```
+**FUN_8127B36A（busy 分支）**：
+```c
+void FUN_8127b36a(int param_1) { if (*(code **)(param_1 + 0x10)) (**(code **)(param_1 + 0x10))(*(u32*)(param_1 + 0x14)); }
+// param_1 = DAT_8153FDA8 = 0x816A0AC0；注册回调在 [+0x10]，参数 [+0x14]
+```
+**M1048 实现（`batch_022.cpp` blk_8127B7C8 入口）**：
+```cpp
+{ static int _on=-1; if(_on<0){ const char* _e=getenv("P5D_DQFORCE"); _on=(_e&&atoi(_e))?1:0; }
+  if(_on){ uint32_t _q0=rd32(s,0x8153FD64u);
+    if(_q0){ uint32_t _a8=rd32(s,0x8153FDA8u);
+      if(_a8){ wr32(s,0x8153FDA8u,0u); fprintf(stderr,"[DQFORCE] #%d clear busy a8=%08X q0=%08X\n",...); } } } } }
+// 另：DQPROC2 探针扩展为打印 r0 / [r0+0x10] 回调 / [r0+0x14] 参数 / 结构体前 4 个字
+```
+编译：batch_022 exit 0；exe 重链 exit 0（57,063,965B，18:43:01）。
+验证运行：`out80m_m1104dqforce.txt`（FORCETITLE + FIOSFILL + DQFORCE）已启动。
+NEXT：
+```
+① [DQFORCE] 是否触发、清 busy 后 FUN_8127B7C8 是否进入回调处理路径并执行 0x812264B5
+② [WAITLOOP] st 是否变成非 1（等待退出）→ 主循环恢复 → [LOGO] state=4/5
+③ logoDrawProc 绘制 → [ABIBEGIN]/[ABIEND]/[TEXBIND]/[PRESENT] → 截帧出现 logo
+④ 若清 busy 后仍卡 → 检查 0x812264B5 回调是否真的清状态，或继续追 DAT_8153FDA8 的合法清除路径
+```
+验证：`out80m_m1103waitloop.txt`、`out80m_m1104dqforce.txt`（生成中）、`dq_busy.txt`。 |
+| §18.4593 | m1103 decisive data: wait-loop param p=84D8D368, [p+0xBC] always 1, DAT_8153FD60=1, DAT_8153FDA8=0x816A0AC0 (busy pointer never cleared), DAT_8153FD64 queue slot q0=0x812264B5 (a pending callback!), q1=0; HLE dispq/present/endscene all 0. So the app display queue holds a pending callback 0x812264B5, but DAT_8153FDA8 != 0 keeps FUN_8127B7C8 on the busy branch (calling the registered callback at 0x816A0AC0), so it never processes its own queue slots -> the state never clears. M1048 implements the DQFORCE experiment: when the queue has a callback (q0 != 0) and the busy flag is non-zero, clear DAT_8153FDA8 so FUN_8127B7C8 takes the normal path and processes the callback queue. m1103 evidence: [WAITLOOP] #1 st=1 p=84D8D368 disq60=00000001 a8=816A0AC0 q=812264B5/00000000 dispq=0 present=0 end=0 cb=1 (all 60 identical: st=1, q0=0x812264B5 pending); [DQPROC] 60 lines d60=1 a8=816A0AC0 q0=0 q1=0; [DQPROC2] 30 lines busy d60=1 a8=816A0AC0; [LOGO] #2 state=3 (no further); [TMX] uploads all ret=1; [BADMEM] 0. FUN_8127B36A (busy branch): void FUN_8127b36a(int param_1) { if (*(code **)(param_1 + 0x10)) (**(code **)(param_1 + 0x10))(*(u32*)(param_1 + 0x14)); } param_1 = DAT_8153FDA8 = 0x816A0AC0; registered callback at [+0x10], arg [+0x14]. M1048 implementation (batch_022.cpp blk_8127B7C8 entry): { static int _on=-1; if(_on<0){ const char* _e=getenv("P5D_DQFORCE"); _on=(_e&&atoi(_e))?1:0; } if(_on){ uint32_t _q0=rd32(s,0x8153FD64u); if(_q0){ uint32_t _a8=rd32(s,0x8153FDA8u); if(_a8){ wr32(s,0x8153FDA8u,0u); fprintf(stderr,'[DQFORCE] #%d clear busy a8=%08X q0=%08X'); } } } } plus DQPROC2 extended to print r0/[r0+0x10] callback/[r0+0x14] arg/struct words. batch_022 compile exit 0; exe relink exit 0 (57,063,965B 18:43:01). Verification run out80m_m1104dqforce.txt (FORCETITLE + FIOSFILL + DQFORCE) started. NEXT: whether [DQFORCE] fires and after clearing busy FUN_8127B7C8 enters the callback path and runs 0x812264B5; whether [WAITLOOP] st becomes non-1 (wait exits) -> main loop resumes -> [LOGO] state=4/5; logoDrawProc draws -> [ABIBEGIN]/[ABIEND]/[TEXBIND]/[PRESENT] -> frames show the logo; if still stuck, check whether 0x812264B5 really clears the state or keep tracing the legitimate DAT_8153FDA8 clearing path. |
 **harness 新钩子**（供 AOT 探针读取 HLE 状态）：
 ```cpp
 extern "C" int h_q_dispq(void)   { return g_disp_pending ? 1 : 0; }
@@ -496068,3 +496100,40 @@ NEXT：
 ANTI-FORGETTING ENTRY. Keywords: M1047 added [WAITLOOP]/[DQPROC] probes to locate the display-queue wait: FUN_8128EA20 wait loop prints [+0xBC] state, DAT_8153FD60/FDA8, DAT_8153FD64 queue slots and HLE counters; FUN_8127B7C8 callback processor / FUN_8127B36A busy branch print queue state. m1102: after title start only one [ABIBEGIN] (n=59.585M), no EndScene/DisplayQueueAddEntry => main loop waits for 'display queue done' but the display submit path is no longer triggered. Harness hooks: h_q_dispq (g_disp_pending), h_q_present (g_gxm_present_n), h_q_endscene (g_gxm_end_n), h_q_dispcb (g_display_cb). batch_022 probes: blk_8128EA36 [WAITLOOP], blk_8127B7C8 [DQPROC], blk_8127B36A [DQPROC2]. harness/batch_022 compile exit 0; exe relink exit 0 (57,062,836B 18:25:04). Verification run out80m_m1103waitloop.txt started. NEXT: st always 1? param_1? disq60/a8/queue slots?; whether the app callback queue is empty/busy; HLE dispq/present counters; then register the callback into the app queue in the HLE displayQueue stub, or call FUN_8127B7C8 directly, or experimentally clear [+0xBC].
 
 LOOKUP: M1047, [WAITLOOP] probe blk_8128EA36, [DQPROC] blk_8127B7C8, [DQPROC2] blk_8127B36A, param+0xBC state, DAT_8153FD60, DAT_8153FDA8, DAT_8153FD64 queue, h_q_dispq/h_q_present/h_q_endscene/h_q_dispcb, batch_022, FUN_8128EA20 wait loop, HLE displayQueue stub, g_disp_pending, g_gxm_present_n, [ABIBEGIN] only one, out80m_m1103waitloop.txt, exe 57,062,836B -> §18.4591 [relevant: spin identified], §18.4590 [relevant: upload force]
+### 18.4593 PORT M1048: 显示队列 busy 标志阻止回调处理 → DQFORCE 实验
+
+1) m1103 证据：
+```
+[WAITLOOP] #1 st=1 p=84D8D368 disq60=00000001 a8=816A0AC0 q=812264B5/00000000 dispq=0 present=0 end=0 cb=1
+（60 条全同：st=1、q0=0x812264B5 悬挂）
+[DQPROC] 60 条 d60=1 a8=816A0AC0 q0=0 q1=0
+[DQPROC2] 30 条 busy d60=1 a8=816A0AC0
+[LOGO] #2 state=3；[TMX] 上传 all ret=1；[BADMEM] 0
+```
+2) FUN_8127B36A（busy 分支）：
+```c
+void FUN_8127b36a(int param_1) { if (*(code **)(param_1 + 0x10)) (**(code **)(param_1 + 0x10))(*(u32*)(param_1 + 0x14)); }
+// param_1 = DAT_8153FDA8 = 0x816A0AC0；注册回调 [+0x10]，参数 [+0x14]
+```
+3) M1048（batch_022.cpp blk_8127B7C8 入口）：
+```cpp
+{ static int _on=-1; if(_on<0){ const char* _e=getenv("P5D_DQFORCE"); _on=(_e&&atoi(_e))?1:0; }
+  if(_on){ uint32_t _q0=rd32(s,0x8153FD64u);
+    if(_q0){ uint32_t _a8=rd32(s,0x8153FDA8u);
+      if(_a8){ wr32(s,0x8153FDA8u,0u); fprintf(stderr,"[DQFORCE] #%d clear busy a8=%08X q0=%08X\n",...); } } } }
+// DQPROC2 扩展：r0/[+0x10] 回调/[+0x14] 参数/结构体前 4 字
+```
+4) 编译：batch_022 exit 0；exe 57,063,965B（18:43:01）
+5) 验证运行 `out80m_m1104dqforce.txt` 已启动
+NEXT：
+```
+① [DQFORCE] 触发 → FUN_8127B7C8 进入回调路径 → 执行 0x812264B5
+② [WAITLOOP] st 变非 1 → 等待退出 → [LOGO] state=4/5
+③ logoDrawProc 绘制 → 截帧出现 logo
+④ 仍卡 → 追 0x812264B5 或 DAT_8153FDA8 合法清除路径
+```
+验证：`out80m_m1103waitloop.txt`、`out80m_m1104dqforce.txt`（生成中）、`dq_busy.txt`。
+
+ANTI-FORGETTING ENTRY. Keywords: M1048 m1103 decisive data: wait-loop param p=84D8D368, [p+0xBC] always 1, DAT_8153FD60=1, DAT_8153FDA8=0x816A0AC0 busy pointer never cleared, DAT_8153FD64 queue slot q0=0x812264B5 pending callback, q1=0, HLE dispq/present/endscene all 0. So the app display queue has a pending callback but the busy flag keeps FUN_8127B7C8 on the busy branch so it never processes its own queue slots -> state never clears. DQFORCE experiment: when q0 != 0 and DAT_8153FDA8 != 0 clear DAT_8153FDA8 so FUN_8127B7C8 takes the normal path. m1103: [WAITLOOP] 60 identical st=1 q=812264B5/0 dispq=0 present=0 end=0 cb=1; [DQPROC] 60 d60=1 a8=816A0AC0 q0=0; [DQPROC2] 30 busy d60=1 a8=816A0AC0; [LOGO] #2 state=3; [TMX] all ret=1; [BADMEM] 0. FUN_8127B36A: void FUN_8127b36a(int param_1) { if (*(code**)(param_1+0x10)) (**(code**)(param_1+0x10))(*(u32*)(param_1+0x14)); } param_1=DAT_8153FDA8=0x816A0AC0. M1048 in batch_022.cpp blk_8127B7C8: if P5D_DQFORCE and q0!=0 and a8!=0 then wr32(0x8153FDA8,0) print [DQFORCE]; DQPROC2 extended with r0/[+0x10]/[+0x14]/struct dump. batch_022 compile exit 0; exe relink exit 0 (57,063,965B 18:43:01). Verification run out80m_m1104dqforce.txt (FORCETITLE + FIOSFILL + DQFORCE) started. NEXT: [DQFORCE] fires; FUN_8127B7C8 processes the queue and runs 0x812264B5; [WAITLOOP] st becomes non-1 -> wait exits -> [LOGO] state=4/5; logoDrawProc draws -> frames show the logo; if stuck check 0x812264B5 or the legitimate DAT_8153FDA8 clearing path.
+
+LOOKUP: M1048, [WAITLOOP] st=1 p=84D8D368, [0x8153FD64] q0=812264B5 pending callback, DAT_8153FDA8=0x816A0AC0 busy, DAT_8153FD60=1, [DQPROC]/[DQPROC2], FUN_8127B36A callback at [+0x10] arg [+0x14], DQFORCE clear busy, batch_022 blk_8127B7C8, [LOGO] state=3, exe 57,063,965B, out80m_m1103waitloop.txt, out80m_m1104dqforce.txt -> §18.4592 [relevant: wait loop probes], §18.4591 [relevant: display wait]
