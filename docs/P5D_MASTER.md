@@ -1081,6 +1081,40 @@
 | M1063 | §18.4608: ★★★★★★★★★★ **架构级突破：gfd 绘制"builder"其实是"延迟作业描述符"，而真正的链→GPU 提交函数是 FUN_811F3572/FUN_811F361C！** 反编译三个 builder（`builders.txt`）：它们只做三件事——`param_1[1]=bucket`、`*param_1 = <walker code ptr>`、`*bucket |= 0x80000000`（标记忙碌），然后 `FUN_811E649A(type,builder)` **同步执行该描述符的 walker**（我们 m1111 的崩溃就发生在 walker 内部，证明是同步执行）。walker（`walkers.txt`）逻辑：
 | M1064 | §18.4609: ★★★★★★★★★★★★ **第 1030 轮里程碑级突破：黑屏的最终根因找到了——不是图形 API、不是命令链，而是【guest 工作线程从未被调度执行】！gfd 的 GPU 提交是"投递到 worker 队列 + 异步线程执行"模型，而我们的 guest 线程调度器没有真正运行 ready 线程，导致所有 GPU 作业永不执行、GXM HLE 调用为零。** 三条决定性证据：
 | M1065 | §18.4610: **线程泵机制完整审计（`recomp_harness.cpp` `hle_thr_pump`）：guest 线程泵存在且有三重门控，关键是 fiber 世界内的泵被默认禁止；M1065 用 `P5D_THRPUMP=1` 重新试验（历史 M720 曾早期崩溃，之后大量修复未再验证）。**
+| M1066 | §18.4611: ★★★★★★★★★★ **gfd 作业队列全链路确认 + 精确卡点：job 已投递、信号量计数在涨、worker 线程却始终 waiting（从未被唤醒/被泵）**。m1112（THRPUMP=1）证据：
+```
+[SCREATE] obj=50011000 init=0    name='gfdJobCountSema'  lr=811E60AC
+[SCREATE] obj=50012000 init=512  name='gfdJobEmptySema'  lr=811E60C6
+[SCREATE] obj=50013000 init=0    name='gfdJobCountSema'
+[SCREATE] obj=50014000 init=10240 name='gfdJobEmptySema'
+[SCREATE] obj=50015000 init=0    name='gfdJobCountSema'
+[SCREATE] obj=50016000 init=…    name='gfdJobEmptySema'
+[TDUMP] tid=40011000 entry=811E68C9 alive=1 ready=0 wait=1 obj=50011000 bits=1 mode=5E4A ctxpc=811E68FC
+[TDUMP] tid=40012000..40015000 entry=811E68C9 同上 obj=50013000
+[TDUMP] tid=40016000 entry=811E68C9 obj=50015000
+[SEMA] 50011000=3 50012000=512 50013000=0 50014000=10240 50015000=440 …   ← ★ 有 3+440 个作业待消费，worker 却 waiting
+[WD] loop=2 total=1500000 blk=811DFB06 fib=848463A0 fex=0 ex=0 pump=0        ← 主线程在自旋
+```
+**投递路径的 stub 精确确认**（`e649a.txt` 反汇编）：
+```
+811e64e8  ldr r0,[r5,#0x0]        ; r5 = &DAT_8169E080[type] 通道结构，[r5]=jobCountSema
+811e64ea  movs r1,#0x1
+811e64ec  blx 0x812b2ad0           ; ★ SceThreadmgr_E6B761D1 = sceKernelSignalSema(我们 HLE 的 case 0x812B2AD0)
+```
+我们的 SignalSema 实现（harness case 0x812B2AD0）**确实**会唤醒等待者：对每个 `waiting && wait_obj==obj` 的线程，若 `wait_mode==0x5E4A` 且有足够计数则扣减并 `waiting=0; ready=1`；其他模式直接 `ready=1`。worker 的 mode=5E4A、bits=1 完全匹配。
+**⇒ 因此真正缺的是"ready 线程被执行"：主线程正在自旋（blk 811DFAFE/811DFB18 各执行 800 万次），而线程泵在 fiber 世界内被门控、主自旋路径未触发泵。** 主循环块执行点相关状态：`g_pump_now`（等待任务调度泵）、`g_pump_force`（强制泵标志）、`g_blkcnt_total>1500000` 门控都已存在。
+NEXT（下一轮直接实施，且可短跑验证——worker 从启动早期就在收作业）：
+```
+① 在主块执行循环加 P5D_PUMPMAIN=1：每 0x400 块执行 g_pump_force=1; hle_thr_pump(&s,300); g_pump_force=0;
+   （主自旋路径 811DFAFE/811DFB18 每 0x200 块都会经过）
+② [PUMP] 诊断：hle_thr_pump 调用数/被门控拒绝数/每个 tid 本轮执行块数/blocked 原因
+③ blk_811E68C8（worker trampoline 函数起点，batch_016）加 [WK] 探针：worker 进入/处理作业
+④ SignalSema case 加 [GSIG] 诊断：5001xxxx 的 signal 计数、当前等待者、唤醒数
+⑤ 短跑（~10 分钟到 n≈10M）即可验证：worker 是否开始执行、50015000 队列是否被消费
+⑥ 成功后跑完整 title 阶段 → GXM per-frame 调用 → 画面
+```
+验证：`out80m_m1112pump.txt`、`e649a.txt`、`recomp_harness.cpp`（hle_thr_pump/SignalSema）、§18.4609/18.4610。 |
+| §18.4611 | gfd job-queue chain fully confirmed + exact blocker: jobs are posted, semaphore counts rise, yet the worker threads stay waiting forever (never woken/pumped). m1112 (THRPUMP=1) evidence: [SCREATE] obj=50011000 init=0 name='gfdJobCountSema' lr=811E60AC; 50012000 init=512 name='gfdJobEmptySema' lr=811E60C6; 50013000 init=0 gfdJobCountSema; 50014000 init=10240 gfdJobEmptySema; 50015000 init=0 gfdJobCountSema; 50016000 gfdJobEmptySema. [TDUMP] tid=40011000 entry=811E68C9 alive=1 ready=0 wait=1 obj=50011000 bits=1 mode=5E4A ctxpc=811E68FC; tid=40012000..40015000 same obj=50013000; tid=40016000 obj=50015000. [SEMA] 50011000=3 50012000=512 50013000=0 50014000=10240 50015000=440 ... (3+440 jobs pending while workers wait!). [WD] loop=2 total=1500000 blk=811DFB06 fib=848463A0 fex=0 ex=0 pump=0 (main thread spinning). Post stub exactly confirmed (e649a.txt disasm): 811e64e8 ldr r0,[r5,#0x0] (r5=&DAT_8169E080[type], [r5]=jobCountSema); 811e64ec blx 0x812b2ad0 = SceThreadmgr_E6B761D1 = sceKernelSignalSema = our HLE case 0x812B2AD0, whose implementation DOES wake waiters: for each waiting && wait_obj==obj, if wait_mode==0x5E4A and count>=need then count-=need, waiting=0, ready=1, else ready=1; worker mode=5E4A/bits=1 matches exactly. So the real missing piece is 'ready threads never get executed': the main thread is spinning (blk 811DFAFE/811DFB18 executed ~8M times each) while the thread pump is fiber-gated and that spin path never triggers it. Related state that already exists: g_pump_now (wait-task pump scheduling), g_pump_force (forced pump flag), g_blkcnt_total>1500000 gate. NEXT: (1) in the main block-execution loop add P5D_PUMPMAIN=1: every 0x400 blocks run g_pump_force=1; hle_thr_pump(&s,300); g_pump_force=0 (main spin path 811DFAFE/811DFB18 passes every 0x200 blocks); (2) [PUMP] diagnostics: hle_thr_pump call count/gate rejections/per-tid blocks run this round/blocked reason; (3) add [WK] probe at blk_811E68C8 (worker trampoline function start, batch_016); (4) add [GSIG] diagnostics to SignalSema for 5001xxxx (signal counts, current waiters, wake count); (5) short run (~10 min to n≈10M) is enough to verify (workers get jobs from early boot): do workers execute, is the 50015000 queue consumed; (6) then run the full title phase -> GXM per-frame calls -> picture. |
 `hle_thr_pump(s, quantum)` 核心逻辑：
 ```c
 static void hle_thr_pump(RecState* s,int quantum) {
@@ -497260,3 +497294,38 @@ NEXT：
 ANTI-FORGETTING ENTRY. Keywords: M1065 thread-pump audit: hle_thr_pump(s,quantum) has gates: (g_cur_thr||g_hostthreads) return; THRYIELD/PERIODPUMP wakes waiting threads whose virtual deadline passed (g_vtime_extra >= deadline -> waiting=0 ready=1); core gate if (g_in_fiber_exec && !g_thrpump_env && !g_thrpump3 && !g_pump_force) return; then for each alive&&ready thread save RecState, memcpy(s->r,t.ctx.r), g_cur_thr=tid, run quantum blocks, on g_thr_blocked set ready=0 waiting=1 wait_obj/bits/mode. Call sites: main loop every 0x200 blocks pump(400); DelayThread when g_in_fex==0&&!g_in_fiber_exec or (g_thrpump_env&&!g_cur_thr&&n>1.5M) pump(20000); sema-wait and eflag-wait from main thread use g_pump_force=1 pump(400); main loop THRPUMP && n%20000==0 pump 20000; THRPUMP3 at pc 0x8120682A/0x812067A0 pump 80. Experiment m1112: standard env (P5D_THRYIELD=1 P5D_PERIODPUMP=1 P5D_VTIME=1) + FORCETITLE+FIOSFILL+WAITFORCE+SCNFORCE + P5D_THRPUMP=1, out80m_m1112pump.txt, at n=20.1M stable (no BADMEM, no early crash, CPU 237s) so M720-era early crash is fixed; watch title phase for GXM HLE calls. NEXT: title-phase GXM calls?; if no pump add [PUMP] probe (call count/gate rejects/per-tid blocks); probe blk_811E68C9 worker for dequeued jobs; if job execution crashes fix HLE semantics; goal workers run gfd GPU jobs -> per-frame GXM draw -> picture.
 
 LOOKUP: M1065, hle_thr_pump, g_thrpump_env P5D_THRPUMP, g_thrpump3 P5D_THRPUMP3, g_pump_force, g_in_fiber_exec gate, g_thryield_env P5D_THRYIELD, g_periodpump_env P5D_PERIODPUMP, g_vtime_extra deadline wake, g_cur_thr, g_hostthreads P5D_HOSTTHREADS, quantum 400/20000/80, main loop n%0x200, n%20000, pc 0x8120682A/0x812067A0, worker entry 0x811E68C9, out80m_m1112pump.txt, M720 early crash fixed -> §18.4609 [relevant: worker threads root cause], §18.4265 [relevant: THRPUMP wiring], §18.4232 [relevant: sema/eflag arg fix]
+### 18.4611 PORT M1066: gfd 作业队列全链路确认——job 已投递/信号量在涨/worker 永远 waiting
+
+1) m1112 证据：
+```
+[SCREATE] 50011000 init=0    gfdJobCountSema   lr=811E60AC
+[SCREATE] 50012000 init=512  gfdJobEmptySema   lr=811E60C6
+[SCREATE] 50013000 init=0    gfdJobCountSema
+[SCREATE] 50014000 init=10240 gfdJobEmptySema
+[SCREATE] 50015000 init=0    gfdJobCountSema
+[TDUMP] tid=40011000 entry=811E68C9 ready=0 wait=1 obj=50011000 mode=5E4A ctxpc=811E68FC
+[TDUMP] tid=40012000..40015000 entry=811E68C9 obj=50013000
+[SEMA] 50011000=3 50012000=512 50013000=0 50014000=10240 50015000=440   ← 3+440 作业待消费
+[WD] loop=2 total=1500000 blk=811DFB06 fib=848463A0 fex=0 ex=0 pump=0     ← 主线程自旋
+```
+2) 投递 stub 确认（`e649a.txt` 反汇编）：
+```
+811e64e8  ldr r0,[r5,#0x0]      ; [r5] = 通道的 jobCountSema
+811e64ec  blx 0x812b2ad0         ; SceThreadmgr_E6B761D1 = sceKernelSignalSema（我们的 HLE case 0x812B2AD0）
+```
+3) 我们的 SignalSema 确实唤醒等待者（wait_mode==0x5E4A 扣减 token；其他模式直接 ready=1），worker 的 mode=5E4A/bits=1 匹配
+4) **真正缺的是"ready 线程被执行"**：主线程自旋（811DFAFE/811DFB18 各 ~800 万次），fiber 门控让泵不生效
+NEXT：
+```
+① 主块执行循环加 P5D_PUMPMAIN=1：每 0x400 块 g_pump_force=1; hle_thr_pump(&s,300); g_pump_force=0
+② [PUMP] 诊断（调用数/门控拒绝/tid 块数/blocked 原因）
+③ blk_811E68C8（worker trampoline，batch_016）[WK] 探针
+④ SignalSema case 加 [GSIG]（5001xxxx 信号计数/等待者/唤醒数）
+⑤ 短跑 ~10 分钟（n≈10M）验证 worker 是否执行、50015000 队列是否被消费
+⑥ 成功 → 完整 title 阶段 → GXM per-frame 调用 → 画面
+```
+验证：`out80m_m1112pump.txt`、`e649a.txt`、`recomp_harness.cpp`。
+
+ANTI-FORGETTING ENTRY. Keywords: M1066 gfd job queue confirmed: semaphores gfdJobCountSema (50011000/50013000/50015000 init 0) and gfdJobEmptySema (50012000 init 512, 50014000 init 10240, 50016000 ...), created at lr=811E60AC/811E60C6; worker threads tid=40011000..40016000 entry=0x811E68C9 wait on them with mode=0x5E4A bits=1 ctxpc=0x811E68FC; job posting FUN_811E649A ends with blx 0x812B2AD0 = SceThreadmgr_E6B761D1 = sceKernelSignalSema (our HLE case 0x812B2AD0 wakes waiters: wait_mode 0x5E4A transfers token; else ready=1); m1112 shows [SEMA] 50011000=3 50015000=440 (pending jobs) yet workers ready=0 waiting=1, and main thread spins in blk 811DFAFE/811DFB18 with [WD] total=1500000 blk=811DFB06 fib=848463A0 fex=0 pump=0 - so the missing piece is execution of ready threads (fiber gate blocks the pump on the spin path). NEXT: add P5D_PUMPMAIN=1 in the main block loop (every 0x400 blocks g_pump_force=1; hle_thr_pump(&s,300); g_pump_force=0); [PUMP] diagnostics (call count/gate rejections/per-tid blocks/blocked reason); [WK] probe at blk_811E68C8 (worker trampoline batch_016); [GSIG] diagnostics in SignalSema for 5001xxxx; short run (~10 min to n≈10M) to verify workers execute and 50015000 queue consumed; then full title run -> GXM per-frame calls -> picture.
+
+LOOKUP: M1066, gfdJobCountSema 50011000/50013000/50015000, gfdJobEmptySema 50012000 init512/50014000 init10240/50016000, SCREATE lr=811E60AC/811E60C6, worker tid 40011000..40016000 entry 811E68C9 mode 5E4A ctxpc 811E68FC, FUN_811E649A blx 0x812B2AD0 SignalSema, HLE case 0x812B2AD0 wakes waiters, [SEMA] 50011000=3 50015000=440 pending, [WD] blk 811DFB06 fex=0 pump=0 main spin, blk_811E68C8 worker trampoline batch_016, P5D_PUMPMAIN plan, g_pump_force, hle_thr_pump, out80m_m1112pump.txt, e649a.txt -> §18.4610 [relevant: pump gates], §18.4609 [relevant: worker root cause], §18.4265 [relevant: THRPUMP]
