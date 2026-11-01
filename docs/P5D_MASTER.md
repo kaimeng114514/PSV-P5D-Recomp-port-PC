@@ -1035,6 +1035,37 @@
 | M1017 | §18.4562: **batch_032 回归通过（无回退）+ 新 exe 合并 batch_032/033 + 新增 TTPROBE 探针追踪 title task 生命周期（定位 0xE5E5E5E5 释放者）**。`out80m_m1081batch32.txt`（batch_032 版 exe）结果与基线逐项一致：
 | M1018 | §18.4563: **TTPROBE（harness 级 pc 探针）0 命中：title 路径在 nested/interpreter 执行，不经过 job_probes → 改为 batch 级（AOT block 内）探针，直接追踪 title task 的创建与释放**。`out80m_m1082ttprobe.txt`：
 | M1019 | §18.4564: ★★★★★★★★★★ **关键真相：title task 没有被提前释放！worker 入口 node[2]=85B8583C 是合法 task 指针——崩溃在 appFade 路径深处：`FUN_81178F0A` 用 worker 的残留 r0 调 `FUN_8116f8a8` 得到 **0xE5E5E5E5**（某个"fade 对象"字段是毒值）**。batch 级探针结果（`out80m_m1083batchprobe.txt` / err）：
+| M1020 | §18.4565: ★★★★★★★★★★ **appFade 真相闭环：管理器创建正常、fade 对象来自被"全强制完成"的周期 job 节点——对象 +8 字段（job arg）已被 completion 回调释放成 0xE5。根因 = 我们的 all-force worker 强制策略破坏了 appFade/序列等周期 job 的状态；修复方向改为"只强制 boot init 系列 job，放行周期 job"**。`out80m_m1084fadeprobe.txt` / err：
+```
+[TTMI] mgrcall p0=00000002 p1=848563D8 p2=00000004   ← appFade 管理器创建（count=2, 回调表, count2=4）✅
+[TTC] task=85B8583C                                   ← title task 合法
+[TTW2]/[TTW] node=85B8586C arg=85B8583C               ← worker 入口合法
+[TTM] worker mgr=85A9E3DC                             ← 管理器非空 ✅
+[TTM] ce2 p=00000000 mgr=85A9E3DC
+[TTO] fadeobj=85A9E46C                                ← fade "对象" = 85A9E46C
+[TTF8] g8a8ret=E5E5E5E5                               ← *(85A9E46C+8)=0xE5（毒值）
+[BADMEM] guest va=0xE5E5E5E9 @81178F18
+```
+**交叉验证（决定性）**：`85A9E46C` 正是 WFDBG/JOBCOMP 列表里的 **job 节点**（worker=0x811792B3，即周期更新 job）：
+```
+[WFDBG] #4 ctx=84617E00 node=85A9E46C wf=811792B3
+[JOBDONE2] ... node=85A9E46C ...
+```
+⇒ appFade getter（FUN_81178CE2）返回的是 **appFade 周期 job 的节点**；`FUN_8116f8a8(node)=node[2]`（job arg）本应是 fade 任务结构，但该 job 被我们的 **all-force 强制完成**（worker 直接返回 -1）→ completion 回调释放了 arg（guest 堆 free 填充 0xE5）→ title worker 读 node[2] 得到 E5 → BADMEM。
+**结论（架构级）**：
+1) task 从未被释放（M1019 结论保持）；管理器也正常；
+2) **真正被破坏的是周期 job 的状态**——all-force 让 appFade/序列管理等周期 job 的 completion 立即执行，arg/任务结构被释放；
+3) 修复 = **选择性强制**：只强制 boot init 系列的 6 个 worker（trophy 0x81184809 / sound 0x811848B7 / gamedata 0x81184965 / msgwindow 0x81184A89 / mainmenu 0x81184B39 / initDataRead 0x81184FFF），**放行周期 job**（appFade 0x811792B3、sequence 0x811857C3 等）让它们正常维护状态。
+   （M1007 曾试过选择性强制但运行在 n≈59.74M 提前结束、只有 1 个 JOBCOMP——下轮重做并查 err 尾部，定位是否是某个周期 worker 撞上 HLE 缺口；现在已有更完整的探针与覆盖率可辅助。）
+NEXT：
+```
+① 恢复选择性强制（batch_011 blk_8116FA5C 只强制 6 个 init worker）
+② 跑一次并检查 err 尾部：周期 worker 真跑后第一个失败点（可能是 HLE API 缺口）
+③ 修掉该失败点 → appFade/序列状态正常 → title worker case0 通过
+④ title 状态机 case0→1→2… → title 对象 → 引擎自绘标题
+```
+验证：`out80m_m1084fadeprobe.txt`、`err80m_m1084fadeprobe.txt`、`out80m_m1077titleworker.txt`、`out80m_m1075selectforce.txt`。 |
+| §18.4565 | appFade truth loop closed: the manager is created normally and the fade 'object' comes from a PERIODIC JOB NODE that our all-force already completed - the object's +8 field (the job arg) was freed by the completion callback into 0xE5. Root cause = our all-force worker policy destroys the state of periodic jobs (appFade / sequence); the fix is to force only the boot-init series jobs and let periodic jobs run. out80m_m1084fadeprobe.txt / err: [TTMI] mgrcall p0=00000002 p1=848563D8 p2=00000004 (appFade manager created: count=2, callback table, count2=4) OK; [TTC] task=85B8583C (title task valid); [TTW2]/[TTW] node=85B8586C arg=85B8583C (worker entry valid); [TTM] worker mgr=85A9E3DC (manager non-null) OK; [TTM] ce2 p=00000000 mgr=85A9E3DC; [TTO] fadeobj=85A9E46C (the fade 'object' = 85A9E46C); [TTF8] g8a8ret=E5E5E5E5 (*(85A9E46C+8)=0xE5 poison); [BADMEM] guest va=0xE5E5E5E9 at 81178F18. Cross-validation (decisive): 85A9E46C is exactly one of the job NODES in the WFDBG/JOBCOMP lists (worker=0x811792B3, a periodic update job): [WFDBG] #4 ctx=84617E00 node=85A9E46C wf=811792B3; [JOBDONE2] ... node=85A9E46C. So the appFade getter FUN_81178CE2 returns the appFade periodic JOB NODE; FUN_8116f8a8(node)=node[2] (job arg) should be the fade task structure, but that job was force-completed by our all-force (worker returns -1 immediately) => the completion callback freed the arg (guest heap free fills 0xE5) => the title worker reads node[2]=E5 => BADMEM. Architecture-level conclusion: (1) the task was never freed (M1019 conclusion holds) and the manager is fine; (2) what is actually destroyed is the state of periodic jobs - all-force makes appFade/sequence-manager periodic jobs execute their completion immediately and free their arg/task structures; (3) fix = selective force: force only the 6 boot-init workers (trophy 0x81184809 / sound 0x811848B7 / gamedata 0x81184965 / msgwindow 0x81184A89 / mainmenu 0x81184B39 / initDataRead 0x81184FFF) and let periodic jobs (appFade 0x811792B3, sequence 0x811857C3, etc.) run normally to maintain state. M1007 tried selective force once but the run ended early at n≈59.74M with only 1 JOBCOMP - redo it next round and inspect the err tail to locate the first failure (likely an HLE gap hit by a real periodic worker). NEXT: restore selective force (batch_011 blk_8116FA5C forces only the 6 init workers); run and check the err tail for the first failure point of a real periodic worker; fix that -> appFade/sequence state valid -> title worker case0 passes -> title state machine advances -> title object -> engine-drawn title. |
 ```
 [TTC] task=85B8583C          ← FUN_8119807C 中 FUN_8115d3ce 创建的 title task 指针
 [TTW2] node=85B8586C arg=85B8583C   ← hybrid trampoline 放行时 node[2] = 合法 task（不是 E5！）
@@ -494195,3 +494226,43 @@ NEXT：
 ANTI-FORGETTING ENTRY. Keywords: M1019 KEY REVELATION - the title task was NOT freed early: at title worker entry node[2]=85B8583C is a valid task pointer, and the three free probes never fired. The crash is deep in the appFade path: FUN_81178F0A uses the worker's leftover r0 to call FUN_8116f8a8, which reads *(fadeObj+8) = 0xE5E5E5E5 (the appFade fade object is uninitialized/not created). Evidence out80m_m1083batchprobe.txt: [TTC] task=85B8583C; [TTW2] node=85B8586C arg=85B8583C; [TTW] node=85B8586C arg=85B8583C; [TTF] 43C/968/94 = 0 lines; [BADMEM] guest va=0xE5E5E5E9 at 81178F18. appFade chain decompiled: FUN_81178BA8(count,list,count2) = manager creation (appFade.c:0x1f/0x26): iVar5=count*4+count2*4+0x10; piVar3=FUN_8115d36a; memset 0 (SceLibc_6DC1F0D8); piVar3[1]=count; piVar3[0]=piVar4=piVar3+4 (fade object pointer array); piVar3[2]=piVar4+count (callback table); memcpy callbacks (SceLibc_7205BFDB); piVar3[3]=count2; DAT_813afe00=piVar3. FUN_81178CE2(param)=*(u32*)(*DAT_813afe00+param*4) returns a fade object pointer. FUN_81178F0A(): FUN_8116f8a8(leftover r0) -> *(u32*)(fadeObj+8). DAT_813AFE00 refs: WRITE at 0x81178c3a in FUN_81178ba8; READ in FUN_81179240, FUN_81178c80, FUN_81178ce2, FUN_81178c44. FUN_81178BA8's only caller = FUN_81030F98 at 0x81030FD0 (app init chain). M1019 probes (exe 57,049,751B 10:29:36): batch_012 blk_81178BA8 [TTMI] mgrcall p0/p1/p2; blk_81178CE2 [TTM] ce2 p/mgr; blk_81178F10 [TTF8] g8a8ret; batch_013 blk_8119819A [TTM] worker mgr; blk_811981A0 [TTO] fadeobj. Diagnostic run out80m_m1084fadeprobe.txt started. NEXT: check whether appFade manager was created; mgr/fadeobj values; which field is E5; find the fade object creator (FUN_81178C44?) and whether it was in a skipped init; add the missing init -> title state machine continues.
 
 LOOKUP: M1019, [TTC] task=85B8583C, [TTW2] node=85B8586C, [TTW], [TTF] 0 lines, task NOT freed, appFade, DAT_813AFE00, FUN_81178BA8, FUN_81178CE2, FUN_81178F0A, FUN_8116f8a8 leftover r0, fade object uninitialized, 0xE5E5E5E5, FUN_81178C44, FUN_81030F98, fadeinit.txt, fade_refs.txt, [TTMI], [TTM], [TTO], [TTF8], out80m_m1084fadeprobe.txt -> §18.4563 [relevant: batch probes], §18.4559 [relevant: crash point], §18.4558 [relevant: title worker]
+### 18.4565 PORT M1020: appFade 真相闭环——全强制破坏了周期 job 状态
+
+1) 探针结果（`out80m_m1084fadeprobe.txt` / err）：
+```
+[TTMI] mgrcall p0=00000002 p1=848563D8 p2=00000004   ← appFade 管理器创建 ✅（count=2）
+[TTC] task=85B8583C                                   ← title task 合法
+[TTW2]/[TTW] node=85B8586C arg=85B8583C               ← worker 入口合法
+[TTM] worker mgr=85A9E3DC                             ← 管理器非空 ✅
+[TTM] ce2 p=00000000 mgr=85A9E3DC
+[TTO] fadeobj=85A9E46C
+[TTF8] g8a8ret=E5E5E5E5                               ← *(85A9E46C+8)=0xE5
+[BADMEM] guest va=0xE5E5E5E9 @81178F18
+```
+2) 交叉验证：`85A9E46C` 是 **appFade 周期 job 节点**（worker=0x811792B3）：
+```
+[WFDBG] #4 ctx=84617E00 node=85A9E46C wf=811792B3
+[JOBDONE2] ... node=85A9E46C ...
+```
+⇒ getter 返回的是周期 job 节点；`FUN_8116f8a8(node)=node[2]`（job arg）本应是 fade 任务结构，但该 job 被 **all-force 强制完成** → completion 回调释放 arg（0xE5 填充）→ title worker 读 node[2]=E5 → BADMEM。
+3) 架构结论：
+- task 未被释放；管理器正常；
+- **被破坏的是周期 job 的状态**（appFade / sequence manager）；
+- 修复 = **选择性强制**：只强制 6 个 boot init worker，放行周期 job。
+```
+trophy 0x81184809 / sound 0x811848B7 / gamedata 0x81184965
+msgwindow 0x81184A89 / mainmenu 0x81184B39 / initDataRead 0x81184FFF
+（放行：appFade 0x811792B3、sequence 0x811857C3 等）
+```
+NEXT：
+```
+① 恢复选择性强制（batch_011 blk_8116FA5C）
+② 跑并查 err 尾部：周期 worker 真跑后的第一个失败点（可能 HLE 缺口）
+③ 修失败点 → appFade/序列状态正常 → title worker case0 通过
+④ title 状态机继续 → title 对象 → 引擎自绘标题
+```
+验证：`out80m_m1084fadeprobe.txt`、`out80m_m1077titleworker.txt`、`out80m_m1075selectforce.txt`。
+
+ANTI-FORGETTING ENTRY. Keywords: M1020 appFade truth loop closed - the manager is created normally and the fade 'object' comes from a PERIODIC JOB NODE (85A9E46C) that our all-force already completed; the node's +8 field (job arg) was freed by the completion callback into 0xE5, so the title worker's FUN_8116f8a8(node)=node[2]=E5 crashes at 81178F18. Evidence out80m_m1084fadeprobe.txt: [TTMI] mgrcall p0=00000002 p1=848563D8 p2=00000004 (appFade manager created count=2); [TTC] task=85B8583C; [TTW2]/[TTW] node=85B8586C arg=85B8583C; [TTM] worker mgr=85A9E3DC; [TTM] ce2 p=0 mgr=85A9E3DC; [TTO] fadeobj=85A9E46C; [TTF8] g8a8ret=E5E5E5E5; [BADMEM] 0xE5E5E5E9 at 81178F18. Cross-validation: 85A9E46C is a job node in WFDBG/JOBCOMP (worker=0x811792B3, periodic update job): [WFDBG] #4 ctx=84617E00 node=85A9E46C wf=811792B3. The appFade getter FUN_81178CE2 returns the appFade periodic job node; FUN_8116f8a8(node)=node[2] (job arg) should be the fade task structure but the job was all-force-completed and its arg freed (guest heap fills 0xE5). Root cause = all-force worker policy destroys periodic job state (appFade/sequence). Fix = selective force: force only the 6 boot-init workers (trophy 0x81184809 / sound 0x811848B7 / gamedata 0x81184965 / msgwindow 0x81184A89 / mainmenu 0x81184B39 / initDataRead 0x81184FFF) and let periodic jobs (appFade 0x811792B3, sequence 0x811857C3, etc.) run normally. M1007 tried selective force once but the run ended early at n≈59.74M with only 1 JOBCOMP - redo next round and inspect the err tail. NEXT: restore selective force in batch_011 blk_8116FA5C; run and find the first failure of a real periodic worker; fix it -> appFade/sequence state valid -> title worker case0 passes -> title state machine advances -> engine-drawn title.
+
+LOOKUP: M1020, appFade, [TTMI], [TTC], [TTW2], [TTW], [TTM], [TTO] fadeobj=85A9E46C, [TTF8] g8a8ret=E5E5E5E5, 85A9E46C, 811792B3, periodic job node, all-force destroys periodic job state, selective force, init workers 0x81184809/0x811848B7/0x81184965/0x81184A89/0x81184B39/0x81184FFF, out80m_m1084fadeprobe.txt, out80m_m1077titleworker.txt -> §18.4564 [relevant: appFade revelation], §18.4554 [relevant: hybrid force], §18.4553 [relevant: page6 force]
