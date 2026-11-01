@@ -1066,6 +1066,40 @@
 | M1048 | §18.4593: ★★★★★★★★ **m1103 决定性数据：等待循环参数 p=84D8D368、`[p+0xBC]` 恒为 1、`DAT_8153FD60=1`、`DAT_8153FDA8=0x816A0AC0`（busy 指针永不清）、`DAT_8153FD64` 队列槽 q0=**0x812264B5**（待执行回调！）、q1=0；HLE 侧 dispq/present/endscene 全 0。⇒ app 显示队列里有一个待执行回调 0x812264B5，但 `DAT_8153FDA8 != 0` 让 FUN_8127B7C8 永远走 busy 分支（调用 0x816A0AC0 的注册回调），**从不处理自己的队列槽** → 状态永不清除。M1048 实施 DQFORCE 实验：队列有回调（q0 != 0）且 busy 标志非 0 时，把 `DAT_8153FDA8` 清 0，让 FUN_8127B7C8 走正常路径处理回调队列**。m1103 证据：
 | M1049 | §18.4594: **m1104（DQFORCE）结果：busy 指针 `DAT_8153FDA8` 被成功清 0（早期一次），title 阶段 [WAITLOOP] 显示 `a8=00000000`、q0=812264B5 仍在队列中，但 `st=[p+0xBC]` 仍恒为 1——说明"清 busy → 处理队列回调"不是清除状态的关键；且运行后期出现新 BADMEM（va=0 @block=0x811C3FD4，stub=0x812B1BA0），说明 DQFORCE 破坏了某条路径。结论：显示队列的系统比预想复杂——需要先搞清 `[p+0xBC]` 状态由谁设置/清除、回调 0x812264B5 做什么、以及 app 注册的显示回调 0x8127BB29 与 HLE GXM 显示完成的关系**。m1104 证据：
 | M1050 | §18.4595: ★★★★★★★★★ **重大发现：显示队列由 5 个 guest 线程（entry=0x8127C1D3，"CriThread"）服务——FUN_8127BE58 用 sceKernelCreateThread(entry=0x8127C1D3)+sceKernelStartThread 创建它们（tid 4001A000/4001E000/4001F000/40020000/40021000）；PDUMP 显示它们等待各自的事件标志（obj=60016000/60018000/6001A000/6001C000，bits=1）——**这些事件标志应由显示队列回调/提交路径设置，但主线程卡在等待状态，形成互等死锁**。M1050 实施 WAITFORCE 实验：在等待循环把 `[p+0xBC]` 强制置 0（st!=1）让主循环继续，验证下游 title 绘制链路**。m1103/m1104 证据：
+| M1051 | §18.4596: ★★★★★★★★★★ **WAITFORCE 成功解锁：S0_LOGO 状态机开始真实运行！logo 序列从 state=0→3→4→5（69 帧计数×138 次）→6→8（54 次），并创建了**第二个 logo 任务**（task=85D0B78C）；[TMX] 增加到 96 条（更多 logo 容器/TGA 加载）；事件标志 obj=60016000 bits=1 被 guest 反复设置 200+ 次，5 个显示线程全部被唤醒（TDUMP ready=1）；无 BADMEM**。但**仍无绘制调用**（[ABIEND]/draw 计数不变）——S0 logo 的绘制回调（注册在 FUN_81193704 尾部的 0x8119351D）尚未被调用。M1051 加 [LOGODRAW]/[VFW2] 探针定位绘制回调。m1105 证据：
+```
+[WAITFORCE] #1 p=84D8D368 st=1 -> 0
+[WAITFORCE] #2 p=84D8D5C0 st=1 -> 0
+[WAITFORCE] #3 p=84D8D818 st=1 -> 0
+[LOGO] #1 state=0 → #2 state=3 → #3 state=4 → #4 state=5 …（state5 共 138 次）
+[LOGO] #7 state=0 task=85D0B78C   ← ★ 第二个 logo 任务创建
+[LOGO] #189..#200 state=8 task=85B8754C/85D0B78C
+LOGO state counts: {'0':2, '3':2, '4':2, '5':138, '6':2, '8':54}
+[TMX] 96 条（arch->entry/gxm_tex_create/texobj/upload-done/upload ret=1）
+[SETEF57] obj=60016000 bits=00000001 ×200+（guest 反复设置事件标志，显示线程被唤醒）
+[TDUMP] tid=4001A000 entry=8127C1D3 ready=1（显示线程已唤醒）
+[TDUMP] eflags: 60011000=0 60012000=0 60013000=0 60014000=0 60015000=0 60016000=0
+[ABIBEGIN] 1  [ABIEND] 0  [PRESENT] 1  [TEXBIND] 1  [ABIVTX] 1（无新绘制）
+[BADMEM] 0
+运行到 n=62,274,780 后进入自旋（hle_ring 812B2830/812B2880 互斥+等待循环）
+```
+**分析**：
+- WAITFORCE 让主循环越过显示管理器等待 → title 页面更新恢复 → S0_LOGO 状态机完整推进（含 69 帧计数、fade、第二 logo）
+- 但绘制回调（0x8119351D，注册在 FUN_81193704 尾部 `*(u32*)(iVar5+8)=0x8119351D`）从未被调用 → 无 BeginScene/Draw/Present
+- 可能原因：绘制由 appMain 的 draw 阶段（mainDraw/mainDrawOt proc）驱动，而主循环仍在另一处自旋（hle_ring 互斥等待）——需要继续用 WAITFORCE 式的等待点分析，或找到 mainDraw 调度入口
+**M1051 新增探针**：`batch_013.cpp` blk_8119351C → `[LOGODRAW]`（绘制回调入口）；`batch_012.cpp` blk_81182742 → `[VFW2]`（m1105 中 [VFW] at=81182742 的回调）。
+编译：batch_012/batch_013 exit 0；exe 重链 exit 0（57,065,196B，19:28:10）。
+验证运行：`out80m_m1106drawprobe.txt`（FORCETITLE + FIOSFILL + WAITFORCE + 绘制探针）已启动。
+NEXT：
+```
+① [LOGODRAW] 是否出现（绘制回调是否被调用）
+② [VFW2] 频率与参数（判断是否绘制管线在跑）
+③ 若绘制回调从未被调用 → 找 mainDraw/mainDrawOt 的调度入口（appMain draw 阶段）并 probe
+④ 若绘制回调被调用但无 GXM 调用 → 检查绘制回调内部逻辑（可能被状态门控）
+⑤ 继续用 WAITFORCE 处理主循环剩余自旋点（hle_ring 互斥等待 812B2880@811732C2）
+```
+验证：`out80m_m1105waitforce.txt`、`err80m_m1105waitforce.txt`、`out80m_m1106drawprobe.txt`（生成中）。 |
+| §18.4596 | WAITFORCE success: the S0_LOGO state machine really runs! The logo sequence goes state=0->3->4->5 (69-frame counter x138)->6->8 (x54), a second logo task was created (task=85D0B78C); [TMX] grew to 96 lines (more logo containers/TGA loads); the event flag obj=60016000 bits=1 is set by the guest 200+ times and all 5 display threads are awake (TDUMP ready=1); no BADMEM. But there are still no drawing calls ([ABIEND]/draw counters unchanged) - the S0 logo draw callback (0x8119351D, registered at the tail of FUN_81193704 as *(u32*)(iVar5+8)=0x8119351D) is never called. M1051 adds [LOGODRAW]/[VFW2] probes to locate the draw callback. m1105 evidence: [WAITFORCE] #1 p=84D8D368 st=1->0; #2 p=84D8D5C0; #3 p=84D8D818; [LOGO] #1 state=0 -> #2 state=3 -> #3 state=4 -> #4 state=5 ... (state 5 x138); [LOGO] #7 state=0 task=85D0B78C (second logo task created); [LOGO] #189..#200 state=8 task=85B8754C/85D0B78C; LOGO state counts {'0':2,'3':2,'4':2,'5':138,'6':2,'8':54}; [TMX] 96 lines (arch->entry/gxm_tex_create/texobj/upload-done/upload ret=1); [SETEF57] obj=60016000 bits=00000001 x200+; [TDUMP] tid=4001A000 entry=8127C1D3 ready=1; eflags all 0; [ABIBEGIN] 1; [ABIEND] 0; [PRESENT] 1; [TEXBIND] 1; [ABIVTX] 1; [BADMEM] 0; run reaches n=62,274,780 then spins (hle_ring 812B2830/812B2880 mutex+wait loops). Analysis: WAITFORCE lets the main loop pass the display-manager wait -> title page update resumes -> the S0_LOGO state machine fully advances (69-frame counter, fades, second logo); but the draw callback (0x8119351D registered at the tail of FUN_81193704) is never called -> no BeginScene/Draw/Present; likely drawing is driven by the appMain draw phase (mainDraw/mainDrawOt procs) while the main loop is still spinning in another mutex wait - keep applying WAITFORCE-style analysis or find the mainDraw scheduling entry. M1051 probes: batch_013.cpp blk_8119351C -> [LOGODRAW]; batch_012.cpp blk_81182742 -> [VFW2]. batch_012/batch_013 compile exit 0; exe relink exit 0 (57,065,196B 19:28:10). Verification run out80m_m1106drawprobe.txt started. NEXT: whether [LOGODRAW] appears; [VFW2] frequency/args; if the draw callback is never called find the mainDraw/mainDrawOt scheduling entry (appMain draw phase) and probe it; if the draw callback is called but makes no GXM calls, inspect its internal state gating; continue handling the main loop's remaining spin points (hle_ring mutex wait 812B2880@811732C2) with WAITFORCE. |
 ```
 [THR2] create tid=4001A000 entry=8127C1D3 lr=8127BF18
 [THR2] start  tid=4001A000 entry=8127C1D3 arglen=4 argp=84855F78
@@ -496275,3 +496309,36 @@ NEXT：
 ANTI-FORGETTING ENTRY. Keywords: M1050 display queue serviced by 5 guest threads (entry=0x8127C1D3 'CriThread'): FUN_8127BE58 creates them via sceKernelCreateThread (SceLibKernel_C5C11EE7(name,0x8127C1D3,arg,param_3,0,flags,0)) + sceKernelStartThread (SceLibKernel_F08DE149(tid,4,&local_30)); tids 4001A000/4001E000/4001F000/40020000/40021000; PDUMP shows them waiting on event flags obj=60016000/60018000/6001A000/6001C000 bits=1 ctxpc=8127BE1C; threads 40018000/40019000 entry=8120767D ready=1. FUN_8127BAAF (app-registered display callback, busy branch) processes the DAT_8153FD64 8-slot queue with lock DAT_816A0B64; FUN_812264B4 (callback 0x812264B5) updates DAT_8153F2F8 timing stats, does not clear the state. So display threads wait on event flags that should be set by the display submit path (EndScene/DisplayQueueAddEntry completion) while the main thread waits on [p+0xBC] -> mutual deadlock (HLE only stubbed the GXM display queue without setting the guest event flags). M1050 WAITFORCE: batch_022.cpp blk_8128EA36 if P5D_WAITFORCE { uint32_t _p=s->r[6]; if(_p){ uint32_t _st=rd32(s,_p+0xBCu); if(_st==1u){ wr32(s,_p+0xBCu,0u); print [WAITFORCE]; } } } batch_022 compile exit 0; exe relink exit 0 (57,064,070B 19:06:30). Verification run out80m_m1105waitforce.txt (FORCETITLE + FIOSFILL + WAITFORCE) started. NEXT: [WAITFORCE] fires -> main loop exits -> title state=4/5; logoDrawProc draws -> frames show the logo; fix GXM texture/draw if needed; formal fix: set the display threads' event flags per guest semantics after the HLE display-queue submit (find setters of 0x60016000 etc.).
 
 LOOKUP: M1050, display threads 5x entry=8127C1D3 CriThread, FUN_8127BE58 sceKernelCreateThread SceLibKernel_C5C11EE7 + sceKernelStartThread SceLibKernel_F08DE149, tids 4001A000/4001E000/4001F000/40020000/40021000, event flags 60016000/60018000/6001A000/6001C000 bits=1 ctxpc=8127BE1C, PDUMP, WAITFORCE blk_8128EA36 wr32 p+0xBC=0, [p+0xBC] wait state, deadlock, exe 57,064,070B, out80m_m1105waitforce.txt -> §18.4594 [relevant: DQFORCE], §18.4593 [relevant: busy flag], §18.4592 [relevant: wait loop]
+### 18.4596 PORT M1051: WAITFORCE 解锁 S0_LOGO 状态机（state 0→8），绘制回调探针
+
+1) m1105 证据：
+```
+[WAITFORCE] #1 p=84D8D368 st=1 -> 0
+[WAITFORCE] #2 p=84D8D5C0 st=1 -> 0
+[WAITFORCE] #3 p=84D8D818 st=1 -> 0
+[LOGO] #1 state=0 → #2 state=3 → #3 state=4 → #4 state=5 …（state5×138）
+[LOGO] #7 state=0 task=85D0B78C   ← 第二个 logo 任务
+[LOGO] #189..#200 state=8
+state counts: {'0':2,'3':2,'4':2,'5':138,'6':2,'8':54}
+[TMX] 96 条（更多 logo 容器/TGA 加载）
+[SETEF57] obj=60016000 bits=1 ×200+   [TDUMP] 显示线程 ready=1
+[ABIBEGIN] 1  [ABIEND] 0  [PRESENT] 1（无新绘制）
+[BADMEM] 0；运行到 n=62,274,780 后自旋
+```
+2) 分析：WAITFORCE 越过显示等待 → title 更新恢复 → S0_LOGO 完整推进（69 帧计数/fade/第二 logo）；但绘制回调 0x8119351D 从未被调用 → 无 BeginScene/Draw/Present
+3) M1051 探针：`batch_013.cpp` blk_8119351C → [LOGODRAW]；`batch_012.cpp` blk_81182742 → [VFW2]
+4) 编译：batch_012/batch_013 exit 0；exe 57,065,196B（19:28:10）
+5) 验证运行 `out80m_m1106drawprobe.txt` 已启动
+NEXT：
+```
+① [LOGODRAW] 是否出现
+② [VFW2] 频率/参数
+③ 未调用 → 找 mainDraw/mainDrawOt 调度入口
+④ 有调用无 GXM → 检查绘制回调内部状态门控
+⑤ 继续 WAITFORCE 处理 hle_ring 互斥等待（812B2880@811732C2）
+```
+验证：`out80m_m1105waitforce.txt`、`out80m_m1106drawprobe.txt`（生成中）。
+
+ANTI-FORGETTING ENTRY. Keywords: M1051 WAITFORCE unlocked the S0_LOGO state machine: logo sequence state=0->3->4->5 (69-frame counter x138)->6->8 (x54), second logo task 85D0B78C created; [TMX] 96 lines; event flag obj=60016000 bits=1 set 200+ times; 5 display threads awake (TDUMP ready=1); no BADMEM; but no drawing calls ([ABIEND] 0) - the S0 logo draw callback (0x8119351D, registered at the tail of FUN_81193704 as *(u32*)(iVar5+8)=0x8119351D) is never called. m1105: [WAITFORCE] #1 p=84D8D368 st=1->0; #2 p=84D8D5C0; #3 p=84D8D818; [LOGO] #7 state=0 task=85D0B78C; LOGO state counts {'0':2,'3':2,'4':2,'5':138,'6':2,'8':54}; [SETEF57] obj=60016000 bits=1 x200+; [TDUMP] tid=4001A000 entry=8127C1D3 ready=1; [ABIBEGIN] 1; [ABIEND] 0; [PRESENT] 1; run reaches n=62,274,780 then spins (hle_ring 812B2830/812B2880 mutex+wait). Analysis: WAITFORCE lets the main loop pass the display-manager wait -> title update resumes -> S0_LOGO fully advances (69-frame counter, fades, second logo); drawing is driven by the appMain draw phase (mainDraw/mainDrawOt procs) while the main loop still spins in another mutex wait. M1051 probes: batch_013 blk_8119351C [LOGODRAW]; batch_012 blk_81182742 [VFW2]. batch_012/batch_013 compile exit 0; exe relink exit 0 (57,065,196B 19:28:10). Verification run out80m_m1106drawprobe.txt started. NEXT: [LOGODRAW] appears?; [VFW2] frequency/args; if never called find mainDraw/mainDrawOt scheduling entry (appMain draw phase) and probe it; if called but no GXM calls inspect its state gating; continue WAITFORCE on the hle_ring mutex wait 812B2880@811732C2.
+
+LOOKUP: M1051, WAITFORCE unlock, S0_LOGO state 0->3->4->5->6->8, state5 x138, second logo task 85D0B78C, [LOGO] 202 lines, [TMX] 96, [SETEF57] 60016000 bits=1, TDUMP ready=1 display threads, no ABIEND/draw, draw callback 0x8119351D registered at FUN_81193704 tail *(u32*)(iVar5+8)=0x8119351D, [LOGODRAW] probe blk_8119351C batch_013, [VFW2] probe blk_81182742 batch_012, [VFW] at=81182742, spin n=62,274,780 hle_ring 812B2830/812B2880, exe 57,065,196B, out80m_m1105waitforce.txt, out80m_m1106drawprobe.txt -> §18.4595 [relevant: WAITFORCE], §18.4594 [relevant: display queue], §18.4592 [relevant: wait loop]
