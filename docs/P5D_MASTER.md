@@ -1070,6 +1070,39 @@
 | M1052 | §18.4597: ★★★★★★★★★★ **m1106 里程碑：logo 绘制回调真的被调用了！[LOGODRAW] 80 条（两个 logo 任务 85B8759C/85D0B7DC 交替绘制，回调参数 r2=0x8119351D 与注册值一致），[LOGO] 状态机继续推进 127 条，无 BADMEM。但绘制函数内部被"场景就绪门控"挡住：FUN_8119351C→FUN_81160B7E/FUN_811610A4 都先调用 `FUN_81160814()` 检查，返回 0 时跳过 `FUN_81163ABC(...)` 提交——所以仍无 GXM 绘制调用（[ABIBEGIN] 1/[ABIEND] 0）**。m1106 证据：
 | M1053 | §18.4598: ★★★★★★★★ **门控定位到单个字节：`FUN_81160814()` = `(DAT_8155545C == 0)`（0x81555438+0x24）；DAT_8155545C 非 0 时 logo 绘制被跳过。M1053 实施 SCNFORCE 实验：门控函数直接返回 1（强制场景就绪），并加 [DRAWSUB] 探针确认提交路径 FUN_81163ABC 真正执行**。反编译证据（`scnready.txt`）：
 | M1054 | §18.4599: ★★★★★★★★★★ **m1107 里程碑：appGx 绘制提交真的在执行！[DRAWSUB] 60 条（FUN_81163ABC 被反复调用，参数 p2/p4 指向栈上顶点/索引数组，p3=4 顶点、p5=6 索引——游戏正在为 logo 提交真实绘制图元）；[LOGODRAW] 80、[LOGO] 111、[SCNFORCE] 40（该字节本来就是 00，门控不是本运行的阻塞点）；但仍无 BeginScene/EndScene/GXM 提交，且末段显示线程在 `sceDisplayWaitVblankStartMultiCB(0x812B1810)` + `SetEventFlag(0x812B2AE0)` 循环——appGx 批次没有被 flush 到 GXM**。m1107 证据：
+| M1055 | §18.4600: **appGx 绘制架构解析完成：绘制分两步——(1) `FUN_8115FF12` 把期望 GXM 状态刷到硬件（FUN_811634F6/540/552/5B8/5CA/604/61C/6C8/6DA/794/D0 = GXM 状态设置器）；(2) `FUN_811E3960`/`FUN_811E3B54` 分配 draw command 对象（0x34 字节，vtable=&LAB_811E44AE_1），`FUN_811C041C` 按 bucket 入队：`(&DAT_816CC6D8)[DAT_816CC700] + param_1*0x20`，两条链表 +0x0C/+0x10（不透明）与 +0x14/+0x18（透明），由 param_2+0x1C 选择。→ command 对象需由**命令执行器（flush 阶段）**遍历执行才会提交 GXM；目前该 flush 未发生**。M1055 加 [ENQ] 探针 + HLEDUMP 运行（title 阶段 HLE 调用画像，确认 GXM draw API 是否被调用、被谁调用）。反编译证据（`gxflush.txt`）：
+```c
+void FUN_811C041C(int param_1,int param_2) {           // 入队
+  int iVar1 = (&DAT_816CC6D8)[DAT_816CC700] + param_1*0x20;
+  if (*(int*)(param_2+0x1C)==0) { *(u32*)(param_2+0x14)=0;
+    if (*(int*)(iVar1+0xC)==0) { *(int*)(iVar1+0xC)=param_2; *(int*)(iVar1+0x10)=param_2; }
+    else { *(int*)(*(int*)(iVar1+0x10)+0x14)=param_2; *(int*)(iVar1+0x10)=param_2; } }
+  else { *(u32*)(param_2+0x18)=0;
+    if (*(int*)(iVar1+0x14)==0) { *(int*)(iVar1+0x14)=param_2; *(int*)(iVar1+0x18)=param_2; }
+    else { *(int*)(*(int*)(iVar1+0x18)+0x18)=param_2; *(int*)(iVar1+0x18)=param_2; } } }
+// FUN_811E3960/FUN_811E3B54：分配 0x34 字节 command，puVar3[2]=顶点数据, *puVar3=&LAB_811E44AE_1（执行器）
+// FUN_8115FF12（1354B）：GXM 状态 diff+flush（期望 DAT_81555438 vs 已应用 DAT_81555460，
+//   逐位调用 FUN_811634F6(alpha)/63540/635B8/635CA/63604/6361C/636C8/636DA/63794/634D0）
+```
+**M1055 探针（`batch_014.cpp` blk_811C041C）**：
+```
+[ENQ] #n type=%X idx=%X base=%X ptr=%X A=%X/%X B=%X/%X cmd=%X
+```
+（打印命令类型、队列 bucket、两条链表头/尾、command 对象）
+编译：batch_014 exit 0；exe 重链 exit 0（57,066,425B，20:42:36）。
+验证运行：`out80m_m1108enq.txt`（FORCETITLE + FIOSFILL + WAITFORCE + SCNFORCE + `P5D_HLEDUMP=1`）已启动：
+- HLEDUMP 会在 n≥62M 时打印 title 阶段 top-48 HLE stub 调用统计
+NEXT：
+```
+① HLEDUMP：title 阶段是否有 GXM draw/state HLE 调用（sceGxmDraw/SetVertexStream/BeginScene/EndScene）
+② [ENQ]：命令入队数量、bucket 索引、链表非空
+③ 若只有入队无执行 → 找 flush 阶段：DAT_816CC6D8/DAT_816CC700 的遍历者
+   （很可能是 gfd draw manager / FUN_811E44AE 调用者）
+④ 若 flush 也不缺 → 检查是否因无 BeginScene 而命令被执行器跳过
+⑤ 目标：让 command 执行器跑起来 → GXM 收到 draw → logo 出现在画面
+```
+验证：`gxflush.txt`、`out80m_m1108enq.txt`（生成中）、`out80m_m1107scnforce.txt`。 |
+| §18.4600 | appGx draw architecture decoded: drawing happens in two steps - (1) FUN_8115FF12 flushes the desired GXM state to the hardware (FUN_811634F6/540/552/5B8/5CA/604/61C/6C8/6DA/794/D0 = GXM state setters); (2) FUN_811E3960/FUN_811E3B54 allocate draw command objects (0x34 bytes, vtable=&LAB_811E44AE_1) and FUN_811C041C enqueues them per bucket: (&DAT_816CC6D8)[DAT_816CC700] + param_1*0x20, two linked lists +0x0C/+0x10 (opaque) and +0x14/+0x18 (transparent), selected by param_2+0x1C. So command objects must be walked/executed by a command executor (flush stage) before GXM submission; that flush does not happen yet. M1055 adds an [ENQ] probe and an HLEDUMP run (title-phase HLE call profile, confirming whether/from where the GXM draw APIs are called). Decompiled (gxflush.txt): void FUN_811C041C(int param_1,int param_2) { int iVar1 = (&DAT_816CC6D8)[DAT_816CC700] + param_1*0x20; if (*(int*)(param_2+0x1C)==0) { *(u32*)(param_2+0x14)=0; if (*(int*)(iVar1+0xC)==0) { *(int*)(iVar1+0xC)=param_2; *(int*)(iVar1+0x10)=param_2; } else { *(int*)(*(int*)(iVar1+0x10)+0x14)=param_2; *(int*)(iVar1+0x10)=param_2; } } else { *(u32*)(param_2+0x18)=0; if (*(int*)(iVar1+0x14)==0) { *(int*)(iVar1+0x14)=param_2; *(int*)(iVar1+0x18)=param_2; } else { *(int*)(*(int*)(iVar1+0x18)+0x18)=param_2; *(int*)(iVar1+0x18)=param_2; } } } FUN_811E3960/FUN_811E3B54 allocate a 0x34-byte command, puVar3[2]=vertex data, *puVar3=&LAB_811E44AE_1 (executor). FUN_8115FF12 (1354B) is the GXM state diff+flush (desired DAT_81555438 vs applied DAT_81555460, per-bit calls FUN_811634F6(alpha)/63540/635B8/635CA/63604/6361C/636C8/636DA/63794/634D0). M1055 probe (batch_014.cpp blk_811C041C): [ENQ] #n type/%X idx/%X base/%X ptr/%X A/%X/%X B/%X/%X cmd/%X (command type, queue bucket, list heads/tails, command object). batch_014 compile exit 0; exe relink exit 0 (57,066,425B 20:42:36). Verification run out80m_m1108enq.txt (FORCETITLE + FIOSFILL + WAITFORCE + SCNFORCE + P5D_HLEDUMP=1) started; HLEDUMP prints the title-phase top-48 HLE stub call stats at n>=62M. NEXT: HLEDUMP whether any GXM draw/state HLE calls during title (sceGxmDraw/SetVertexStream/BeginScene/EndScene); [ENQ] command enqueue count/bucket/list state; if only enqueue and no execution find the flush stage (walker of DAT_816CC6D8/DAT_816CC700, likely gfd draw manager / FUN_811E44AE caller); if flush is present check whether commands are skipped because there is no BeginScene; goal: get the command executor running -> GXM receives draw -> logo appears on screen. |
 ```
 [SCNFORCE] #1..#40 force scene-ready (byte 8155545C=00)     ← 门控字节本来就是 0
 [DRAWSUB] #1 p1=0 p2=848562F4 p3=4 p4=848562E8 p5=6 p6=0
@@ -496547,3 +496580,41 @@ NEXT：
 ANTI-FORGETTING ENTRY. Keywords: M1054 m1107: the appGx draw submission really executes! [DRAWSUB] 60 lines (FUN_81163ABC repeatedly called; p2/p4 point to on-stack vertex/index arrays; p3=4 vertices, p5=6 indices = two triangles for the logo sprite); [LOGODRAW] 80; [LOGO] 111; [SCNFORCE] 40 (byte 8155545C already 00, gate not the blocker); but still no BeginScene/EndScene/GXM submission: the appGx batches are never flushed to GXM; final spin = display thread loop on sceDisplayWaitVblankStartMultiCB (0x812B1810) + sceKernelSetEventFlag (0x812B2AE0); [GFD] only 4 early lines; [ABIBEGIN] 1; [ABIEND] 0; [PRESENT] 1; [ABIVTX] 1; [TEXBIND] 1; [BADMEM] 0; run reaches n≈60,990,000. Analysis: FUN_81163ABC only enqueues (FUN_811C041C); real flush to GXM happens in the mainDraw/display-thread batch submit stage; [GFD] shows the title-stage gfd draw submit path is not reached; display thread alive looping vblank+SetEventFlag but does not submit appGx batches. NEXT: decompile batch flush path FUN_8115FF12/FUN_811C041C/FUN_811E3960/FUN_811E3B54/FUN_811C0B3C; add [GXFLUSH] probes; find BeginScene/EndScene callers (mainDraw/mainDrawOt draw start/end); check whether the display thread calls our display-queue stub; once flush works -> GXM draw -> frames show the logo.
 
 LOOKUP: M1054, [DRAWSUB] 60, FUN_81163ABC submit, p2=848562F4 p3=4 p4=848562E8 p5=6, appGx primitive enqueue FUN_811C041C, no BeginScene/EndScene, [SCNFORCE] byte 8155545C=00, display thread loop sceDisplayWaitVblankStartMultiCB 0x812B1810 + SetEventFlag 0x812B2AE0, [GFD] 4 early, batch flush FUN_8115FF12/FUN_811E3960/FUN_811E3B54/FUN_811C0B3C, mainDraw/mainDrawOt, exe 57,065,862B, out80m_m1107scnforce.txt -> §18.4598 [relevant: scene gate], §18.4597 [relevant: draw callback], §18.4596 [relevant: WAITFORCE]
+### 18.4600 PORT M1055: appGx 绘制架构 = 状态 flush + command 入队（待执行器 flush）
+
+1) 反编译（`gxflush.txt`）：
+```c
+// FUN_811C041C：command 入队
+void FUN_811C041C(int param_1,int param_2) {
+  int iVar1 = (&DAT_816CC6D8)[DAT_816CC700] + param_1*0x20;
+  if (*(int*)(param_2+0x1C)==0) {          // 不透明队列
+    *(u32*)(param_2+0x14)=0;
+    if (*(int*)(iVar1+0xC)==0) { *(int*)(iVar1+0xC)=param_2; *(int*)(iVar1+0x10)=param_2; }
+    else { *(int*)(*(int*)(iVar1+0x10)+0x14)=param_2; *(int*)(iVar1+0x10)=param_2; } }
+  else {                                    // 透明队列
+    *(u32*)(param_2+0x18)=0;
+    if (*(int*)(iVar1+0x14)==0) { *(int*)(iVar1+0x14)=param_2; *(int*)(iVar1+0x18)=param_2; }
+    else { *(int*)(*(int*)(iVar1+0x18)+0x18)=param_2; *(int*)(iVar1+0x18)=param_2; } } }
+// FUN_811E3960 / FUN_811E3B54：分配 0x34 字节 command，vtable=&LAB_811E44AE_1
+// FUN_8115FF12（1354B）：GXM 状态 diff+flush（DAT_81555438 期望 vs DAT_81555460 已应用）
+//   逐位调用 FUN_811634F6（alpha）/63540/635B8/635CA/63604/6361C/636C8/636DA/63794/634D0
+```
+2) M1055 探针（batch_014.cpp blk_811C041C）：
+```
+[ENQ] #n type=%X idx=%X base=%X ptr=%X A=%X/%X B=%X/%X cmd=%X
+```
+3) 编译：batch_014 exit 0；exe 57,066,425B（20:42:36）
+4) 验证运行 `out80m_m1108enq.txt`（+ `P5D_HLEDUMP=1`）已启动
+NEXT：
+```
+① HLEDUMP：title 阶段 GXM draw/state HLE 调用画像
+② [ENQ]：入队数量/bucket/链表状态
+③ 只有入队无执行 → 找 flush 阶段（DAT_816CC6D8/DAT_816CC700 遍历者）
+④ 有 flush 但跳过 → 检查是否因无 BeginScene
+⑤ 执行器跑起来 → GXM draw → logo 上屏
+```
+验证：`gxflush.txt`、`out80m_m1108enq.txt`（生成中）。
+
+ANTI-FORGETTING ENTRY. Keywords: M1055 appGx draw architecture = state flush + command enqueue. FUN_811C041C enqueues command objects per bucket: (&DAT_816CC6D8)[DAT_816CC700] + param_1*0x20, two lists (+0xC/+0x10 opaque, +0x14/+0x18 transparent selected by param_2+0x1C). FUN_811E3960/FUN_811E3B54 allocate 0x34-byte commands with vtable &LAB_811E44AE_1. FUN_8115FF12 (1354B) = GXM state diff+flush (desired DAT_81555438 vs applied DAT_81555460, per-bit calls FUN_811634F6/63540/635B8/635CA/63604/6361C/636C8/636DA/63794/634D0). M1055 probe batch_014.cpp blk_811C041C: [ENQ] type/idx/base/ptr/list heads/cmd. batch_014 compile exit 0; exe relink exit 0 (57,066,425B 20:42:36). Verification run out80m_m1108enq.txt (FORCETITLE + FIOSFILL + WAITFORCE + SCNFORCE + P5D_HLEDUMP=1) started; HLEDUMP prints title-phase top-48 HLE stub stats at n>=62M. NEXT: HLEDUMP for GXM draw/state calls; [ENQ] enqueue stats; if only enqueue find the flush stage (walker of DAT_816CC6D8/DAT_816CC700, likely gfd draw manager / FUN_811E44AE caller); if flush present check BeginScene; goal: command executor runs -> GXM draw -> logo on screen.
+
+LOOKUP: M1055, appGx draw = state flush + command enqueue, FUN_811C041C enqueue bucket (&DAT_816CC6D8)[DAT_816CC700]+type*0x20, lists +0xC/+0x10 opaque and +0x14/+0x18 transparent, FUN_811E3960/FUN_811E3B54 command 0x34 bytes vtable LAB_811E44AE_1, FUN_8115FF12 GXM state diff flush DAT_81555438 vs DAT_81555460, FUN_811634F6 63540 635B8 635CA 63604 6361C 636C8 636DA 63794 634D0, [ENQ] probe batch_014 blk_811C041C, P5D_HLEDUMP title phase top-48 HLE stub stats, out80m_m1108enq.txt, gxflush.txt -> §18.4599 [relevant: DRAWSUB], §18.4598 [relevant: scene gate], §18.4597 [relevant: draw callback]
