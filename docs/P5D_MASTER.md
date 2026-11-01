@@ -1051,6 +1051,37 @@
 | M1033 | §18.4578: **m1092 决定性结果：driver 只被调用 4 次（state 0→1→2→1 step0→1），即使在强制推进下，创建 step1（sound）后 driver 仍不再被调用 ⇒ 这不是"等待条件"问题，而是 initDataRead driver job 在调用 step 创建者后被移出调度。改用"DRIVDONE"捷径：driver 创建完 trophy+sound 两步后直接返回 -1 → 完成回调 setSequence(6,0,0,5) → page6 TITLE**。`out80m_m1092drvadvance.txt` / err：
 | M1034 | §18.4579: **m1093 证实 DRIVDONE 无法触发（driver 只在 step=1 后被移出调度，永远到不了 step=2）；改用更高层捷径：HLE 侧用 `call_guest_cb4` 直接调用 guest `FUN_81185616(6,0,0,0)`（= setSequence(page=6)）直达 TITLE 页，绕开卡死的 init 链**。`out80m_m1093drivdone.txt`：
 | M1035 | §18.4580: ★★★★★★★★★★ **重大进展：FORCETITLE 生效！HLE 直接调用 setSequence(6,0,0,0) 成功启动 TITLE 页（title task 创建、appFade 正常），崩溃仅剩 sound 对象 null；同时子代理完成"进程/Job 子系统静态 dossier"，用写集证明"创建子 job 不可能把父 job 摘出 ready 链"，并给出 A/B/C 三种候选与单断点判别法**。
+| M1036 | §18.4581: **m1095 结果：FORCETITLE 再次成功启动 TITLE 页（title task=85B8743C、appFade OK ×2、fade 对象取到），但我们的 M1035 null-sound 跳过方式有错误（跳 epilogue 会写 [r5+0x58]，r5=0 时 BADMEM va=0x58 @0x811723BA）→ M1036 改为手动退栈返回；同时 TRRET 探针给出第一批 job 调度数据：trophy step 以 -1 完成（通道 A，符合预期），未出现 TRSET（通道 B 未触发）**。`out80m_m1095titlepath.txt` / err：
+```
+[FORCETITLE] invoke setSequence(6,0,0,0) n=59620001 → returned r0=85B8746C
+[TTC] task=85B8743C        [TTF8] g8a8ret=85A9E42C ×2        [TTO] fadeobj=85A9E46C
+[BADMEM] guest va=0x00000058 @block=0x811723BA        ← M1035 跳过方式错误（epilogue 写 [r5+0x58]）
+[TRRET] #4 job=84618110 ret=FFFFFFFF tramp=8116FA5D node=85B86A1C   ← trophy step 正常完成（通道 A）
+[TRRET] #7 job=84618180 ret=00000000 tramp=8105A261 node=85B86A50
+[TRRET] 其余：ret=0，tramp=81199F51/81199F7B（周期 job）
+[TRSET] 0 条（通道 B 未触发）
+```
+**M1036 修复/增强**：
+1) `batch_011.cpp` blk_81172386：null-sound 跳过改为**手动退栈**（不跳 epilogue、不写 [r5+0x58]）：
+```cpp
+if (s->r[0] == 0u) {
+  s->r[4]=rd32(s,s->r[13]); s->r[13]+=4;   // pop {r4,r5,r6,pc} 的正确展开
+  s->r[5]=rd32(s,s->r[13]); s->r[13]+=4;
+  s->r[6]=rd32(s,s->r[13]); s->r[13]+=4;
+  uint32_t _pc=rd32(s,s->r[13]); s->r[13]+=4; return _pc; }
+```
+2) `batch_016.cpp` blk_811DB24E（TRRET）扩展：条件增加"job 的 node worker == 0x81184FFF（initDataRead driver）"，输出增加 wf 字段——**直接监控 driver job 每次 trampoline 调用的返回值与 trampoline 槽状态**（cap 160），用于确认 driver 失联是 A（返回 -1）还是 C（job 池别名/字段被清）。
+编译：batch_011/batch_016 exit 0；exe 重链 exit 0（57,055,185B，15:53:38）。
+验证运行：`out80m_m1096title2.txt`（P5D_FORCETITLE=1 + 修正的 null-sound + 扩展 TRRET）已启动。
+NEXT：
+```
+① title worker 越过 sound 请求 → title 状态机 case0/1/2…
+② [TRRET] 中 wf=81184FFF 的 driver job：最后一次调用/返回值/槽状态 → 定位失联通道
+③ title 对象创建 → 引擎自绘标题画面（TTC/TTF8/TTO/截图）
+④ 若 title 继续推进到绘制 → 检查 NOMOVIE 截帧是否出现引擎自绘内容
+```
+验证：`out80m_m1095titlepath.txt`、`err80m_m1095titlepath.txt`、`recomp_harness.exe`（57,055,185B）、`out80m_m1096title2.txt`（生成中）。 |
+| §18.4581 | m1095 result: FORCETITLE again successfully started the TITLE page (title task=85B8743C, appFade OK x2, fade object retrieved), but our M1035 null-sound skip was wrong (jumping to the epilogue writes [r5+0x58], and with r5=0 gives BADMEM va=0x58 at 0x811723BA) -> M1036 switches to manual stack unwind; meanwhile the TRRET probe produced the first job-scheduling data: the trophy step completed via -1 (channel A, expected), no TRSET (channel B not triggered). out80m_m1095titlepath.txt / err: [FORCETITLE] invoke setSequence(6,0,0,0) n=59620001 -> returned r0=85B8746C; [TTC] task=85B8743C; [TTF8] g8a8ret=85A9E42C x2; [TTO] fadeobj=85A9E46C; [BADMEM] guest va=0x00000058 at block=0x811723BA (M1035 skip wrong: epilogue writes [r5+0x58]); [TRRET] #4 job=84618110 ret=FFFFFFFF tramp=8116FA5D node=85B86A1C (trophy step normal completion, channel A); [TRRET] #7 job=84618180 ret=00000000 tramp=8105A261 node=85B86A50; other TRRET: ret=0, tramp=81199F51/81199F7B (periodic jobs); [TRSET] 0 lines (channel B not triggered). M1036 fixes/enhancements: (1) batch_011.cpp blk_81172386 null-sound skip now manually unwinds the stack (no epilogue, no [r5+0x58] write): if(s->r[0]==0u){ s->r[4]=rd32(s,s->r[13]); s->r[13]+=4; s->r[5]=rd32(s,s->r[13]); s->r[13]+=4; s->r[6]=rd32(s,s->r[13]); s->r[13]+=4; uint32_t _pc=rd32(s,s->r[13]); s->r[13]+=4; return _pc; } (2) batch_016.cpp blk_811DB24E TRRET extended: condition adds 'job node worker == 0x81184FFF (initDataRead driver)', output adds wf - directly monitoring the driver job's trampoline return and slot state (cap 160) to decide whether the driver goes silent via A (returns -1) or C (job pool alias/fields cleared). batch_011/batch_016 exit 0; exe relink exit 0 (57,055,185B 15:53:38). Verification run out80m_m1096title2.txt (P5D_FORCETITLE=1 + fixed null-sound + extended TRRET) started. NEXT: title worker passes the sound request -> title state machine case0/1/2; [TRRET] wf=81184FFF driver job last invocation/return/slot state -> locate the channel; title object creation -> engine-drawn title (TTC/TTF8/TTO/screenshots); if the title advances to drawing check whether NOMOVIE frames show engine-drawn content. |
 **m1094（FORCETITLE）证据**：
 ```
 [FORCETITLE] invoke setSequence(6,0,0,0) n=59620001
@@ -495271,3 +495302,38 @@ NEXT：
 ANTI-FORGETTING ENTRY. Keywords: M1035 MAJOR PROGRESS - FORCETITLE works: HLE setSequence(6,0,0,0) started the TITLE page (m1094: [FORCETITLE] invoke n=59620001; returned r0=85B8746C; [TTC] task=85B8743C; [TTF8] g8a8ret=85A9E42C x2 appFade OK; [BADMEM] va=0x4 at 0x81172386 only the sound object null remains) => page6->title worker chain connected; only init-chain sound objects missing (bypassed). M1035 fix batch_011.cpp blk_81172386: if(s->r[0]==0u) return 0x811723BAu; (safe skip to function epilogue). Subagent dossier C:\dev\p5d_build\ghidra_out\jobproc_dossier.md (39KB/316 lines): appProcessCreate(parentNode,name,priority,countdown,grace,worker,completion,arg) @0x8116F7CA (param_1 = parent node, NOT priority; validated via 0x8116F9F8 bl FUN_8116F728 in DAT_815554C4 chain, node[3] = parentJob); appProcess node 0x1C (+0x00 worker/+0x04 completion/+0x08 user-arg getter 0x8116F8A8/+0x0C job*/+0x10 older/+0x14 newer/+0x18 hash; DAT_815554C4 newest head, DAT_815554C8 oldest tail); job 0x70 (+0x00 state 0/1/2/3, +0x08 priority, +0x20 countdown, +0x24 grace max(2,grace), +0x28 trampoline, +0x30 destroy 0x8116FA67, +0x34 back-pointer node, +0x38/0x3C/0x40 parent/first-child/sibling, +0x44/0x48 timer∩release, +0x4C/0x50 ready, +0x54/0x58 secondary, +0x64 abort stack, +0x68/0x6C id). Write-set proof: FUN_811DAB8C only writes 0x811DAC4E parent->first_child; ready chain 0x4C/0x50 only 4 writers; timer chain has no insert API => child creation cannot unlink parent. Remaining channels: A) worker returns -1 -> completion; B) non-0 non--1 -> 0x811DB258 str r3,[r5,#0x28] overwrites trampoline slot (typical bug return appProcessCreate(...)); C) job pool block alias. Single breakpoint discriminator: 0x811DB24E records r0 and r5(job) (+0x28 expected 0x8116FA5D, +0x24 expected 2). Pitfalls: real call is trampoline(job,dt) (0x811DB246 adds r0,r5,#0 / vmov.f32 s0,s16 / blx r1); FUN_8116F748 does not restore r0 => trampoline return = worker return. M1035 probes batch_016: blk_811DB24E [TRRET] job/ret/tramp/node (only ret!=0 or tramp!=0x8116FA5D); blk_811DB258 [TRSET] job/r3. batch_011/batch_016 exit 0; exe 57,055,185B 15:35:44. Verification run out80m_m1095titlepath.txt started. NEXT: title worker passes sound -> title state machine case0/1/2; [TRRET]/[TRSET] identify A/B/C; title object -> engine-drawn title (screenshots).
 
 LOOKUP: M1035, FORCETITLE success, m1094, [FORCETITLE] invoke n=59620001, returned r0=85B8746C, [TTC] task=85B8743C, [TTF8] 85A9E42C, [BADMEM] 0x4 81172386 sound null, blk_81172386 null-sound skip 0x811723BA, jobproc_dossier.md, appProcessCreate parent node, appProcess 0x1C, job 0x70, ready chain 0x4C/0x50 writers, channel A/B/C, 0x811DB258 trampoline overwrite, 0x811DB24E breakpoint, trampoline(job,dt), TRRET/TRSET probes batch_016, exe 57,055,185B, out80m_m1095titlepath.txt -> §18.4579 [relevant: FORCETITLE], §18.4578 [relevant: DRIVDONE], §18.4574 [relevant: driver table]
+### 18.4581 PORT M1036: null-sound 跳过修正 + TRRET 扩展监控 driver job
+
+1) `out80m_m1095titlepath.txt` / err：
+```
+[FORCETITLE] invoke setSequence(6,0,0,0) n=59620001 → returned r0=85B8746C
+[TTC] task=85B8743C   [TTF8] g8a8ret=85A9E42C ×2   [TTO] fadeobj=85A9E46C
+[BADMEM] guest va=0x00000058 @block=0x811723BA     ← M1035 跳过方式错误
+[TRRET] #4 job=84618110 ret=FFFFFFFF tramp=8116FA5D node=85B86A1C  ← trophy 正常完成（通道 A）
+[TRRET] #7 job=84618180 ret=00000000 tramp=8105A261 node=85B86A50
+[TRRET] 其余 ret=0，tramp=81199F51/81199F7B
+[TRSET] 0 条（通道 B 未触发）
+```
+2) M1036 修复：
+```cpp
+// batch_011.cpp blk_81172386：null-sound 手动退栈
+if (s->r[0] == 0u) {
+  s->r[4]=rd32(s,s->r[13]); s->r[13]+=4;
+  s->r[5]=rd32(s,s->r[13]); s->r[13]+=4;
+  s->r[6]=rd32(s,s->r[13]); s->r[13]+=4;
+  uint32_t _pc=rd32(s,s->r[13]); s->r[13]+=4; return _pc; }
+// batch_016.cpp blk_811DB24E：TRRET 条件增加 wf==0x81184FFF，输出增加 wf 字段（cap 160）
+```
+3) 编译：batch_011/batch_016 exit 0；exe 57,055,185B（15:53:38）
+4) 验证运行 `out80m_m1096title2.txt` 已启动
+NEXT：
+```
+① title worker 越过 sound → title 状态机 case0/1/2…
+② [TRRET] wf=81184FFF：driver job 最后调用/返回值/槽状态
+③ title 对象 → 引擎自绘标题（截图）
+```
+验证：`out80m_m1095titlepath.txt`、`out80m_m1096title2.txt`（生成中）。
+
+ANTI-FORGETTING ENTRY. Keywords: M1036 m1095 result: FORCETITLE again started the TITLE page (title task=85B8743C, appFade OK x2, fade object retrieved) but M1035 null-sound skip was wrong (jumping to the epilogue writes [r5+0x58]; r5=0 => BADMEM va=0x58 at 0x811723BA) -> M1036 manual stack unwind. TRRET first data: trophy step completed via -1 (channel A, expected), no TRSET (channel B not triggered). out80m_m1095titlepath.txt: [FORCETITLE] invoke n=59620001 -> returned r0=85B8746C; [TTC] task=85B8743C; [TTF8] 85A9E42C x2; [TTO] fadeobj=85A9E46C; [BADMEM] va=0x58 at 0x811723BA; [TRRET] #4 job=84618110 ret=FFFFFFFF tramp=8116FA5D node=85B86A1C; [TRRET] #7 job=84618180 ret=0 tramp=8105A261 node=85B86A50; [TRSET] 0. M1036: batch_011 blk_81172386 if(s->r[0]==0u){ pop r4/r5/r6/pc manually via rd32/wr32; return _pc; } (no epilogue); batch_016 blk_811DB24E TRRET condition adds wf==0x81184FFF and prints wf (cap 160) to monitor the driver job's trampoline return/slot. batch_011/batch_016 exit 0; exe 57,055,185B 15:53:38. Verification run out80m_m1096title2.txt started. NEXT: title worker passes sound -> title state machine case0/1/2; [TRRET] wf=81184FFF driver job last invocation/return/slot; title object -> engine-drawn title (screenshots); check NOMOVIE frames for engine content.
+
+LOOKUP: M1036, null-sound skip fix manual unwind, blk_81172386, BADMEM va=0x58 811723BA, TRRET data, #4 job=84618110 ret=-1 tramp=8116FA5D node=85B86A1C trophy channel A, #7 job=84618180 tramp=8105A261, TRSET 0, TRRET extended wf==0x81184FFF, blk_811DB24E, out80m_m1096title2.txt, exe 57,055,185B -> §18.4580 [relevant: FORCETITLE + dossier], §18.4576 [relevant: driver disappear], §18.4574 [relevant: init chain driver]
