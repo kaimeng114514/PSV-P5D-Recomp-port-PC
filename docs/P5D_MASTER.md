@@ -1095,6 +1095,36 @@
 | M1077 | §18.4622: ★★★★★★★★★★★ **发现 250M 长跑提前结束的原因：guest 主线程在 **64,278,346 blocks 处返回**（`done: blocks=64278346 pc=8116F748`），harness 随即退出——max_blocks 根本不是限制。真实 Vita 上主线程返回后其他线程（显示/worker）继续驱动游戏世界，而我们的 harness 直接结束。M1077 实现 `P5D_POSTMAIN=1`：主线程返回后进入"后续线程泵"阶段（虚拟时间每轮 +16666us ≈1 帧、vblank 递增、持续 `hle_thr_pump`），让 guest 线程继续推进。**
 | M1078 | §18.4623: ★★★★★★★★★★★ **找到运行在 64,278,346 blocks 终止的真正原因：`[INDIRECT-MISS] reg1=8115849F target=8115849E block=8116F748`——app-job trampoline 通过函数指针调用 **0x8115849E 处的真实 Thumb 函数**，而该函数**不在 function_bounds.json（12,921 个函数）中**、也**不在我们的 AOT 批次（12,532 函数）里**。反汇编确认它是完整函数：`push {r4,r5,r6,r7,lr}; vpush {s16,s17}; sub sp,#0x104; …`。⇒ AOT 覆盖存在系统性缺口（12,921 − 12,532 = **389 个函数从未生成**），这是流程中断的根因，而非运行时门控。**
 | M1079 | §18.4624: ★★★★★★★★★★★ **补上缺失函数：用现有 gap 生成器（`_gen_split_gap2.py` 语义 + capstone）为 Ghidra 漏识别的函数 **0x8115849E 生成 82 个 AOT block**，组装成 `batch_034.cpp` 并接入 harness（FB(034)/ALL_FINDERS[35]/build_all_blocks 扩展）——这是让运行越过 64,278,346 blocks 死亡点的关键补丁。**
+| M1080 | §18.4625: ★★★★★★★★★★★ **历史性突破：运行首次越过 64,278,346 blocks 死亡点！batch_034 补块生效——新函数 0x8115849E 正常执行（PC ring：8115849E→8116F8A8→811584B8/BC0/C6），流程推进到**movie play/标题电影阶段**（[MOVIEPLAY] FUN_8115922C、[MOVIEFIN] 假完成、[PROCREG] 'movie play'）。随后出现新崩溃：BADMEM va=0 @ block 0x811DAC9C（FUN_811DAB8C 内）——节点分配器 FUN_811D9F4A(DAT_816CDA48) 返回 0（r6=0），属新一层的运行时缺口。**
+m1125（`out80m_m1125batch34.txt`）关键证据：
+```
+[TABLE] blocks=230251   （原 230243，+8 唯一新 VA；batch_034 的 82 块大部分与既有块 VA 重合/被去重）
+WD: loop=2 cnt=1499999/977046347/64278383/0 blk=811DAC9C ...   ← ★ n=64,278,383 越过 64,278,346
+WDRING: 81159298 8115929E 811592AA 811592B4 811592B6 811592BE 81178F10 81178F14 81178F36 811DACFC 811DAD4A 811DAC9C
+PC ring（更早）：… 8115849E 8116F8A8 811584B8 811584C0 811584C6   ← ★ 补上的函数被执行！
+[MOVIEPLAY] FUN_8115922C PLAY MOVIE seen (blk=81184722) - will fake completion after movie object exists
+[MOVIEFIN] invoke FUN_81159276(state=1, movie=85A744EC) blk=1500000
+[PROCREG] #23 name='movie play' arg=00000000 cb0=81306548 cb1=85CF2ECC obj=81159277 blk=0016E360
+[SNAP] blk=811DAC9C r0=00000000 r1=812B4150 r2=812B4150 r4=00000002 r5=85CF304C r7=812B414C r13=84856298 r14=81159298
+[BADMEM] guest va=0x00000000 unmapped block=0x811DAC9C tid=0 stub=812B2200
+```
+**新崩溃点分析（`movie_null.txt`、`pool.txt`）**：
+- 0x811DAC9C 生成代码：`s->r[1]=0; wr32(s, s->r[6]+0, s->r[4]); wr32(s, s->r[6]+4, ...)` → **r6 为 0**（写 [0]、[0+4]）
+- r6 = `FUN_811D9F4A(DAT_816CDA48)` 的返回值（`0x811DAB8C` 开头：`puVar2 = FUN_811d9f4a(DAT_816cda48); puVar2[4]=0; …`）
+- FUN_811D9F4A（`pool.txt`，330B）= **位图池分配器**：param_1 是池结构（+0x1C 锁、+4 位图字数、+0x18 块链、+0xC/+8/+0x10 尺寸），遍历位图找空闲位；无空闲则 `FUN_811da534(总大小)` 分配新块；**malloc 失败返回 0**
+- DAT_816CDA48 的写者 = FUN_811DA584（0x811DA5C6/0x811DA5D8 写 DAT_816CDA40/48）→ 池的初始化函数
+- ⇒ 池分配返回 0 的三种可能：HLE malloc 失败、池结构未正确初始化（我们的 boot hack 曾把 DAT_816CDA48 预设为 0xA0028000）、或池耗尽
+NEXT：
+```
+① 查 HLE malloc 失败日志（[ALLOCFAIL]/hle_malloc 失败）与 DAT_816CDA48 运行时值
+② 反编译 FUN_811DA584（池初始化）确认其初始化条件/是否运行
+③ 若池未初始化 → 修正 boot hack（让 DAT_816CDA48 指向正确池/或让 FUN_811DA584 真正运行）
+④ 若 malloc 失败 → 扩容 HLE 堆
+⑤ 池修复后 movie play 继续 → title 电影/标题内容 → 2D 上下文 → array2 → GXM → 画面
+⑥ 若后续还有 indirect miss → 用 M1079 流程继续补块
+```
+验证：`out80m_m1125batch34.txt`、`pool.txt`、`movie_null.txt`、`cda48_refs.txt`、batch_034.cpp。 |
+| §18.4625 | HISTORIC BREAKTHROUGH: the run crossed the 64,278,346-block death point for the first time! The batch_034 fill works - the newly added function 0x8115849E executes normally (PC ring: 8115849E->8116F8A8->811584B8/BC0/C6) and the flow advances into the movie-play/title-movie stage ([MOVIEPLAY] FUN_8115922C, [MOVIEFIN] fake completion, [PROCREG] 'movie play'). Then a new crash appears: BADMEM va=0 at block 0x811DAC9C inside FUN_811DAB8C - the node allocator FUN_811D9F4A(DAT_816CDA48) returned 0 (r6=0), a new runtime gap. m1125 (out80m_m1125batch34.txt) evidence: [TABLE] blocks=230251 (was 230243, +8 unique new VAs; most of batch_034's 82 blocks overlapped existing VAs and were deduped); WD: loop=2 cnt=1499999/977046347/64278383/0 blk=811DAC9C ... -> n=64,278,383 crossed 64,278,346; WDRING: 81159298 8115929E 811592AA 811592B4 811592B6 811592BE 81178F10 81178F14 81178F36 811DACFC 811DAD4A 811DAC9C; PC ring earlier: ... 8115849E 8116F8A8 811584B8 811584C0 811584C6 (the added function executed!); [MOVIEPLAY] FUN_8115922C PLAY MOVIE seen (blk=81184722); [MOVIEFIN] invoke FUN_81159276(state=1, movie=85A744EC) blk=1500000; [PROCREG] #23 name='movie play' arg=0 cb0=81306548 cb1=85CF2ECC obj=81159277 blk=0016E360; [SNAP] blk=811DAC9C r0=0 r1=812B4150 r2=812B4150 r4=2 r5=85CF304C r7=812B414C r13=84856298 r14=81159298; [BADMEM] guest va=0 unmapped block=0x811DAC9C tid=0 stub=812B2200. New crash point analysis: 0x811DAC9C generated code does s->r[1]=0; wr32(s, s->r[6]+0, s->r[4]); wr32(s, s->r[6]+4, ...) -> r6 is 0 (writes [0] and [0+4]); r6 = return value of FUN_811D9F4A(DAT_816CDA48) from the start of 0x811DAB8C: puVar2 = FUN_811d9f4a(DAT_816cda48); puVar2[4]=0; ... FUN_811D9F4A (pool.txt, 330B) is a bitmap pool allocator: param_1 is the pool struct (+0x1C lock, +4 bitmap word count, +0x18 block chain, +0xC/+8/+0x10 sizes), scans the bitmap for a free bit, otherwise allocates a new block via FUN_811da534(total size); returns 0 when malloc fails. DAT_816CDA48 is written by FUN_811DA584 (0x811DA5C6/0x811DA5D8 write DAT_816CDA40/48) - the pool init function. So the pool alloc returned 0 possibly because: HLE malloc failed, pool struct not properly initialized (our boot hack once pre-set DAT_816CDA48=0xA0028000), or pool exhaustion. NEXT: (1) check HLE malloc failure logs ([ALLOCFAIL]/hle_malloc failure) and the runtime DAT_816CDA48 value; (2) decompile FUN_811DA584 (pool init) to see its init conditions/whether it runs; (3) if the pool is uninitialized fix the boot hack (point DAT_816CDA48 at a proper pool, or make FUN_811DA584 really run); (4) if malloc fails expand the HLE heap; (5) after the pool fix movie play continues -> title movie/title content -> 2D context -> array2 -> GXM -> picture; (6) further indirect misses -> continue filling blocks with the M1079 procedure. |
 **AOT 覆盖核对（`_miss_list_1090.py`）**：
 ```
 function_bounds.json 函数数 = 12,921
@@ -498322,3 +498352,36 @@ NEXT：
 ANTI-FORGETTING ENTRY. Keywords: M1079 filled the Ghidra-missed function 0x8115849E with 82 generated AOT blocks into batch_034.cpp and wired it into the harness (FB(034), ALL_FINDERS[35], build_all_blocks loops 32->35, ternary chain +032/033/034, dedupe loop 34..0). AOT coverage check: function_bounds.json 12,921 functions; batches have 230,243 block starts; only 1 bounds function lacks a block (0x8117E184 size=1) -> the earlier 389-gap inference was wrong; the real gap is functions Ghidra missed entirely (function-pointer targets like 0x8115849E). Generation: miss_bounds.json = {0x8115849E size 0x282 FUN_8115849E_miss, 0x8117E184 size 1}; copied _gen_split_gap2.py to _gen_miss_blocks.py with BOUNDS=C:\dev\tmp\miss_bounds.json OUTDIR=C:\dev\tmp\recomp_miss; ran py _gen_miss_blocks.py 500 4 -> gap-filled 0; functions 2; batches 1; 82 blocks; g++ compile rc=0 (obj 30,180B, 315 lines). Assembled batch_034.cpp: replaced generated P() with batch_017 extended mapping (0xA0000000/0xA2000000/0x9F000000 windows), renamed _000->_034. Harness patches: FB(034); extern get_table_034/find_block_034; ALL_FINDERS[34]->[35] appending find_block_034; build_all_blocks loops 32->35 and chain extended; dedupe loop 31->34 (higher batch index wins). Build: batch_034 exit 0; recomp_harness exit 0; exe relink exit 0 (57,110,759B 04:00:22). Verification run m1125: recomp_harness.exe 0x81198464 300000000, env FORCETITLE+FIOSFILL+WAITFORCE+SCNFORCE+THRPUMP+PUMPMAIN+POSTMAIN, out80m_m1125batch34.txt, background. NEXT: monitor blocks > 64,278,346 and no [INDIRECT-MISS]; if a new indirect miss appears repeat the miss_bounds+generator procedure; after passing watch logo 5->6->8->0xD, title-asset FIOSFILL opens, [SCENE] head0F; then FUN_811C2964 -> FUN_811B6B12 -> FUN_811ADAFE -> array2 -> GXM -> picture; record/fill newly missing functions.
 
 LOOKUP: M1079, batch_034.cpp 82 blocks, missing function 0x8115849E size 0x282, miss_bounds.json, _gen_miss_blocks.py from _gen_split_gap2.py, C:\dev\tmp\recomp_miss, harness FB(034) ALL_FINDERS[35] build_all_blocks i<35 chain 032/033/034 dedupe 34..0, exe 57,110,759B 04:00:22, m1125 out80m_m1125batch34.txt, verify passing 64,278,346 blocks, AOT coverage 12921 bounds vs 230243 block starts only 0x8117E184 missing, Ghidra missed 0x8115849E function-pointer target -> §18.4623 [relevant: indirect miss root cause], §18.4622 [relevant: POSTMAIN], §18.4621 [relevant: run length]
+### 18.4625 PORT M1080: 首次越过 64,278,346 死亡点！补块生效，进入 movie play 阶段后遇到池分配空指针
+
+1) m1125 关键证据：
+```
+[TABLE] blocks=230251（+8 唯一新 VA）
+WD: n=64278383 blk=811DAC9C          ← ★ 越过 64,278,346
+PC ring: … 8115849E 8116F8A8 811584B8 811584C0 811584C6   ← 补上的函数执行
+[MOVIEPLAY] FUN_8115922C PLAY MOVIE seen (blk=81184722)
+[MOVIEFIN] invoke FUN_81159276(state=1, movie=85A744EC)
+[PROCREG] #23 name='movie play'
+[SNAP] blk=811DAC9C r0=0 r6(缺省)=0 … lr=81159298
+[BADMEM] guest va=0x00000000 unmapped block=0x811DAC9C
+```
+2) 新崩溃点：
+- 0x811DAC9C：`wr32(s, s->r[6]+0, s->r[4]); wr32(s, s->r[6]+4, 0)` → r6=0
+- r6 = `FUN_811D9F4A(DAT_816CDA48)` 返回值；该函数是位图池分配器（pool.txt 330B）：
+  - param_1 池结构：+0x1C 锁、+4 位图字数、+0x18 块链、+0xC/+8/+0x10 尺寸
+  - 遍历位图找空闲位；无空闲 → FUN_811da534(总大小) 新块；**malloc 失败返回 0**
+- DAT_816CDA48 写者 = FUN_811DA584（0x811DA5C6/D8 写 DAT_816CDA40/48）池初始化
+NEXT：
+```
+① 查 HLE malloc 失败日志与 DAT_816CDA48 运行时值
+② 反编译 FUN_811DA584（池初始化）
+③ 池未初始化 → 修 boot hack 或让初始化真正运行
+④ malloc 失败 → 扩容 HLE 堆
+⑤ movie play 继续 → title 电影 → 2D 上下文 → array2 → GXM → 画面
+⑥ 后续 indirect miss 继续补块
+```
+验证：`out80m_m1125batch34.txt`、`pool.txt`、`movie_null.txt`、`cda48_refs.txt`。
+
+ANTI-FORGETTING ENTRY. Keywords: M1080 FIRST TIME crossing 64,278,346 blocks - batch_034 fill works, new function 0x8115849E executes (PC ring 8115849E->8116F8A8->811584B8/BC0/C6) and the flow reaches the movie-play/title-movie stage ([MOVIEPLAY] FUN_8115922C, [MOVIEFIN] FUN_81159276(state=1, movie=85A744EC), [PROCREG] #23 'movie play'). [TABLE] blocks=230251 (was 230243; +8 unique VAs, most of batch_034's 82 blocks deduped). WD loop=2 n=64278383 blk=811DAC9C (crossed); WDRING 81159298 8115929E 811592AA 811592B4 811592B6 811592BE 81178F10 81178F14 81178F36 811DACFC 811DAD4A 811DAC9C. New crash: [BADMEM] guest va=0 unmapped block=0x811DAC9C tid=0 stub=812B2200; [SNAP] blk=811DAC9C r0=0 r1=812B4150 r2=812B4150 r4=2 r5=85CF304C r7=812B414C r13=84856298 r14=81159298. 0x811DAC9C generated code: s->r[1]=0; wr32(s, s->r[6]+0, s->r[4]); wr32(s, s->r[6]+4, ...) -> r6=0; r6 = FUN_811D9F4A(DAT_816CDA48) return from FUN_811DAB8C start (puVar2=FUN_811d9f4a(DAT_816cda48); puVar2[4]=0). FUN_811D9F4A (pool.txt 330B) is a bitmap pool allocator: pool struct +0x1C lock, +4 bitmap word count, +0x18 block chain, +0xC/+8/+0x10 sizes; scans bitmap for free bit else FUN_811da534(total size) allocates a new block; returns 0 when malloc fails. DAT_816CDA48 writer = FUN_811DA584 (0x811DA5C6/0x811DA5D8 write DAT_816CDA40/48) pool init. Causes: HLE malloc failure, pool struct not properly initialized (boot hack once set DAT_816CDA48=0xA0028000), or pool exhaustion. NEXT: check HLE malloc failure logs and runtime DAT_816CDA48; decompile FUN_811DA584 pool init; fix boot hack or run init; expand HLE heap if malloc fails; then movie play continues -> title movie/content -> 2D context -> array2 -> GXM -> picture; continue filling further indirect misses.
+
+LOOKUP: M1080 first crossing 64,278,346, batch_034 works, 0x8115849E executed, movie play stage FUN_8115922C MOVIEPLAY MOVIEFIN PROCREG #23, BADMEM va=0 block 0x811DAC9C, FUN_811DAB8C node FUN_811D9F4A DAT_816CDA48 returned 0, bitmap pool allocator pool.txt, FUN_811da534 malloc, DAT_816CDA48 writer FUN_811DA584, [TABLE] blocks=230251, WD n=64278383, out80m_m1125batch34.txt -> §18.4624 [relevant: batch_034], §18.4623 [relevant: indirect miss], §18.4622 [relevant: POSTMAIN]
