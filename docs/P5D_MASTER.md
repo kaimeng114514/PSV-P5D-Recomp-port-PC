@@ -1053,6 +1053,37 @@
 | M1035 | §18.4580: ★★★★★★★★★★ **重大进展：FORCETITLE 生效！HLE 直接调用 setSequence(6,0,0,0) 成功启动 TITLE 页（title task 创建、appFade 正常），崩溃仅剩 sound 对象 null；同时子代理完成"进程/Job 子系统静态 dossier"，用写集证明"创建子 job 不可能把父 job 摘出 ready 链"，并给出 A/B/C 三种候选与单断点判别法**。
 | M1036 | §18.4581: **m1095 结果：FORCETITLE 再次成功启动 TITLE 页（title task=85B8743C、appFade OK ×2、fade 对象取到），但我们的 M1035 null-sound 跳过方式有错误（跳 epilogue 会写 [r5+0x58]，r5=0 时 BADMEM va=0x58 @0x811723BA）→ M1036 改为手动退栈返回；同时 TRRET 探针给出第一批 job 调度数据：trophy step 以 -1 完成（通道 A，符合预期），未出现 TRSET（通道 B 未触发）**。`out80m_m1095titlepath.txt` / err：
 | M1037 | §18.4582: ★★★★★★★★★★ **重大发现：FORCETITLE 后 title 子系统创建了新的 logo 序列任务（job node=85B8750C worker=0x81193704），反编译确认这是 S0_LOGO 引擎自绘路径：加载 `title/logo.bin` + `atluslogo.tga`/`crilogo.tga`/`p-studio.tga`，按 69 帧间隔做淡入淡出序列！** m1096 证据：
+| M1038 | §18.4583: **S0_LOGO 任务已注册（`logoDrawProc`）但 title/logo.bin 的 Fios 打开请求从未到达 HLE：文件请求由 guest 侧请求管理器（FUN_81181A3C 队列）排队，需要一个 worker 线程/任务去消费并调用 Fios HLE——当前调度下该 worker 未被驱动，因此加载永不完成（自旋）。已启动 LOADPUMP/SCHEDFIX/THREADWEMU 组合运行尝试驱动请求队列**。m1096 证据：
+```
+[PROCREG] #13 name='logoDrawProc' arg=0 cb0=85B874BC cb1=0 obj=0   ← ★ S0 logo 绘制进程已注册
+[PROCREG] #10 'sequence observer'  #11 'initDataRead'  #12 'init trophy'  #14 'init sound'
+（无 init gamedata/msgwindow/mainmenu → init 链未走完）
+[FHOPEN57] 0 条  [FHREAD57] 0 条  [FIOS] OPEN 0 条  [REQFILL] 0 条
+仅 [IO] OPEN 'sound/bgm/p5d_bgm.acb' 一次
+```
+**文件请求层反编译**：
+```c
+FUN_8115FBE6(name)  → FUN_8115FD22(name,0) → FUN_81181C2A → FUN_81181A3C(name, 0, -1, &DAT_81309208)
+FUN_8115FC0E(req)   → FUN_8115FD38 → FUN_81181CA0(req)
+    // req[+4]==0xC && req[+0xA0]==0 → 1(完成)；req[+0xA0]!=0 → -1(错误)；否则 0(等待)
+FUN_8115FC28(req,out) → FUN_8115FD50 → FUN_81181CE4(req,0,out)   // 从 req[+0x94] 取数据、req[+0x88] 取大小
+FUN_81181A3C(name,...)：guest 侧"请求管理器"——路径哈希（FUN_8118192C + strlen）、在 DAT_816CDAC8 链表里查重、
+    用 FUN_8105ae7a 分配 0xC8 节点、插入队列、FUN_81207454 唤醒等待者；真正 IO 由另一个 guest 任务消费
+[PROCREG] 里没有文件加载 worker → 该 worker 线程/任务当前未被调度（自旋等待）
+```
+⇒ **卡点不再是资源缺失（title/logo.bin 已在 data.cpk 中）而是"请求队列消费者没被调度"**——属于线程/任务调度语义缺口（与外部审计"HLE/线程调度 极高风险"一致）。
+**M1038 实验运行**：`out80m_m1097logopump.txt`（`P5D_FORCETITLE=1 P5D_LOADPUMP=1 P5D_SCHEDFIX=1 P5D_THREADWEMU=1`）已启动：
+- LOADPUMP：模型已有 `FUN_811E5928`（Fios 任务泵）机制，主动推进 Fios 任务
+- SCHEDFIX/THREADWEMU：已有调度修正开关
+NEXT：
+```
+① 运行结果：是否出现 [FHOPEN57]/[FIOS] OPEN 'title/logo.bin'（请求是否被消费）
+② 若仍无：给 FUN_81181A3C 加 [REQ] 探针（name + 队列节点）确认请求已入队；再找队列消费者 guest 函数（x86 引用 DAT_816CDAC8）并主动 pump
+③ 若 logo.bin 打开/读取成功：关注 3 个 TGA 加载任务（FUN_8119343A → "logoTMX" 任务）→ FUN_81174DBC 纹理加载
+④ 成功后 logoDrawProc 将绘制 ATLUS/CRI/P-STUDIO logo（NOMOVIE 截帧应出现引擎自绘内容）
+```
+验证：`out80m_m1096title2.txt`、`fios_req.txt`、`fs_wrap.txt`、`logo_loader.txt`、`out80m_m1097logopump.txt`（生成中）。 |
+| §18.4583 | The S0_LOGO task is registered (logoDrawProc) but the Fios open request for title/logo.bin never reaches HLE: file requests are queued by the guest-side request manager (FUN_81181A3C queue) and a worker thread/task must consume it and call the Fios HLE - under the current scheduling that worker is not driven, so loading never completes (spin). Started a LOADPUMP/SCHEDFIX/THREADWEMU combined run to try to drive the request queue. m1096 evidence: [PROCREG] #13 name='logoDrawProc' arg=0 cb0=85B874BC cb1=0 obj=0 (S0 logo draw process registered); [PROCREG] #10 'sequence observer' #11 'initDataRead' #12 'init trophy' #14 'init sound' (no init gamedata/msgwindow/mainmenu => init chain not finished); [FHOPEN57] 0; [FHREAD57] 0; [FIOS] OPEN 0; [REQFILL] 0; only [IO] OPEN 'sound/bgm/p5d_bgm.acb' once. File request layer decompiled: FUN_8115FBE6(name) -> FUN_8115FD22(name,0) -> FUN_81181C2A -> FUN_81181A3C(name,0,-1,&DAT_81309208); FUN_8115FC0E(req) -> FUN_8115FD38 -> FUN_81181CA0(req): req[+4]==0xC && req[+0xA0]==0 -> 1(done); req[+0xA0]!=0 -> -1(error); else 0(waiting); FUN_8115FC28(req,out) -> FUN_8115FD50 -> FUN_81181CE4(req,0,out) (data from req[+0x94], size req[+0x88]); FUN_81181A3C(name,...) is the guest-side request manager: path hash (FUN_8118192C + strlen), dedupe in DAT_816CDAC8 list, allocate 0xC8 node via FUN_8105ae7a, insert queue, FUN_81207454 wake waiters; the real IO is consumed by another guest task. [PROCREG] has no file-loading worker => that worker thread/task is not scheduled (spin waiting). So the blocker is not a missing resource (title/logo.bin is in data.cpk) but 'the request-queue consumer is not scheduled' - a thread/task scheduling semantics gap (consistent with the external audit's 'HLE/thread scheduling very high risk'). M1038 experiment run out80m_m1097logopump.txt (P5D_FORCETITLE=1 P5D_LOADPUMP=1 P5D_SCHEDFIX=1 P5D_THREADWEMU=1) started: LOADPUMP pumps the Fios task FUN_811E5928, SCHEDFIX/THREADWEMU are existing scheduling-fix switches. NEXT: whether [FHOPEN57]/[FIOS] OPEN 'title/logo.bin' appears (request consumed); if not add a [REQ] probe to FUN_81181A3C (name + queue node) to confirm the request is queued, then find the queue consumer guest function (xrefs to DAT_816CDAC8) and pump it; if logo.bin opens/reads, watch the 3 TGA load tasks (FUN_8119343A -> 'logoTMX' task) -> FUN_81174DBC texture load; after success logoDrawProc draws ATLUS/CRI/P-STUDIO logos (NOMOVIE frames should show engine-drawn content). |
 ```
 [FORCETITLE] invoke setSequence(6,0,0,0) n=59620001 → returned r0=85B8746C
 [TTC] task=85B8743C   [TTF8] 85A9E42C ×3   [TTO] fadeobj=85A9E46C   [BADMEM] 0（无崩溃！）
@@ -495429,3 +495460,34 @@ NEXT：
 ANTI-FORGETTING ENTRY. Keywords: M1037 MAJOR FINDING - after FORCETITLE the title subsystem created a logo-sequence task (job node=85B8750C worker=0x81193704) and decompilation confirms it is the S0_LOGO engine-drawn path: loads title/logo.bin + atluslogo.tga/crilogo.tga/p-studio.tga with 69-frame fade intervals. m1096: [FORCETITLE] invoke n=59620001 -> returned r0=85B8746C; [TTC] task=85B8743C; [TTF8] 85A9E42C x3; [TTO] fadeobj=85A9E46C; [BADMEM] 0; [JOBEXEC] #32 node=85B8746C worker=81198173 (title sequence job); #33 node=85B8750C worker=81193705 (S0 logo sequence job); [TRRET] #15 job=846182D0 ret=-1 wf=811848B7 node=85B87F2C (sound step job completed); [TRRET] driver job 846180A0 ret=0 tramp=8116FA5D node=85B846EC wf=81184FFF still scheduled; run spins at n≈60,732,825 ([WD] stall=486, pcring 8127B85C/8127C0F4/811731E6). FUN_81193704 (titlejob2.txt): case0/1 state=2 open title/logo.bin via FUN_8115fbe6; case2 if FUN_8115fc0e(handle)!=0 { data=FUN_8115fc28(handle,0); state=3; puVar1[5]=FUN_8119343a('atluslogo.tga',data,0); [6]='crilogo.tga'; [7]='p-studio.tga'; } case3 wait three TGA tasks done (FUN_8116f8d2 != 0 && task state==3) -> close FUN_8115fc20 -> state=4; case4 state=5 counter=0 fade=FUN_81178ce2(0) FUN_81178e84(fade,0,10) iVar5=FUN_81175290(0xe); if(0) 0xc9; FUN_810932a0(iVar5,1); case5/8/0xb counter++ if(0x45<counter){state++; fade out;} (69-frame interval); case6/9/0xc wait fade -> next logo; case7/0xa fade in next; case0xd done -> puVar1[1]=1 then FUN_8115fa3e(0x1c)/FUN_8116e49e/(iVar5+0x10=param_1, +8=0x8119351D)/FUN_8116e522. So this is the ATLUS->CRI->P-STUDIO logo engine-drawn intro (S0_LOGO), 69 frames ~2.3s @30fps with fades. Current blocker: title/logo.bin + 3 TGA load tasks (file HLE/CRI FS) -> spins at n≈60.73M. NEXT: check title/logo.bin and TGAs open ([FOPEN] probes to FUN_8115fbe6/FUN_8115fc0e); add [LOGO] state probe to blk_81193704 (state/container/3 handles) to see stuck case2 or case3; extract missing resources from data.cpk to virtual FS; implement CRI/image decode HLE or fake-complete FUN_8119343a; then engine draws ATLUS/CRI/P-STUDIO logos => first visible engine-drawn S0_LOGO milestone.
 
 LOOKUP: M1037, FORCETITLE title subsystem logo job, node=85B8750C worker=81193704, S0_LOGO sequence, title/logo.bin, FUN_8115fbe6, FUN_8115fc0e, FUN_8115fc28, FUN_8119343a, atluslogo.tga, crilogo.tga, p-studio.tga, 69-frame interval 0x45, FUN_81178ce2 fade, FUN_81178e84, FUN_81175290 0xe, FUN_810932a0, case 0-0xd state machine, spin n=60,732,825, [WD] pcring 8127B85C/8127C0F4, titlejob2.txt, [JOBEXEC] #33, [TRRET] #15 sound -1, out80m_m1096title2.txt -> §18.4581 [relevant: TRRET + title2], §18.4580 [relevant: FORCETITLE], §18.4574 [relevant: init chain]
+### 18.4583 PORT M1038: logo 任务已注册但 Fios 请求未被消费（调度缺口）
+
+1) m1096 证据：
+```
+[PROCREG] #13 name='logoDrawProc' arg=0 cb0=85B874BC cb1=0 obj=0    ← S0 logo 绘制进程已注册
+[PROCREG] #10 'sequence observer' #11 'initDataRead' #12 'init trophy' #14 'init sound'
+[FHOPEN57] 0  [FHREAD57] 0  [FIOS] OPEN 0  [REQFILL] 0
+[IO] OPEN 'sound/bgm/p5d_bgm.acb' -> fd=16385（仅此一次）
+```
+2) 文件请求层反编译（`fs_wrap.txt`/`fios_req.txt`）：
+```c
+FUN_8115FBE6(name) → FUN_8115FD22 → FUN_81181C2A → FUN_81181A3C(name,0,-1,&DAT_81309208)
+FUN_8115FC0E(req)  → FUN_81181CA0(req): req[+4]==0xC && req[+0xA0]==0 → 1；req[+0xA0]!=0 → -1；否则 0
+FUN_8115FC28(req,out) → FUN_81181CE4: 数据在 req[+0x94]，大小 req[+0x88]
+FUN_81181A3C = guest 请求管理器：路径哈希 + DAT_816CDAC8 链表查重 + FUN_8105ae7a 分配 0xC8 节点 + 唤醒等待者
+```
+⇒ 真正 IO 由另一个 guest 任务消费；**[PROCREG] 无文件加载 worker ⇒ 消费者未被调度**
+⇒ 卡点 = 线程/任务调度语义缺口（非资源缺失；title/logo.bin 在 data.cpk 中）
+3) M1038 实验运行 `out80m_m1097logopump.txt`（FORCETITLE + LOADPUMP + SCHEDFIX + THREADWEMU）已启动
+NEXT：
+```
+① [FHOPEN57]/[FIOS] OPEN 'title/logo.bin' 是否出现
+② 仍无 → [REQ] 探针确认入队；找 DAT_816CDAC8 消费者并主动 pump
+③ 成功 → 3 个 TGA 加载（logoTMX 任务）→ FUN_81174DBC
+④ logoDrawProc 绘制 ATLUS/CRI/P-STUDIO logo（NOMOVIE 截帧可见）
+```
+验证：`out80m_m1096title2.txt`、`fios_req.txt`、`fs_wrap.txt`、`out80m_m1097logopump.txt`（生成中）。
+
+ANTI-FORGETTING ENTRY. Keywords: M1038 S0_LOGO task registered (PROCREG #13 name='logoDrawProc' cb0=85B874BC) but the Fios open request for title/logo.bin never reaches HLE. m1096: [FHOPEN57] 0, [FHREAD57] 0, [FIOS] OPEN 0, [REQFILL] 0, only [IO] OPEN 'sound/bgm/p5d_bgm.acb'. PROCREG: #10 sequence observer, #11 initDataRead, #12 init trophy, #14 init sound (no gamedata/msgwindow/mainmenu). File request layer: FUN_8115FBE6(name) -> FUN_8115FD22(name,0) -> FUN_81181C2A -> FUN_81181A3C(name,0,-1,&DAT_81309208); FUN_8115FC0E(req) -> FUN_81181CA0(req): req[+4]==0xC && req[+0xA0]==0 -> 1 done, req[+0xA0]!=0 -> -1 error, else 0 waiting; FUN_8115FC28(req,out) -> FUN_81181CE4(req,0,out) (data req[+0x94], size req[+0x88]); FUN_81181A3C is the guest request manager: path hash (FUN_8118192C+strlen), dedupe in DAT_816CDAC8 list, alloc 0xC8 node via FUN_8105ae7a, insert, FUN_81207454 wake waiters; the real IO consumer is another guest task. [PROCREG] has no file-loading worker => consumer not scheduled => spin. So blocker is thread/task scheduling semantics, not missing resources (title/logo.bin exists in data.cpk: [CPKNAME] title/logo.bin). M1038 experiment out80m_m1097logopump.txt (P5D_FORCETITLE=1 P5D_LOADPUMP=1 P5D_SCHEDFIX=1 P5D_THREADWEMU=1) started; LOADPUMP pumps FUN_811E5928 Fios task; SCHEDFIX/THREADWEMU existing scheduling-fix switches. NEXT: check for [FHOPEN57]/[FIOS] OPEN 'title/logo.bin'; if absent add [REQ] probe to FUN_81181A3C and find/pump the DAT_816CDAC8 consumer; then 3 TGA loads (logoTMX task, FUN_81174DBC); logoDrawProc should then draw ATLUS/CRI/P-STUDIO logos (engine-drawn S0_LOGO visible under NOMOVIE).
+
+LOOKUP: M1038, PROCREG #13 logoDrawProc, cb0=85B874BC, S0_LOGO, title/logo.bin in data.cpk, FHOPEN57 0, FHREAD57 0, REQFILL 0, IO OPEN sound/bgm/p5d_bgm.acb, FUN_8115FBE6, FUN_8115FD22, FUN_81181C2A, FUN_81181A3C request manager, DAT_816CDAC8, FUN_8105ae7a, FUN_81207454, FUN_81181CA0 req[+4]==0xC req[+0xA0], FUN_81181CE4 req[+0x94]/[+0x88], consumer not scheduled, thread scheduling gap, P5D_LOADPUMP, FUN_811E5928 Fios task pump, P5D_SCHEDFIX, P5D_THREADWEMU, out80m_m1097logopump.txt -> §18.4582 [relevant: S0_LOGO job], §18.4581 [relevant: title2], §18.4580 [relevant: FORCETITLE]
