@@ -1089,6 +1089,44 @@
 | M1071 | §18.4616: ★★★★★★★★★★ **m1117 铁证：两个场景对象（859BF220/859BF940）每帧被检查，`st=1, head0F=0, head19=0`——2D 条目链完全为空；且在 arm 后没有任何对 scene+0x3C 的写入（[SCW]=0）。同时反编译出场景帧驱动与场景/视图注册器。**
 | M1072 | §18.4617: ★★★★★★★★★★ **m1118 定位到"场景已注册、但 2D 视图从未注册"：`FUN_811C2A4C`（场景/视图注册器）**从未被调用**（[SCREATE]# = 0）；场景对象 859BF220/859BF940 是由场景注册 API `FUN_811BF900(index, scene)` 写入 `(&DAT_816CC664)[index]` 的（该 API 还调用 FUN_811C3438(scene) 初始化、*scene=index；替换旧场景时调用 FUN_811C222E）。**
 | M1073 | §18.4618: ★★★★★★★★★★ **m1119 拿到场景注册的真实调用点：FUN_811BF900 在 title 初始化时被调用 2 次（index=0/scene=859BF220，index=1/scene=859BF940，调用者 0x8115A0E0/0x8115A314）；FUN_811C3438 只是互斥锁初始化；每帧 FUN_811C241E（[SCBUILD]）是场景相机矩阵计算（非视图构建）；P5D_PTRSCAN 扫描 939MB guest 镜像找 0x811C2A4C/0x811C2964 等指针 → 0 命中（说明该函数没有静态函数表入口，或镜像代码段非原始布局）。**
+| M1074 | §18.4619: ★★★★★★★★★★ **找到"添加 2D 视图"API：`FUN_811C30D4(scene, geometry, name)`——分配 0x50 视图节点、按类型挂入场景的每类型链表（type 2 的链表头就是 scene+0x3C，即 FUN_811C2964 遍历的 2D 视图链）；调用者是游戏代码 FUN_81015E1A/FUN_81015E36/FUN_81015E84 与 FUN_810418AA。** 反编译（`viewapi.txt`）：
+```c
+void FUN_811c30d4(int *scene, int *geom, undefined1 *name) {
+  piVar2 = (int*)FUN_811da55c(0x50); FUN_811e6a40(piVar2,0x50);   // 分配 0x50 视图节点
+  piVar2[0x13] = -0x80000000;      // 初始 bit31=1（禁用）
+  piVar2[0xB]  = 0xF00001;
+  for 3: *(char*)(piVar2+0xC+i)=i; // 材质槽
+  ...FUN_811de07e(piVar2+1, name)（名字）...
+  // 链 A：scene[0x1F] 头 + scene[0x20] 尾，节点 next=+0x44 / prev=+0x48
+  iVar6 = scene[0x1F];
+  if (iVar6==0) { scene[0x20]=piVar2; piVar2[0x12]=0; }
+  else { piVar2[0x12]=iVar6; *(int**)(iVar6+0x44)=piVar2; }
+  scene[0x1F]=piVar2;
+  *piVar2 = geom; FUN_811bd66a(geom);
+  iVar6 = *geom;                    // ★ 类型（0/1/2/7）
+  ...回调表 &DAT_813E15A0 + iVar6*0x14...
+  // 链 B：按类型 scene[0xB+2*type] 头/尾，节点 next=+0x40 / prev=+0x3C
+  piVar2[0xF]=0;
+  iVar3 = scene[iVar6*2 + 0xB];
+  if (iVar3==0) { scene[iVar6*2+0xC]=piVar2; piVar2[0x10]=0; }
+  else { piVar2[0x10]=iVar3; *(int**)(iVar3+0x3C)=piVar2; }
+  scene[iVar6*2+0xB]=piVar2;         // ★ type=2 → scene word 0xF = scene+0x3C（2D 视图链！）
+  if (iVar6==2) { …FUN_811c2f32(scene)… }  else if (iVar6==7) { piVar2[0xB]=0xF00002/0xF00005; }
+}
+```
+**FUN_811C1FE0 = 移除/释放视图**（unlink + FUN_811da56e 释放）。
+**调用者（xrefs）**：FUN_811C30D4 ← FUN_81015E1A / FUN_81015E36 / FUN_81015E84 / FUN_810418AA（游戏代码）；FUN_811C1FE0 ← FUN_811C20FE/FUN_811C3280/FUN_811C32A4 等场景管理函数。
+**⇒ 关键理解：scene+0x3C 是"type=2 视图"链（2D 视图）。游戏添加 view 的 API 已找到，接下来看游戏代码 FUN_81015E1A/36/84、FUN_810418AA 是否被调用、传的 scene 是哪一个——如果它们未运行或传了别的场景对象，就解释了为什么 [SCENE] head0F 一直是 0。**
+NEXT：
+```
+① 探针：[VIEWADD] FUN_811C30D4（scene/geom/name/type/tid/lr）
+② 探针：[G15E] FUN_81015E1A/FUN_81015E36/FUN_81015E84、[G418] FUN_810418AA（游戏侧调用点）
+③ 若被调用但 scene 不同 → 找哪个 scene 对象应被注册（可能与 859BF220/859BF940 不同）
+④ 若未被调用 → 向上找调用链门控（可能在 2D sprite 绘制/场景设置路径，受 HLE 返回值影响）
+⑤ 视图注册成功 → FUN_811C2964 → FUN_811B6B12 → FUN_811ADAFE → array2 → GXM → 画面
+```
+验证：`viewapi.txt`、`viewadd_refs.txt`、`store3c_gfd.txt`、`scene_cb.txt`。 |
+| §18.4619 | Found the add-2D-view API: FUN_811C30D4(scene, geometry, name) - allocates a 0x50 view node and links it into the scene's per-type lists (the type-2 list head is scene+0x3C, exactly the 2D view chain that FUN_811C2964 iterates); its callers are game code FUN_81015E1A/FUN_81015E36/FUN_81015E84 and FUN_810418AA. Decompiled (viewapi.txt): void FUN_811c30d4(int *scene, int *geom, undefined1 *name) { piVar2=(int*)FUN_811da55c(0x50); FUN_811e6a40(piVar2,0x50) (allocate 0x50 view node); piVar2[0x13]=-0x80000000 (bit31 initially disabled); piVar2[0xB]=0xF00001; for 3: *(char*)(piVar2+0xC+i)=i (material slots); FUN_811de07e(piVar2+1, name); chain A: scene[0x1F] head + scene[0x20] tail, node next=+0x44/prev=+0x48 (iVar6=scene[0x1F]; if 0 {scene[0x20]=piVar2; piVar2[0x12]=0;} else {piVar2[0x12]=iVar6; *(int**)(iVar6+0x44)=piVar2;} scene[0x1F]=piVar2); *piVar2=geom; FUN_811bd66a(geom); iVar6=*geom (type 0/1/2/7); callback table &DAT_813E15A0+iVar6*0x14; chain B by type: piVar2[0xF]=0; iVar3=scene[iVar6*2+0xB]; if (iVar3==0) {scene[iVar6*2+0xC]=piVar2; piVar2[0x10]=0;} else {piVar2[0x10]=iVar3; *(int**)(iVar3+0x3C)=piVar2;} scene[iVar6*2+0xB]=piVar2 (type=2 -> scene word 0xF = scene+0x3C = 2D view chain); if (iVar6==2) { ...FUN_811c2f32(scene)... } else if (iVar6==7) { piVar2[0xB]=0xF00002/0xF00005; } }. FUN_811C1FE0 = remove/free view (unlink + FUN_811da56e free). Callers (xrefs): FUN_811C30D4 <- FUN_81015E1A / FUN_81015E36 / FUN_81015E84 / FUN_810418AA (game code); FUN_811C1FE0 <- FUN_811C20FE/FUN_811C3280/FUN_811C32A4 (scene management). So scene+0x3C is the type-2 (2D) view chain; the add-view API is found - next check whether the game-side functions FUN_81015E1A/36/84 and FUN_810418AA run and which scene object they pass. NEXT: (1) probe [VIEWADD] FUN_811C30D4 (scene/geom/name/type/tid/lr); (2) probe [G15E] FUN_81015E1A/FUN_81015E36/FUN_81015E84 and [G418] FUN_810418AA; (3) if called with a different scene find which scene should be registered; (4) if not called find the upstream gate (probably in the 2D sprite draw/scene setup path and may depend on an HLE return value); (5) views registered -> FUN_811C2964 -> FUN_811B6B12 -> FUN_811ADAFE -> array2 -> GXM -> picture. |
 m1119（P5D_PUMPMAIN=1，n=61.7M）：
 ```
 [SREG] #1 tid=0 r0=00000000 r1=859BF220 r2=00000001 lr=8115A0E0   ← 场景 index=0 注册
@@ -497857,3 +497895,44 @@ NEXT：
 ANTI-FORGETTING ENTRY. Keywords: M1073 m1119: scene registration real call sites - FUN_811BF900 called twice at title init ([SREG] #1 tid=0 r0=0 r1=859BF220 r2=1 lr=8115A0E0; #2 r0=1 r1=859BF940 r2=1 lr=8115A314); FUN_811C3438 ([SINIT] lr=811BF924) only does FUN_81207290(scene+200) mutex init; [SUNREG]=0; [SCBUILD]=100 (cap) FUN_811C241E called per frame from gfd flush lr=811993C0 with r0=859BF220 r1=0 r2=0x1444 / r0=859BF940 r1=812B4150 r2=859BF2A8 - decompiled as 1348-byte NEON camera/matrix function (param_1[3] camera matrix, param_1[0x31] transform, callbacks param_1[0x2B]/[0x2F]), not view builder. P5D_PTRSCAN (new harness env): scans guest image 939,524,096B base 0x80600000 for pointers 0x811C2A4C/4D, 0x811C2964/65, 0x811C27D8/D9 -> total=0 (no static pointer references). So FUN_811C2A4C has no direct xref nor static pointer; may be dead code or called via runtime-computed table on the heap -> need late runtime scan. NEXT: P5D_PTRSCAN_LATE scanning guest memory around n≈2M for function pointers in 0x811BF000-0x811C6000 to find the appGx scene/view API table; decompile appGx scene API ranges 0x811C3000-0x811C3A00 and 0x811C1E00-0x811C2400 for the function allocating 0x50 nodes and linking into scene+0x3C; inspect 0x813E15AC callback table; probe whether the game calls the add-view API and find its gate; views registered -> FUN_811C2964 -> FUN_811B6B12 -> FUN_811ADAFE -> array2 -> GXM -> picture.
 
 LOOKUP: M1073, [SREG] FUN_811BF900 index 0/1 scene 859BF220/859BF940 lr 8115A0E0/8115A314, [SINIT] FUN_811C3438 FUN_81207290(scene+200), [SUNREG] 0, [SCBUILD] FUN_811C241E camera matrix per frame lr=811993C0 r2=0x1444/859BF2A8, P5D_PTRSCAN 939524096 bytes base 80600000 total=0, P5D_PTRSCAN_LATE plan, appGx API range 0x811C3000-0x811C3A00 / 0x811C1E00-0x811C2400, 0x813E15AC callback table, 0x50 view node scene+0x3C, out80m_m1119sreg.txt, c241e.txt, out_m1120ptrscan.txt -> §18.4617 [relevant: scene registration API], §18.4616 [relevant: scene lists empty], §18.4615 [relevant: 2D dispatcher]
+### 18.4619 PORT M1074: 找到"添加 2D 视图"API FUN_811C30D4（type=2 → scene+0x3C）
+
+1) 反编译（`viewapi.txt`）：
+```c
+void FUN_811c30d4(int *scene, int *geom, undefined1 *name) {
+  piVar2 = FUN_811da55c(0x50); FUN_811e6a40(piVar2,0x50);   // 0x50 视图节点
+  piVar2[0x13] = -0x80000000;  piVar2[0xB] = 0xF00001;
+  for 3: *(char*)(piVar2+0xC+i)=i;
+  FUN_811de07e(piVar2+1, name);
+  // 链 A：scene[0x1F] 头，节点 next=+0x44 / prev=+0x48
+  iVar6 = scene[0x1F];
+  if (iVar6==0) { scene[0x20]=piVar2; piVar2[0x12]=0; }
+  else { piVar2[0x12]=iVar6; *(int**)(iVar6+0x44)=piVar2; }
+  scene[0x1F]=piVar2;
+  *piVar2 = geom; FUN_811bd66a(geom);
+  iVar6 = *geom;                                    // 类型
+  // 回调表 &DAT_813E15A0 + iVar6*0x14
+  // 链 B：按类型 scene[0xB+2*type]
+  piVar2[0xF]=0; iVar3 = scene[iVar6*2+0xB];
+  if (iVar3==0) { scene[iVar6*2+0xC]=piVar2; piVar2[0x10]=0; }
+  else { piVar2[0x10]=iVar3; *(int**)(iVar3+0x3C)=piVar2; }
+  scene[iVar6*2+0xB]=piVar2;      // type=2 → scene+0x3C = 2D 视图链
+  if (iVar6==2) { …FUN_811c2f32(scene)… } else if (iVar6==7) { … }
+}
+// FUN_811C1FE0 = 移除/释放视图（unlink + FUN_811da56e free）
+```
+2) 调用者（xrefs）：FUN_811C30D4 ← **FUN_81015E1A / FUN_81015E36 / FUN_81015E84 / FUN_810418AA（游戏代码）**
+3) 关键：scene+0x3C 是 type=2 视图链；游戏添加 view 的 API 已定位
+NEXT：
+```
+① [VIEWADD] 探针 FUN_811C30D4（scene/geom/name/type/tid/lr）
+② [G15E]/[G418] 探针游戏侧调用点
+③ 若 scene 不同 → 找应注册的 scene 对象
+④ 若未被调用 → 向上找门控（2D sprite/场景设置路径，可能受 HLE 返回值影响）
+⑤ 视图注册 → FUN_811C2964 → FUN_811B6B12 → FUN_811ADAFE → array2 → GXM → 画面
+```
+验证：`viewapi.txt`、`viewadd_refs.txt`、`store3c_gfd.txt`。
+
+ANTI-FORGETTING ENTRY. Keywords: M1074 found add-2D-view API FUN_811C30D4(scene, geom, name): allocates 0x50 view node (FUN_811da55c(0x50); FUN_811e6a40(piVar2,0x50)), piVar2[0x13]=-0x80000000 (bit31 initially disabled), piVar2[0xB]=0xF00001, material slots piVar2+0xC.., FUN_811de07e(piVar2+1,name), chain A scene[0x1F] head/scene[0x20] tail with next +0x44/prev +0x48, *piVar2=geom, FUN_811bd66a(geom), iVar6=*geom (type), callback table &DAT_813E15A0+iVar6*0x14, chain B by type scene[iVar6*2+0xB] with node next +0x10 (+0x40) and prev link at +0x3C, scene[iVar6*2+0xB]=piVar2, type==2 -> scene+0x3C = 2D view chain (what FUN_811C2964 iterates), type==7 special ids 0xF00002/0xF00005; FUN_811C1FE0 = remove/free view (unlink + FUN_811da56e). Callers of FUN_811C30D4: FUN_81015E1A/FUN_81015E36/FUN_81015E84/FUN_810418AA (game code); callers of FUN_811C1FE0: FUN_811C20FE/FUN_811C3280/FUN_811C32A4. So scene+0x3C is the type-2 2D view chain. NEXT: probe [VIEWADD] FUN_811C30D4 (scene/geom/name/type/tid/lr); probe [G15E] FUN_81015E1A/36/84 and [G418] FUN_810418AA; if called with a different scene find the right scene; if not called find the upstream gate (2D sprite draw/scene setup path, possibly an HLE return value); once views registered FUN_811C2964 -> FUN_811B6B12 -> FUN_811ADAFE -> array2 -> GXM -> picture.
+
+LOOKUP: M1074, add-view API FUN_811C30D4 scene geom name, 0x50 view node FUN_811da55c, FUN_811e6a40, piVar2[0x13]=-0x80000000, piVar2[0xB]=0xF00001, FUN_811de07e name, chain A scene[0x1F]/[0x20] next +0x44 +0x48, chain B type scene[iVar6*2+0xB] next +0x40 prev +0x3C, type 2 = scene+0x3C 2D view chain, type 7 0xF00002/0xF00005, FUN_811C1FE0 remove view FUN_811da56e, callers FUN_81015E1A/FUN_81015E36/FUN_81015E84/FUN_810418AA, callback table DAT_813E15A0 / DAT_813E15A4, FUN_811c2f32, viewapi.txt, viewadd_refs.txt, store3c_gfd.txt -> §18.4618 [relevant: view registration missing], §18.4617 [relevant: scene registration API], §18.4616 [relevant: scene lists empty]
