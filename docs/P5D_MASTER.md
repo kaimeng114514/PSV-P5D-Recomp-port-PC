@@ -1075,6 +1075,30 @@
 | M1057 | §18.4602: ★★★★★★★★★ **找到 appGx 的帧提交函数 `FUN_8119934A`（gfd flush/submit）！反编译：它遍历命令链 → 调用绘制列表构建器（FUN_811F347E/FUN_811F3468/FUN_811F3452）→ `FUN_811E649A(type, builder)` 提交 → `FUN_811E6498()` 刷新命令缓冲 → 推进三缓冲帧索引 `DAT_816CC700`（mod 3）→ `FUN_811EA460()`。M1057 加 [FLUSH]/[SUBMIT]/[CMDFLUSH]/[BLD1..3] 探针，并修正 HLEDUMP 阈值（P5D_HLEDUMP_AT=60000000）以拿到 title 阶段 HLE 调用画像**。反编译（`gfd_flush.txt`）：
 | M1058 | §18.4603: ★★★★★★★★ **m1109 重大证据：gfd 帧提交流程每帧真的在跑！[FLUSH] 120（frame 0→1→2 循环）、[SUBMIT] 121（type=0/2）、[CMDFLUSH] 80；但 [BLD1/2/3] 全 0——flush 扫描的三个链表都是空的。HLEDUMP（title 阶段 60M→64M）拿到 53 个 HLE stub 调用画像：**只有同步/线程类 API 高频（sem/eflag wait/set、vblank 等），GXM 类只有极少量初始化调用（0x812B1720 DisplayQueueAddEntry ×2、0x812B1340 TextureInitLinear ×1、0x812B16A0 ×3 等），没有 per-frame 的 sceGxmDraw**。⇒ gfd 提交链在运行，但**我们入队的 type=0xB/0x4B 命令不在 flush 扫描的 bucket 里**。m1109：
 | M1059 | §18.4604: **type=0xB/0x4B 命令来源定位：xrefs 显示 `FUN_811ADAFE`（2D sprite/primitive 批处理渲染器）是入队主力（大量调用 FUN_811C041C/FUN_811C05EC/FUN_811C0754），另有 FUN_81163ABC（我们已知的 2D sprite 提交）、FUN_811C5580/FUN_811C57F2（pipeline 设置）等。M1059 加 [FLUSHX]（打印 DAT_816CC6F4、三数组指针 6E4/6CC/6D8 与每 bucket 的 +0xC/+0x14 链表头）、[ENQ2]（FUN_811C0754 → 数组1 sprite 链）、[ADA]（FUN_811ADAFE 入口）探针，定位 type 0xB 命令最终落入哪个数组/链表、flush 是否扫描**。xrefs（`enq_refs.txt`）：
+| M1060 | §18.4605: ★★★★★★★★★★ **m1110 决定性证据：命令落点与 flush 扫描范围不匹配被完全确认！[FLUSHX]：DAT_816CC6F4=0x82（130 个 bucket）、三帧数组 a1/a2/a3 循环；**数组3（6D8）的 bucket11（type 0xB）不透明链（+0xC）非空：8F142000 / 8F343050 / 8F544050**（正是我们的 type=0xB 命令！），后续帧还有 bucket0/bucket10；而 FUN_8119934A 的 array3 扫描循环只检查 **+0x14（透明链）** → **命令在 +0xC 不透明链，flush 从不消费它们**。这解释了 [BLD1/2/3]=0、[SUBMIT] 只有 type=0/2、以及 HLEDUMP 无 per-frame GXM 调用**。m1110：
+```
+[FLUSHX] #1 frame=0 f4=82 a1=851CD1F0 a2=851CD1B0 a3=851CC770
+[FLUSHX]   bucket11 op=8F142000 tr=00000000          ← ★ 不透明链非空
+[FLUSHX] #2 frame=1 f4=82 a1=851CDC90 a2=851CDC50 a3=851CD210
+[FLUSHX]   bucket11 op=8F343050 tr=00000000
+[FLUSHX] #3 frame=2 f4=82 a1=851CE730 a2=851CE6F0 a3=851CDCB0
+[FLUSHX]   bucket11 op=8F544050 tr=00000000
+[FLUSHX] #5 frame=1 … bucket0 op=8F3431C0 / bucket10 op=8F3432D0 / bucket11 op=8F343050
+[BLD1] 0  [BLD2] 0  [BLD3] 0        ← flush 只查 +0x14（tr 全 0）
+[FLUSH] 100（每帧）  [SUBMIT] 107（type=0/2）  [ABIBEGIN] 1  [ABIEND] 0
+```
+**结论**：FUN_811C041C 把命令放入 `(&DAT_816CC6D8)[frame] + type*0x20` 的 **+0xC（不透明）** 链；FUN_8119934A 对 array3 只扫 **+0x14（透明）**；**array3 的 +0xC 不透明链消费者是另一个函数**（待定位）。命令对象 vtable=&LAB_811E44AE_1 的执行者应在该消费者中。
+NEXT：
+```
+① 反编译 FUN_811E649A（submit type,builder）/FUN_811E6498（cmdbuf flush）→ 看是否遍历 +0xC 链
+② 找 array3 +0xC 链消费者：xrefs 搜 DAT_816CC6D8 的读取者（FUN_811C0464/4B6/5D2/75C 等）中检查 +0xC 的代码
+③ 给 FUN_811E649A 加提交计数探针（type=0/2 各多少、builder 内容）
+④ 若消费者存在但被条件门控 → 打印门控变量
+⑤ 消费者 = FUN_811DBxxx/gfd 帧末路径，可能同样需要 WAITFORCE 类等待解除
+⑥ 打通后 array3 +0xC 链 → 命令执行 → GXM draw → logo 上屏
+```
+验证：`out80m_m1110flushx.txt`、`gfd_flush.txt`、`enq_refs.txt`。 |
+| §18.4605 | m1110 decisive evidence: the command landing place vs the flush scan range mismatch is fully confirmed! [FLUSHX]: DAT_816CC6F4=0x82 (130 buckets), the three frame arrays a1/a2/a3 cycle; the array3 (6D8) bucket11 (type 0xB) OPAQUE chain (+0xC) is non-empty: 8F142000 / 8F343050 / 8F544050 (exactly our type=0xB commands!), and later frames also have bucket0/bucket10; but the FUN_8119934A array3 scan loop only checks +0x14 (transparent chain) -> the commands sit in the +0xC opaque chain that the flush never consumes. This explains [BLD1/2/3]=0, [SUBMIT] only type=0/2, and HLEDUMP showing no per-frame GXM calls. m1110: [FLUSHX] #1 frame=0 f4=82 a1=851CD1F0 a2=851CD1B0 a3=851CC770; bucket11 op=8F142000 tr=00000000; #2 frame=1 f4=82 a1=851CDC90 a2=851CDC50 a3=851CD210; bucket11 op=8F343050; #3 frame=2 ... bucket11 op=8F544050; #5 frame=1 bucket0 op=8F3431C0 / bucket10 op=8F3432D0 / bucket11 op=8F343050; [BLD1] 0 [BLD2] 0 [BLD3] 0 (flush only checks +0x14, all tr=0); [FLUSH] 100 per frame; [SUBMIT] 107 type=0/2; [ABIBEGIN] 1; [ABIEND] 0. Conclusion: FUN_811C041C puts commands into (&DAT_816CC6D8)[frame] + type*0x20 + 0xC (opaque) chain; FUN_8119934A scans array3 only at +0x14 (transparent); the consumer of array3's +0xC opaque chain is another function (to be located), and the command vtable &LAB_811E44AE_1 executor lives in it. NEXT: (1) decompile FUN_811E649A (submit type,builder) / FUN_811E6498 (cmdbuf flush) to see whether they walk the +0xC chain; (2) find the array3 +0xC consumer among readers of DAT_816CC6D8 (FUN_811C0464/4B6/5D2/75C etc.) that check +0xC; (3) add submit-count probes to FUN_811E649A (type=0/2 counts, builder contents); (4) if the consumer exists but is gated print the gate variables; (5) the consumer is likely a FUN_811DBxxx/gfd frame-end path that may need the same WAITFORCE-style wait lifting; (6) once connected: array3 +0xC chain -> command executes -> GXM draw -> logo on screen. |
 ```
 == refs to 811C041C ==
   from 81163cee func=FUN_81163abc/81163abc      ← 2D sprite 提交（我们已知的 DRAWSUB）
@@ -496899,3 +496923,34 @@ NEXT：
 ANTI-FORGETTING ENTRY. Keywords: M1059 located the type=0xB/0x4B command source: FUN_811ADAFE (2D sprite/primitive batch renderer) is the main enqueuer (calls FUN_811C041C/FUN_811C05EC/FUN_811C0754; the latter two are called only from FUN_811adafe). Other FUN_811C041C callers: FUN_81163abc (our DRAWSUB 2D sprite submit), FUN_811bfxxx, FUN_811c0138, FUN_811c5580, FUN_811c57f2 (pipeline setup), FUN_81163d0e, FUN_811aec34. M1059 probes: blk_8119934A [FLUSHX] frame/DAT_816CC6F4/(&DAT_816CC6E4/6CC/6D8)[frame] + first 16 a3 buckets with +0xC/+0x14 heads; blk_811C0754 [ENQ2] cmd; blk_811ADAFE [ADA] r0..r3. batch_013/batch_014 compile exit 0; exe relink exit 0 (57,068,934B 21:54:34). Verification run out80m_m1110flushx.txt (FORCETITLE+FIOSFILL+WAITFORCE+SCNFORCE) started. NEXT: [FLUSHX] F4 value, three array pointers, non-empty buckets; [ENQ2]/[ADA] whether the 2D batch runs and enqueues into array1; compare [ENQ] type=0xB landing (array3 bucket 0xB) with the flush scan -> confirm mismatch; find the real consumer of type 0xB commands (maybe not FUN_8119934A but another frame submit path); make it execute -> GXM draw -> logo on screen.
 
 LOOKUP: M1059, type 0xB source FUN_811ADAFE 2D sprite batch renderer, FUN_811C041C callers FUN_81163abc/FUN_811bfxxx/FUN_811c0138/FUN_811c5580/FUN_811c57f2/FUN_81163d0e/FUN_811aec34/FUN_811adafe, FUN_811C05EC only from FUN_811adafe, FUN_811C0754 from 811adc2e, [FLUSHX] DAT_816CC6F4 arrays 816CC6E4/6CC/6D8 bucket +0xC/+0x14 heads, [ENQ2] blk_811C0754, [ADA] blk_811ADAFE, enq_refs.txt, out80m_m1110flushx.txt, exe 57,068,934B -> §18.4603 [relevant: flush scans empty], §18.4602 [relevant: gfd flush], §18.4601 [relevant: enqueue]
+### 18.4605 PORT M1060: bucket11 不透明链非空但与 flush 扫描范围不匹配（决定性确认）
+
+1) m1110 证据：
+```
+[FLUSHX] #1 frame=0 f4=82 a1=851CD1F0 a2=851CD1B0 a3=851CC770
+[FLUSHX]   bucket11 op=8F142000 tr=00000000          ← ★ 不透明链非空
+[FLUSHX] #2 frame=1 f4=82 a1=851CDC90 a2=851CDC50 a3=851CD210
+[FLUSHX]   bucket11 op=8F343050
+[FLUSHX] #3 frame=2 … bucket11 op=8F544050
+[FLUSHX] #5 frame=1 … bucket0 op=8F3431C0 / bucket10 op=8F3432D0 / bucket11 op=8F343050
+[BLD1] 0  [BLD2] 0  [BLD3] 0        ← flush 只查 +0x14（tr 全 0）
+[FLUSH] 100（每帧）  [SUBMIT] 107（type=0/2）  [ABIBEGIN] 1  [ABIEND] 0
+```
+2) 结论：
+- FUN_811C041C 把命令放入 array3 bucket 的 +0xC（不透明）链
+- FUN_8119934A 对 array3 只扫 +0x14（透明）链
+- **array3 的 +0xC 消费者是另一个函数**（命令对象 vtable 0x811E44AE 的执行者）
+NEXT：
+```
+① 反编译 FUN_811E649A / FUN_811E6498 → 是否遍历 +0xC 链
+② 找 array3 +0xC 消费者（DAT_816CC6D8 读取者中检查 +0xC 的）
+③ FUN_811E649A 提交计数探针
+④ 消费者被门控 → 打印门控变量
+⑤ 消费者可能需 WAITFORCE 类等待解除
+⑥ 打通 → 命令执行 → GXM draw → logo 上屏
+```
+验证：`out80m_m1110flushx.txt`、`gfd_flush.txt`、`enq_refs.txt`。
+
+ANTI-FORGETTING ENTRY. Keywords: M1060 m1110 decisive: command landing vs flush scan mismatch fully confirmed. [FLUSHX]: DAT_816CC6F4=0x82 (130 buckets), three frame arrays a1/a2/a3 cycle; array3 (818CC6D8) bucket11 (type 0xB) OPAQUE chain (+0xC) non-empty: 8F142000/8F343050/8F544050 (our type 0xB commands), later buckets 0/10 too; but FUN_8119934A's array3 loop only checks +0x14 (transparent) -> commands in +0xC are never consumed; explains [BLD1/2/3]=0, [SUBMIT] only type 0/2, HLEDUMP no per-frame GXM. m1110: [FLUSHX] #1 frame=0 f4=82 a1=851CD1F0 a2=851CD1B0 a3=851CC770 bucket11 op=8F142000 tr=0; #2 frame=1 a3=851CD210 bucket11 op=8F343050; #3 frame=2 a3=851CDCB0 bucket11 op=8F544050; #5 bucket0 op=8F3431C0 bucket10 op=8F3432D0 bucket11 op=8F343050; [BLD1] 0 [BLD2] 0 [BLD3] 0; [FLUSH] 100; [SUBMIT] 107 type=0/2; [ABIBEGIN] 1; [ABIEND] 0. Conclusion: FUN_811C041C puts commands into (&DAT_816CC6D8)[frame]+type*0x20 +0xC opaque chain; FUN_8119934A scans array3 only +0x14; the consumer of array3 +0xC opaque chain is another function whose command vtable &LAB_811E44AE_1 executor lives there. NEXT: decompile FUN_811E649A/FUN_811E6498 (do they walk +0xC?); find the array3 +0xC consumer among DAT_816CC6D8 readers (FUN_811C0464/4B6/5D2/75C) checking +0xC; add submit-count probes; if gated print gate vars; consumer likely a FUN_811DBxxx/gfd frame-end path needing WAITFORCE-style lifting; once connected array3 +0xC chain -> command executes -> GXM draw -> logo on screen.
+
+LOOKUP: M1060, [FLUSHX] f4=82 130 buckets, a1=851CD1F0 a2=851CD1B0 a3=851CC770, bucket11 op=8F142000/8F343050/8F544050 tr=0, bucket0 op=8F3431C0, bucket10 op=8F3432D0, array3 +0xC opaque chain vs flush +0x14 transparent, FUN_8119934A scan, FUN_811C041C enqueue +0xC, command vtable LAB_811E44AE_1, BLD1/2/3 0, SUBMIT 107 type=0/2, out80m_m1110flushx.txt, gfd_flush.txt -> §18.4604 [relevant: type 0xB source], §18.4603 [relevant: flush scans empty], §18.4602 [relevant: gfd flush]
