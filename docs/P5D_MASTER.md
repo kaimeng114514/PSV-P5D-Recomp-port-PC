@@ -1046,6 +1046,27 @@
 | M1028 | §18.4573: **EXECRET/TPATH 探针给出决定性数据：trophy worker 确实走到检查 block 并返回 -1 路径；trampoline 30 次返回中绝大部分 0、有 1 次 -1 ⇒ 完成机制有被触发，但 init 链仍不推进 → 下一步必须反编译 page1 init 主状态机（FUN_8118479C）搞清"推进条件"**。`out80m_m1090execpath.txt` / err：
 | M1029 | §18.4574: ★★★★★★★★★★ **找到 8 步 init 链驱动器本体：`FUN_81184FFE`（= "initDataRead" worker 0x81184FFF）内含 9 项函数指针表 + 状态机，逐步创建并等待各 step job**。反编译（`idr_worker.txt`）：
 | M1030 | §18.4575: **推进条件语义确认 + 用户外部审计回应：`FUN_8116f8d2(step_job)` 的"完成"定义 = step job 的 appProcess 节点从 DAT_815554C4 链表移除或 node[0xC]==0；trophy 已完成（sound step 已创建），卡点确定在 step1 sound。新增 SSTEP/DRV 探针精确定位**。`jobdone.txt` 反编译：
+| M1031 | §18.4576: ★★★★★★★★ **SSTEP/DRV 探针决定性结果：sound worker 完整返回 -1；driver 已从 step0 推进到 step1（trophy→sound），但调用 sound 创建者后 driver 不再被调用 → 链冻结在 step1。同步 README 到 M1030（外部审计建议项）**。`out80m_m1091drvprobe.txt` / err：
+```
+[SSTEPD6] r0=00000001 r1=813061A4     ← sound worker state 路径
+[SSTEPDA] r0=00000001 r1=812B4150     ← 检查 block 执行（强制 r0=1）
+[SSTEPDE] r0=00000001 r1=812B4150     ← ★ 返回 -1 路径执行（sound worker 完整返回 -1）
+[DRVA6] r0=8118484F r1=8118484F step=0    ← driver 调 table[0]（trophy 创建者 0x8118484E），step=0
+[DRVB2] r0=85B846BC r1=00000002 step=0    ← driver 查 FUN_8116F8D2(handle=85B846BC)
+[DRVB2] r0=85B846BC r1=00000002 step=0
+[DRVBC] r0=00000000 r1=00000000 step=0    ← ★ step 索引递增（trophy step 完成）
+[DRVA6] r0=8118484F r1=811848FD step=1    ← ★ driver 调 table[1]（sound 创建者 0x811848FC），step=1
+（此后无任何 DRVB2/DRVBC → driver 不再被调用）
+[JOBCOMP] 1   [SEQREQ] 8（无 page=6）   [BADMEM] 0   [EXECRET] 29×0 + 1×FFFFFFFF
+```
+**结论**：
+1) ✅ trophy step 完成（driver 从 step0 → step1）
+2) ✅ sound worker 完整执行并返回 -1（SSTEPDE 路径）
+3) ⚠️ 但 driver 调用 sound 创建者后**不再被调用**（DRVB2 step=1 未出现）⇒ **initDataRead driver job 自身在执行完 step1 创建后被意外结束/移除**（JOBCOMP #1 n=59626141 可能就是它的提前完成）
+4) 下一步探针：**driver 入口 0x81184FFE 打印 state/step**（确认 driver 是否还在被调用、state/step 值），以及 initDataRead job 的完成路径（谁把它从 ready 列表移除）
+**README 同步（审计建议项落地）**：`C:\dev\P5D-PC\README.md` 更新：状态头 M940→M1030、新增"最新里程碑（M1000–M1030）"、更新"当前阻塞"（init 链 step1 sound / SSTEP-DRV 探针）。
+验证：`out80m_m1091drvprobe.txt`、`err80m_m1091drvprobe.txt`、README.md。 |
+| §18.4576 | SSTEP/DRV probes decisive: the sound worker fully returns -1; the driver advanced from step0 to step1 (trophy->sound), but after calling the sound creator the driver is no longer invoked => the chain freezes at step1. Also synced README to M1030 (external audit action item). out80m_m1091drvprobe.txt / err: [SSTEPD6] r0=1 r1=813061A4 (sound worker state path); [SSTEPDA] r0=1 r1=812B4150 (check block, forced r0=1); [SSTEPDE] r0=1 r1=812B4150 (return -1 path executes); [DRVA6] r0=8118484F r1=8118484F step=0 (driver calls table[0] = trophy creator 0x8118484E, step 0); [DRVB2] r0=85B846BC r1=2 step=0 (driver queries FUN_8116F8D2(handle=85B846BC)); [DRVBC] r0=0 step=0 (step index increments, trophy step complete); [DRVA6] r0=8118484F r1=811848FD step=1 (driver calls table[1] = sound creator 0x811848FC, step 1); after that no DRVB2/DRVBC => the driver is no longer called. [JOBCOMP] 1; [SEQREQ] 8 (no page=6); [BADMEM] 0; [EXECRET] 29x0 + 1xFFFFFFFF. Conclusions: (1) trophy step completed (driver step0->step1); (2) sound worker fully executes and returns -1 (SSTEPDE path); (3) but after calling the sound creator the driver is no longer invoked (no DRVB2 step=1) => the initDataRead driver job itself is unexpectedly ended/removed after executing step1's creator (JOBCOMP #1 n=59626141 is probably its early completion); (4) next probe: driver entry 0x81184FFE printing state/step (whether the driver is still called, and state/step), plus the initDataRead job removal path. README sync (audit action item): C:\dev\P5D-PC\README.md updated - status header M940->M1030, new 'latest milestones (M1000-M1030)' section, updated 'current blockers' (init chain step1 sound / SSTEP-DRV probes). |
 ```c
 undefined4 FUN_8116f8d2(int param_1) {        // init 链推进条件
   iVar1 = DAT_815554c4;                        // appProcess 链表头
@@ -494944,3 +494965,33 @@ NEXT：
 ANTI-FORGETTING ENTRY. Keywords: M1030 advancement condition semantics confirmed + external audit response. FUN_8116f8d2(step_job) defines done as the step job's appProcess node removed from DAT_815554C4 list or node[0xC]==0. jobdone.txt: undefined4 FUN_8116f8d2(int param_1){ iVar1=DAT_815554c4; if(param_1!=0){ for(;iVar1!=0;iVar1=*(int*)(iVar1+0x10)){ if(iVar1==param_1){ if(*(int*)(param_1+0xc)==0) return 0; return FUN_8116fa38(); } } } return 0; }; driver FUN_81184FFE state==2: if(FUN_8116f8d2(handle)==0){ state=1; step++; }. Done = the appProcess node freed/removed by completion callback FUN_8116F75E. Trophy passed (sound job created, WFDBG #49); stuck at step1 sound completion. External audit (ChatGPT): agree risks are runtime semantics/thread scheduling/GXM correctness, first blocker init chain; its 'Stage A' matches current work; its 'M1028 init chain natural completion' is superseded by our M1029 (found driver FUN_81184FFE + condition FUN_8116F8D2; blocker narrowed to step1 sound). Adopted engineering suggestions: sync README version, milestone records with commit SHA/compile/data version/blocks/state/BADMEM/visual evidence. M1030 probes (exe 57,052,362B 14:16:24): 811848D6/DA/DE -> [SSTEPD6/DA/DE]; 811850A6 -> [DRVA6]; 811850B2 -> [DRVB2]; 811850BC -> [DRVBC]. Verification run out80m_m1091drvprobe.txt started. NEXT: [SSTEP] whether the sound worker returns -1; [DRVB2] handle/step; if not, check FUN_8115478e; if the job completes but node not freed check 0x811848E8/FUN_8116F75E; after fix driver runs 8 steps -> setSequence(6) -> page6.
 
 LOOKUP: M1030, FUN_8116f8d2 semantics, appProcess node removed = done, node[0xC]==0, DAT_815554c4 list, FUN_8116F75E completion free, trophy passed, stuck step1 sound, external audit response ChatGPT, Stage A eliminate startup force patches, README version sync, SSTEP probes 811848D6/DA/DE, DRV probes 811850A6/B2/BC, jobdone.txt, out80m_m1091drvprobe.txt, exe 57,052,362B -> §18.4574 [relevant: init chain driver], §18.4573 [relevant: init chain stuck], §18.4572 [relevant: EXECRET/TPATH]
+### 18.4576 PORT M1031: SSTEP/DRV 探针结果 + README 同步
+
+1) `out80m_m1091drvprobe.txt` / err：
+```
+[SSTEPD6] r0=00000001 r1=813061A4      ← sound worker state 路径
+[SSTEPDA] r0=00000001 r1=812B4150      ← 检查 block（强制 r0=1）
+[SSTEPDE] r0=00000001 r1=812B4150      ← ★ 返回 -1 路径执行（sound worker 完整返回 -1）
+[DRVA6] r0=8118484F r1=8118484F step=0 ← driver 调 table[0]（trophy 创建者 0x8118484E）
+[DRVB2] r0=85B846BC r1=00000002 step=0 ← driver 查 FUN_8116F8D2(handle=85B846BC)
+[DRVBC] r0=00000000 r1=00000000 step=0 ← ★ step 索引递增（trophy step 完成）
+[DRVA6] r0=8118484F r1=811848FD step=1 ← ★ driver 调 table[1]（sound 创建者 0x811848FC）
+（此后无 DRVB2/DRVBC）
+[JOBCOMP] 1   [SEQREQ] 8   [BADMEM] 0   [EXECRET] 29×0 + 1×FFFFFFFF
+```
+2) 结论：
+- trophy step 完成（driver step0→step1）✅
+- sound worker 完整返回 -1（SSTEPDE）✅
+- **driver 调用 sound 创建者后不再被调用** ⇒ initDataRead driver job 自身被意外结束/移除（JOBCOMP #1 = 提前完成？）
+3) README 同步：`C:\dev\P5D-PC\README.md`（M940→M1030、最新里程碑段、当前阻塞段）
+NEXT：
+```
+① driver 入口 0x81184FFE 探针打印 state/step（确认 driver 是否还被调用）
+② initDataRead job 的完成/移除路径（谁把它从 ready 列表移除）
+③ 修复后 driver 继续 step2 gamedata → … → step8 → 返回 -1 → setSequence(6) → page6
+```
+验证：`out80m_m1091drvprobe.txt`、`err80m_m1091drvprobe.txt`、README.md。
+
+ANTI-FORGETTING ENTRY. Keywords: M1031 SSTEP/DRV probes decisive: the sound worker fully returns -1; the driver advanced from step0 to step1 (trophy->sound) but after calling the sound creator the driver is no longer invoked => chain freezes at step1. out80m_m1091drvprobe.txt: [SSTEPD6] r0=1 r1=813061A4; [SSTEPDA] r0=1 r1=812B4150; [SSTEPDE] r0=1 r1=812B4150; [DRVA6] r0=8118484F r1=8118484F step=0 (trophy creator 0x8118484E); [DRVB2] r0=85B846BC r1=2 step=0; [DRVBC] r0=0 step=0 (advance); [DRVA6] r0=8118484F r1=811848FD step=1 (sound creator 0x811848FC); no DRVB2 after. [JOBCOMP] 1; [SEQREQ] 8; [BADMEM] 0; [EXECRET] 29x0+1xFFFFFFFF. The initDataRead driver job is unexpectedly ended/removed after executing step1's creator (JOBCOMP #1 n=59626141 likely its early completion). README synced (C:\dev\P5D-PC\README.md): status M940->M1030, latest milestones M1000-M1030, updated blockers. NEXT: probe driver entry 0x81184FFE printing state/step; find the initDataRead job removal path; after fix driver continues step2 gamedata -> ... -> step8 -> returns -1 -> setSequence(6) -> page6.
+
+LOOKUP: M1031, SSTEPD6/DA/DE, sound worker returns -1, DRVA6 trophy creator 0x8118484E, DRVB2 handle 85B846BC, DRVBC advance, DRVA6 sound creator 0x811848FC step=1, driver no longer invoked, initDataRead job early completion, JOBCOMP 1 n=59626141, README sync M940->M1030, out80m_m1091drvprobe.txt -> §18.4575 [relevant: SSTEP/DRV probes], §18.4574 [relevant: init chain driver], §18.4573 [relevant: init chain stuck]

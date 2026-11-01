@@ -11,7 +11,7 @@ CPU 采用 **AOT 静态重编译**（原版 ARM/Thumb 代码一次性翻译为 x
 
 ---
 
-## 当前状态（2026-10-31，里程碑 M940；整体约 65–70%）
+## 当前状态（2026-11-01，里程碑 M1030；整体约 70–75%）
 
 | 模块 | 完成度 | 当前状态 |
 |---|---|---|
@@ -26,6 +26,16 @@ CPU 采用 **AOT 静态重编译**（原版 ARM/Thumb 代码一次性翻译为 x
 | 视频解码 | 10–15% | 启动 USM 影片由 guest 软件解码跑通（约 5,000 万块）；`VdecInitLibrary` 已在 page1 被调用一次，真实 AVC/CRI Mana 解码未完成 |
 | 场景链 S0→S4→RESULT | **S0 ✅ / S1 加载中（page1 已出画面）** | S0_LOGO 完整通过；S1_TITLE 的 page1 现在会真实渲染并 present（首帧已上屏），但 page1 尚未结束；S2–S4 未到达 |
 | 单 exe 打包 / 移动端 | ~40% / 0% | 仓库/许可证/审计/CI 在跑；单文件成品与移动端尚未开始 |
+
+### 最新里程碑（M1000–M1030，2026-11-01）
+
+- **M1000–M1005**：Job 完成链打通（trampoline 强制完成）→ page1 8 步初始化完成、job "title sequence" 提交、**page6 TITLE 页启动**；序列页表从 ELF 完整解析（page0 DEBUG MENU / page1 initread / page2 FREE MODE / page3 COMMU / page4 TUTORIAL / page5 MAIN MENU / **page6 TITLE start=0x81185974 update=0x81185986 end=0x81185998**）
+- **M1011–M1018**：探针盲区定位（title 路径走 nested runner，job_probes 不生效）→ 所有关键探针下沉到 AOT block 内（batch 级）
+- **M1015–M1016**：**AOT 内部函数覆盖率 100%**（Ghidra 12,532 函数全部命中；230,243 blocks；仅剩 14 个 HLE import + module_start 无 block）
+- **M1019–M1020**：appFade 真相闭环——fade "对象"是周期 job 节点，被"全强制完成"破坏其 job arg（0xE5 毒值）
+- **M1021–M1022**：改为**选择性强制**（只强制 boot init worker）→ 周期 job 全部真跑（JOBNORM 28 条），appFade 状态修复；title worker 真正运行并推进到声音对象缺口
+- **M1023–M1026**：移除 page1 提前结束强制 → **真实 init 链启动**（trophy/sound/initDataRead worker 真实调度）；发现 STEPFORCE 对 nested runner 无效 → 18 个 init 检查 block 强制下沉到 AOT 内
+- **M1027–M1030**：**找到 8 步 init 链驱动器 `FUN_81184FFE`（"initDataRead" worker）**：9 项函数表 + 状态机，推进条件 `FUN_8116F8D2(step_job)==0`；trophy step 已通过、卡点缩小到 **step1 "init sound" 的完成**（本轮 SSTEP/DRV 探针运行中）
 
 ### 最近关键里程碑（M869–M923）
 
@@ -52,15 +62,11 @@ CPU 采用 **AOT 静态重编译**（原版 ARM/Thumb 代码一次性翻译为 x
 
 ### 当前阻塞（明确、可执行）
 
-- **S1 boot page1（标题加载页）的帧循环仍需跑完**（现在会真实渲染并 present）——旧描述：：主 fiber 停留在 CRI FS 帧节拍循环（`FUN_8127BB30` → `FUN_8127C0E8` → `DelayThreadCB`；等待标志循环 `FUN_8127B336`），worker 线程空闲/等待，**该阶段没有任何文件 I/O API 调用、也没有 GXM 绘制调用**；`[P1TICK]` 显示外层 n 极慢推进（约 9 分钟 0.2M）——**外层循环被内层嵌套执行吞掉**
-- **首帧已上屏（M940）**；待办：让 page1 结束进入标题页、完善 title 渲染、再向 S2–S4 推进
-- 音频（ACF/ACB）、真实视频解码（AVC/CRI Mana）、输入流仍未接入
+- **init 链 step1 "init sound" 的完成条件未闭合**：driver `FUN_81184FFE` 已越过 trophy（创建了 sound job，WFDBG #49 node=85B8861C），但 sound step job 的 appProcess 节点未被完成回调释放 → `FUN_8116F8D2(step_job)` 仍非 0 → driver 停在 step2 等待；SSTEP/DRV 探针（batch_012 811848D6/DA/DE、811850A6/B2/BC）正在定位
+- 完成后 driver 将继续创建 gamedata → msgwindow → mainmenu → step5 → 返回 -1 → 完成回调 setSequence(6,0,0,5) → page6 TITLE 页
+- 之后：title 状态机（声音对象已创建后）→ title 对象 → 引擎自绘标题画面
+- 后续：S2_MENU / S3_SELECT / S4_GAME / RESULT；音频/输入/真实视频解码；单 exe 打包（当前 AOT 与 HLE 已远超 M940 状态）
 
-下一步任务顺序：
-1. 用栈回溯探针（`P5D_BT57`）从 CRI 帧节拍器调用点扫描 app 栈返回地址，定位 **page1 的驱动函数与调用链**，确定它等待的 guest 条件（反编译其上层函数）
-2. 让 page1 完成（若为 guest 侧纯计算则给足 n；若为事件丢失则补正确完成投递）→ **S1 标题页出现**
-3. 之后实现/验证 **GXM BeginScene / EndScene / Draw / Present → Vulkan 交换链**（首帧可见），再向 S2_MENU、S3_SELECT、S4_GAME、RESULT 推进
-4. 补齐音频/输入/视频 HLE；最后做单 exe 打包与移动端
 
 ## 仓库结构
 
