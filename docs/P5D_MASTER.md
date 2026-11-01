@@ -1048,6 +1048,38 @@
 | M1030 | §18.4575: **推进条件语义确认 + 用户外部审计回应：`FUN_8116f8d2(step_job)` 的"完成"定义 = step job 的 appProcess 节点从 DAT_815554C4 链表移除或 node[0xC]==0；trophy 已完成（sound step 已创建），卡点确定在 step1 sound。新增 SSTEP/DRV 探针精确定位**。`jobdone.txt` 反编译：
 | M1031 | §18.4576: ★★★★★★★★ **SSTEP/DRV 探针决定性结果：sound worker 完整返回 -1；driver 已从 step0 推进到 step1（trophy→sound），但调用 sound 创建者后 driver 不再被调用 → 链冻结在 step1。同步 README 到 M1030（外部审计建议项）**。`out80m_m1091drvprobe.txt` / err：
 | M1032 | §18.4577: **第 1000 轮里程碑：实验"强制 driver step 推进"（不等 step job 完成），期望一帧走一步、8 帧走完 8 步 → driver 返回 -1 → 完成回调 setSequence(6,0,0,5) → page6 TITLE；同时加 driver 入口 DRIVIN 探针（打印 task 的 state/step）**。m1091 关键补充证据：
+| M1033 | §18.4578: **m1092 决定性结果：driver 只被调用 4 次（state 0→1→2→1 step0→1），即使在强制推进下，创建 step1（sound）后 driver 仍不再被调用 ⇒ 这不是"等待条件"问题，而是 initDataRead driver job 在调用 step 创建者后被移出调度。改用"DRIVDONE"捷径：driver 创建完 trophy+sound 两步后直接返回 -1 → 完成回调 setSequence(6,0,0,5) → page6 TITLE**。`out80m_m1092drvadvance.txt` / err：
+```
+[DRIVIN] #1 task=85B846BC state=0 step=0    ← 第1次（初始化 task）
+[DRIVIN] #2 task=85B846BC state=1 step=0    ← 创建 step0（trophy）
+[DRIVIN] #3 task=85B846BC state=2 step=0    ← 查 FUN_8116F8D2
+[DRIVIN] #4 task=85B846BC state=1 step=1    ← ★ 推进到 step1（sound）
+（无 #5 → driver 不再被调用）
+[DRVB2] r0=85B846BC r1=00000002 step=0
+[DRVBC] r0=00000000 r1=84618110 step=0
+[JOBCOMP] 1  [SEQREQ] 8（无 page=6）  [BADMEM] 0
+```
+⇒ driver 在**调用 step1 创建者 FUN_811848FC（"init sound" job 创建）之后**不再被调度（step0→1 的推进成功，step1 创建成功，但此后 job 消失）——怀疑 FUN_8116F7CA 在进程创建时修改了 driver 自身的 appProcess 链/调度状态（param_1=driver 的 appProcess 节点被传入子 job 创建）。
+**M1033 捷径（batch_012.cpp blk_81184FFE 入口）**：driver 创建完 trophy+sound 后强制完成：
+```cpp
+{ uint32_t _t = s->r[0] ? rd32(s, s->r[0] + 8u) : 0u;
+  uint32_t _sp = _t ? rd32(s, _t + 4u) : 0xFFFFFFFFu;
+  if (_t && _sp >= 2u && _sp < 0x100u) {
+    std::fprintf(stderr,"[DRIVDONE] step=%u -> return -1\n",(unsigned)_sp);
+    s->r[0] = 0xFFFFFFFFu; return s->r[14]; } }
+```
+⇒ driver 在 step=2 时返回 -1 → 执行器 completion → 完成回调 0x811850DA → `setSequence(6,0,0,0)`（我们已把 delay 改成 0）→ **page6 TITLE 页 start → title worker**。
+编译：batch_012 exit 0；exe 重链 exit 0（57,052,925B，15:00:02）。
+验证运行：`out80m_m1093drivdone.txt` 已启动。
+NEXT：
+```
+① [DRIVDONE] 触发 → [JOBCOMP] 增加 → [SEQREQ] page=6 → page6 start
+② title worker（WFDBG wf=81198173）→ appFade OK（M1022）→ 声音对象（trophy+sound 已创建）→ title case0/1 通过
+③ title 状态机推进 → title 对象 → 引擎自绘标题画面
+④ 若 title 仍崩 → 用探针继续定位（已有 TTC/TTF8/TTO/SSTEP/DRIVIN 全套）
+```
+验证：`out80m_m1092drvadvance.txt`、`err80m_m1092drvadvance.txt`（DRIVIN #1-#4）、`out80m_m1093drivdone.txt`（生成中）。 |
+| §18.4578 | m1092 decisive result: the driver is invoked only 4 times (state 0->1->2->1, step0->1); even with forced advancement, after creating step1 (sound) the driver is never invoked again => this is not a wait-condition problem but the initDataRead driver job being removed from scheduling after calling a step creator. Switched to a DRIVDONE shortcut: after the driver has created the trophy+sound steps, return -1 immediately -> completion callback setSequence(6,0,0,5) -> page6 TITLE. out80m_m1092drvadvance.txt / err: [DRIVIN] #1 task=85B846BC state=0 step=0; #2 state=1 step=0 (create step0 trophy); #3 state=2 step=0 (query FUN_8116F8D2); #4 state=1 step=1 (advanced to step1 sound); no #5. [DRVB2] r0=85B846BC r1=2 step=0; [DRVBC] r0=0 r1=84618110 step=0; [JOBCOMP] 1; [SEQREQ] 8 (no page=6); [BADMEM] 0. So the driver is no longer scheduled after calling the step1 creator FUN_811848FC ('init sound' job creator) (step0->1 advancement succeeded, step1 creation succeeded, then the job disappears) - suspect FUN_8116F7CA modifies the driver's own appProcess chain/scheduling state when creating the child process (param_1 = driver's appProcess node passed into child job creation). M1033 shortcut (batch_012.cpp blk_81184FFE entry): { uint32_t _t = s->r[0] ? rd32(s, s->r[0] + 8u) : 0u; uint32_t _sp = _t ? rd32(s, _t + 4u) : 0xFFFFFFFFu; if (_t && _sp >= 2u && _sp < 0x100u) { fprintf(stderr,'[DRIVDONE] step=%u -> return -1'); s->r[0] = 0xFFFFFFFFu; return s->r[14]; } } => the driver returns -1 at step=2 -> executor completion -> completion callback 0x811850DA -> setSequence(6,0,0,0) (delay already patched to 0) -> page6 TITLE start -> title worker. batch_012 compile exit 0; exe relink exit 0 (57,052,925B 15:00:02). Verification run out80m_m1093drivdone.txt started. NEXT: [DRIVDONE] triggers -> [JOBCOMP] grows -> [SEQREQ] page=6 -> page6 start; title worker (WFDBG wf=81198173) -> appFade OK (M1022) -> sound objects (trophy+sound created) -> title case0/1 passes; title state machine advances -> title object -> engine-drawn title screen; if the title still crashes use the existing probe suite (TTC/TTF8/TTO/SSTEP/DRIVIN). |
 ```
 [JOBEXEC] #8 node=85B846EC worker=81184FFF completion=811850DB n=59584015   ← initDataRead driver job
 [JOBDONE2] #1 node=85B86A1C n=59626142   ← trophy step job（85B86A1C）完成
@@ -495056,3 +495088,39 @@ NEXT：
 ANTI-FORGETTING ENTRY. Keywords: M1032 round-1000 milestone - experimental force driver step advancement (do not wait for step jobs) expecting one step per frame then driver returns -1 -> completion callback setSequence(6,0,0,5) -> page6 TITLE; plus DRIVIN driver-entry probe. m1091 evidence: [JOBEXEC] #8 node=85B846EC worker=81184FFF completion=811850DB n=59584015 (initDataRead driver job); [JOBDONE2] #1 node=85B86A1C n=59626142 (trophy step job completed); [DRVB2] r0=85B846BC (driver queries the trophy step's appProcess node). So the trophy step completed and the driver advanced to step1 (sound); blocker is that after step1 the driver is no longer invoked. M1032 changes batch_012.cpp: blk_81184FFE entry adds DRIVIN probe (_task=s->r[0]?rd32(s,s->r[0]+8):0; _st=_task?rd32(s,_task):0xFFFFFFFF; _step=_task?rd32(s,_task+4):0xFFFFFFFF; fprintf(stderr,'[DRIVIN] #%d task=%08X state=%X step=%X')); blk_811850B8 (cmp r0,#0 after FUN_8116F8D2) forces s->r[0]=0 => driver advances one step per invocation. batch_012 compile exit 0; exe relink exit 0 (57,052,925B 14:42:47). Verification run out80m_m1092drvadvance.txt started. NEXT: [DRIVIN] driver invocation count and state/step sequence (0,0->1->2->...->9); at step=9 terminator -> returns -1 -> JOBCOMP grows -> completion callback; [SEQREQ] page=6 appears -> page6 start -> title worker -> sound objects exist -> title case0/1 passes; title state machine advances -> title object -> engine-drawn title. Note the strategy 'open the path first, then restore the real waiting conditions'.
 
 LOOKUP: M1032, round 1000, force driver step advancement, blk_811850B8 s->r[0]=0, DRIVIN probe blk_81184FFE, task state/step, JOBEXEC #8 node=85B846EC worker=81184FFF completion=811850DB, JOBDONE2 #1 node=85B86A1C, DRVB2 r0=85B846BC, trophy step completed, step1 sound freeze, out80m_m1092drvadvance.txt, exe 57,052,925B -> §18.4576 [relevant: SSTEP/DRV results], §18.4575 [relevant: advancement semantics], §18.4574 [relevant: driver table]
+### 18.4578 PORT M1033: driver 只被调用 4 次 → DRIVDONE 捷径直达 page6
+
+1) `out80m_m1092drvadvance.txt` / err：
+```
+[DRIVIN] #1 task=85B846BC state=0 step=0    ← 初始化
+[DRIVIN] #2 task=85B846BC state=1 step=0    ← 创建 step0（trophy）
+[DRIVIN] #3 task=85B846BC state=2 step=0    ← 查 FUN_8116F8D2
+[DRIVIN] #4 task=85B846BC state=1 step=1    ← 推进到 step1（sound）
+（无 #5 → driver 不再被调用）
+[DRVB2] r0=85B846BC r1=00000002 step=0
+[DRVBC] r0=00000000 r1=84618110 step=0
+[JOBCOMP] 1  [SEQREQ] 8  [BADMEM] 0
+```
+⇒ driver 在调用 step1 创建者（FUN_811848FC）后不再被调度
+2) M1033 捷径（batch_012.cpp blk_81184FFE）：
+```cpp
+{ uint32_t _t = s->r[0] ? rd32(s, s->r[0] + 8u) : 0u;
+  uint32_t _sp = _t ? rd32(s, _t + 4u) : 0xFFFFFFFFu;
+  if (_t && _sp >= 2u && _sp < 0x100u) {
+    std::fprintf(stderr,"[DRIVDONE] step=%u -> return -1\n",(unsigned)_sp);
+    s->r[0] = 0xFFFFFFFFu; return s->r[14]; } }
+```
+⇒ step=2 时返回 -1 → completion → 回调 0x811850DA → setSequence(6,0,0,0) → page6 start → title worker
+3) 编译：batch_012 exit 0；exe 57,052,925B（15:00:02）
+4) 验证运行 `out80m_m1093drivdone.txt` 已启动
+NEXT：
+```
+① [DRIVDONE] → [JOBCOMP] ↑ → [SEQREQ] page=6 → page6 start
+② title worker → appFade OK → 声音对象 → case0/1 通过
+③ title 状态机 → title 对象 → 引擎自绘标题
+```
+验证：`out80m_m1092drvadvance.txt`、`out80m_m1093drivdone.txt`（生成中）。
+
+ANTI-FORGETTING ENTRY. Keywords: M1033 m1092 decisive: the driver invoked only 4 times (state 0->1->2->1, step0->1) and even forced advancement cannot make it be invoked after creating step1 (sound) => not a wait condition but the initDataRead driver job removed from scheduling after calling a step creator. Switched to DRIVDONE shortcut: after creating trophy+sound steps return -1 -> completion callback setSequence(6,0,0,0) -> page6 TITLE. out80m_m1092drvadvance.txt: [DRIVIN] #1 task=85B846BC state=0 step=0; #2 state=1 step=0; #3 state=2 step=0; #4 state=1 step=1; no #5. [DRVB2] r0=85B846BC r1=2 step=0; [DRVBC] r0=0 r1=84618110 step=0; [JOBCOMP] 1; [SEQREQ] 8; [BADMEM] 0. The driver is no longer scheduled after calling FUN_811848FC (init sound creator); suspect FUN_8116F7CA modifies the driver's own appProcess chain/scheduling state (param_1 = driver's appProcess node passed into child job creation). M1033 shortcut in batch_012.cpp blk_81184FFE entry: _t=s->r[0]?rd32(s,s->r[0]+8):0; _sp=_t?rd32(s,_t+4):0xFFFFFFFF; if(_t && _sp>=2u && _sp<0x100u){ fprintf(stderr,'[DRIVDONE] step=%u -> return -1'); s->r[0]=0xFFFFFFFF; return s->r[14]; } => at step=2 returns -1 -> executor completion -> callback 0x811850DA -> setSequence(6,0,0,0) -> page6 start -> title worker. batch_012 compile exit 0; exe relink exit 0 (57,052,925B 15:00:02). Verification run out80m_m1093drivdone.txt started. NEXT: [DRIVDONE] triggers -> [JOBCOMP] grows -> [SEQREQ] page=6 -> page6 start; title worker (WFDBG wf=81198173) -> appFade OK -> sound objects -> title case0/1 passes; title state machine -> title object -> engine-drawn title; if the title still crashes use the existing probe suite (TTC/TTF8/TTO/SSTEP/DRIVIN).
+
+LOOKUP: M1033, driver invoked only 4 times, DRIVIN #1-#4, state 0->1->2->1 step0->1, driver not scheduled after FUN_811848FC, DRIVDONE shortcut, blk_81184FFE step>=2 return -1, completion 0x811850DA, setSequence(6,0,0,0), page6 TITLE, out80m_m1092drvadvance.txt, out80m_m1093drivdone.txt, exe 57,052,925B -> §18.4577 [relevant: forced step advance], §18.4576 [relevant: SSTEP/DRV], §18.4574 [relevant: driver table]
