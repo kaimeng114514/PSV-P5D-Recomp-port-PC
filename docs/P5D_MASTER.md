@@ -1078,6 +1078,34 @@
 | M1060 | §18.4605: ★★★★★★★★★★ **m1110 决定性证据：命令落点与 flush 扫描范围不匹配被完全确认！[FLUSHX]：DAT_816CC6F4=0x82（130 个 bucket）、三帧数组 a1/a2/a3 循环；**数组3（6D8）的 bucket11（type 0xB）不透明链（+0xC）非空：8F142000 / 8F343050 / 8F544050**（正是我们的 type=0xB 命令！），后续帧还有 bucket0/bucket10；而 FUN_8119934A 的 array3 扫描循环只检查 **+0x14（透明链）** → **命令在 +0xC 不透明链，flush 从不消费它们**。这解释了 [BLD1/2/3]=0、[SUBMIT] 只有 type=0/2、以及 HLEDUMP 无 per-frame GXM 调用**。m1110：
 | M1061 | §18.4606: **m1060 定位到"命令在 array3 的 +0xC 不透明链、flush 只扫 +0x14 透明链"后，M1061 实施 FLUSHWIRE 交叉接线实验：在 FUN_8119934A 入口把 array3 各 bucket 的 +0xC 链表头复制到 +0x14（仅当 +0x14 为空），让 gfd flush 的三个绘制列表构建器（FUN_811F3452 等）真正消费我们的 type=0xB 命令，验证"命令一旦被 flush 消费是否能一路走到 GXM 绘制"**。实现（`batch_013.cpp` blk_8119934A 入口，env `P5D_FLUSHWIRE=1`）：
 | M1062 | §18.4607: ★★★★★★★★★★ **m1111（FLUSHWIRE）结果：交叉接线成功、flush 真的消费了命令，但 builder 崩溃——证明"不透明链+0xC 的命令不是给透明链 builder 用的"。证据链完整：[WIRE] #1（bucket11 op=8F142000 → tr）→ [BLD3] #1（bucket=851CC8D0，flush 开始消费）→ [SUBMIT] #1（type=1，提交路径触发）→ **BADMEM guest va=0x00000004 @block=0x811F371A stub=0x812B28A0**（builder 内某处 0+4 解引用空指针崩溃）。说明：**+0xC 不透明链需要它自己的消费者/命令布局**（命令对象 +0x1C 标志区分不透明/透明，builder FUN_811F3452 只理解透明链布局）；同时 m1111 再次确认 [FLUSHX] bucket11 op=8F142000 tr=8F142000（WIRE 已接线）**。m1111：
+| M1063 | §18.4608: ★★★★★★★★★★ **架构级突破：gfd 绘制"builder"其实是"延迟作业描述符"，而真正的链→GPU 提交函数是 FUN_811F3572/FUN_811F361C！** 反编译三个 builder（`builders.txt`）：它们只做三件事——`param_1[1]=bucket`、`*param_1 = <walker code ptr>`、`*bucket |= 0x80000000`（标记忙碌），然后 `FUN_811E649A(type,builder)` **同步执行该描述符的 walker**（我们 m1111 的崩溃就发生在 walker 内部，证明是同步执行）。walker（`walkers.txt`）逻辑：
+```c
+// FUN_811F36C6（BLD3=FUN_811F3452 用于 array3 +0x14 链）:
+uVar2 = puVar4[5];                    // bucket +0x14 链表头
+while (uVar2) { uVar3=[uVar2+0x18];   // 下一个（透明链 link 在 +0x18）
+  if (*(int*)(*(int*)(uVar2+0x1C)+4)==0) { ... unlink 已完成命令 ... } }
+if ((*puVar4 & 0x40000000)==0) {
+  if ((*puVar4 & 1)==0) { if ((*puVar4 & 2)!=0) puVar4[5]=FUN_811F361C(puVar4[5]); }   // ★ 提交路径 A
+  else { puVar4[5]=FUN_811F3572(puVar4[5]); }                                            // ★ 提交路径 B
+}
+*puVar4 &= 0x7fffffff;                 // 清除忙碌位（完成）
+// FUN_811F37AC（BLD1=FUN_811F347E 用于 array1 +0xC 链）: 遍历 puVar6[3]（+0xC），link=+0x14，
+//   检查 [cmd+0x1C]!=0 && [[cmd+0x1C]+4]==0 && [[cmd+0x1C]+8]==0 → unlink
+// FUN_811F3750（BLD2=FUN_811F3468 用于 array2 +0x14 链）: 遍历 puVar5[5]，link=+0x18，检查 [[cmd+0x1C]+8]==0
+```
+**我们 m1111 崩溃的精确原因**：FLUSHWIRE 把 array3 的 **+0xC 不透明链命令（+0x1C==0）** 接到了 **+0x14 透明链**，walker 0x811F36C6 把 `[cmd+0x1C]` 当指针解引用 `+4` → **BADMEM va=0x4 @0x811F371A**（`*(int*)(*(int*)(uVar2+0x1C)+4)` 即 `[0+4]`）。⇒ **+0x1C 语义确认：0 = 不透明链命令；非 0 = 指向透明链的完成状态对象（有 +4/+8/+0xC 标志位）**。
+**关键新目标：FUN_811F3572 / FUN_811F361C = 把命令链提交到 GPU 的真正函数**（walker 末尾根据 bucket 标志位 bit0/bit2 调用它们）。opaque 链（+0x1C==0）由 FUN_811C0464 在 **GPU 完成后**清理（等 `*bucket & 0x80000000` 清零再清链）——说明不透明链的**提交发生在这之前**，由 FUN_811F3572/361C 完成。
+NEXT：
+```
+① 反编译 FUN_811F3572 / FUN_811F361C（链→命令执行/GPU 提交的真正入口）
+② 确认它们如何遍历链、调用命令对象第一字（执行器）与提交 GXM
+③ 找 array3 +0xC（不透明链）提交调用点：walker 0x811F37AC 处理 array1；array3 +0xC 的
+   提交可能是另一个函数（或 FUN_811F3572 同样处理）→ 用 [ENQ]/[FLUSHX] 数据对照
+④ 若提交函数存在但未调用 → 找门控（bit0/bit2 设置者 FUN_811C05A6）
+⑤ 打通后 → 命令执行器 → GXM draw → logo 上屏
+```
+验证：`builders.txt`、`walkers.txt`、`out80m_m1111wire.txt`。 |
+| §18.4608 | Architecture-level breakthrough: the gfd draw 'builders' are actually deferred job descriptors, and the real chain->GPU submit functions are FUN_811F3572/FUN_811F361C! Decompiled the three builders (builders.txt): they only do three things - param_1[1]=bucket, *param_1=<walker code ptr>, *bucket |= 0x80000000 (mark busy), then FUN_811E649A(type,builder) synchronously executes that descriptor's walker (our m1111 crash happened inside the walker, proving synchronous execution). walkers (walkers.txt): FUN_811F36C6 (BLD3=FUN_811F3452 for array3 +0x14 chain): uVar2=puVar4[5] (bucket +0x14 chain head); while(uVar2){uVar3=[uVar2+0x18] (next, transparent link at +0x18); if(*(int*)(*(int*)(uVar2+0x1C)+4)==0){...unlink completed...}} if((*puVar4&0x40000000)==0){ if((*puVar4&1)==0){ if((*puVar4&2)!=0) puVar4[5]=FUN_811F361C(puVar4[5]); } else { puVar4[5]=FUN_811F3572(puVar4[5]); } } *puVar4 &= 0x7fffffff; FUN_811F37AC (BLD1=FUN_811F347E for array1 +0xC chain): walks puVar6[3] (+0xC), link=+0x14, checks [cmd+0x1C]!=0 && [[cmd+0x1C]+4]==0 && [[cmd+0x1C]+8]==0 -> unlink. FUN_811F3750 (BLD2=FUN_811F3468 for array2 +0x14 chain): walks puVar5[5], link=+0x18, checks [[cmd+0x1C]+8]==0. Exact m1111 crash cause: FLUSHWIRE moved array3's +0xC opaque-chain commands (+0x1C==0) into the +0x14 transparent chain, and walker 0x811F36C6 treats [cmd+0x1C] as a pointer and dereferences +4 -> BADMEM va=0x4 at 0x811F371A ([0+4]). So +0x1C semantics confirmed: 0 = opaque-chain command; non-zero = pointer to a completion-state object (flags at +4/+8/+0xC) for transparent chains. New key target: FUN_811F3572/FUN_811F361C = the real functions that submit a command chain to the GPU (called by the walker depending on bucket flags bit0/bit2). Opaque chains (+0x1C==0) are cleaned by FUN_811C0464 after GPU completion (wait until *bucket & 0x80000000 clears, then clear the chain) - so submission happens before that via FUN_811F3572/361C. NEXT: (1) decompile FUN_811F3572/FUN_811F361C (the real chain->command-execution/GPU submit entry); (2) confirm how they walk the chain, call command object first-word executors and submit GXM; (3) find the array3 +0xC (opaque chain) submit call site (walker 0x811F37AC handles array1; array3 +0xC submission may be another function or also FUN_811F3572) - cross-check with [ENQ]/[FLUSHX] data; (4) if the submit function exists but is not called find the gate (bit0/bit2 setters FUN_811C05A6); (5) once connected -> command executor -> GXM draw -> logo on screen. |
 ```
 [WIRE] #1 frame=0 bucket11 op=8F142000 -> tr
 [BLD3] #1 bucket=851CC8D0
@@ -497055,3 +497083,36 @@ NEXT：
 ANTI-FORGETTING ENTRY. Keywords: M1062 m1111 FLUSHWIRE result: cross-wire worked and flush consumed commands ([WIRE] #1 bucket11 op=8F142000 -> tr; [BLD3] #1 bucket=851CC8D0; [SUBMIT] #1 type=1 builder=848563D0) but the builder crashed with BADMEM guest va=0x00000004 at block=0x811F371A stub=812B28A0 (null+4 deref) -> the +0xC opaque chain commands are not for the transparent-chain builder; command objects use +0x1C flag to distinguish opaque/transparent and builder FUN_811F3452 only understands the transparent layout. Architecture refinement: DAT_816CC6CC/6D8/6E4 are per-frame pointer arrays (3 entries) to bucket arrays; flush scans 6E4 +0xC (BLD1/FUN_811F347E), 6CC type0/1 +0x14 (BLD2/FUN_811F3468), 6D8 buckets +0x14 (BLD3/FUN_811F3452); our commands in 6D8 bucket +0xC need their own consumer. NEXT: decompile FUN_811F3452/3468/347E comparing command field assumptions (+0 executor, +0x14/0x18 chains, +0x1C flag); find the real 6D8 +0xC consumer by searching for 'cmd=cmd->[0x14]; call cmd->[0]' patterns (executor &LAB_811E44AE_1, thumb-odd 0x811E44AD); inspect the FUN_811E3B54 command creation path for types 0xB/0x4B; if consumer is the display/GPU thread check scheduling/event flags; fix consumer -> command executes -> GXM draw -> logo on screen.
 
 LOOKUP: M1062, FLUSHWIRE, [WIRE] bucket11 8F142000, [BLD3] bucket=851CC8D0, [SUBMIT] type=1 builder=848563D0, BADMEM va=4 block=0x811F371A stub=812B28A0, command +0x1C opaque/transparent flag, builder FUN_811F3452 transparent layout, arrays 816CC6CC/6D8/6E4 per-frame pointer arrays, BLD1 FUN_811F347E BLD2 FUN_811F3468 BLD3 FUN_811F3452, command executor LAB_811E44AE_1, FUN_811E3B54 creation, out80m_m1111wire.txt, out80m_m1110flushx.txt -> §18.4606 [relevant: FLUSHWIRE], §18.4605 [relevant: mismatch confirmed], §18.4602 [relevant: gfd flush]
+### 18.4608 PORT M1063: builder = 延迟作业描述符；真正提交函数 = FUN_811F3572/FUN_811F361C
+
+1) 三个 builder（`builders.txt`）：
+```c
+void FUN_811F3452(u32 *param_1, u32 *param_2) { param_1[1]=param_2; u32 v=*param_2; *param_1=0x811F36C7; *param_2=v|0x80000000; }
+void FUN_811F3468(...) { ... *param_1=0x811F3751; ... }
+void FUN_811F347E(...) { ... *param_1=0x811F37AD; ... }
+// 然后 FUN_811E649A(type,builder) 同步执行该描述符的 walker（m1111 崩溃证明是同步）
+```
+2) walker（`walkers.txt`）：
+```c
+// FUN_811F36C6（array3 +0x14 链）：遍历 [bucket+0x14]，link=+0x18，
+//   对每条命令检查 [[cmd+0x1C]+4]==0；末尾按 bucket 标志：
+//     bit1==0: bit2 → FUN_811F361C(head)；否则 → FUN_811F3572(head)
+//   最后 *bucket &= 0x7fffffff（清忙碌）
+// FUN_811F37AC（array1 +0xC 链）：link=+0x14，检查 [cmd+0x1C]!=0 && [+4]==0 && [+8]==0
+// FUN_811F3750（array2 +0x14）：link=+0x18，检查 [[cmd+0x1C]+8]==0
+```
+3) m1111 崩溃精确原因：+0xC 不透明命令（+0x1C==0）被 FLUSHWIRE 接到 +0x14 透明链 → walker 把 [cmd+0x1C]=0 当指针 → `[0+4]` BADMEM va=0x4 @0x811F371A
+4) 新目标：**FUN_811F3572 / FUN_811F361C** = 链→GPU 提交的真正函数
+NEXT：
+```
+① 反编译 FUN_811F3572 / FUN_811F361C
+② 它们如何遍历链/调执行器/提交 GXM
+③ 找 array3 +0xC 的提交点（或确认也走这两个函数）
+④ 提交函数未被调用 → 查门控（bit0/bit2 设置者 FUN_811C05A6）
+⑤ 打通 → 命令执行 → GXM draw → logo 上屏
+```
+验证：`builders.txt`、`walkers.txt`、`out80m_m1111wire.txt`。
+
+ANTI-FORGETTING ENTRY. Keywords: M1063 gfd builders are deferred job descriptors: FUN_811F3452/3468/347E set {*param_1 = walker code ptr (0x811F36C7/0x811F3751/0x811F37AD), param_1[1]=bucket, *bucket |= 0x80000000} and FUN_811E649A synchronously runs the walker (m1111 crash inside walker proves synchronous). Walkers: FUN_811F36C6 (array3 +0x14 chain): head=[bucket+0x14], next=[cmd+0x18], checks [[cmd+0x1C]+4]==0, then if *bucket bit1==0 and bit2 set calls FUN_811F361C(head) else if bit1 set calls FUN_811F3572(head), finally *bucket &= 0x7fffffff. FUN_811F37AC (array1 +0xC chain): head=[bucket+0xC], next=[cmd+0x14], checks [cmd+0x1C]!=0 && [[cmd+0x1C]+4]==0 && [[cmd+0x1C]+8]==0. FUN_811F3750 (array2 +0x14): next=[cmd+0x18], checks [[cmd+0x1C]+8]==0. m1111 crash cause: FLUSHWIRE moved array3 +0xC opaque commands (+0x1C==0) into the +0x14 transparent chain -> walker treats [cmd+0x1C] as pointer -> [0+4] BADMEM va=0x4 at 0x811F371A. So +0x1C semantics: 0 = opaque chain command; non-zero = completion-state pointer (flags +4/+8/+0xC) for transparent chains. Opaque chains cleaned by FUN_811C0464 after GPU completion (wait *bucket & 0x80000000 clear then clear chain) so submission happens before via FUN_811F3572/FUN_811F361C. NEXT: decompile FUN_811F3572/FUN_811F361C (real chain->GPU submit entry); confirm how they walk chains/call command first-word executors/submit GXM; find array3 +0xC opaque submit call site (walker 0x811F37AC handles array1; array3 +0xC submission may be another function or also FUN_811F3572); if the submit function is not called find the gate (bit0/bit2 setters FUN_811C05A6); once connected -> command executor -> GXM draw -> logo on screen.
+
+LOOKUP: M1063, builders deferred descriptors, FUN_811F3452 walker 0x811F36C7, FUN_811F3468 walker 0x811F3751, FUN_811F347E walker 0x811F37AD, FUN_811E649A synchronous walker execution, walker FUN_811F36C6 head [bucket+0x14] next [cmd+0x18] checks [[cmd+0x1C]+4], bucket flags bit1/bit2, FUN_811F361C FUN_811F3572 submit functions, FUN_811F37AC head [bucket+0xC] next [cmd+0x14], FUN_811F3750, m1111 crash 0x811F371A BADMEM va=4, +0x1C semantics opaque 0 vs transparent state pointer, FUN_811C0464 cleanup after GPU, FUN_811C05A6 bit0/bit2 setter, builders.txt, walkers.txt -> §18.4607 [relevant: FLUSHWIRE crash], §18.4606 [relevant: FLUSHWIRE], §18.4602 [relevant: gfd flush]
