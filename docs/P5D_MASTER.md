@@ -1073,6 +1073,42 @@
 | M1055 | §18.4600: **appGx 绘制架构解析完成：绘制分两步——(1) `FUN_8115FF12` 把期望 GXM 状态刷到硬件（FUN_811634F6/540/552/5B8/5CA/604/61C/6C8/6DA/794/D0 = GXM 状态设置器）；(2) `FUN_811E3960`/`FUN_811E3B54` 分配 draw command 对象（0x34 字节，vtable=&LAB_811E44AE_1），`FUN_811C041C` 按 bucket 入队：`(&DAT_816CC6D8)[DAT_816CC700] + param_1*0x20`，两条链表 +0x0C/+0x10（不透明）与 +0x14/+0x18（透明），由 param_2+0x1C 选择。→ command 对象需由**命令执行器（flush 阶段）**遍历执行才会提交 GXM；目前该 flush 未发生**。M1055 加 [ENQ] 探针 + HLEDUMP 运行（title 阶段 HLE 调用画像，确认 GXM draw API 是否被调用、被谁调用）。反编译证据（`gxflush.txt`）：
 | M1056 | §18.4601: **m1108 关键证据：(1) [ENQ] 确认游戏真的在建绘制命令链——type=0x0B 命令连续入队（bucket base=851CC770，链表头从 8F142000→8F142170 递增，command 对象按 0x30 间隔分配 8F142000/2030/2060…），随后 type=0x4B；(2) HLEDUMP 未触发（默认阈值 n=62M，本次运行只到 n≈61.03M）——需 P5D_HLEDUMP_AT=60000000。队列管理函数反编译完成（FUN_811C07C6 分配队列缓冲/FUN_811C0464/FUN_811C04B6 重置/FUN_811C0828 释放/FUN_811C067C 写计数），它们是 GXM 命令缓冲管理，不是执行器**。m1108：
 | M1057 | §18.4602: ★★★★★★★★★ **找到 appGx 的帧提交函数 `FUN_8119934A`（gfd flush/submit）！反编译：它遍历命令链 → 调用绘制列表构建器（FUN_811F347E/FUN_811F3468/FUN_811F3452）→ `FUN_811E649A(type, builder)` 提交 → `FUN_811E6498()` 刷新命令缓冲 → 推进三缓冲帧索引 `DAT_816CC700`（mod 3）→ `FUN_811EA460()`。M1057 加 [FLUSH]/[SUBMIT]/[CMDFLUSH]/[BLD1..3] 探针，并修正 HLEDUMP 阈值（P5D_HLEDUMP_AT=60000000）以拿到 title 阶段 HLE 调用画像**。反编译（`gfd_flush.txt`）：
+| M1058 | §18.4603: ★★★★★★★★ **m1109 重大证据：gfd 帧提交流程每帧真的在跑！[FLUSH] 120（frame 0→1→2 循环）、[SUBMIT] 121（type=0/2）、[CMDFLUSH] 80；但 [BLD1/2/3] 全 0——flush 扫描的三个链表都是空的。HLEDUMP（title 阶段 60M→64M）拿到 53 个 HLE stub 调用画像：**只有同步/线程类 API 高频（sem/eflag wait/set、vblank 等），GXM 类只有极少量初始化调用（0x812B1720 DisplayQueueAddEntry ×2、0x812B1340 TextureInitLinear ×1、0x812B16A0 ×3 等），没有 per-frame 的 sceGxmDraw**。⇒ gfd 提交链在运行，但**我们入队的 type=0xB/0x4B 命令不在 flush 扫描的 bucket 里**。m1109：
+```
+[FLUSH] #1 frame=0  #2 frame=1  #3 frame=2  …（120 条，三缓冲循环）
+[SUBMIT] #1 type=2 builder=848563D0
+[SUBMIT] #2 type=2 … #3 type=0 builder=848562B0 …（121 条）
+[CMDFLUSH] 80（FUN_811E6498 每帧调用）
+[BLD1] 0  [BLD2] 0  [BLD3] 0            ← ★ flush 扫描的链表为空
+[HLEDUMP] distinct=53
+  va=812B28A0 count=1171057  (sceKernelUnlockLwMutex)
+  va=812B2830 count=1165757  (sceKernelLockLwMutex)
+  va=812B2880 count=1164981  (sceKernelWaitEventFlag)
+  va=812B2AE0 count=752331   (sceKernelSetEventFlag)
+  va=812B1810 count=752269   (sceDisplayWaitVblankStartMultiCB)
+  va=812B2A50 count=76008 …（DelayThread 等）
+  …GXM: 812B1720×2(DisplayQueueAddEntry) 812B1340×1(TextureInitLinear) 812B16A0×3 …
+  （无 sceGxmDraw / BeginScene / EndScene 的 per-frame 调用）
+```
+**flush 函数内部反编译（`buckets.txt`/`gfd_flush.txt`）**：
+```c
+FUN_811C077C(frame) => (&DAT_816CC6E4)[frame]           // flush 扫描的数组 1
+FUN_811C063A(type,frame) => (&DAT_816CC6CC)[frame] + (type&0xFFFFFF)*0x20   // 数组 2
+FUN_811C0544(i,frame) => (&DAT_816CC6D8)[frame] + i*0x20                    // 数组 3（我们入队的目标）
+// flush 只扫描：数组1 的 [+0xC]；数组2 的 type 0/1 的 [+0x14]；数组3 的 i<DAT_816CC6F4 的 [+0x14]
+// 我们的 [ENQ]：数组3 的 bucket type=0xB 的 [+0xC]（不透明链）→ 不在上述扫描范围内
+```
+⇒ **下一步关键：找 type=0xB/0x4B 命令的消费者（另一条 2D sprite 提交路径），或确认 DAT_816CC6F4 是否太小导致 bucket 0xB 不被扫描**
+NEXT：
+```
+① [FLUSH] 探针扩展：打印 DAT_816CC6F4、三个数组指针（6E4/6CC/6D8）、各 bucket 链表头
+② 反编译数组 6E4/6CC 的写入者（FUN_811C07xx 家族）→ 确认 type 0xB 对应哪条队列
+③ 找 type 0xB/0x4B 命令消费者：谁遍历 bucket 0xB 的 +0xC 链（可能 FUN_811C0754 / 2D sprite 专用 submit）
+④ 若 F4 太小 → 检查 FUN_811C07C6 初始化参数（bucket 数量）
+⑤ 打通消费 → 命令执行 → GXM draw → logo 上屏
+```
+验证：`out80m_m1109flush.txt`、`gfd_flush.txt`、`buckets.txt`、`flush2.txt`。 |
+| §18.4603 | m1109 key evidence: the gfd frame submit flow really runs every frame! [FLUSH] 120 (frame 0->1->2 cycling), [SUBMIT] 121 (type=0/2), [CMDFLUSH] 80; but [BLD1/2/3] are all 0 - the three lists scanned by the flush are empty. HLEDUMP (title phase 60M->64M) gives a 53-stub profile: only sync/thread APIs are hot (sem/eflag wait/set, vblank), while GXM-class calls are only a few init ones (0x812B1720 DisplayQueueAddEntry x2, 0x812B1340 TextureInitLinear x1, 0x812B16A0 x3, ...), no per-frame sceGxmDraw. So the gfd submit chain is running, but our enqueued type=0xB/0x4B commands are not in the buckets the flush scans. m1109: [FLUSH] #1 frame=0, #2 frame=1, #3 frame=2 ... (120, triple-buffer cycling); [SUBMIT] #1 type=2 builder=848563D0, #2 type=2, #3 type=0 builder=848562B0 ... (121); [CMDFLUSH] 80 (FUN_811E6498 every frame); [BLD1] 0 [BLD2] 0 [BLD3] 0 (scanned lists empty); HLEDUMP distinct=53: 812B28A0 count=1171057 (unlock mutex), 812B2830 count=1165757 (lock mutex), 812B2880 count=1164981 (wait eflag), 812B2AE0 count=752331 (set eflag), 812B1810 count=752269 (vblank wait), 812B2A50 count=76008 (delay), ... GXM: 812B1720 x2 (DisplayQueueAddEntry), 812B1340 x1 (TextureInitLinear), 812B16A0 x3, no per-frame sceGxmDraw/BeginScene/EndScene. Flush internals (buckets.txt/gfd_flush.txt): FUN_811C077C(frame)=(&DAT_816CC6E4)[frame] (array1); FUN_811C063A(type,frame)=(&DAT_816CC6CC)[frame]+(type&0xFFFFFF)*0x20 (array2); FUN_811C0544(i,frame)=(&DAT_816CC6D8)[frame]+i*0x20 (array3, our enqueue target). The flush only scans: array1 [+0xC]; array2 types 0/1 [+0x14]; array3 i<DAT_816CC6F4 [+0x14]. Our [ENQ] goes to array3 bucket type=0xB [+0xC] (opaque chain) -> outside those scans. So next: find the consumer of type=0xB/0x4B commands (another 2D sprite submit path) or check whether DAT_816CC6F4 is too small for bucket 0xB to be scanned. NEXT: (1) extend [FLUSH] probe to print DAT_816CC6F4 and the three array pointers (6E4/6CC/6D8) and bucket heads; (2) decompile the writers of arrays 6E4/6CC (FUN_811C07xx family) to map type 0xB to a queue; (3) find the consumer of type=0xB/0x4B commands: who walks bucket 0xB's +0xC chain (maybe FUN_811C0754 / a 2D-sprite-specific submit); (4) if F4 is too small check FUN_811C07C6 init parameters; (5) once consumed -> command executes -> GXM draw -> logo on screen. |
 ```c
 void FUN_8119934A(void) {   // gfd 每帧 flush
   ...FUN_811edd2c(); ...
@@ -496761,3 +496797,39 @@ NEXT：
 ANTI-FORGETTING ENTRY. Keywords: M1057 found the appGx frame submit function FUN_8119934A (gfd flush/submit): walks command chains -> FUN_811F347E/FUN_811F3468/FUN_811F3452 builders -> FUN_811E649A(type,builder) submit -> FUN_811E6498() command buffer flush -> advances triple-buffered DAT_816CC700 (mod 3) -> FUN_811EA460(). Probes: blk_8119934A [FLUSH] frame; blk_811E649A [SUBMIT] type/builder; blk_811E6498 [CMDFLUSH]; blk_811F347E/3468/3452 [BLD1..3] bucket=r1. batch_013/016/017 compile exit 0; exe relink exit 0 (57,068,267B 21:23:17). Verification run out80m_m1109flush.txt (FORCETITLE+FIOSFILL+WAITFORCE+SCNFORCE+P5D_HLEDUMP=1 P5D_HLEDUMP_AT=60000000) started. NEXT: [FLUSH] per-frame? frame index advance; [BLD1/2/3] called (non-empty lists); [SUBMIT]/[CMDFLUSH] execute; HLEDUMP title top-48 (GXM draw/state?); if flush not running find its caller (gfd per-frame flow, possibly the skipped display-manager path); if flush runs but no GXM inspect FUN_811E649A/6498 (executor vtable 0x811E44AE).
 
 LOOKUP: M1057, gfd flush FUN_8119934A, FUN_811C077C bucket, FUN_811C063A, FUN_811C0544, FUN_811F347E/811F3468/811F3452 builders, FUN_811E649A submit, FUN_811E6498 cmdbuf flush, DAT_816CC700 triple buffer mod 3, FUN_811EA460, FUN_811eb930, [FLUSH] [SUBMIT] [CMDFLUSH] [BLD1..3] probes, batch_013 batch_016 batch_017, P5D_HLEDUMP_AT=60000000, gfd_flush.txt, out80m_m1109flush.txt, exe 57,068,267B -> §18.4601 [relevant: enqueue], §18.4600 [relevant: draw architecture], §18.4599 [relevant: DRAWSUB]
+### 18.4603 PORT M1058: gfd flush 每帧运行，但扫描的链表为空（type 0xB/0x4B 命令不在扫描 bucket）
+
+1) m1109 证据：
+```
+[FLUSH] #1 frame=0  #2 frame=1  #3 frame=2 …（120 条三缓冲循环）
+[SUBMIT] 121（type=0/2，builder=848562B0/848563D0）
+[CMDFLUSH] 80（FUN_811E6498 每帧）
+[BLD1] 0  [BLD2] 0  [BLD3] 0          ← flush 扫描链表为空
+[HLEDUMP] distinct=53：
+  812B28A0×1171057（unlock mutex） 812B2830×1165757（lock mutex）
+  812B2880×1164981（wait eflag）   812B2AE0×752331（set eflag）
+  812B1810×752269（vblank wait）   812B2A50×76008（delay）
+  GXM：812B1720×2（DisplayQueueAddEntry）812B1340×1（TextureInitLinear）812B16A0×3
+  （无 per-frame sceGxmDraw/BeginScene/EndScene）
+```
+2) flush 内部（`buckets.txt`）：
+```c
+FUN_811C077C(frame) => (&DAT_816CC6E4)[frame]                  // 数组1
+FUN_811C063A(type,frame) => (&DAT_816CC6CC)[frame]+(type&0xFFFFFF)*0x20   // 数组2
+FUN_811C0544(i,frame) => (&DAT_816CC6D8)[frame]+i*0x20          // 数组3（我们入队目标）
+// flush 扫描：数组1 [+0xC]；数组2 type0/1 [+0x14]；数组3 i<DAT_816CC6F4 [+0x14]
+// 我们入队：数组3 bucket type=0xB 的 [+0xC]（不透明链）→ 不在扫描范围
+```
+3) NEXT：
+```
+① [FLUSH] 扩展：打印 DAT_816CC6F4、三数组指针、bucket 链表头
+② 反编译数组 6E4/6CC 写入者 → type 0xB 对应队列
+③ 找 type 0xB/0x4B 消费者（bucket 0xB +0xC 链遍历者）
+④ 若 F4 太小 → 检查 FUN_811C07C6 初始化参数
+⑤ 消费打通 → GXM draw → logo 上屏
+```
+验证：`out80m_m1109flush.txt`、`gfd_flush.txt`、`buckets.txt`。
+
+ANTI-FORGETTING ENTRY. Keywords: M1058 m1109: gfd frame submit flow runs every frame ([FLUSH] 120 frame 0->1->2 cycling, [SUBMIT] 121 type=0/2, [CMDFLUSH] 80) but [BLD1/2/3] all 0 - the scanned lists are empty; HLEDUMP title phase (60M->64M) distinct=53: top sync/thread APIs (812B28A0 unlock mutex 1171057, 812B2830 lock mutex 1165757, 812B2880 wait eflag 1164981, 812B2AE0 set eflag 752331, 812B1810 vblank wait 752269, 812B2A50 delay 76008), GXM only init calls (812B1720 DisplayQueueAddEntry x2, 812B1340 TextureInitLinear x1, 812B16A0 x3), no per-frame sceGxmDraw/BeginScene/EndScene. Flush internals: FUN_811C077C(frame)=(&DAT_816CC6E4)[frame] (array1); FUN_811C063A(type,frame)=(&DAT_816CC6CC)[frame]+(type&0xFFFFFF)*0x20 (array2); FUN_811C0544(i,frame)=(&DAT_816CC6D8)[frame]+i*0x20 (array3, our enqueue target). Flush scans array1 [+0xC], array2 types 0/1 [+0x14], array3 i<DAT_816CC6F4 [+0x14]; our [ENQ] goes to array3 bucket type=0xB [+0xC] -> outside. NEXT: extend [FLUSH] probe with DAT_816CC6F4 + three array pointers + bucket heads; decompile writers of arrays 6E4/6CC (FUN_811C07xx family) to map type 0xB to a queue; find the consumer of type=0xB/0x4B commands (who walks bucket 0xB +0xC chain, maybe FUN_811C0754 / 2D-sprite submit); if F4 too small check FUN_811C07C6 init params; once consumed -> GXM draw -> logo on screen.
+
+LOOKUP: M1058, [FLUSH] 120 frame 0/1/2, [SUBMIT] 121 type=0/2 builder=848562B0/848563D0, [CMDFLUSH] 80, [BLD1/2/3] 0, HLEDUMP distinct=53 812B28A0 1171057 unlock, 812B2830 lock, 812B2880 wait eflag, 812B2AE0 set eflag, 812B1810 vblank, 812B1720 x2 DisplayQueueAddEntry, 812B1340 TextureInitLinear, 812B16A0 x3, no sceGxmDraw, FUN_811C077C 816CC6E4, FUN_811C063A 816CC6CC, FUN_811C0544 816CC6D8, DAT_816CC6F4, bucket type 0xB opaque +0xC vs scanned +0x14, [ENQ] type=0000000B ×9 type=0000004B, out80m_m1109flush.txt, gfd_flush.txt, buckets.txt -> §18.4602 [relevant: gfd flush found], §18.4601 [relevant: command chains], §18.4599 [relevant: DRAWSUB]
