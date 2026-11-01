@@ -1069,6 +1069,35 @@
 | M1051 | §18.4596: ★★★★★★★★★★ **WAITFORCE 成功解锁：S0_LOGO 状态机开始真实运行！logo 序列从 state=0→3→4→5（69 帧计数×138 次）→6→8（54 次），并创建了**第二个 logo 任务**（task=85D0B78C）；[TMX] 增加到 96 条（更多 logo 容器/TGA 加载）；事件标志 obj=60016000 bits=1 被 guest 反复设置 200+ 次，5 个显示线程全部被唤醒（TDUMP ready=1）；无 BADMEM**。但**仍无绘制调用**（[ABIEND]/draw 计数不变）——S0 logo 的绘制回调（注册在 FUN_81193704 尾部的 0x8119351D）尚未被调用。M1051 加 [LOGODRAW]/[VFW2] 探针定位绘制回调。m1105 证据：
 | M1052 | §18.4597: ★★★★★★★★★★ **m1106 里程碑：logo 绘制回调真的被调用了！[LOGODRAW] 80 条（两个 logo 任务 85B8759C/85D0B7DC 交替绘制，回调参数 r2=0x8119351D 与注册值一致），[LOGO] 状态机继续推进 127 条，无 BADMEM。但绘制函数内部被"场景就绪门控"挡住：FUN_8119351C→FUN_81160B7E/FUN_811610A4 都先调用 `FUN_81160814()` 检查，返回 0 时跳过 `FUN_81163ABC(...)` 提交——所以仍无 GXM 绘制调用（[ABIBEGIN] 1/[ABIEND] 0）**。m1106 证据：
 | M1053 | §18.4598: ★★★★★★★★ **门控定位到单个字节：`FUN_81160814()` = `(DAT_8155545C == 0)`（0x81555438+0x24）；DAT_8155545C 非 0 时 logo 绘制被跳过。M1053 实施 SCNFORCE 实验：门控函数直接返回 1（强制场景就绪），并加 [DRAWSUB] 探针确认提交路径 FUN_81163ABC 真正执行**。反编译证据（`scnready.txt`）：
+| M1054 | §18.4599: ★★★★★★★★★★ **m1107 里程碑：appGx 绘制提交真的在执行！[DRAWSUB] 60 条（FUN_81163ABC 被反复调用，参数 p2/p4 指向栈上顶点/索引数组，p3=4 顶点、p5=6 索引——游戏正在为 logo 提交真实绘制图元）；[LOGODRAW] 80、[LOGO] 111、[SCNFORCE] 40（该字节本来就是 00，门控不是本运行的阻塞点）；但仍无 BeginScene/EndScene/GXM 提交，且末段显示线程在 `sceDisplayWaitVblankStartMultiCB(0x812B1810)` + `SetEventFlag(0x812B2AE0)` 循环——appGx 批次没有被 flush 到 GXM**。m1107 证据：
+```
+[SCNFORCE] #1..#40 force scene-ready (byte 8155545C=00)     ← 门控字节本来就是 0
+[DRAWSUB] #1 p1=0 p2=848562F4 p3=4 p4=848562E8 p5=6 p6=0
+[DRAWSUB] #2 p1=0 p2=848562EC p3=4 p4=848562E0 p5=6 p6=0
+...（60 条，顶点/索引数组在 app 栈上）
+[LOGODRAW] 80  [LOGO] 111  [WAITFORCE] 3  [BADMEM] 0
+[ABIBEGIN] 1  [ABIEND] 0  [PRESENT] 1  [ABIVTX] 1  [TEXBIND] 1（无新 GXM 调用）
+[GFD] 4 条（仅在 n≈59.56M/59.84M 早期）
+末段自旋：hle_ring: 812B1810@811539FE 812B2AE0@8127BE56 …（显示线程：
+  sceDisplayWaitVblankStartMultiCB(0x812B1810) + sceKernelSetEventFlag(0x812B2AE0) 循环）
+运行到 n≈60,990,000
+```
+**分析**：
+- FUN_81163ABC 只是把图元**入队**（FUN_811C041C）；真正 flush 到 GXM 应在 mainDraw/display 线程的批次提交阶段
+- [GFD] 只在早期出现 → title 阶段的 gfd draw 提交路径未执行
+- 显示线程在 vblank 等待循环里活着（每帧 SetEventFlag），但没有把 appGx 批次提交给 GXM
+NEXT：
+```
+① 反编译 appGx 批次 flush 路径：FUN_8115FF12（提交前调用）、FUN_811C041C（入队）、
+   FUN_811E3960/FUN_811E3B54（draw command）、FUN_811C0B3C/FUN_811C0…（batch 管理）
+② 给这些函数加 [GXFLUSH] 探针，确认 flush 是否被调用、卡在哪
+③ 找 BeginScene/EndScene 的调用者：title 绘制需要活动 render pass；可能由 mainDraw 的
+   "draw start/end" 驱动（PROCREG #3/#4 mainDraw/mainDrawOt）
+④ 检查显示线程（entry 0x8127C1D3）在 GXM 显示队列处理时是否调用我们的 display 队列 stub
+⑤ 一旦 flush 打通 → GXM 收到 draw → 截帧出现 logo
+```
+验证：`out80m_m1107scnforce.txt`、`err80m_m1107scnforce.txt`、`scnready.txt`。 |
+| §18.4599 | m1107 milestone: the appGx draw submission really executes! [DRAWSUB] 60 lines (FUN_81163ABC called repeatedly, args p2/p4 pointing at on-stack vertex/index arrays, p3=4 vertices, p5=6 indices - the game is submitting real draw primitives for the logo); [LOGODRAW] 80, [LOGO] 111, [SCNFORCE] 40 (that byte was already 00, the gate was not this run's blocker); but still no BeginScene/EndScene/GXM submission, and at the end the display thread loops on sceDisplayWaitVblankStartMultiCB(0x812B1810) + SetEventFlag(0x812B2AE0) - the appGx batches are never flushed to GXM. m1107 evidence: [SCNFORCE] #1..#40 force scene-ready (byte 8155545C=00); [DRAWSUB] #1 p1=0 p2=848562F4 p3=4 p4=848562E8 p5=6 p6=0; #2 p1=0 p2=848562EC p3=4 p4=848562E0 p5=6; (60 lines, vertex/index arrays on the app stack); [LOGODRAW] 80; [LOGO] 111; [WAITFORCE] 3; [BADMEM] 0; [ABIBEGIN] 1; [ABIEND] 0; [PRESENT] 1; [ABIVTX] 1; [TEXBIND] 1; [GFD] 4 (only early at n≈59.56M/59.84M); final spin hle_ring 812B1810@811539FE 812B2AE0@8127BE56 (display thread loop on sceDisplayWaitVblankStartMultiCB + sceKernelSetEventFlag); run reaches n≈60,990,000. Analysis: FUN_81163ABC only enqueues primitives (FUN_811C041C); the real flush to GXM should happen in the mainDraw/display thread batch-submit stage; [GFD] appears only early so the title-stage gfd draw submit path is not reached; the display thread is alive looping on vblank + SetEventFlag but does not submit the appGx batches to GXM. NEXT: (1) decompile the appGx batch flush path FUN_8115FF12 (called before submit), FUN_811C041C (enqueue), FUN_811E3960/FUN_811E3B54 (draw command), FUN_811C0B3C/FUN_811C0... (batch management); (2) add [GXFLUSH] probes to these functions to see whether flush is called and where it stalls; (3) find the BeginScene/EndScene callers - title drawing needs an active render pass, probably driven by mainDraw's draw start/end (PROCREG #3/#4 mainDraw/mainDrawOt); (4) check whether the display thread (entry 0x8127C1D3) calls our display-queue stub when processing the GXM display queue; (5) once the flush is connected -> GXM receives draw -> frames show the logo. |
 ```c
 // FUN_81160814（22 字节）——场景就绪门控
 bool FUN_81160814(void) {
@@ -496487,3 +496516,34 @@ NEXT：
 ANTI-FORGETTING ENTRY. Keywords: M1053 the gate is a single byte: FUN_81160814() = (DAT_8155545C == 0) at address 0x8155545C (0x81555438+0x24); non-zero means not ready and the logo draw is skipped. SCNFORCE experiment: gate returns 1 (forces scene-ready) + [DRAWSUB] probe on FUN_81163ABC. scnready.txt: FUN_81160814 (22 bytes) bool FUN_81160814(void) { movw r0,#0x5438; movt r0,#0x8155 -> 0x81555438; ldrsb r1,[r0,#0x24] -> 0x8155545C; return (char)DAT_8155545C == '\0'; }; FUN_81163ABC (592 bytes) final submit: primitive table, FUN_811637D8()/FUN_8116397A build vertices, FUN_811C5580/811C57F2 pipelines, FUN_811E3960/FUN_811E3B54 draw command, FUN_811C041C enqueue. M1053 (batch_010.cpp): blk_81160814 if P5D_SCNFORCE { print [SCNFORCE]; s->r[0]=1u; return s->r[14]; } blk_81163ABC [DRAWSUB] probe p1..p6. batch_010 compile exit 0; exe relink exit 0 (57,065,862B 20:10:22). Verification run out80m_m1107scnforce.txt (FORCETITLE + FIOSFILL + WAITFORCE + SCNFORCE) started. NEXT: [SCNFORCE] fires -> gate always 1 -> FUN_81163ABC executes; [DRAWSUB] appears; GXM HLE receives draw/vertex calls; check frames for the ATLUS logo; if still no picture check BeginScene/EndScene (drawing needs an active render pass).
 
 LOOKUP: M1053, scene-ready gate FUN_81160814 -> DAT_8155545C == 0, addr 0x81555438+0x24, SCNFORCE returns 1, [DRAWSUB] probe FUN_81163ABC, appGx primitive submit, FUN_811637D8, FUN_8116397A, FUN_811C5580, FUN_811C57F2, FUN_811E3960, FUN_811E3B54, FUN_811C041C, batch_010 blk_81160814, exe 57,065,862B, out80m_m1107scnforce.txt, scnready.txt -> §18.4597 [relevant: draw callback + gate], §18.4596 [relevant: WAITFORCE], §18.4587 [relevant: S0 logo]
+### 18.4599 PORT M1054: appGx 图元提交执行（[DRAWSUB]），但批次未 flush 到 GXM
+
+1) m1107 证据：
+```
+[SCNFORCE] #1..#40 force scene-ready (byte 8155545C=00)     ← 门控字节本来就是 0
+[DRAWSUB] #1 p1=0 p2=848562F4 p3=4 p4=848562E8 p5=6 p6=0
+[DRAWSUB] #2 p1=0 p2=848562EC p3=4 p4=848562E0 p5=6
+（60 条：顶点/索引数组在 app 栈上，4 顶点 6 索引 = 两个三角形）
+[LOGODRAW] 80  [LOGO] 111  [WAITFORCE] 3  [BADMEM] 0
+[ABIBEGIN] 1  [ABIEND] 0  [PRESENT] 1  [ABIVTX] 1  [TEXBIND] 1
+[GFD] 4（仅 n≈59.56M/59.84M 早期）
+末段自旋：812B1810@811539FE（sceDisplayWaitVblankStartMultiCB）+ 812B2AE0@8127BE56（SetEventFlag）
+运行到 n≈60,990,000
+```
+2) 分析：
+- FUN_81163ABC 只把图元入队（FUN_811C041C），真正 flush 到 GXM 在 mainDraw/显示线程的批次提交阶段
+- title 阶段的 [GFD] 提交路径未执行 → BeginScene/EndScene 缺失
+- 显示线程活着（vblank + SetEventFlag 循环），但没把 appGx 批次交给 GXM
+NEXT：
+```
+① 反编译批次 flush 路径（FUN_8115FF12/FUN_811C041C/FUN_811E3960/FUN_811E3B54/FUN_811C0B3C）
+② [GXFLUSH] 探针确认 flush 调用与卡点
+③ 找 BeginScene/EndScene 调用者（mainDraw/mainDrawOt 的 draw start/end）
+④ 检查显示线程是否调用我们的 display 队列 stub
+⑤ flush 打通 → GXM draw → 截帧出现 logo
+```
+验证：`out80m_m1107scnforce.txt`、`scnready.txt`。
+
+ANTI-FORGETTING ENTRY. Keywords: M1054 m1107: the appGx draw submission really executes! [DRAWSUB] 60 lines (FUN_81163ABC repeatedly called; p2/p4 point to on-stack vertex/index arrays; p3=4 vertices, p5=6 indices = two triangles for the logo sprite); [LOGODRAW] 80; [LOGO] 111; [SCNFORCE] 40 (byte 8155545C already 00, gate not the blocker); but still no BeginScene/EndScene/GXM submission: the appGx batches are never flushed to GXM; final spin = display thread loop on sceDisplayWaitVblankStartMultiCB (0x812B1810) + sceKernelSetEventFlag (0x812B2AE0); [GFD] only 4 early lines; [ABIBEGIN] 1; [ABIEND] 0; [PRESENT] 1; [ABIVTX] 1; [TEXBIND] 1; [BADMEM] 0; run reaches n≈60,990,000. Analysis: FUN_81163ABC only enqueues (FUN_811C041C); real flush to GXM happens in the mainDraw/display-thread batch submit stage; [GFD] shows the title-stage gfd draw submit path is not reached; display thread alive looping vblank+SetEventFlag but does not submit appGx batches. NEXT: decompile batch flush path FUN_8115FF12/FUN_811C041C/FUN_811E3960/FUN_811E3B54/FUN_811C0B3C; add [GXFLUSH] probes; find BeginScene/EndScene callers (mainDraw/mainDrawOt draw start/end); check whether the display thread calls our display-queue stub; once flush works -> GXM draw -> frames show the logo.
+
+LOOKUP: M1054, [DRAWSUB] 60, FUN_81163ABC submit, p2=848562F4 p3=4 p4=848562E8 p5=6, appGx primitive enqueue FUN_811C041C, no BeginScene/EndScene, [SCNFORCE] byte 8155545C=00, display thread loop sceDisplayWaitVblankStartMultiCB 0x812B1810 + SetEventFlag 0x812B2AE0, [GFD] 4 early, batch flush FUN_8115FF12/FUN_811E3960/FUN_811E3B54/FUN_811C0B3C, mainDraw/mainDrawOt, exe 57,065,862B, out80m_m1107scnforce.txt -> §18.4598 [relevant: scene gate], §18.4597 [relevant: draw callback], §18.4596 [relevant: WAITFORCE]
