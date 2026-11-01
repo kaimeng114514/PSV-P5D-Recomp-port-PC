@@ -1061,6 +1061,45 @@
 | M1043 | §18.4588: **为下一阶段加 [LOGO]/[TMX]/[TMA] 探针：追踪 S0_LOGO 状态机（FUN_81193704 case）、logoTMX worker（0x811933F0）与 TMX 容器解析（FUN_81174DBC），以确认 logo.bin→TGA→纹理上传链路**。改动：`batch_013.cpp` blk_81193718（[LOGO] state）、blk_81193738（case0/1 open logo.bin）、blk_811933F0（[TMX] worker arg）、blk_8119341E（[TMX] completion）；`batch_011.cpp` blk_81174DBC（[TMA] data/name/flags）。编译：batch_011/batch_013 exit 0；exe 重链 exit 0（57,059,576B，17:18:35）。验证运行：`out80m_m1100logoprobe.txt`（FORCETITLE + FIOSFILL + 新探针）已启动。NEXT：① [LOGO] state 序列（2→3→4→5…）② [TMA] 调用与返回值（TMX 容器解析）③ [TMX] completion（3 个任务是否完成）④ [TEXUPLOAD]/[TEXBIND] 纹理上传 → logoDrawProc 绘制。验证：`out80m_m1100logoprobe.txt`（生成中）、exe（57,059,576B）。 |
 | M1044 | §18.4589: **m1100 关键证据：S0_LOGO 状态机已从 state=0 推进到 state=3（logo.bin 成功解析、3 个 logoTMX 任务创建），logoTMX worker 真实运行 6 次，FUN_81174DBC（TMX 容器解析）以我们的 logo.bin 缓冲（99C67790）为输入处理 3 个 TGA 名称——但卡在 state=3：等 3 个 TGA 任务完成（FUN_8116f8d2 + task state==3），而纹理上传（[TEXUPLOAD] 0）尚未发生。M1044 为上传链（FUN_81174DBC→FUN_8116332A→FUN_81163FA4→FUN_811CA9F0/FUN_811CA6B6）加一排探针定位。** m1100 证据：
 | M1045 | §18.4590: **m1101 证据：TMX 上传链全部走通——FUN_81174DBC 在 logo.bin 中找到全部 3 个 TGA（arch->entry=99C677B8/99D67F40/99DE8384）、纹理对象创建（texobj=85B8771C/85C07C3C/85C07D1C）、GXM 纹理创建（FUN_811CA6B6）、上传调用（FUN_811CA9F0）全部执行；但 guest 的"上传完成"判定依赖纹理对象 +0x28 的 bit31（FUN_811CA9F0: `return ([tex+0x28] & 0x80000000) == 0`），我们的 HLE 从不清除该位 → worker 永远停在 state=2 → S0_LOGO 卡在 state=3。M1045 在 FUN_811CA9F0 处强制"上传完成"（清 bit31 并返回 1）**。m1101：
+| M1046 | §18.4591: **m1102 结果：强制上传完成生效（3 个 TGA 的 upload ret=1），但 [LOGO] 仍停在 state=3——不是单帧逻辑问题，而是主循环进入 app 显示管理器等待循环：`FUN_8128EA20` 每 1ms 休眠一次，等待 `[param+0xBC] != 1`（显示队列完成状态）；该状态由显示队列回调处理器 `FUN_8127B7C8`（队列 `DAT_8153FD64`，`DAT_8153FDA8` 控制）清除。即：title 代码在等"显示队列回调"完成，而我们的 HLE DisplayQueue 捕获路径可能绕过了 app 自己的队列登记，导致状态永不清除 → 主循环空转、S0_LOGO 不再被调度**。m1102 证据（`out80m_m1102tmxdone.txt`/err）：
+```
+[TMX] arch->entry=99C677B8/99D67F40/99DE8384   [TMX] texobj=85B8771C/85C07C3C/85C07D1C
+[TMX] upload begin tex=85B87730/85C07C50/85C07D30
+[TMX] upload-done forced tex=85B87730/85C07C50   [TMX] upload ret=00000001   ← ★ 强制生效
+[LOGO] #1 state=0 → case0/1 open logo.bin → [LOGO] #2 state=3   ← 之后不再被调用
+随后主循环自旋：[WD] pcring 8127B85C 8127B36A 8127B370 8127BB28 8127BE36 8127BE4E 812B2AE0 8127BE56
+  8127BB2E 8127B374 8127B860 81283C8A 8128EA78 8127C0E8 8127C0F4 812B2A80
+  hle_ring: 812B28A0@8120735C 812B2880@811732C2 812B2830@81207350（互斥锁/等待循环）
+```
+**自旋点反编译（`spin_ident.txt`/`gxm_wait.txt`）**：
+```c
+// FUN_8128EA20 —— app 显示管理器等待循环
+while (1) {
+  int st = (param_1 == 0) ? call(0x81279176,"E2008071730",-2) : *(int*)(param_1 + 0xBC);
+  if ((st == 2 || st == 3) && *(char*)(param_1 + 0xD9) != 0) st = 0;
+  *out = st;
+  if (st != 1) break;                 // 等 [param+0xBC] != 1
+  FUN_81283C84();                     // → FUN_8127B7C8：处理显示队列回调
+  FUN_8127C0E8(1);                    // → SceThreadmgr_9C0180E1(1000) = sceKernelDelayThread(1000us)
+}
+// FUN_8127B7C8 —— 显示队列回调处理器
+if (DAT_8153FD60 != 0) {
+  if (DAT_8153FDA8 == 0) { lock(DAT_816A0B64); 处理 DAT_8153FD64 的 8 个回调槽; FUN_81278C96(unlock); 执行回调; }
+  else FUN_8127B36A();
+}
+// FUN_8127C0E8(n) → 812B2A80(1000*n) = sceKernelDelayThread(us)
+// FUN_81207344 → 812B2830 = sceKernelLockLwMutex；FUN_811732AE → 812B2880 = SceLibKernel_83C0E2AF(r0,1,2,0,0) 等待
+```
+⇒ 主循环在等 **显示队列完成状态 `[+0xBC]`**，清除者应为显示队列回调（app 自己维护在 `DAT_8153FD64`，由 `DAT_8153FD60/FDA8` 开关）；我们的 HLE DisplayQueue 捕获路径（g_disp_pending/call_guest_cb）可能只执行回调而没有走 app 的回调队列登记，导致状态不清。
+NEXT：
+```
+① 在自旋循环 block（0x8128EA6E/0x8128EA78）加探针：打印 [param+0xBC] 状态、DAT_8153FD60/FDA8、DAT_8153FD64 队列项、param_1 地址
+② 检查 harness DisplayQueue 捕获（g_disp_pending）与 app 队列（DAT_8153FD64）的登记/执行路径差异
+③ 实验性强制：连续 N 帧 state==1 时把 [+0xBC] 置 0（或按 2/3 允许值）→ 让等待退出 → title 绘制继续
+④ 若显示队列回调确实被漏执行 → 在 HLE displayQueue stub 里同时把回调登记进 app 队列（按 guest 结构），或直接同步调用 app 的队列处理 FUN_8127B7C8
+```
+验证：`out80m_m1102tmxdone.txt`、`err80m_m1102tmxdone.txt`、`spin_ident.txt`、`gxm_wait.txt`。 |
+| §18.4591 | m1102 result: the forced upload-done worked (all 3 TGA uploads return 1) but [LOGO] still stays at state=3 - not a single-frame logic issue: the main loop enters the app display-manager wait loop FUN_8128EA20, which sleeps 1 ms per iteration waiting for [param+0xBC] != 1 (display-queue completion state); that state is cleared by the display-queue callback processor FUN_8127B7C8 (queue DAT_8153FD64, controlled by DAT_8153FDA8). So the title code is waiting for a display-queue callback completion while our HLE DisplayQueue capture path may bypass the app's own queue registration, so the state never clears -> main loop spins and the S0_LOGO job is no longer scheduled. m1102 evidence: [TMX] arch->entry=99C677B8/99D67F40/99DE8384; texobj=85B8771C/85C07C3C/85C07D1C; upload begin tex=85B87730/85C07C50/85C07D30; upload-done forced tex=85B87730/85C07C50; upload ret=00000001 (forced works); [LOGO] #1 state=0 -> case0/1 open logo.bin -> [LOGO] #2 state=3 (never called again); then the main loop spins (WD pcring 8127B85C 8127B36A 8127B370 8127BB28 8127BE36 8127BE4E 812B2AE0 8127BE56 8127BB2E 8127B374 8127B860 81283C8A 8128EA78 8127C0E8 8127C0F4 812B2A80; hle_ring 812B28A0@8120735C 812B2880@811732C2 812B2830@81207350). Spin-point decompiled (spin_ident.txt/gxm_wait.txt): FUN_8128EA20 loop: st = (param_1==0)? call(0x81279176,"E2008071730",-2) : *(int*)(param_1+0xBC); if ((st==2||st==3) && *(char*)(param_1+0xD9)) st=0; *out=st; if (st != 1) break; FUN_81283C84(); FUN_8127C0E8(1); - FUN_81283C84 -> FUN_8127B7C8 display-queue callback processor: if (DAT_8153FD60 != 0) { if (DAT_8153FDA8 == 0) { lock(DAT_816A0B64); process the 8 callback slots of DAT_8153FD64; unlock; run callbacks; } else FUN_8127B36A(); }; - FUN_8127C0E8(n) -> 812B2A80(1000*n) = sceKernelDelayThread(us); FUN_81207344 -> 812B2830 = sceKernelLockLwMutex; FUN_811732AE -> 812B2880 = SceLibKernel_83C0E2AF(r0,1,2,0,0) wait. So the main loop waits for display-queue completion state [+0xBC], cleared by the display-queue callback (app-maintained in DAT_8153FD64 with DAT_8153FD60/FDA8 switches); our HLE DisplayQueue capture path (g_disp_pending/call_guest_cb) may only run the callback without registering it in the app's queue, so the state never clears. NEXT: (1) probe the spin loop blocks (0x8128EA6E/0x8128EA78) printing [+0xBC] state, DAT_8153FD60/FDA8, DAT_8153FD64 queue entries, param_1; (2) compare the harness DisplayQueue capture (g_disp_pending) with the app queue (DAT_8153FD64) registration/execution; (3) experimental force: after N frames of state==1 set [+0xBC]=0 (or an allowed value 2/3) so the wait exits and title drawing continues; (4) if the display-queue callback is indeed skipped, register it into the app queue (per guest structure) in the HLE displayQueue stub, or directly call the app queue processor FUN_8127B7C8. |
 ```
 [TMX] arch->entry=99C677B8/99D67F40/99DE8384      ← ★ 3 个 TGA 全部在 logo.bin 中找到
 [TMX] gxm_tex_create r0=99C677B8 r1=00080312 r2=2
@@ -495936,3 +495975,41 @@ NEXT：
 ANTI-FORGETTING ENTRY. Keywords: M1045 m1101 proved the whole TMX upload chain works: FUN_81174DBC found all 3 TGAs in logo.bin (arch->entry=99C677B8/99D67F40/99DE8384), texture objects created (texobj=85B8771C/85C07C3C/85C07D1C), GXM texture create (FUN_811CA6B6) and upload (FUN_811CA9F0) executed, but the guest's upload-done test is bit31 of the texture object word at +0x28 (FUN_811CA9F0: return ([tex+0x28] & 0x80000000)==0) which our HLE never clears -> worker stuck at state=2 -> S0_LOGO stuck at state=3. M1045 forces upload-done in FUN_811CA9F0: { uint32_t _p=s->r[0]; if(_p){ uint32_t _v=rd32(s,_p+0x28u); wr32(s,_p+0x28u,_v&0x7FFFFFFFu); } fprintf(stderr,'[TMX] upload-done forced tex=%08X'); s->r[0]=1u; return s->r[14]; } (batch_015.cpp blk_811CA9F0). batch_015 compile exit 0; exe relink exit 0 (57,061,469B 17:58:43). Verification run out80m_m1102tmxdone.txt (FORCETITLE + FIOSFILL) started. NEXT: [LOGO] state=4 (case4 fade-in + SE) -> state=5 (69-frame counter); logoDrawProc draws (GXM draw -> [TEXBIND]/[BSIMG]/[PRESENT]); frames should show ATLUS logo under NOMOVIE; if black check the TGA->TMX->GXM texture data path.
 
 LOOKUP: M1045, TMX upload chain complete, arch->entry=99C677B8/99D67F40/99DE8384, texobj=85B8771C/85C07C3C/85C07D1C, gxm_tex_create r1=00080312, upload begin tex=85B87730/85C07C50/85C07D30, upload ret=0, FUN_811CA9F0 bit31 [tex+0x28], upload-done force, blk_811CA9F0 batch_015, [LOGO] state=3, exe 57,061,469B, out80m_m1102tmxdone.txt -> §18.4589 [relevant: upload chain probes], §18.4587 [relevant: logo.bin loaded]
+### 18.4591 PORT M1046: 强制上传完成生效，但主循环卡在显示队列等待（FUN_8128EA20）
+
+1) m1102：
+```
+[TMX] upload-done forced tex=85B87730/85C07C50   [TMX] upload ret=00000001   ← 强制生效
+[LOGO] #1 state=0 → case0/1 open logo.bin → [LOGO] #2 state=3   ← 之后不再被调用
+[WD] pcring 8127B85C 8127B36A 8127B370 8127BB28 8127BE36 8127BE4E 812B2AE0 8127BE56
+     8127BB2E 8127B374 8127B860 81283C8A 8128EA78 8127C0E8 8127C0F4 812B2A80
+hle_ring: 812B28A0@8120735C 812B2880@811732C2 812B2830@81207350
+```
+2) 自旋点（`spin_ident.txt`/`gxm_wait.txt`）：
+```c
+// FUN_8128EA20（app 显示管理器等待循环）
+while (1) {
+  int st = (param_1==0) ? call(0x81279176,"E2008071730",-2) : *(int*)(param_1 + 0xBC);
+  if ((st==2 || st==3) && *(char*)(param_1 + 0xD9) != 0) st = 0;
+  *out = st; if (st != 1) break;
+  FUN_81283C84();          // → FUN_8127B7C8 显示队列回调处理
+  FUN_8127C0E8(1);         // → sceKernelDelayThread(1000us)
+}
+// FUN_8127B7C8：if (DAT_8153FD60 != 0) { if (DAT_8153FDA8 == 0) { lock(DAT_816A0B64);
+//   处理 DAT_8153FD64 的 8 个回调槽; unlock; 执行回调; } else FUN_8127B36A(); }
+// FUN_8127C0E8(n) → 812B2A80(1000*n) = sceKernelDelayThread(us)
+// FUN_81207344 → 812B2830 = sceKernelLockLwMutex；FUN_811732AE → 812B2880 = SceLibKernel_83C0E2AF 等待
+```
+⇒ 主循环等 `[+0xBC]` 显示队列完成状态；清除者是 app 自己的回调队列（DAT_8153FD64），我们的 HLE DisplayQueue 捕获可能只执行回调、未登记 app 队列 → 状态不清 → title 代码不再被调度
+NEXT：
+```
+① 自旋循环探针（[+0xBC]、DAT_8153FD60/FDA8、DAT_8153FD64、param_1）
+② 对比 HLE DisplayQueue 捕获 vs app 队列登记路径
+③ 实验性强制：[+0xBC]=0 让等待退出
+④ 修复：HLE displayQueue stub 同步登记 app 队列 或 直接调用 FUN_8127B7C8
+```
+验证：`out80m_m1102tmxdone.txt`、`err80m_m1102tmxdone.txt`、`spin_ident.txt`、`gxm_wait.txt`。
+
+ANTI-FORGETTING ENTRY. Keywords: M1046 m1102 forced upload-done worked (3 TGA uploads return 1) but [LOGO] stays at state=3 because the main loop enters the app display-manager wait loop FUN_8128EA20, which sleeps 1 ms per iteration waiting for [param+0xBC] != 1 (display-queue completion state); that state is cleared by the display-queue callback processor FUN_8127B7C8 (queue DAT_8153FD64 controlled by DAT_8153FDA8). So the title code waits for a display-queue callback while our HLE DisplayQueue capture path may bypass the app's own queue registration -> state never clears -> main loop spins and the S0_LOGO job is not scheduled. m1102: [TMX] arch->entry=99C677B8/99D67F40/99DE8384; texobj=85B8771C/85C07C3C/85C07D1C; upload-done forced tex=85B87730/85C07C50; upload ret=00000001; [LOGO] #1 state=0 -> case0/1 open logo.bin -> [LOGO] #2 state=3; WD pcring 8127B85C 8127B36A 8127B370 8127BB28 8127BE36 8127BE4E 812B2AE0 8127BE56 8127BB2E 8127B374 8127B860 81283C8A 8128EA78 8127C0E8 8127C0F4 812B2A80; hle_ring 812B28A0@8120735C 812B2880@811732C2 812B2830@81207350. Spin decompiled: FUN_8128EA20 while(1){ st=(param_1==0)?call(0x81279176,"E2008071730",-2):*(int*)(param_1+0xBC); if((st==2||st==3)&&*(char*)(param_1+0xD9)) st=0; *out=st; if(st!=1) break; FUN_81283C84(); FUN_8127C0E8(1);} FUN_81283C84 -> FUN_8127B7C8: if(DAT_8153FD60!=0){ if(DAT_8153FDA8==0){ lock(DAT_816A0B64); process 8 callback slots of DAT_8153FD64; unlock; run callbacks; } else FUN_8127B36A(); } FUN_8127C0E8(n) -> 812B2A80(1000*n)=sceKernelDelayThread(us); FUN_81207344 -> 812B2830=sceKernelLockLwMutex; FUN_811732AE -> 812B2880=SceLibKernel_83C0E2AF(r0,1,2,0,0). NEXT: probe spin loop blocks (0x8128EA6E/0x8128EA78) printing [+0xBC], DAT_8153FD60/FDA8, DAT_8153FD64 queue, param_1; compare HLE DisplayQueue capture vs app queue; experimental force [+0xBC]=0; fix by registering the callback into the app queue in the HLE displayQueue stub or calling FUN_8127B7C8 directly.
+
+LOOKUP: M1046, forced upload works ret=1, [LOGO] state=3, main loop spin FUN_8128EA20, [param+0xBC] state, FUN_8127B7C8 display queue processor, DAT_8153FD64 queue, DAT_8153FD60, DAT_8153FDA8, FUN_81283C84, FUN_8127C0E8 -> sceKernelDelayThread, 812B2A80, FUN_81207344 sceKernelLockLwMutex, 812B2830, 812B2880 SceLibKernel_83C0E2AF, 812B28A0, WD pcring 8127B85C/81283C8A/8128EA78, out80m_m1102tmxdone.txt, spin_ident.txt, gxm_wait.txt -> §18.4590 [relevant: upload force], §18.4589 [relevant: upload chain]
