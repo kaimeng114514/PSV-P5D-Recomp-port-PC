@@ -1087,6 +1087,40 @@
 | M1069 | §18.4614: ★★★★★★★★★★ **worker 线程确认执行了 gfd 帧提交描述符（[GSUBMIT] tid=40016000 r1=811F3495；[GPUPREP2] tid=40016000 进入 FUN_811EBB90），并反汇编解码了 FUN_811F3494 的两道提交门控——门控显示 array2（DAT_816CC6CC）绘制列表为空，因为 2D sprite 批处理渲染器 FUN_811ADAFE 从未运行。**
 | M1070 | §18.4615: ★★★★★★★★★★ **m1116 把门控原因再推进一层：gfd 帧提交入口实测 `frame=0 a2=850FD960 g730=0x03000000`，array2 bucket0/1 链表头全 0（b0op/b0tr/b1op/b1tr=0）——两道门控都跳过；而 2D 场景调度器 `FUN_811C2964` 确实每帧被主线程调用（120 次，r0=859BF220/859BF940 两个场景对象），但它没有到达 FUN_811B6B12/FUN_811ADAFE——场景条目列表（param_1[0xF]）为空或条目全被禁用。**
 | M1071 | §18.4616: ★★★★★★★★★★ **m1117 铁证：两个场景对象（859BF220/859BF940）每帧被检查，`st=1, head0F=0, head19=0`——2D 条目链完全为空；且在 arm 后没有任何对 scene+0x3C 的写入（[SCW]=0）。同时反编译出场景帧驱动与场景/视图注册器。**
+| M1072 | §18.4617: ★★★★★★★★★★ **m1118 定位到"场景已注册、但 2D 视图从未注册"：`FUN_811C2A4C`（场景/视图注册器）**从未被调用**（[SCREATE]# = 0）；场景对象 859BF220/859BF940 是由场景注册 API `FUN_811BF900(index, scene)` 写入 `(&DAT_816CC664)[index]` 的（该 API 还调用 FUN_811C3438(scene) 初始化、*scene=index；替换旧场景时调用 FUN_811C222E）。**
+m1118（P5D_PUMPMAIN=1，n=64.3M，exit 0）：
+```
+[SCREATE] #0    ← ★ FUN_811C2A4C（视图注册器）从未被调用
+[VCNT] 120：FUN_811DED54 从 FUN_811C6C54 区域调用（r0=84B54460 视图/上下文管理器，r9=3/2/1/0 索引）
+[SCENE] 120：p=859BF220/859BF940 st=1 head0F=0 head19=0 cnt=0   ← 场景存在，2D 条目链空
+[C2964] 120  [B6B12]=0 [ADA]=0 [SCW]=0
+[GSUBX] frame=0 a2=850FD960 g730=03000000 b0op=b0tr=b1op=b1tr=0
+[BADMEM]=0
+```
+**场景注册 API（`scenereg_api.txt`）**：
+```c
+void FUN_811bf900(int index, int *scene) {          // ★ 场景注册
+  if ((&DAT_816CC664)[index] != 0) FUN_811c222e();  // 注销旧场景
+  (&DAT_816CC664)[index] = scene;                   // 写入全局场景表
+  if (scene != 0) { FUN_811c3438(scene); *scene = index; }   // 场景初始化/挂接 + 记录 index
+}
+undefined4 FUN_811bf928(int index) { return (&DAT_816CC664)[index]; }        // 取场景
+undefined4 FUN_811bf938(int index) { … FUN_811c340e(); }                    // 场景查询 1
+undefined4 FUN_811bf954(int index) { … FUN_811c3412(); }                    // 场景查询 2
+```
+xrefs：`0x816CC664/0x816CC668` 的写者就是 FUN_811BF900/FUN_811BF928/938/954（后三个是 getter/查询）；读访问来自 FUN_81199FDA/FUN_8119934A/FUN_81199F7A（GFD 帧驱动）。
+**⇒ 结论：两个场景对象（859BF220/859BF940）已在启动期通过 FUN_811BF900 注册进全局场景表，但它们的"2D 视图条目链（scene+0x3C / +0x64）"从未被填充——因为填充者 FUN_811C2A4C 从未被调用（既非直接调用也非函数表进入）。** 游戏在 title 阶段的 2D 绘制（logo）没有走"创建视图"的路径，或该路径被某条件/HLE 返回值挡住。
+NEXT：
+```
+① 探针：FUN_811BF900（[SREG]）—— 场景注册时刻/参数（index、scene 指针、调用者 lr）
+② 反编译 FUN_811C3438（场景初始化/挂接）与 FUN_811C222E（注销），看它们是否应创建 2D 视图
+③ 找"视图添加" API：向 scene+0x3C / scene+0x64 写链的函数（FUN_811C2A4C 的调用者；无 xref → 函数表/间接调用：
+   检查 0x813E15AC 函数表与 appGx 场景 API 表）
+④ 检查 appGx 2D sprite 绘制路径（FUN_81163ABC/FUN_811ADAFE 上游）是否本应创建视图
+⑤ 一旦视图条目注册（head0F 非空）→ FUN_811C2964 → FUN_811B6B12 → FUN_811ADAFE → array2 → GXM → 画面
+```
+验证：`out80m_m1118screate.txt`、`scenereg_api.txt`、`scenep_refs.txt`、`scene_cb.txt`、`scenerange.txt`。 |
+| §18.4617 | m1118 pinpoints 'scenes registered but 2D views never registered': FUN_811C2A4C (scene/view registration) is NEVER called ([SCREATE]# = 0); the scene objects 859BF220/859BF940 were written into (&DAT_816CC664)[index] by the scene registration API FUN_811BF900(index, scene) (which also calls FUN_811C3438(scene) init and sets *scene=index; on replacing an old scene it calls FUN_811C222E). m1118 (P5D_PUMPMAIN=1, n=64.3M, exit 0): [SCREATE] #0 (FUN_811C2A4C never called); [VCNT] 120 (FUN_811DED54 called from the FUN_811C6C54 region, r0=84B54460 view/context manager, r9=3/2/1/0 index); [SCENE] 120: p=859BF220/859BF940 st=1 head0F=0 head19=0 cnt=0 (scenes exist, 2D entry lists empty); [C2964] 120 [B6B12]=0 [ADA]=0 [SCW]=0; [GSUBX] frame=0 a2=850FD960 g730=03000000 b0op=b0tr=b1op=b1tr=0; [BADMEM]=0. Scene registration API (scenereg_api.txt): void FUN_811bf900(int index, int *scene) { if ((&DAT_816CC664)[index] != 0) FUN_811c222e(); (&DAT_816CC664)[index] = scene; if (scene != 0) { FUN_811c3438(scene); *scene = index; } } plus getters FUN_811bf928(index) returns (&DAT_816CC664)[index], FUN_811bf938/811bf954 (query via FUN_811c340e/FUN_811c3412). xrefs: writers of 0x816CC664/0x816CC668 are FUN_811BF900/928/938/954; readers FUN_81199FDA/FUN_8119934A/FUN_81199F7A (GFD frame drivers). So both scene objects were registered at startup through FUN_811BF900, but their 2D view entry lists (scene+0x3C / +0x64) were never filled because the filler FUN_811C2A4C is never called (neither directly nor via a function table). The game's title-phase 2D drawing (logo) did not take the 'create view' path, or that path is gated by a condition/HLE return value. NEXT: (1) probe FUN_811BF900 ([SREG]) for registration time/args (index, scene ptr, caller lr); (2) decompile FUN_811C3438 (scene init/attach) and FUN_811C222E (unregister) to see whether they should create 2D views; (3) find the 'add view' API writing scene+0x3C/scene+0x64 chains (callers of FUN_811C2A4C; no xref -> indirect/function table: inspect the 0x813E15AC table and the appGx scene API table); (4) check whether the appGx 2D sprite draw path (upstream of FUN_81163ABC/FUN_811ADAFE) should create views; (5) once view entries are registered (head0F non-empty) -> FUN_811C2964 -> FUN_811B6B12 -> FUN_811ADAFE -> array2 -> GXM -> picture. |
 m1117（P5D_PUMPMAIN=1，n=64.3M，exit 0）：
 ```
 [SCENE] #1 tid=00000000 p=859BF220 st=00000001 head0F=00000000 head19=00000000 cnt=0
@@ -497732,3 +497766,38 @@ NEXT：
 ANTI-FORGETTING ENTRY. Keywords: M1071 m1117: scene objects 859BF220/859BF940 checked every frame with st=1 head0F=0 head19=0 (2D entry lists empty); [SCW]=0 means nothing ever writes scene+0x3C after arming (never registered). Scene frame driver FUN_81199FDA (pre-GFD callback 0x81199FDB): puVar1=&DAT_816cc630; do { if (puVar1[0xD]!=0) FUN_811c2964((undefined4*)puVar1[0xD]); ++; ++; } while (<2); DAT_816cd950=0; ...; FUN_812072dc(&DAT_816CC730 + DAT_816CC700*4, 0x3000000) -> explains g730=0x03000000 (bit0=0 so gate2 skips GPU submit). Scene/view registration FUN_811C2A4C (998B): piVar1=FUN_811da534(0x100); FUN_811e6a40(piVar1,0xCC); local_38=FUN_811ded54(param_1); if((local_38&1)!=0){ iVar2=FUN_811bcb2e(local_40); ...} local_3c=FUN_811ded54(local_40) (view count); if(local_3c!=0){ do { piVar3=FUN_811da55c(0x50); FUN_811e6a40(piVar3,0x50); piVar3[0x13]=-0x80000000 (bit31 initial disabled); piVar3[0xB]=0xF00001; for 3: *(char*)(piVar3+0xC+i)=i; ...bind GPU resource FUN_811bd60a/FUN_811b595a..., FUN_811bd66a(puVar7); piVar3[0xF]=0; iVar2=local_34[0xB]; if(iVar2==0){local_34[0xC]=piVar3; piVar3[0x10]=0;} else {piVar3[0x10]=iVar2; *(int**)(iVar2+0x3C)=piVar3;} local_34[0xB]=piVar3; } while(++local_30<local_3c); }. FUN_811C2A4C has no direct xref (indirect/function table). So scene created by FUN_811C2A4C (0x100 + 0x50 nodes), registration driven by FUN_811DED54 view count; zero -> no entries (matches [SCENE]). NEXT: probe FUN_811C2A4C ([SCREATE]) and FUN_811DED54 return (view count); find scene creation site (0x859BF220 allocation); why FUN_811DED54 returns 0 (state/HLE value); make scene creation+view registration happen -> head0F non-empty; then FUN_811C2964 -> FUN_811B6B12 -> FUN_811ADAFE -> array2 -> FUN_811C0654=0 -> FUN_811EC172 -> SceGxm_* -> picture.
 
 LOOKUP: M1071, [SCENE] p=859BF220/859BF940 st=1 head0F=0 head19=0 cnt=0, [SCW]=0 never writes scene+0x3C, scene frame driver FUN_81199FDA pre-GFD callback 0x81199FDB loops DAT_816CC630[0xD]/[0xE] calls FUN_811C2964, FUN_812072dc(&DAT_816CC730[frame],0x3000000) explains g730=0x03000000, FUN_811C2A4C scene/view registration 998B, FUN_811da534(0x100), FUN_811ded54 view count, 0x50 view nodes with [0x13]=0x80000000 [0xB]=0xF00001 material slots [0xC..], list next +0x10 prev +0x3C, FUN_811bd60a/FUN_811b595a GPU resource bind, FUN_811C2A4C no xref indirect table, out80m_m1117scene.txt, scene_cb.txt, scenerange.txt -> §18.4615 [relevant: scene entries empty], §18.4614 [relevant: submit gates], §18.4608 [relevant: walkers]
+### 18.4617 PORT M1072: 场景已注册但 2D 视图从未注册（FUN_811C2A4C 从未调用）
+
+1) m1118（n=64.3M，exit 0）：
+```
+[SCREATE] #0     ← FUN_811C2A4C 从未被调用
+[VCNT] 120：FUN_811DED54 从 FUN_811C6C54 区域调用（r0=84B54460，r9=3/2/1/0）
+[SCENE] 120：p=859BF220/859BF940 st=1 head0F=0 head19=0 cnt=0
+[C2964]=120 [B6B12]=0 [ADA]=0 [SCW]=0
+[GSUBX] frame=0 a2=850FD960 g730=03000000 b0*=0
+```
+2) 场景注册 API（`scenereg_api.txt`）：
+```c
+void FUN_811bf900(int index, int *scene) {
+  if ((&DAT_816CC664)[index] != 0) FUN_811c222e();
+  (&DAT_816CC664)[index] = scene;
+  if (scene != 0) { FUN_811c3438(scene); *scene = index; } }
+undefined4 FUN_811bf928(int index) { return (&DAT_816CC664)[index]; }
+undefined4 FUN_811bf938(int index) { … FUN_811c340e(); }
+undefined4 FUN_811bf954(int index) { … FUN_811c3412(); }
+```
+xrefs：写者 FUN_811BF900/928/938/954；读者 FUN_81199FDA/FUN_8119934A/FUN_81199F7A（GFD 帧驱动）
+3) 结论：场景对象已在启动期注册；2D 视图条目链（scene+0x3C/+0x64）从未填充，填充者 FUN_811C2A4C 从未被调用
+NEXT：
+```
+① [SREG] 探针：FUN_811BF900 的 index/scene/lr
+② 反编译 FUN_811C3438/FUN_811C222E（场景初始化/注销）
+③ 找"视图添加"API（写 scene+0x3C/+0x64 链的函数；FUN_811C2A4C 无 xref → 函数表）
+④ 检查 appGx 2D sprite 路径是否本应创建视图
+⑤ 视图注册后 → FUN_811C2964 → FUN_811B6B12 → FUN_811ADAFE → array2 → GXM → 画面
+```
+验证：`out80m_m1118screate.txt`、`scenereg_api.txt`、`scenep_refs.txt`。
+
+ANTI-FORGETTING ENTRY. Keywords: M1072 m1118: scenes registered but 2D views never registered. FUN_811C2A4C never called ([SCREATE]#=0). Scene registration API FUN_811BF900(index, scene): if ((&DAT_816CC664)[index]!=0) FUN_811c222e(); (&DAT_816CC664)[index]=scene; if (scene!=0){ FUN_811c3438(scene); *scene=index; } plus getters FUN_811bf928(index)=(&DAT_816CC664)[index], FUN_811bf938/954 via FUN_811c340e/FUN_811c3412. Writers of 0x816CC664/0x816CC668 = FUN_811BF900/928/938/954; readers FUN_81199FDA/FUN_8119934A/FUN_81199F7A. Scene objects 859BF220/859BF940 exist (st=1) but head0F=0/head19=0 and [SCW]=0 (scene+0x3C never written). [VCNT] FUN_811DED54 called from FUN_811C6C54 region with r0=84B54460, r9=3/2/1/0 (not scene registration). m1118 also [C2964]=120, [B6B12]=0 [ADA]=0, [GSUBX] frame=0 a2=850FD960 g730=03000000 b0op=b0tr=b1op=b1tr=0, [BADMEM]=0. NEXT: probe FUN_811BF900 ([SREG]) index/scene/lr; decompile FUN_811C3438 (scene init) and FUN_811C222E (unregister); find the add-view API writing scene+0x3C/scene+0x64 (callers of FUN_811C2A4C; no xref so indirect/function table - inspect 0x813E15AC and appGx scene API table); check whether appGx 2D sprite draw path upstream of FUN_81163ABC/FUN_811ADAFE should create views; once views registered head0F non-empty -> FUN_811C2964 -> FUN_811B6B12 -> FUN_811ADAFE -> array2 -> GXM -> picture.
+
+LOOKUP: M1072, [SCREATE]#=0 FUN_811C2A4C never called, scene registration FUN_811BF900 index scene (&DAT_816CC664)[index], FUN_811C3438 scene init, *scene=index, FUN_811C222E unregister, getters FUN_811BF928/938/954 FUN_811C340E/FUN_811C3412, globals 0x816CC664/0x816CC668, [VCNT] FUN_811DED54 from FUN_811C6C54 region r0=84B54460 r9=3/2/1/0, [SCENE] p=859BF220/859BF940 st=1 head0F=0 head19=0, [SCW]=0, [GSUBX] g730=03000000, out80m_m1118screate.txt, scenereg_api.txt, scenep_refs.txt -> §18.4616 [relevant: scene lists empty], §18.4615 [relevant: 2D dispatcher], §18.4614 [relevant: submit gates]
