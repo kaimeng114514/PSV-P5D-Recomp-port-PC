@@ -1058,6 +1058,7 @@
 | M1040 | §18.4585: **实现"FIOS 同步完成"探针（P5D_FIOSFILL=1）：在应用层文件包装函数 `FUN_8115FBE6/FC0E/FC28/FC20` 入口直接由 HLE 从 CPK 提供文件数据，绕开未被调度的 guest 请求队列消费者——目标：让 S0_LOGO 加载 `title/logo.bin` + 3 个 TGA 并进入绘制**。实现：
 | M1041 | §18.4586: **m1098 证据表明 FIOSFILL 已生效（第一笔：`app_system/font/c_font_p5.fnt` size=1,167,652 成功直填！），但 fake handle 是小整数导致 guest 直接把它当指针解引用 → BADMEM va=5 @0x81181CBE。M1041 改为返回完整 guest 请求对象（对象内含 [obj+4]=0xC/[obj+0xA0]=0/[obj+0x88]=size/[obj+0x94]=buf/[obj+0]=0），让 guest 自己的完成/取数据函数可以正常读取**。m1098：
 | M1042 | §18.4587: ★★★★★★★★★★ **重大突破：FIOSFILL 完整请求对象生效——`title/logo.bin`（2,101,012 字节）成功提供给 S0_LOGO 加载器，3 个 `logoTMX` 任务全部注册，且 logoTMX worker（wf=0x811933F1）真实执行；引擎开始渲染 960x544 场景（BSIMG doClear=1）且无任何 BADMEM**。m1099 证据：
+| M1043 | §18.4588: **为下一阶段加 [LOGO]/[TMX]/[TMA] 探针：追踪 S0_LOGO 状态机（FUN_81193704 case）、logoTMX worker（0x811933F0）与 TMX 容器解析（FUN_81174DBC），以确认 logo.bin→TGA→纹理上传链路**。改动：`batch_013.cpp` blk_81193718（[LOGO] state）、blk_81193738（case0/1 open logo.bin）、blk_811933F0（[TMX] worker arg）、blk_8119341E（[TMX] completion）；`batch_011.cpp` blk_81174DBC（[TMA] data/name/flags）。编译：batch_011/batch_013 exit 0；exe 重链 exit 0（57,059,576B，17:18:35）。验证运行：`out80m_m1100logoprobe.txt`（FORCETITLE + FIOSFILL + 新探针）已启动。NEXT：① [LOGO] state 序列（2→3→4→5…）② [TMA] 调用与返回值（TMX 容器解析）③ [TMX] completion（3 个任务是否完成）④ [TEXUPLOAD]/[TEXBIND] 纹理上传 → logoDrawProc 绘制。验证：`out80m_m1100logoprobe.txt`（生成中）、exe（57,059,576B）。 |
 ```
 [FIOSFILL] OPEN 'app_system/font/c_font_p5.fnt' size=1167652 -> obj=85B1E6D0
 [FIOSFILL] OPEN 'app_system/font/font_staff.fnt' size=28176  -> obj=85B312D0
@@ -495780,3 +495781,26 @@ NEXT：
 ANTI-FORGETTING ENTRY. Keywords: M1042 MAJOR BREAKTHROUGH - full-request-object FIOSFILL works: title/logo.bin (2,101,012 bytes) served to the S0_LOGO loader, 3 logoTMX tasks registered, logoTMX worker (wf=0x811933F1) really executed, engine began rendering a 960x544 scene (BSIMG doClear=1), zero BADMEM. m1099: [FIOSFILL] OPEN 'app_system/font/c_font_p5.fnt' size=1167652 -> obj=85B1E6D0; font_staff.fnt 28176 -> 85B312D0; font.ctbl 22024 -> 85B426D0; 'title/logo.bin' size=2101012 -> obj=85B875D0; [PROCREG] #13 logoDrawProc cb0=85B8754C; #14 logoTMX cb0=99C677B8 cb1=85B876EC; #15 logoTMX cb0=99D67F40 cb1=85C07C0C; #16 logoTMX cb0=99DE8384 cb1=85C07CEC; [WFDBG] #43 ctx=84618260 node=85B8759C wf=81193705; #44 ctx=846182D0 node=85B8777C wf=811933F1; #45 ctx=84618420 node=85C88B2C wf=811848B7; [TRRET] #15 job=84618420 ret=-1 node=85C88B2C wf=811848B7; [TEXBIND] #0 real=1 alias=0 dummy=15 u0=tex256x512; [BSIMG] cd=8D300000 960x544 doClear=1; [ABIRT] disp=1 rc=0; [PRESENT] #1 VK_SUCCESS; [BADMEM] 0; [DRIVIN] #4 task=85B8474C state=1 step=1; [DRVA6] r0=8118484F r1=811848FD step=1; run continues past n≈60.2M. Chain connected: file request -> logo.bin -> 3 TGA tasks -> logoTMX worker -> engine frame start. To confirm: logoTMX worker internals FUN_81174DBC (TMX container parse) success, TGA texture upload ([TEXUPLOAD] still 0), FUN_81193704 case3->4 (needs [LOGO] probe), and the 3 tasks completing (FUN_8116f8d2 + task state==3). NEXT: add [LOGO] probes to the FUN_81193704 state machine in batch_013; add [TMX] probes to worker 0x811933F1 and FUN_81174DBC; check task completion; if TMX parse/upload fails implement the GXM texture HLE or simplify FUN_8119343A.
 
 LOOKUP: M1042, FIOSFILL full request object works, title/logo.bin 2101012 obj=85B875D0, font c_font_p5.fnt 1167652 font_staff.fnt 28176 font.ctbl 22024, PROCREG #13 logoDrawProc #14-16 logoTMX cb0=99C677B8/99D67F40/99DE8384 cb1=85B876EC/85C07C0C/85C07CEC, WFDBG #43 wf=81193705 #44 wf=811933F1 #45 wf=811848B7, TEXBIND real=1 u0=tex256x512, BSIMG 960x544 doClear=1, TRRET #15 ret=-1, BADMEM 0, DRIVIN #4 state=1 step=1, out80m_m1099fiosobj.txt -> §18.4586 [relevant: FIOSFILL object fix], §18.4585 [relevant: FIOSFILL], §18.4582 [relevant: S0 logo job]
+### 18.4588 PORT M1043: S0_LOGO/TMX 追踪探针
+
+1) 新增探针：
+- `batch_013.cpp` blk_81193718 → `[LOGO] state=%X task=%08X`（S0 logo 状态机 case）
+- `batch_013.cpp` blk_81193738 → `[LOGO] case0/1 open logo.bin`
+- `batch_013.cpp` blk_811933F0 → `[TMX] worker arg`（logoTMX worker 入口）
+- `batch_013.cpp` blk_8119341E → `[TMX] completion node`（logoTMX 完成回调）
+- `batch_011.cpp` blk_81174DBC → `[TMA] FUN_81174DBC data/name/flags`（TMX 容器解析）
+2) 编译：batch_011/batch_013 exit 0；exe 57,059,576B（17:18:35）
+3) 验证运行 `out80m_m1100logoprobe.txt` 已启动
+NEXT：
+```
+① [LOGO] state 序列 2→3→4→5…
+② [TMA] 调用与返回（TMX 容器解析）
+③ [TMX] completion（3 任务完成）
+④ [TEXUPLOAD]/[TEXBIND] → logoDrawProc 绘制
+```
+验证：`out80m_m1100logoprobe.txt`（生成中）。
+
+ANTI-FORGETTING ENTRY. Keywords: M1043 added [LOGO]/[TMX]/[TMA] probes to trace the S0_LOGO state machine (FUN_81193704 case), logoTMX worker 0x811933F0 and TMX container parse FUN_81174DBC. batch_013.cpp blk_81193718 [LOGO] state, blk_81193738 case0/1 open logo.bin, blk_811933F0 [TMX] worker arg, blk_8119341E [TMX] completion; batch_011.cpp blk_81174DBC [TMA] data/name/flags. batch_011/batch_013 compile exit 0; exe relink exit 0 (57,059,576B 17:18:35). Verification run out80m_m1100logoprobe.txt (FORCETITLE + FIOSFILL + new probes) started. NEXT: [LOGO] state sequence 2->3->4->5; [TMA] calls and returns (TMX container parse); [TMX] completion (3 tasks); [TEXUPLOAD]/[TEXBIND] texture upload -> logoDrawProc drawing.
+
+LOOKUP: M1043, [LOGO] probe blk_81193718, blk_81193738, [TMX] probe blk_811933F0, blk_8119341E, [TMA] probe blk_81174DBC batch_011, FUN_81193704 state machine, logoTMX worker 0x811933F0, FUN_81174DBC TMX container, exe 57,059,576B, out80m_m1100logoprobe.txt -> §18.4587 [relevant: logo.bin loaded], §18.4582 [relevant: S0 logo job]
+
