@@ -1042,6 +1042,37 @@
 | M1024 | §18.4569: ★★★★★★★★ **真实 init 链启动成功！M1023 移除 page1 提前结束强制后，trophy/sound/initDataRead worker 全部真实被调度（WFDBG #49 `node=85B8861C wf=811848B7` = init-sound worker 首次调度！），运行突破 n=60.1M 且无 BADMEM**。`out80m_m1087realinit.txt` / err：
 | M1025 | §18.4570: **真实 init 链卡在 step0 trophy：反编译发现每个 init worker 都是「state 0→1 调初始化函数 + 每次调完成检查函数，检查非 0 → return -1」；STEPFORCE 缺 trophy 的检查 block（0x8118482C `cmp r0,#0` 后 beq pending），已补强制 r0=1**。反编译证据（`initsteps2.txt`）：
 | M1026 | §18.4571: **发现 STEPFORCE 对 init worker 无效的原因：init worker 经 nested runner 执行，不经过 job_probes → 把 18 个 init 完成检查 block 的强制从 harness 探针移到 batch_012 的 AOT block 内**。证据（m1088，trophy 检查已加 STEPFORCE）：
+| M1027 | §18.4572: **init 链仍不推进的下一层原因分析：`FUN_8116F748` 丢弃 worker 返回值（`(*(code*)*param_1)();` 不取返回值）；completion 由 job[8] countdown（200 帧）到期触发；worker 只有返回 -1 才会立即完成。batch 级检查强制已加但 JOBCOMP 仍 1 ⇒ 怀疑 trophy worker 卡在 state0 的初始化调用（`FUN_8102d53c`）而非检查 block。已加 EXECRET/TPATH 探针验证执行路径**。m1089（batch_012 18 个检查强制后）结果：
+```
+[FRAMEDUMP] n=60445000（运行继续，无崩溃）
+[JOBCOMP] 1（仍只有 #1）  [SEQREQ] 8（无 page=6）  [BADMEM] 0
+[WFDBG] 53 条：trophy #18 85B86A1C wf=81184809 只出现 1 次；sound #49 85B8861C wf=811848B7 1 次
+[PRESENT] 1（VK_ERROR_OUT_OF_DATE_KHR，运行中交换链状态）
+```
+**反编译澄清（`exec748.txt`/`jobmgr2.txt`）**：
+```c
+// FUN_8116FA5C = trampoline(ctx): FUN_8116f748(*(u32*)(ctx+0x34));   // 返回 void
+// FUN_8116F748(node): DAT_815554C0=node; (*(code*)*node)();           // ★ worker 返回值被丢弃
+//                     DAT_815554C0=0; return;
+// FUN_811DB020 = process 管理器：running 列表 job[8]-- 每帧递减，到 0 → 移入 ready 列表 *job=2
+//                ready 列表执行 job[10]（trampoline）；若返回 -1 → FUN_811dad8c(job) → completion(job[1])
+```
+⇒ worker 的 -1 只有经 trampoline 返回才能触发完成；但 **FUN_8116F748 丢弃 worker 返回值**（返回 void，r0 实际=worker 返回值所以仍可能透传）；更可疑的是 worker **卡在初始化调用**（未走到检查 block）。
+**M1027 探针（已编入 exe 57,050,520B，13:33:15）**：
+```
+batch_011 blk_8116FA64（trampoline 调用返回后）→ [EXECRET] r0=...
+batch_012 blk_81184820/28/2C/30（trophy 检查路径）→ [TPATH820/828/82C/830] lr=... r0=...
+```
+诊断运行：`out80m_m1090execpath.txt` 已启动。
+NEXT：
+```
+① [EXECRET]：trampoline 返回的实际值（-1 还是 0）
+② [TPATH82C]：trophy 检查 block 是否被执行（若没有 → 卡在 FUN_8102d53c 初始化）
+③ 若卡在 FUN_8102d53c → 反编译它，看依赖的 HLE（trophy 相关）
+④ 修复后 JOBCOMP 递增 → page1 结束 → page6 → title
+```
+验证：`out80m_m1089batchstepforce.txt`、`exec748.txt`、`jobmgr2.txt`、`recomp_harness.exe`（57,050,520B）、`out80m_m1090execpath.txt`（生成中）。 |
+| §18.4572 | Next-layer analysis of why the init chain still does not advance: FUN_8116F748 discards the worker return value ((*(code*)*param_1)(); no return use); completion is triggered when the job[8] countdown (200 frames) expires; a worker only completes immediately if it returns -1. The batch-level check forcing is in place but JOBCOMP is still 1 => suspect the trophy worker is stuck in its state0 init call (FUN_8102d53c) before reaching the check block. Added EXECRET/TPATH probes to verify the execution path. m1089 (after the 18 batch_012 check forces): [FRAMEDUMP] n=60445000 (run continues, no crash); [JOBCOMP] 1 (still only #1); [SEQREQ] 8 (no page=6); [BADMEM] 0; [WFDBG] 53 lines: trophy #18 85B86A1C wf=81184809 appears once; sound #49 85B8861C wf=811848B7 once; [PRESENT] 1 (VK_ERROR_OUT_OF_DATE_KHR mid-run swapchain state). Decompilation clarification (exec748.txt/jobmgr2.txt): FUN_8116FA5C = trampoline(ctx): FUN_8116f748(*(u32*)(ctx+0x34)); returns void. FUN_8116F748(node): DAT_815554C0=node; (*(code*)*node)(); DAT_815554C0=0; return; - the worker return value is discarded. FUN_811DB020 = process manager: running list job[8]-- decremented each frame, at 0 moved to the ready list with *job=2; ready list executes job[10] (trampoline); if it returns -1 -> FUN_811dad8c(job) -> completion(job[1]). So the worker's -1 only triggers completion if it propagates through the trampoline; but FUN_8116F748 discards the return (returns void; r0 actually still holds the worker return so it may propagate); more likely the worker is stuck in the init call before reaching the check block. M1027 probes (exe 57,050,520B 13:33:15): batch_011 blk_8116FA64 (after the trampoline call returns) -> [EXECRET] r0=...; batch_012 blk_81184820/28/2C/30 (trophy check path) -> [TPATH820/828/82C/830] lr=... r0=... Diagnostic run out80m_m1090execpath.txt started. NEXT: [EXECRET] the actual trampoline return value (-1 or 0); [TPATH82C] whether the trophy check block executes (if not, stuck in FUN_8102d53c); if stuck, decompile FUN_8102d53c for its HLE dependencies; after the fix JOBCOMP grows -> page1 ends -> page6 -> title. |
 ```
 [WFDBG] #18 ctx=84618110 node=85B86A1C wf=81184809   ← trophy worker 被调度（1 次）
 [WFDBG] #49 ctx=846181F0 node=85B8861C wf=811848B7   ← sound worker 被调度（1 次）
@@ -494664,3 +494695,37 @@ NEXT：
 ANTI-FORGETTING ENTRY. Keywords: M1026 found why STEPFORCE had no effect on init workers - they run through the nested runner and do not pass through job_probes (same blind spot as the M1018 TTPROBE discovery), so the forcing of 18 init completion-check blocks was moved from the harness probe into the AOT blocks in batch_012. Evidence m1088: [WFDBG] #18 ctx=84618110 node=85B86A1C wf=81184809 (trophy worker scheduled); #49 ctx=846181F0 node=85B8861C wf=811848B7 (sound worker scheduled); [JOBCOMP] 1; [SEQREQ] 8 (no page=6); [BADMEM] 0. M1026 batch-level forces in batch_012.cpp: 8118482C=1 (trophy FUN_8102d544); 811848DA=1 (sound FUN_8115487a); 811849A4/AC/B4/BC/C4/CC/D4/E0=1 (gamedata 7 checks); 81184AA8=1 (msgwindow FUN_81031904); 81184B6C=0 (mainmenu FUN_810e865c), 81184B74/7C/88/90/98=1; 81184D1A=1 (step5 FUN_81049a76). batch_012 compile exit 0; exe relink exit 0 (57,049,241B 12:57:25). Verification run out80m_m1089batchstepforce.txt started. NEXT: [JOBCOMP] should grow (trophy->sound->gamedata->msgwindow->mainmenu->step5->initDataRead); [SEQREQ] page=6; page6 start -> title worker -> sound objects exist -> title case0/1 passes; title state machine advances -> title object -> engine-drawn title.
 
 LOOKUP: M1026, STEPFORCE ineffective for init workers, nested runner, job_probes blind spot, batch-level forces batch_012, 8118482C trophy, 811848DA sound, 811849A4 gamedata, 81184AA8 msgwindow, 81184B6C mainmenu, 81184D1A step5, WFDBG #18 85B86A1C, WFDBG #49 85B8861C, [JOBCOMP] 1, out80m_m1089batchstepforce.txt, exe 57,049,241B -> §18.4570 [relevant: trophy check], §18.4569 [relevant: init chain started], §18.4563 [relevant: nested runner blind spot]
+### 18.4572 PORT M1027: init 链不推进的下一层分析 + EXECRET/TPATH 探针
+
+1) m1089（batch_012 18 个检查强制后）：
+```
+[FRAMEDUMP] n=60445000  [JOBCOMP] 1  [SEQREQ] 8（无 page=6）  [BADMEM] 0
+[WFDBG] 53 条：trophy #18 85B86A1C wf=81184809 ×1；sound #49 85B8861C wf=811848B7 ×1
+```
+2) `exec748.txt` / `jobmgr2.txt` 澄清：
+```c
+FUN_8116FA5C(ctx): FUN_8116f748(*(u32*)(ctx+0x34));          // void
+FUN_8116F748(node): DAT_815554C0=node; (*(code*)*node)();      // worker 返回值被丢弃
+                    DAT_815554C0=0;
+FUN_811DB020: running 列表 job[8]-- 每帧递减；到 0 → ready 列表 *job=2
+              ready 列表执行 job[10]（trampoline）；返回 -1 → FUN_811dad8c(job) → completion(job[1])
+```
+⇒ 完成由 **countdown 到期** 触发；worker 返回 -1 才会立即完成。batch 检查强制已加但 JOBCOMP 仍 1 ⇒ **怀疑 trophy worker 卡在 state0 初始化调用 FUN_8102d53c**（未走到检查 block）。
+3) M1027 探针（exe 57,050,520B 13:33:15）：
+```
+batch_011 blk_8116FA64 → [EXECRET] r0=...          （trampoline 返回后的值）
+batch_012 blk_81184820/28/2C/30 → [TPATH820/828/82C/830] lr=... r0=...
+```
+4) 诊断运行 `out80m_m1090execpath.txt` 已启动。
+NEXT：
+```
+① [EXECRET]：返回 -1 或 0
+② [TPATH82C]：trophy 检查 block 是否执行
+③ 若卡在 FUN_8102d53c → 反编译查 HLE 依赖
+④ 修复 → JOBCOMP 递增 → page1 结束 → page6 → title
+```
+验证：`out80m_m1089batchstepforce.txt`、`exec748.txt`、`jobmgr2.txt`、`out80m_m1090execpath.txt`（生成中）。
+
+ANTI-FORGETTING ENTRY. Keywords: M1027 next-layer analysis of why the init chain does not advance. FUN_8116F748 discards the worker return value ((*(code*)*param_1)();) and completion is triggered when the job[8] countdown (200 frames) expires; a worker only completes immediately if it returns -1. Batch-level check forcing is in place but JOBCOMP is still 1 => suspect the trophy worker is stuck in its state0 init call FUN_8102d53c before reaching the check block. m1089: [JOBCOMP] 1; [SEQREQ] 8 (no page=6); [BADMEM] 0; [WFDBG] 53 lines: trophy #18 85B86A1C wf=81184809 once; sound #49 85B8861C wf=811848B7 once; n=60445000. Decompiled exec748.txt/jobmgr2.txt: FUN_8116FA5C(ctx)=FUN_8116f748(*(u32*)(ctx+0x34)); FUN_8116F748(node): DAT_815554C0=node; (*(code*)*node)(); DAT_815554C0=0; FUN_811DB020: running list job[8]-- each frame; at 0 moved to ready list *job=2; ready list executes job[10] trampoline; if it returns -1 -> FUN_811dad8c(job) -> completion(job[1]). M1027 probes (exe 57,050,520B 13:33:15): batch_011 blk_8116FA64 -> [EXECRET] r0=...; batch_012 blk_81184820/28/2C/30 -> [TPATH820/828/82C/830] lr/r0. Diagnostic run out80m_m1090execpath.txt started. NEXT: [EXECRET] actual return value; [TPATH82C] whether the trophy check executes; if stuck in FUN_8102d53c decompile it for HLE deps; after fix JOBCOMP grows -> page1 ends -> page6 -> title.
+
+LOOKUP: M1027, init chain not advancing, FUN_8116F748 discards worker return, job[8] countdown 200, FUN_811DB020 process manager, ready list job[10] trampoline, return -1 completion, trophy worker stuck FUN_8102d53c, EXECRET probe blk_8116FA64, TPATH probes 81184820/28/2C/30, out80m_m1090execpath.txt, exec748.txt, jobmgr2.txt, exe 57,050,520B -> §18.4571 [relevant: batch-level forces], §18.4570 [relevant: trophy check], §18.4569 [relevant: init chain]
