@@ -1029,6 +1029,29 @@
 | M1011 | §18.4556: **WFDBG 诊断首跑无效（发现多个 recomp_harness 实例并存 → 日志/运行互相干扰），清理后单实例重跑**。检查 `out80m_m1078wfdbg.txt`（Start-Process 启动）：
 | M1012 | §18.4557: ★★★★★★★★★ **WFDBG 诊断成功：worker 检测完全正确，但发现 init 链 job 根本没被调用；title 页未启动的原因 = setSequence(6) 的 delay=5 依赖序列 update 帧（observer 任务未跑）→ patch delay 5→0 让标题页**立即启动**！** WFDBG 输出（`err80m_m1079wfdbg2.txt`，单实例）：
 | M1013 | §18.4558: ★★★★★★★★★★ **`setSequence(6) delay=0` 成功！title 状态机 worker（0x81198173）**真正运行**（WFDBG #11 / JOBEXEC #1）——但随即暴露下一个精确卡点：`FUN_8116f8a8()` 返回**已释放内存（0xE5E5E5E5 毒值）**导致 `[BADMEM] guest va=0xE5E5E5E9 @block=0x81178F18`**。证据（`out80m_m1080titlestart.txt` / `err80m_m1080titlestart.txt`）：
+| M1014 | §18.4559: **崩溃点精确定位：`FUN_8116f8a8` 语义 = `return *(u32*)(param_1 + 8)`（job 节点 [2] = 任务 arg 指针）；BADMEM 说明 title job 节点 85B8586C 的 [2]/arg = 0xE5E5E5E5（被 guest 分配器 free 填充毒值）——即 title task 已被提前释放**。反编译（`gettask.txt`）：
+```c
+undefined4 FUN_8116f8a8(int param_1) { return *(undefined4 *)(param_1 + 8); }   // 仅 ldr r0,[r0,#8]; bx lr
+void FUN_8116f8ac(int param_1) { ...遍历 DAT_815554c4 找 node，取 node+0xc，调 FUN_8116fa30... }
+```
+**调用链还原**：
+```
+FUN_8116f748(node):  str r0→DAT_815554C0; r1=node[0] (worker); blx r1   // r0 仍=node
+  → title worker FUN_81198172(r0=node)
+      r5=node; bl FUN_8116f8a8           // = *(u32*)(node+8) = node[2] = 任务 arg
+      → r0 = 0xE5E5E5E5                  // ← node[2] 已被填充毒值
+      bl FUN_81178F0A → *(u32*)(0xE5E5E5E5+4)=0xE5E5E5E9 → BADMEM
+```
+**结论**：title job 节点 arg（= FUN_8119807C 中 `iVar3` app task）在 worker 运行前已被释放（0xE5 是原版 guest 堆的 free 填充模式，非我们 HLE）⇒ 需要找出谁释放了它。最可能：**sequence 页 end（0x81185998）或 M1008 强制 page6 update=1 触发的页结束路径**，或 `FUN_8116fa30`（FUN_8116f8ac 调用的）对 title job 做了 cancel/free。
+NEXT：
+```
+① 在 harness 给 FUN_8116f7ca 加探针：当 name=="title sequence" 时打印 arg(task) 指针（node[2]）
+② 给 FUN_8115d43c（task free）/ FUN_811da094（堆 free）加探针：打印被释放的地址
+③ 对比确认 title task 何时、被谁释放（sequence end / 强制完成路径 / FUN_8116fa30 cancel）
+④ 保护 title task 不被提前释放（或在 worker 运行前不释放）→ title 状态机继续 case0→1→2…
+```
+验证：`gettask.txt`、`out80m_m1080titlestart.txt`、`err80m_m1080titlestart.txt`（[BADMEM] 0xE5E5E5E9 @81178F18）。 |
+| §18.4559 | Crash point precisely located: FUN_8116f8a8 semantics = return *(u32*)(param_1 + 8) (job node [2] = task arg pointer); the BADMEM means title job node 85B8586C's [2]/arg = 0xE5E5E5E5 (guest allocator free-fill poison) - i.e. the title task was freed early. Decompiled (gettask.txt): undefined4 FUN_8116f8a8(int param_1) { return *(undefined4 *)(param_1 + 8); } (just ldr r0,[r0,#8]; bx lr); void FUN_8116f8ac(int param_1) { ...walk DAT_815554c4 to find node, take node+0xc, call FUN_8116fa30... }. Call chain reconstruct: FUN_8116f748(node): str r0->DAT_815554C0; r1=node[0] (worker); blx r1 (r0 still = node) -> title worker FUN_81198172(r0=node): r5=node; bl FUN_8116f8a8 (= *(u32*)(node+8) = node[2] = task arg) -> r0 = 0xE5E5E5E5 (node[2] already poison-filled); bl FUN_81178F0A -> *(u32*)(0xE5E5E5E5+4)=0xE5E5E5E9 -> BADMEM. Conclusion: the title job node's arg (= iVar3 app task from FUN_8119807C) was freed before the worker ran (0xE5 is the original guest heap's free-fill pattern, not our HLE) => need to find who freed it. Most likely the sequence page end (0x81185998) or the page-end path triggered by M1008 forcing page6 update=1, or FUN_8116fa30 (called by FUN_8116f8ac) cancelling/freeing the title job. NEXT: (1) add a harness probe at FUN_8116f7ca printing the arg(task) pointer when name=='title sequence' (node[2]); (2) add probes at FUN_8115d43c (task free) / FUN_811da094 (heap free) printing freed addresses; (3) compare to find when/who frees the title task (sequence end / forced path / FUN_8116fa30 cancel); (4) protect the title task from early free (or don't free before the worker runs) -> title state machine continues case0->1->2... |
 ```
 [SEQREQ] #2 page(r0)=00000006 a3=00000000          ← ★ delay 5→0 生效（a3=0）
 [WFDBG] #11 ctx=84618110 node=85B8586C wf=81198173  ← ★★★ TITLE WORKER 首次被调度！
@@ -493790,3 +493813,32 @@ NEXT：
 ANTI-FORGETTING ENTRY. Keywords: M1013 setSequence(6) delay=0 worked - the title state-machine worker 0x81198173 REALLY RAN for the first time, but it exposed the next blocker: FUN_8116f8a8() returned FREED memory (HLE poison 0xE5E5E5E5) causing [BADMEM] guest va=0xE5E5E5E9 at block 0x81178F18. Evidence out80m_m1080titlestart.txt / err80m_m1080titlestart.txt: [SEQREQ] #2 page(r0)=00000006 a3=00000000 (delay 5->0 effective); [WFDBG] #11 ctx=84618110 node=85B8586C wf=81198173; [JOBEXEC] #1 node=85B8586C worker=81198173 completion=811982A9 n=59571556; [PROC] exec p=85B8586C; [SNAP] blk=81178F18 r0=E5E5E5E5; [BADMEM] guest va=0xE5E5E5E9 unmapped block=0x81178F18; rg_ring [81178F0A/85A9E46C] [8116F8A8/85A9E46C] [81178F10/E5E5E5E5] [81178F18/E5E5E5E5]. Decompiled title_sub.txt: FUN_81178CE2(param) = appFade manager getter (appFade.c:0x40): if (DAT_813AFE00 == 0) ASSERT; if (DAT_813AFE00[1] <= param) ASSERT; return *(u32*)(*DAT_813AFE00 + param*4). FUN_81178F0A() = title task state getter: iVar1=FUN_8116f8a8(); switch(*(u32*)(iVar1+4)){case0:1; case3:2; case1/2/4/5:0; default:1}. The crash is FUN_8116f8a8() returning a freed task pointer (poison 0xE5E5E5E5), ldr [r0,#4] accessing 0xE5E5E5E9 -> BADMEM, run terminates at n≈59,571,570. Confirmed: (1) delay=0 fix works (page6 start executes immediately, title job submitted node=85B8586C worker=0x81198173 completion=0x811982A9); (2) hybrid trampoline lets the title worker through correctly; (3) title worker reaches FUN_81178CE2(appFade)/FUN_81178F0A and fails because the task pointer was freed => next fix point = FUN_8116f8a8 return-value lifetime (who freed the title task: possibly FUN_8115d43c(free) in the forced-completion path, or DAT_813AFE00 appFade manager uninitialized). NEXT: decompile FUN_8116f8a8; trace who frees the title task (FUN_8119807C's FUN_8115d3ce allocation); if the forced path wrongly frees title tasks, prevent it; after the fix the title state machine continues case 0->1->2... -> title object -> engine-drawn.
 
 LOOKUP: M1013, out80m_m1080titlestart.txt, SEQREQ page6 a3=0, WFDBG #11, node 85B8586C, worker 81198173, completion 811982A9, [BADMEM] 0xE5E5E5E9, block 81178F18, FUN_8116f8a8, FUN_81178CE2, FUN_81178F0A, appFade.c, DAT_813AFE00, title_sub.txt -> §18.4557 [relevant: delay 5->0], §18.4554 [relevant: hybrid force]
+### 18.4559 PORT M1014: FUN_8116f8a8 语义 + title task 被提前释放
+
+1) 反编译（`gettask.txt`）：
+```c
+undefined4 FUN_8116f8a8(int param_1) { return *(undefined4 *)(param_1 + 8); }   // ldr r0,[r0,#8]; bx lr
+void FUN_8116f8ac(int param_1) { ...DAT_815554c4 链找 node，取 node+0xc，调 FUN_8116fa30... }
+```
+2) 调用链还原：
+```
+FUN_8116f748(node): DAT_815554C0=node; r1=node[0](worker); blx r1   // r0 仍=node
+  → title worker FUN_81198172(r0=node)
+      r5=node; bl FUN_8116f8a8        // = *(u32*)(node+8) = node[2] = task arg
+      → r0 = 0xE5E5E5E5               // ← node[2] 已是毒值
+      bl FUN_81178F0A → *(u32*)(0xE5E5E5E5+4)=0xE5E5E5E9 → BADMEM
+```
+3) 结论：title job 节点的 arg（FUN_8119807C 中 `iVar3` app task）在 worker 运行前已被释放（0xE5=原版 guest 堆 free 填充模式）⇒ 需找出释放者。
+4) 最可能路径：sequence 页 end（0x81185998）、M1008 强制 page6 update=1 触发的页结束、或 FUN_8116fa30 cancel/free。
+NEXT：
+```
+① 探针 FUN_8116f7ca：name=="title sequence" 时打印 arg(task) 指针
+② 探针 FUN_8115d43c（task free）/ FUN_811da094（堆 free）：打印释放地址
+③ 确定释放时机与调用者
+④ 保护 title task 不被提前释放 → title 状态机继续
+```
+验证：`gettask.txt`、`out80m_m1080titlestart.txt`、`err80m_m1080titlestart.txt`。
+
+ANTI-FORGETTING ENTRY. Keywords: M1014 crash point precisely located: FUN_8116f8a8 = return *(u32*)(param_1 + 8) (job node [2] = task arg pointer); BADMEM means title job node 85B8586C's [2]/arg = 0xE5E5E5E5 (guest allocator free-fill poison) - the title task was freed early. Decompiled gettask.txt: undefined4 FUN_8116f8a8(int param_1){ return *(undefined4 *)(param_1 + 8); } (ldr r0,[r0,#8]; bx lr); void FUN_8116f8ac(int param_1){ ...walk DAT_815554c4 to find node, take node+0xc, call FUN_8116fa30... }. Call chain: FUN_8116f748(node): DAT_815554C0=node; r1=node[0](worker); blx r1 (r0 still=node) -> title worker FUN_81198172(r0=node): r5=node; bl FUN_8116f8a8 (=*(u32*)(node+8)=node[2]=task arg) -> r0=0xE5E5E5E5; bl FUN_81178F0A -> *(u32*)(0xE5E5E5E5+4)=0xE5E5E5E9 -> BADMEM. The title job node's arg (=iVar3 app task from FUN_8119807C) was freed before the worker ran (0xE5 is the original guest heap's free-fill pattern). Possible paths: sequence page end 0x81185998, the page-end path triggered by M1008 forcing page6 update=1, or FUN_8116fa30 cancel/free. NEXT: probe FUN_8116f7ca for name=='title sequence' printing the arg(task) pointer; probe FUN_8115d43c (task free) / FUN_811da094 (heap free) printing freed addresses; find when/who frees the title task; protect it from early free -> title state machine continues case0->1->2...
+
+LOOKUP: M1014, FUN_8116f8a8, return *(u32*)(param_1+8), job node [2] arg, node 85B8586C, 0xE5E5E5E5 poison, guest heap free fill, FUN_81178F0A, BADMEM 0xE5E5E5E9, FUN_8115d43c, FUN_811da094, FUN_8116fa30, FUN_8116f8ac, gettask.txt, out80m_m1080titlestart.txt -> §18.4558 [relevant: title worker crash], §18.4557 [relevant: delay=0 fix]
