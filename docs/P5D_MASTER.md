@@ -1032,6 +1032,33 @@
 | M1014 | §18.4559: **崩溃点精确定位：`FUN_8116f8a8` 语义 = `return *(u32*)(param_1 + 8)`（job 节点 [2] = 任务 arg 指针）；BADMEM 说明 title job 节点 85B8586C 的 [2]/arg = 0xE5E5E5E5（被 guest 分配器 free 填充毒值）——即 title task 已被提前释放**。反编译（`gettask.txt`）：
 | M1015 | §18.4560: ★★★★★★★★★ **参考 totk-pc-recomp（塞尔达：王国之泪静态重编译移植）架构 + 采纳其"覆盖率 oracle"做法：首次 AOT 全函数覆盖率审计，新增 batch_032 补齐 23 个缺失函数（Ghidra 12,532 函数中缺失 entry 从 38 → 20，剩余内部缺口仅 5 个）**。
 | M1016 | §18.4561: ★★★★★★★★★★ **AOT 内部函数覆盖率 100%：batch_033 补齐最后 5 个内部函数（Ghidra 12,532 函数全命中；缺失 entry 仅剩 14 个 HLE import + module_start = 预期无 block）**。原因：这 5 个函数在 `function_bounds.json` 里是 **size=1 的退化条目**（生成器跳过），但 Ghidra 知道真实尺寸：
+| M1017 | §18.4562: **batch_032 回归通过（无回退）+ 新 exe 合并 batch_032/033 + 新增 TTPROBE 探针追踪 title task 生命周期（定位 0xE5E5E5E5 释放者）**。`out80m_m1081batch32.txt`（batch_032 版 exe）结果与基线逐项一致：
+```
+[INDIRECT-MISS] 0        [JOBCOMP] 11 / [JOBDONE2] 11
+[SEQREQ] 16（page=6）     [WFDBG] #11 wf=81198173（title worker）
+[BADMEM] 1（仍是 0xE5E5E5E9 @block=81178F18，title task 提前释放未变）
+```
+⇒ batch_032 补齐**无回归**；运行在 title worker 崩溃点正常终止（n≈59.57M）。
+**新 exe**：`recomp_harness.exe` = 57,046,493B（9:54:24），首次**同时包含 batch_032 + batch_033**（batch_033 的 5 个内部函数此前未链接）。
+**M1017 新探针 `P5D_TTPROBE=1`（job_probes 内新增块）**：
+```cpp
+if (_p == 0x811980B0u) { _task = s->r[0]; printf("[TT] task=%08X n=%u\n", _task, g_main_n); }
+else if (_p == 0x81198172u) { _arg = GP(s->r[0]+8) 读 node[2]; printf("[TT] worker node=... arg=... task=..."); }
+else if (_p == 0x8115D43Cu || _p == 0x811DA094u) { if(r0==task||r1==task||r0==task+4||r1==task+4) printf("[TT] FREE p=... r0=... r1=... task=..."); }
+```
+- `0x811980B0` = FUN_8119807C 里 `FUN_8115d3ce` 返回后的 block ⇒ 记录 **title task 指针**
+- `0x81198172` = title worker 入口 ⇒ 记录 node 与 node[2]（arg）实际值
+- `0x8115D43C`/`0x811DA094` = 两个 free 候选函数 ⇒ 只打印与 title task 相关的释放
+**诊断运行**：`out80m_m1082ttprobe.txt`（P5D_TTPROBE=1 + NOMOVIE + OT/STEPFORCE + VDEC + delay=0 + hybrid force）已启动。
+NEXT：
+```
+① 读 [TT]：task 指针、worker 入口时 node[2] 是否已是 0xE5E5E5E5
+② 读 [TT] FREE：title task 何时被 0x8115D43C/0x811DA094 释放（调用时机/参数）
+③ 若是 page6 end / FUN_8116fa30 cancel 触发 → 让 title page 不再结束（或延迟 free）
+④ 修好后 title 状态机 case0→1→2… → title 对象 → 引擎自绘标题
+```
+验证：`out80m_m1081batch32.txt`、`recomp_harness.exe`（57,046,493B）、`out80m_m1082ttprobe.txt`（生成中）。 |
+| §18.4562 | batch_032 regression passed (no regression) + new exe merges batch_032/033 + new TTPROBE probe tracking the title task lifecycle (locating the 0xE5E5E5E5 freer). out80m_m1081batch32.txt (batch_032 exe) matches the baseline item by item: [INDIRECT-MISS] 0; [JOBCOMP] 11 / [JOBDONE2] 11; [SEQREQ] 16 (page=6); [WFDBG] #11 wf=81198173 (title worker); [BADMEM] 1 (still 0xE5E5E5E9 at block 81178F18, title task freed early unchanged) => batch_032 fill causes no regression; the run terminates normally at the title worker crash point (n≈59.57M). New exe: recomp_harness.exe = 57,046,493B (9:54:24), first time including both batch_032 and batch_033 (batch_033's 5 internal functions were not linked before). M1017 new probe P5D_TTPROBE=1 (new block in job_probes): at 0x811980B0 (after FUN_8115d3ce in FUN_8119807C) records the title task pointer; at 0x81198172 (title worker entry) prints node and node[2] (arg); at 0x8115D43C/0x811DA094 (two free candidates) prints only frees related to the title task (r0==task||r1==task||r0==task+4||r1==task+4). Diagnostic run out80m_m1082ttprobe.txt (P5D_TTPROBE=1 + NOMOVIE + OT/STEPFORCE + VDEC + delay=0 + hybrid force) started. NEXT: read [TT] for the task pointer and whether node[2] is already 0xE5E5E5E5 at worker entry; read [TT] FREE for when/who frees the title task; if page6 end / FUN_8116fa30 cancel triggers it, keep the title page from ending (or delay the free); after the fix the title state machine advances case0->1->2... -> title object -> engine-drawn title. |
 ```
 0x810108DE size=532   FUN_810108de
 0x8112D9C8 size=818   FUN_8112d9c8
@@ -493990,3 +494017,31 @@ NEXT：
 ANTI-FORGETTING ENTRY. Keywords: M1016 AOT internal function coverage now 100%: batch_033 fills the last 5 internal functions. All 12,532 Ghidra functions matched; missing entry blocks only 14 HLE imports + module_start (expected no blocks). The 5 were degenerate size=1 entries in function_bounds.json so the generator skipped them, while Ghidra has the real sizes: 0x810108DE size=532 FUN_810108de; 0x8112D9C8 size=818 FUN_8112d9c8; 0x8112EA42 size=1654 FUN_8112ea42; 0x8112F630 size=690 FUN_8112f630; 0x811307D0 size=6530 FUN_811307d0. Flow: gap2_bounds.json -> _gen_split_gap2.py 8 1 -> recomp_gap2/batch_000.cpp (196,799B, .o 139,647B) -> renamed batch_033.cpp -> harness FB(033)+get_table_033+ALL_FINDERS[34] -> batch_033.o compile exit 0; harness recompiled exit 0. Final coverage: blocks 230,243; functions 12,532; missing 15 = 14 SceLibm_*/SceNpActivity_* HLE stubs + module_start => internal function gaps 0. Regression run out80m_m1081batch32.txt (batch_032 exe, P5D_NOMOVIE=1 + OT/STEPFORCE + VDEC + delay=0 + hybrid force) started; exe relink pending until run ends. NEXT: relink batch_032/033 and rerun; fix title task freed early (0xE5E5E5E5); consider real threads/virtual core scheduling.
 
 LOOKUP: M1016, batch_033, 5 internal functions, 0x810108DE, 0x8112D9C8, 0x8112EA42, 0x8112F630, 0x811307D0, size=1 degenerate bounds, gap2_bounds.json, _gen_split_gap2.py, recomp_gap2, FB(033), ALL_FINDERS[34], 230,243 blocks, 12,532 functions, missing 15 = 14 HLE imports + module_start, out80m_m1081batch32.txt -> §18.4560 [relevant: coverage oracle], §18.4559 [relevant: title task free]
+### 18.4562 PORT M1017: batch_032 回归通过 + TTPROBE 追踪 title task 生命周期
+
+1) `out80m_m1081batch32.txt`（batch_032 版）与基线一致：
+```
+[INDIRECT-MISS] 0   [JOBCOMP] 11 / [JOBDONE2] 11
+[SEQREQ] 16（page=6） [WFDBG] #11 wf=81198173（title worker）
+[BADMEM] 1（0xE5E5E5E9 @81178F18，title task 提前释放未变）⇒ 无回归
+```
+2) 新 exe：`recomp_harness.exe` 57,046,493B（9:54:24），首次同时含 **batch_032 + batch_033**。
+3) 新探针 `P5D_TTPROBE=1`（job_probes 内）：
+```
+0x811980B0  FUN_8119807C 中 FUN_8115d3ce 返回后 → 记录 title task 指针 [TT] task=
+0x81198172  title worker 入口 → [TT] worker node=... arg=node[2]=... task=...
+0x8115D43C / 0x811DA094  free 候选 → 仅当 r0/r1 与 task 相关时打印 [TT] FREE p=...
+```
+4) 诊断运行 `out80m_m1082ttprobe.txt` 已启动（P5D_TTPROBE=1 + 常规 milestone env）。
+NEXT：
+```
+① [TT]：task 指针 & worker 入口时 node[2] 是否已 E5
+② [TT] FREE：谁/何时释放 title task
+③ 若 page6 end / FUN_8116fa30 cancel → 阻止 title 页结束或延迟 free
+④ title 状态机继续 case0→1→2… → title 对象 → 引擎自绘
+```
+验证：`out80m_m1081batch32.txt`、`recomp_harness.exe`、`out80m_m1082ttprobe.txt`（生成中）。
+
+ANTI-FORGETTING ENTRY. Keywords: M1017 batch_032 regression passed (no regression): out80m_m1081batch32.txt identical to baseline - [INDIRECT-MISS] 0, [JOBCOMP] 11/[JOBDONE2] 11, [SEQREQ] 16 (page=6), [WFDBG] #11 wf=81198173 (title worker), [BADMEM] 1 (still 0xE5E5E5E9 at block 81178F18, title task freed early). New exe recomp_harness.exe = 57,046,493B (9:54:24) first time including both batch_032 and batch_033 (batch_033's 5 internal functions). M1017 new probe P5D_TTPROBE=1 in job_probes: 0x811980B0 (after FUN_8115d3ce in FUN_8119807C) records title task pointer [TT] task=; 0x81198172 (title worker entry) prints node and node[2] (arg); 0x8115D43C/0x811DA094 (free candidates) print [TT] FREE only when r0==task||r1==task||r0==task+4||r1==task+4. Diagnostic run out80m_m1082ttprobe.txt (P5D_TTPROBE=1 + NOMOVIE + OT/STEPFORCE + VDEC + delay=0 + hybrid force) started. NEXT: read [TT] for the task pointer and whether node[2] is already 0xE5E5E5E5 at worker entry; read [TT] FREE for when/who frees it; if page6 end / FUN_8116fa30 cancel triggers it, keep the title page from ending or delay the free; after the fix the title state machine advances -> title object -> engine-drawn title.
+
+LOOKUP: M1017, out80m_m1081batch32.txt, batch_032 regression no regression, batch_033 linked, recomp_harness.exe 57,046,493B, P5D_TTPROBE, [TT] task, 0x811980B0, 0x81198172, 0x8115D43C, 0x811DA094, [TT] FREE, out80m_m1082ttprobe.txt, title task freed early -> §18.4561 [relevant: batch_033], §18.4559 [relevant: title task free]

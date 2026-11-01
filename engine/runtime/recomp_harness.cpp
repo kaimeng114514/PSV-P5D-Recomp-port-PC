@@ -1123,6 +1123,22 @@ namespace p5d { namespace vulkan { int32_t upload_gxm_control_resolved(unsigned 
 namespace p5d { namespace vulkan { int32_t upload_gxm_control_to_unit(unsigned int unit, const void* control16, const unsigned char* hostPixels, unsigned int bytes); } }   // 18.4521 M976
 namespace p5d { namespace vulkan { int upload_vertex_stream(const void* data, unsigned int bytes, unsigned int vertex_count); } }   // 18.4498 M953
 static void job_probes(uint32_t pcv, RecState* s) {
+  // 18.4562 M1017: P5D_TTPROBE - track the title-sequence task pointer and who frees it.
+  { static int _tt = -1; static uint32_t _task = 0; static int _nf = 0;
+    if (_tt < 0) { const char* _e = getenv("P5D_TTPROBE"); _tt = (_e && atoi(_e)) ? 1 : 0; }
+    if (_tt) {
+      const uint32_t _p = pcv & ~1u;
+      if (_p == 0x811980B0u) { _task = s->r[0];
+        printf("[TT] task=%08X n=%u\n", _task, g_main_n); fflush(stdout); }
+      else if (_p == 0x81198172u) { uint32_t _arg = 0; uint8_t* _q = s->r[0] ? GP(s->r[0] + 8u) : nullptr;
+        if (_q) std::memcpy(&_arg, _q, 4);
+        printf("[TT] worker node=%08X arg=%08X task=%08X n=%u\n", s->r[0], _arg, _task, g_main_n); fflush(stdout); }
+      else if ((_p == 0x8115D43Cu || _p == 0x811DA094u) && _nf < 400) {
+        uint32_t _a0 = s->r[0], _a1 = s->r[1];
+        if (_a0 == _task || _a1 == _task || _a0 == (_task + 4) || _a1 == (_task + 4)) {
+          ++_nf;
+          printf("[TT] FREE p=%08X r0=%08X r1=%08X task=%08X n=%u\n", _p, _a0, _a1, _task, g_main_n); fflush(stdout); } }
+    } }
   // 18.4528 M983: P5D_JOBFORCE2 - generic job-completion force at FUN_8116f8d2 entry.
   // FUN_8116f8d2(job) returns 0 iff *(u32*)(job+0xC)==0; forcing that for every job call lets every
   // async step of the page1 init/sequence state machine advance even though our HLE never runs the worker.
