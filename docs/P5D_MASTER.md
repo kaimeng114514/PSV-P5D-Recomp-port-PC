@@ -1099,6 +1099,40 @@
 | M1081 | §18.4626: ★★★★★★★★ **池层已正常（FUN_811DA584 池初始化在 n=0 由 FUN_81198E2E 调用，池结构合法：pool=846001E0/84617AE0，w4=16 w8=512 wC=128 w10=16 w18=84600230；DAT_816CDA48 在 27 次 appProcessCreate 中始终为合法 0x84617AE0）——所以之前的"池未初始化"假设被排除。崩溃仍有：BADMEM va=0 @ 0x811DAC9C，WDRING 显示路径 81178F10→81178F14→81178F36→811DACFC→811DAD4A→811DAC9C（0x811DAD4A: `movs r4,#2; b 0x811DAC9C`；0x811DAC9C 把 r4 写入 [r6+0]），此时 r6=0。r6 在 FUN_811DAB8C 内只在 0x811DABC2 由 `adds r6,r0`（池分配返回值）赋值，函数其余部分不写 r6 → 说明**节点分配器**返回值或寄存器上下文在 0x811DABC2 之后变 0。M1081 加 [R6-ALLOC]/[R6-ACFC]/[R6-AD4A]/[R6-AC9C] 探针追踪 r6 在四个关键块的取值（运行 m1127）。**
 | M1082 | §18.4627: ★★★★★★★★★★ **崩溃根因锁定：不是池、不是 r6 生命周期，而是我们自己的 [MOVIEFIN] 假完成 hack 破坏了 guest 栈/寄存器上下文！m1127 r6 追踪给出决定性证据：前 27 次 FUN_811DAB8C 调用 r6 全部合法（84617B60→846186C0，步长 0x70），第 28 次（lr=81159298，来自 FUN_81159276 回调栈帧）r6=0 并立即崩溃。rg_ring 显示程序从 0x811592BE `pop {r4,r5,r6,pc}` 返回到了 0x81178F10（FUN_81178F0A 中间的 cmp 指令）而不是正常返回点，然后再跳到 0x811DACFC —— 典型的"栈/返回地址被 hack 注入的回调污染"轨迹。**
 | M1083 | §18.4628: ★★★★★★★★ **M1082 的"MOVIEFIN 污染栈"结论被 m1128 否决：不设 P5D_MOVIEFIN（hack 不执行）时崩溃完全相同（同一 SNAP/同一 rg_ring：811592BE→81178F10→811DACFC→811DAD4A→811DAC9C，r6=0，BADMEM va=0）。真正的证据来自 m1128 BADMEM 前的探针交错顺序：崩溃调用的 [R6-ALLOC]（r5=85CF304C r7=81306538 sp=84856298）之后，先出现一次**正常**调用的 [R6-ACFC]/[R6-AD4A]/[R6-AC9C]（r6=846186C0），随后才出现**崩溃**调用的 [R6-ACFC]（r6=0，lr=81159298）——说明 FUN_811DAB8C 执行期间发生了**任务/纤程切换**，切回来时 r6 没有被正确恢复。⇒ 根因转向我们的 guest 线程/纤程上下文保存恢复（HLE 互斥锁 stub 0x81207344/0x81207352 内部可触发切换）。**
+| M1084 | §18.4629: ★★★★★★★ **fiber/线程身份探针结果：崩溃调用与正常调用在【同一纤程 848463A0、同一线程 0、同一 SP 84856298】上——排除"跨纤程恢复"假设。更诡异的现象：同一函数 FUN_811DAB8C 的尾段块（0x811DACFC/0x811DAD4A/0x811DAC9C）在崩溃前被执行【两次】：第一次 r6=846186C0（正常完成），紧接着第二次 r6=0（同一 SP / r4 / r5 / r7 / lr=81159298）→ BADMEM。这说明不是线程切换丢寄存器，而是**同一个调用路径被重放/重入**，且第二次进入时 r6 已被清零。M1084 加 pc-ring 前驱探针（harness_pc_ring hook，打印进入每个关键块前最后 6-8 个 PC）以确定第二次进入的直接前驱。**
+m1129（`out80m_m1129fiber.txt`）证据（BADMEM 前 8 行）：
+```
+[PROCCREATE] #27 poolmgr=84617AE0 lr=8116FA26 n=0
+[R6-ALLOC] r6=00000000 r4=816CDA48 r5=85CF304C r7=81306538 sp=84856298 lr=8120735C fib=848463A0 thr=00000000
+[R6-ACFC]  r6=846186C0 r4=816CDA48 r5=00000000 r7=816CD9F0 sp=84856298 lr=8120735C fib=848463A0
+[R6-AD4A]  r6=846186C0 …
+[R6-AC9C]  r6=846186C0 r4=00000002 …            ← 第一次（正常）
+[R6-ACFC]  r6=00000000 r4=816CDA48 r5=85CF304C r7=812B414C sp=84856298 lr=81159298 fib=848463A0   ← 第二次（重入，r6=0）
+[R6-AD4A]  r6=00000000 …
+[R6-AC9C]  r6=00000000 r4=00000002 … lr=81159298
+[BADMEM] guest va=0x00000000 unmapped block=0x811DAC9C
+```
+**观察**：
+1. 两次执行的关键寄存器快照：第一次 r5=0 r7=816CD9F0（函数内部重载后的值），第二次 r5=85CF304C r7=812B414C（调用者原值）→ 第二次进入时**函数内部的 r5/r7 重载没有发生**，即**进程从 0x811DACFC 直接开始**，跳过了 0x811DAB8C~0x811DACF4 的所有初始化（包括 r6 分配）
+2. 因此 r6 保持调用者的遗留值 0 → 写 [r6] 崩溃
+3. fib/thr 相同 → 不是纤程切换；SP 相同 → 不是嵌套调用（同一栈深度）
+4. ⇒ 直接跳到 0x811DACFC 的"第二个入口"是问题的直接原因；候选：某个块 return 0x811DACFC（AOT 错误生成/错误的目标表），或 0x81178F0A 的 `pop {r4,pc}` 从栈上弹出了 0x811DACFC（栈内容错位）
+**M1084 探针**：
+- harness 新增 `extern "C" uint32_t harness_pc_ring(int idx)`（返回最近 PC 环的第 idx 个前驱）
+- batch_016 的 [R6-ALLOC]/[R6-ACFC] 探针追加 `r0`、`ring:`（打印进入块前 6-8 个 PC）
+编译：batch_016 exit 0；harness exit 0；exe 57,114,358B（05:36:55）。验证运行 `out80m_m1130pcr.txt` 已启动。
+NEXT：
+```
+① 读 m1130：第二次进入 0x811DACFC 的直接前驱（ring）是哪个块
+   • 若前驱=0x811DACF4/0x811DAD84（函数内正常路径）→ 说明确实重入函数中段（可能 HLE 回调/续跑）
+   • 若前驱=0x81178F36（pop {r4,pc}）→ 栈内容错位（返回地址 0x811DACFC 从栈弹出）
+   • 若前驱=某个 batch 块 → 检查该块生成代码（错误 return 0x811DACFC）
+② 定位后修复：若为栈内容错位 → 查谁在栈上写了 0x811DACFC；若为 AOT 生成错误 → 重生成该块
+③ 修复后 movie 路径 appProcessCreate 正常完成
+④ 之后：title 资源加载 → 2D 上下文 → array2 → GXM → 画面
+```
+验证：`out80m_m1129fiber.txt`、`out80m_m1130pcr.txt`（生成中）、`recomp_harness.cpp`（pc_ring hook）。 |
+| §18.4629 | Fiber/thread identity probes: the crashing call and the normal call are on the SAME fiber 848463A0, SAME thread 0, SAME SP 84856298 - ruling out the cross-fiber restore hypothesis. Stranger still: the tail blocks of FUN_811DAB8C (0x811DACFC/0x811DAD4A/0x811DAC9C) execute TWICE before the crash: first with r6=846186C0 (normal completion), then immediately again with r6=0 (same SP/r4/r5/r7/lr=81159298) -> BADMEM. So it is not a thread switch losing a register but the same call path being replayed/re-entered, and the second entry has r6 already zeroed. m1129 evidence (8 lines before BADMEM): [PROCCREATE] #27 poolmgr=84617AE0 lr=8116FA26; [R6-ALLOC] r6=0 r4=816CDA48 r5=85CF304C r7=81306538 sp=84856298 lr=8120735C fib=848463A0 thr=0; [R6-ACFC] r6=846186C0 r5=0 r7=816CD9F0 sp=84856298 lr=8120735C fib=848463A0; [R6-AD4A] r6=846186C0; [R6-AC9C] r6=846186C0 r4=2 (first, normal); [R6-ACFC] r6=0 r4=816CDA48 r5=85CF304C r7=812B414C sp=84856298 lr=81159298 fib=848463A0 (second, re-entry, r6=0); [R6-AD4A] r6=0; [R6-AC9C] r6=0 r4=2 lr=81159298; [BADMEM] guest va=0 unmapped block=0x811DAC9C. Observation: (1) first execution has r5=0 r7=816CD9F0 (values reloaded inside the function), the second has r5=85CF304C r7=812B414C (the caller's original values) -> the second entry did NOT execute the function's internal initialization (0x811DAB8C..0x811DACF4), including the r6 allocation; (2) so r6 keeps the caller's leftover value 0 -> store [r6] crashes; (3) same fib/thr -> not a fiber switch; same SP -> not a nested call (same stack depth); (4) so the immediate cause is a direct jump to 0x811DACFC as a 'second entry'; candidates: some block returns 0x811DACFC (AOT mis-generation/wrong target), or FUN_81178F0A's pop {r4,pc} popped 0x811DACFC from a corrupted stack slot. M1084 probes: new harness extern "C" uint32_t harness_pc_ring(int idx) returning the idx-th predecessor in the pc ring; batch_016 [R6-ALLOC]/[R6-ACFC] probes extended with r0 and ring: (last 6-8 PCs). Build: batch_016 exit 0; harness exit 0; exe 57,114,358B 05:36:55. Verification run out80m_m1130pcr.txt started. NEXT: (1) read m1130: what is the direct predecessor of the second entry into 0x811DACFC - if 0x811DACF4/0x811DAD84 (normal in-function paths) then it is a genuine re-entry into mid-function (maybe HLE callback/continuation); if 0x81178F36 (pop {r4,pc}) then the stack content is misaligned (return address 0x811DACFC popped from stack); if some batch block then check its generated code (wrong return 0x811DACFC); (2) fix accordingly: stack misalignment -> find who wrote 0x811DACFC on the stack; AOT mis-generation -> regenerate that block; (3) after the fix the movie-path appProcessCreate completes; (4) then title asset load -> 2D context -> array2 -> GXM -> picture. |
 m1128（`out80m_m1128nomoviefin.txt`，MOVIEFIN 关闭）证据：
 ```
 [MOVIEFIN]=0（hack 未执行）
@@ -498615,3 +498649,35 @@ NEXT：
 ANTI-FORGETTING ENTRY. Keywords: M1083 refutes M1082 (MOVIEFIN hack not the cause: m1128 with P5D_MOVIEFIN unset has the identical crash - same SNAP r0=0 r4=2 r5=85CF304C r7=812B414C sp=84856298 r14=81159298, same rg_ring 811592BE 81178F10 81178F14 81178F36 811DACFC 811DAD4A 811DAC9C, same BADMEM va=0 at 0x811DAC9C). Decisive probe interleaving before BADMEM: [R6-ALLOC] r6=0 r5=85CF304C r7=81306538 sp=84856298 lr=8120735C (crashing call's alloc entry) then a NORMAL call's [R6-ACFC] r6=846186C0 r5=0 r7=816CD9F0, [R6-AD4A] r6=846186C0, [R6-AC9C] r6=846186C0 r4=2, and only then the CRASHING call's [R6-ACFC] r6=0 r5=85CF304C r7=812B414C sp=84856298 lr=81159298, [R6-AD4A] r6=0, [R6-AC9C] r6=0 -> two calls of FUN_811DAB8C interleave; while A is inside the alloc path the scheduler switches to B (which completes the whole path normally) and when it switches back to A, r6 has been lost (=0). The crashing call's lr=81159298 is the return address of bl 0x81157F4C inside FUN_81159276 (movie completion callback), i.e. this is the normal appProcessCreate on the movie path. Root cause direction: our guest thread/fiber context save/restore is incomplete (callee-saved r4-r11 not fully preserved, or HLE mutex stubs 0x81207344/0x81207352 trigger a switch without full save). M1083 probes: harness hook harness_cur_fiber2() returning g_cur_fiber; batch_016 [R6-*] probes print fib/thr; build batch_016 exit 0, harness exit 0, exe 57,113,794B 05:18:01; run out80m_m1129fiber.txt started. NEXT: read m1129 whether crashing call's fib/thr differs (cross-fiber); inspect HLE stubs 0x81207344/0x81207352 for pump/switch; check fiber_save/g_fctx covers r4-r11; fix and rerun so movie path appProcessCreate works; then title asset load -> 2D context -> array2 -> GXM -> picture.
 
 LOOKUP: M1083 MOVIEFIN refuted, m1128 identical crash with hack off, probe interleaving two FUN_811DAB8C calls, [R6-ALLOC] r5=85CF304C r7=81306538, normal [R6-ACFC] r6=846186C0, crash [R6-ACFC] r6=0 lr=81159298 sp=84856298, rg_ring 811592BE 81178F10 81178F14 81178F36 811DACFC 811DAD4A 811DAC9C, fiber/thread context restore incomplete r4-r11, HLE mutex stubs 0x81207344 0x81207352, harness_cur_fiber2 hook, batch_016 fib thr probes, exe 57,113,794B 05:18:01, out80m_m1129fiber.txt -> §18.4627 [relevant: earlier wrong conclusion], §18.4626 [relevant: r6 probes], §18.4625 [relevant: crash point]
+### 18.4629 PORT M1084: 同一纤程/同一栈深度下尾段块被执行两次 → 不是跨纤程丢寄存器，而是"第二次入口"直接跳到 0x811DACFC
+
+1) m1129 崩溃前 8 行：
+```
+[PROCCREATE] #27 poolmgr=84617AE0 lr=8116FA26
+[R6-ALLOC] r6=0 r5=85CF304C r7=81306538 sp=84856298 lr=8120735C fib=848463A0 thr=0
+[R6-ACFC]  r6=846186C0 r5=0 r7=816CD9F0 sp=84856298 lr=8120735C fib=848463A0
+[R6-AD4A]  r6=846186C0
+[R6-AC9C]  r6=846186C0 r4=2                       ← 第一次（正常完成）
+[R6-ACFC]  r6=0 r5=85CF304C r7=812B414C sp=84856298 lr=81159298   ← 第二次（直接进中段，r6=0）
+[R6-AD4A]  r6=0
+[R6-AC9C]  r6=0 r4=2 lr=81159298
+[BADMEM] va=0 @0x811DAC9C
+```
+2) 关键区别：第一次 r5=0 r7=816CD9F0（函数内重载）；第二次 r5=85CF304C r7=812B414C（调用者原值）→ 第二次**没有执行函数初始化**，从 0x811DACFC 直接开始
+3) fib/thr/SP 全部相同 → 非跨纤程、非嵌套；直接原因是"第二次入口"
+4) M1084 探针：`harness_pc_ring(int idx)` hook + [R6-*] 打印 r0 与最近 6-8 个 PC 前驱
+5) 编译：batch_016 exit 0；harness exit 0；exe 57,114,358B（05:36:55）；运行 `out80m_m1130pcr.txt` 已启动
+NEXT：
+```
+① 读 m1130 第二次进入 0x811DACFC 的直接前驱
+② 前驱=0x811DACF4/0x811DAD84 → 真正的中段重入（HLE 回调/续跑）
+   前驱=0x81178F36 → pop {r4,pc} 栈错位
+   前驱=某 batch 块 → 检查生成代码是否错误 return 0x811DACFC
+③ 对应修复（栈错位 → 查谁写入 0x811DACFC；AOT 错误 → 重生成块）
+④ movie appProcessCreate 正常 → title 资源 → 2D 上下文 → array2 → GXM → 画面
+```
+验证：`out80m_m1129fiber.txt`、`out80m_m1130pcr.txt`（生成中）。
+
+ANTI-FORGETTING ENTRY. Keywords: M1084 fiber/thread identity probes show the crashing call and the normal call are on the SAME fiber 848463A0, same thread 0, same SP 84856298 -> not cross-fiber. Stranger: FUN_811DAB8C tail blocks 0x811DACFC/0x811DAD4A/0x811DAC9C execute TWICE before the crash, first with r6=846186C0 (normal), then immediately again with r6=0 (same SP/r4/r5/r7/lr=81159298) -> BADMEM. Key difference: first pass r5=0 r7=816CD9F0 (values reloaded inside the function), second pass r5=85CF304C r7=812B414C (caller's original values) -> the second entry did NOT execute the function initialization (0x811DAB8C..0x811DACF4) including the r6 allocation; r6 keeps the caller's leftover 0 -> crash. So the immediate cause is a direct jump to 0x811DACFC as a 'second entry'. m1129 sequence: [PROCCREATE] #27 poolmgr=84617AE0; [R6-ALLOC] r6=0 r5=85CF304C r7=81306538 sp=84856298 lr=8120735C fib=848463A0; [R6-ACFC] r6=846186C0 r5=0 r7=816CD9F0; [R6-AD4A] r6=846186C0; [R6-AC9C] r6=846186C0 r4=2; [R6-ACFC] r6=0 r5=85CF304C r7=812B414C lr=81159298; [R6-AD4A] r6=0; [R6-AC9C] r6=0 r4=2 lr=81159298; [BADMEM] va=0 at 0x811DAC9C. Candidates: some block returns 0x811DACFC (AOT mis-generation/wrong target table), or FUN_81178F0A's pop {r4,pc} popped 0x811DACFC from a corrupted stack slot. M1084 probes: harness extern "C" uint32_t harness_pc_ring(int idx) returning the idx-th predecessor from g_pc_ring; batch_016 [R6-ALLOC]/[R6-ACFC] extended with r0 and ring: last 6-8 PCs. Build: batch_016 exit 0; harness exit 0; exe 57,114,358B 05:36:55. Verification run out80m_m1130pcr.txt started. NEXT: read m1130 direct predecessor of the second entry into 0x811DACFC - if 0x811DACF4/0x811DAD84 (normal in-function) then genuine mid-function re-entry (HLE callback/continuation); if 0x81178F36 (pop {r4,pc}) then stack misalignment (return address 0x811DACFC) -> find who wrote 0x811DACFC on the stack; if some batch block check its generated code; then fix so movie-path appProcessCreate completes; then title asset load -> 2D context -> array2 -> GXM -> picture.
+
+LOOKUP: M1084 same fiber 848463A0 same thread same SP, tail blocks executed twice, first r6=846186C0 r5=0 r7=816CD9F0, second r6=0 r5=85CF304C r7=812B414C lr=81159298, direct entry 0x811DACFC skipped function init incl r6 alloc, harness_pc_ring hook, [R6-*] ring probes, pc predecessors, candidates 0x811DACF4 0x811DAD84 0x81178F36 pop {r4,pc} stack misalignment AOT mis-generation, m1130 out80m_m1130pcr.txt, exe 57,114,358B 05:36:55 -> §18.4628 [relevant: fiber probes], §18.4627 [relevant: MOVIEFIN refuted], §18.4626 [relevant: r6 crash]

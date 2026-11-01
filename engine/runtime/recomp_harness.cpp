@@ -409,6 +409,7 @@ static int g_in_fex = 0, g_nested_n = 0;
 static uint32_t g_mr_pc[40] = {0}, g_mr_nx[40] = {0};
 static uint32_t g_mr_n = 0;
 static uint32_t g_pc_ring_n = 0;
+extern "C" uint32_t harness_pc_ring(int idx) { return g_pc_ring[(g_pc_ring_n - 1u - (uint32_t)idx) & 63u]; }
 static int g_fslot_n = 0;
 static int g_gs_n = 0;
 static int g_pumped = 0;
