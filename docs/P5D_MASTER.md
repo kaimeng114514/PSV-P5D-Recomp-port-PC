@@ -1056,6 +1056,36 @@
 | M1038 | §18.4583: **S0_LOGO 任务已注册（`logoDrawProc`）但 title/logo.bin 的 Fios 打开请求从未到达 HLE：文件请求由 guest 侧请求管理器（FUN_81181A3C 队列）排队，需要一个 worker 线程/任务去消费并调用 Fios HLE——当前调度下该 worker 未被驱动，因此加载永不完成（自旋）。已启动 LOADPUMP/SCHEDFIX/THREADWEMU 组合运行尝试驱动请求队列**。m1096 证据：
 | M1039 | §18.4584: **参考项目 Project Nativ（`TheLostPantheon/nativ`）：通用 PS Vita 游戏静态重编译框架（Killzone/Uncharted/Unit 13/Shovel Knight 可玩）——与本项目同类但更完整的架构参照。已 git clone 到 `C:\dev\refs\nativ`（注意：**GPLv2 许可，只能作只读参考，不可复制代码**）。核心对照与可采纳项如下**。
 | M1040 | §18.4585: **实现"FIOS 同步完成"探针（P5D_FIOSFILL=1）：在应用层文件包装函数 `FUN_8115FBE6/FC0E/FC28/FC20` 入口直接由 HLE 从 CPK 提供文件数据，绕开未被调度的 guest 请求队列消费者——目标：让 S0_LOGO 加载 `title/logo.bin` + 3 个 TGA 并进入绘制**。实现：
+| M1041 | §18.4586: **m1098 证据表明 FIOSFILL 已生效（第一笔：`app_system/font/c_font_p5.fnt` size=1,167,652 成功直填！），但 fake handle 是小整数导致 guest 直接把它当指针解引用 → BADMEM va=5 @0x81181CBE。M1041 改为返回完整 guest 请求对象（对象内含 [obj+4]=0xC/[obj+0xA0]=0/[obj+0x88]=size/[obj+0x94]=buf/[obj+0]=0），让 guest 自己的完成/取数据函数可以正常读取**。m1098：
+```
+[FIOSFILL] OPEN 'app_system/font/c_font_p5.fnt' size=1167652 -> h=1 buf=98C9C870   ← ★ FIOSFILL 工作正常
+[BADMEM] guest va=0x00000005 unmapped block=0x81181CBE                              ← 小整数 handle 被当指针解引用
+[PROCREG] 7 个（app_main_start/…/appFontSystem）  [FORCETITLE] 0（未到 title 阶段）
+```
+**M1041 修改（`recomp_harness.cpp` harness_fios_open）**：不再返回自增小 id，而是 `hle_malloc(0x100)` 分配**请求对象**并按 guest 语义填充：
+```cpp
+uint32_t obj = hle_malloc(0x100u); memset(obj, 0, 0x100);
+wr32(obj+0x04, 0xCu);        // 类型=完成
+wr32(obj+0x88, size);        // 大小
+wr32(obj+0x94, buf);         // 数据指针
+*(u8*)(obj+0xA0) = 0;        // 成功
+g_fakefile[obj] = {buf,size};
+printf("[FIOSFILL] OPEN '%s' size=%u -> obj=%08X buf=%08X\n", ...);
+return obj;
+```
+⇒ 之后 guest 自己的 `FUN_81181CA0(obj)`（检查 [obj+4]==0xC && [obj+0xA0]==0）会返回 1（完成）、`FUN_81181CE4(obj,0,out)` 从 [obj+0x94] 取数据、[obj+0x88] 取大小——**完全兼容低层请求语义**，不再需要依赖我们的 FC0E/FC28 拦截（保留但冗余）。
+编译：harness exit 0；exe 重链 exit 0（57,058,809B，16:53:30）。
+验证运行：`out80m_m1099fiosobj.txt`（`P5D_FORCETITLE=1 P5D_FIOSFILL=1`）已启动。
+NEXT：
+```
+① [FIOSFILL] OPEN 'title/logo.bin' → [FIOSFILL] OPEN 'atluslogo.tga' 等
+② [LOGO] FUN_81193704 case2→3（TGA 任务创建）→ case4+（fade in）→ 69 帧切换
+③ logoDrawProc 绘制 → 截帧出现 ATLUS/CRI/P-STUDIO logo
+④ 若字体/logo 都通过则 title 页其余资源（title.bin/title.spr4）也会直填
+⑤ 若 TGA 走 FUN_81174DBC 容器内部路径 → 检查容器解析（logo.bin 整体已提供）
+```
+验证：`out80m_m1098fiosfill.txt`、`out80m_m1099fiosobj.txt`（生成中）。 |
+| §18.4586 | m1098 proved FIOSFILL works (first hit: app_system/font/c_font_p5.fnt size=1,167,652 served directly!), but the fake handle being a small integer crashed when the guest dereferenced it as a pointer -> BADMEM va=5 at 0x81181CBE. M1041 returns a full guest request object instead ([obj+4]=0xC/[obj+0xA0]=0/[obj+0x88]=size/[obj+0x94]=buf/[obj+0]=0) so the guest's own completion/get-data functions can read it normally. m1098: [FIOSFILL] OPEN 'app_system/font/c_font_p5.fnt' size=1167652 -> h=1 buf=98C9C870; [BADMEM] guest va=0x00000005 unmapped block=0x81181CBE (small-int handle dereferenced); [PROCREG] 7 (app_main_start/.../appFontSystem); [FORCETITLE] 0 (title not reached). M1041 change (recomp_harness.cpp harness_fios_open): instead of returning an auto-increment small id, allocate a 0x100-byte request object with hle_malloc, memset 0, write [obj+4]=0xC (type done), [obj+0x88]=size, [obj+0x94]=data ptr, byte [obj+0xA0]=0 (success), map g_fakefile[obj]={buf,size}, printf('[FIOSFILL] OPEN %s size=%u -> obj=%08X buf=%08X'), return obj. Then the guest's own FUN_81181CA0(obj) (checks [obj+4]==0xC && [obj+0xA0]==0) returns 1 (done) and FUN_81181CE4(obj,0,out) reads data from [obj+0x94] and size from [obj+0x88] - fully compatible with the low-level request semantics; our FC0E/FC28 intercepts stay but are redundant. harness exit 0; exe relink exit 0 (57,058,809B 16:53:30). Verification run out80m_m1099fiosobj.txt (P5D_FORCETITLE=1 P5D_FIOSFILL=1) started. NEXT: [FIOSFILL] OPEN 'title/logo.bin' then atluslogo.tga etc; [LOGO] FUN_81193704 case2->3 (TGA task creation) -> case4+ (fade in) -> 69-frame switching; logoDrawProc draws ATLUS/CRI/P-STUDIO logos; if fonts/logos pass, the title page's other resources (title.bin/title.spr4) also get served directly; if TGAs go through FUN_81174DBC's container-internal path check container parsing (the whole logo.bin is provided). |
 **harness 侧（`recomp_harness.cpp`，fiOSFILL hooks）**：
 ```cpp
 static std::map<uint32_t, std::pair<uint32_t,uint32_t>> g_fakefile;  // handle -> (guest buf, size)
@@ -495652,3 +495682,36 @@ NEXT：
 ANTI-FORGETTING ENTRY. Keywords: M1040 implemented the FIOS synchronous completion provider P5D_FIOSFILL=1 for the S0_LOGO loader - HLE serves files directly from the CPK at the app-level wrappers FUN_8115FBE6/FC0E/FC28/FC20, bypassing the unscheduled guest request-queue consumer. Harness: static g_fakefile map handle->(guest buf,size); extern "C" harness_fios_open(name) with lazy P5D_FIOSFILL flag, fios_ensure_cpk, cpk_read_any_impl, hle_malloc + copy to GP(buf), printf('[FIOSFILL] OPEN %s size=%u -> h=%u buf=%08X'); harness_fios_ready/ptr/size/close. batch_010.cpp blocks: blk_8115FBE6 -> harness_fios_open((const char*)P(s,s->r[0])); if handle set r0 and return lr; blk_8115FC0E -> ready => r0=1 return lr; blk_8115FC28 -> ready => r0=data ptr, if r1 wr32(s,r1,size), return lr; blk_8115FC20 -> ready => close r0=0 return lr. Rationale: FUN_81181CA0 checks [req+4]==0xC && [req+0xA0]==0, FUN_81181CE4 reads data [req+0x94] size [req+0x88]; fake handle satisfies that. harness exit 0; batch_010 exit 0; exe relink exit 0 (57,058,809B 16:36:56). Verification run out80m_m1098fiosfill.txt (P5D_FORCETITLE=1 P5D_FIOSFILL=1) started. NEXT: [FIOSFILL] OPEN 'title/logo.bin' then TGA opens; [LOGO] state FUN_81193704 case2->3->4 (fade in) 69-frame switching; logoDrawProc draws ATLUS/CRI/P-STUDIO logos under NOMOVIE; if TGAs go through FUN_81174DBC container-internal path check container parsing; if still spins add [TGA] probes to FUN_81174DBC/FUN_811933F1.
 
 LOOKUP: M1040, FIOS synchronous completion, P5D_FIOSFILL, harness_fios_open, g_fakefile, cpk_read_any_impl, hle_malloc, GP, batch_010 intercepts blk_8115FBE6 blk_8115FC0E blk_8115FC28 blk_8115FC20, FUN_8115FD22, FUN_81181C2A, FUN_81181A3C, FUN_81181CA0 req+4==0xC req+0xA0==0, FUN_81181CE4 req+0x94 req+0x88, title/logo.bin, atluslogo.tga crilogo.tga p-studio.tga, S0_LOGO, FUN_81193704, FUN_81174DBC, exe 57,058,809B, out80m_m1098fiosfill.txt -> §18.4584 [relevant: Nativ reference], §18.4583 [relevant: FIOS consumer blocker]
+### 18.4586 PORT M1041: FIOSFILL 返回完整 guest 请求对象（修复 handle 解引用崩溃）
+
+1) m1098：
+```
+[FIOSFILL] OPEN 'app_system/font/c_font_p5.fnt' size=1167652 -> h=1 buf=98C9C870   ← FIOSFILL 生效！
+[BADMEM] guest va=0x00000005 unmapped block=0x81181CBE                              ← 小整数 handle 被解引用
+[PROCREG] 7（app_main_start/…/appFontSystem）  [FORCETITLE] 0
+```
+2) M1041 修改（`recomp_harness.cpp` harness_fios_open）：
+```cpp
+uint32_t obj = hle_malloc(0x100u); memset(GP(obj), 0, 0x100);
+wr32(obj+0x04, 0xCu);   // 类型=完成
+wr32(obj+0x88, size);   // 大小
+wr32(obj+0x94, buf);    // 数据指针
+*(u8*)GP(obj+0xA0) = 0; // 成功
+g_fakefile[obj] = {buf, size};
+printf("[FIOSFILL] OPEN '%s' size=%u -> obj=%08X buf=%08X\n", ...);
+return obj;             // 返回对象地址而不是小 id
+```
+⇒ guest 的 FUN_81181CA0/CE4 可直接读取该对象（完成/数据/大小语义一致）
+3) 编译：harness exit 0；exe 57,058,809B（16:53:30）
+4) 验证运行 `out80m_m1099fiosobj.txt`（FORCETITLE + FIOSFILL）已启动
+NEXT：
+```
+① [FIOSFILL] OPEN 'title/logo.bin' → TGA OPEN
+② [LOGO] case2→3→4 → 69 帧切换
+③ logoDrawProc 绘制 → 截图可见 logo
+```
+验证：`out80m_m1098fiosfill.txt`、`out80m_m1099fiosobj.txt`（生成中）。
+
+ANTI-FORGETTING ENTRY. Keywords: M1041 m1098 proved FIOSFILL works (first hit app_system/font/c_font_p5.fnt size=1,167,652 served directly) but a small-integer fake handle crashed when the guest dereferenced it -> BADMEM va=5 at 0x81181CBE. M1041 returns a full guest request object instead: hle_malloc(0x100), memset 0, [obj+0x04]=0xC, [obj+0x88]=size, [obj+0x94]=data ptr, byte [obj+0xA0]=0, map g_fakefile[obj]={buf,size}, return obj. m1098 details: [FIOSFILL] OPEN 'app_system/font/c_font_p5.fnt' size=1167652 -> h=1 buf=98C9C870; [BADMEM] guest va=0x00000005 unmapped block=0x81181CBE; [PROCREG] 7 (app_main_start/.../appFontSystem); [FORCETITLE] 0. Rationale: the guest's own FUN_81181CA0(obj) checks [obj+4]==0xC && [obj+0xA0]==0 -> 1 (done), FUN_81181CE4(obj,0,out) reads data [obj+0x94] and size [obj+0x88] - fully compatible; FC0E/FC28 intercepts retained but redundant. harness exit 0; exe relink exit 0 (57,058,809B 16:53:30). Verification run out80m_m1099fiosobj.txt (P5D_FORCETITLE=1 P5D_FIOSFILL=1) started. NEXT: [FIOSFILL] OPEN 'title/logo.bin' then atluslogo.tga etc; [LOGO] FUN_81193704 case2->3 (TGA task creation) -> case4+ (fade in) -> 69-frame switching; logoDrawProc draws ATLUS/CRI/P-STUDIO logos; fonts/logos served; if TGAs go through FUN_81174DBC container path check parsing (whole logo.bin provided).
+
+LOOKUP: M1041, FIOSFILL full request object, hle_malloc 0x100 obj, obj+0x04=0xC, obj+0x88=size, obj+0x94=data, obj+0xA0=0, BADMEM va=5 81181CBE, m1098 font c_font_p5.fnt size=1167652 h=1 buf=98C9C870, harness_fios_open returns obj, FUN_81181CA0,[obj+4]==0xC, FUN_81181CE4 req+0x94/+0x88, exe 57,058,809B, out80m_m1099fiosobj.txt -> §18.4585 [relevant: FIOSFILL first implementation], §18.4583 [relevant: FIOS consumer blocker]

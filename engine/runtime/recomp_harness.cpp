@@ -1095,9 +1095,20 @@ extern "C" uint32_t harness_fios_open(const char* name) {
   uint32_t buf = hle_malloc((uint32_t)data.size());
   if (!buf) return 0;
   std::memcpy(GP(buf), data.data(), data.size());
-  uint32_t hnd = ++g_fakefile_id;
+  // M1041: the handle the guest stores is a REQUEST OBJECT, not a small id: the guest's own
+  // completion/get functions (FUN_81181CA0/FUN_81181CE4) read it directly:
+  //   [obj+0x00]=0 (no archive index), [obj+0x04]=0xC (done), [obj+0x88]=size,
+  //   [obj+0x94]=data ptr, [obj+0xA0]=0 (success).
+  uint32_t obj = hle_malloc(0x100u);
+  if (!obj) return 0;
+  { uint8_t* p = GP(obj); if (p) std::memset(p, 0, 0x100u); }
+  { uint32_t v = 0xCu; std::memcpy(GP(obj + 0x04u), &v, 4); }
+  { uint32_t v = (uint32_t)data.size(); std::memcpy(GP(obj + 0x88u), &v, 4); }
+  { uint32_t v = buf; std::memcpy(GP(obj + 0x94u), &v, 4); }
+  { uint8_t v = 0; if (GP(obj + 0xA0u)) *GP(obj + 0xA0u) = v; }
+  uint32_t hnd = obj;
   g_fakefile[hnd] = std::make_pair(buf, (uint32_t)data.size());
-  if (g_fakefile_id <= 80) { printf("[FIOSFILL] OPEN '%s' size=%u -> h=%u buf=%08X\n", name, (unsigned)data.size(), hnd, buf); fflush(stdout); }
+  if (g_fakefile_id++ < 80) { printf("[FIOSFILL] OPEN '%s' size=%u -> obj=%08X buf=%08X\n", name, (unsigned)data.size(), obj, buf); fflush(stdout); }
   return hnd;
 }
 extern "C" uint32_t harness_fios_ready(uint32_t hnd) { return g_fakefile.count(hnd) ? 1u : 0u; }
