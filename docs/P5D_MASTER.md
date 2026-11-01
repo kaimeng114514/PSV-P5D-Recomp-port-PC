@@ -1085,6 +1085,46 @@
 | M1067 | §18.4612: ★★★★★★★★★★ **m1113（THRPUMP+THREADDUMP 短跑）铁证：13 个 guest 线程中 **7 个 ready=1、wait=0、却从不执行**；同时 6 个 gfd worker 在 gfdJobCountSema 上等待。信号量语义（SignalSema 唤醒/WaitSema 消费）已逐行核对正确——问题 100% 在"ready 线程不被调度执行"。**
 | M1068 | §18.4613: ★★★★★★★★★★★★ **M1068 线程泵修复成功：`P5D_PUMPMAIN=1` 让 guest 线程真正执行！2.5M+ 次线程执行、worker 进入 trampoline、帧计数器 ctr 从 0→221（引擎帧循环活了）、无 BADMEM、运行速度提升约 3 倍；但 title 阶段仍无 per-frame GXM 绘制调用——下一层：worker 是否执行 gfd 作业描述符。**
 | M1069 | §18.4614: ★★★★★★★★★★ **worker 线程确认执行了 gfd 帧提交描述符（[GSUBMIT] tid=40016000 r1=811F3495；[GPUPREP2] tid=40016000 进入 FUN_811EBB90），并反汇编解码了 FUN_811F3494 的两道提交门控——门控显示 array2（DAT_816CC6CC）绘制列表为空，因为 2D sprite 批处理渲染器 FUN_811ADAFE 从未运行。**
+| M1070 | §18.4615: ★★★★★★★★★★ **m1116 把门控原因再推进一层：gfd 帧提交入口实测 `frame=0 a2=850FD960 g730=0x03000000`，array2 bucket0/1 链表头全 0（b0op/b0tr/b1op/b1tr=0）——两道门控都跳过；而 2D 场景调度器 `FUN_811C2964` 确实每帧被主线程调用（120 次，r0=859BF220/859BF940 两个场景对象），但它没有到达 FUN_811B6B12/FUN_811ADAFE——场景条目列表（param_1[0xF]）为空或条目全被禁用。**
+m1116（P5D_PUMPMAIN=1，n=64.3M，exit 0）：
+```
+[GSUBX] #1 tid=40016000 desc=847F4264 frame=0 a2=850FD960 g730=03000000
+        b0op=00000000 b0tr=00000000 b1op=00000000 b1tr=00000000   ← ★ array2 空
+[GSUBMIT] #1 tid=40016000 r0=847F4264 r1=811F3495 lr=811E6936
+[GPUPREP2] #1 tid=40016000 r0=0 lr=811F3548（仅帧0一次）
+[C2964] 120 条：tid=00000000（主线程）r0=859BF220/859BF940 r1=81199FDB/0 r2=00001398 lr=81199FF6
+[B6B12]=0 [B6546]=0 [B7EC4]=0 [ADA]=0 [19E02]=0      ← ★ 2D 渲染链未进入
+[FLUSHX] a1=850FD9A0 a2=850FD960 a3=850FCF20，a3 bucket11 op=8F142000（命令在 array3）
+[ENQ] type=0x0B ×9 + 0x4B；[LOGO]=202 [LOGODRAW]=80 [BADMEM]=0
+[ABIBEGIN]=1 [ABIEND]=0 [PRESENT]=1
+```
+**FUN_811C2964 反编译（`c2964.txt`）——2D 场景渲染调度器**：
+```c
+void FUN_811c2964(undefined4 *param_1) {                 // param_1 = gfd 场景对象
+  if ((param_1[1] & 0x18) == 0) {                        // 场景状态门
+    DAT_816cd950 = *param_1;
+    for (piVar5 = (int*)param_1[0xF]; piVar5 != NULL; piVar5 = (int*)piVar5[0x10]) {  // ★ 场景条目链
+      if ((piVar5[0x13] & 0x80000000U) == 0) {           // 条目未禁用
+        if (piVar5[0xE] != 0) { for 3 次 FUN_811b29e6(piVar5[0xE],i,材质) }   // 3 组材质
+        *(uint*)(*piVar5 + 0x10) |= 0x80000;             // 标记
+        FUN_811b6b12(piVar5[0xB]);                       // ★ 2D 批次渲染（→FUN_811ADAFE→array2）
+      } }
+    FUN_811e64f4(); … 第二条链 param_1[0x19] → FUN_811cd376 …；回调 param_1[0x2D]
+  } }
+```
+**FUN_811B6B12 反编译头部（1306B）**：param_1=entry id、param_2=对象指针；门控链：`(uVar4=*(param_2+0x10) & 0x400) → 直接跳 LAB_811b6ec0`；`&0x200000 → 三缓冲拷贝`；`&0x20`；当 `(uVar4 & 0xD)==8` 且 iVar5=*(param_2+0x1C) 合法时 → `FUN_811b67c2(...)`（内部生成 draw 批次/调用 FUN_811ADAFE 填 array2）。
+**⇒ 结论：不是提交端问题，而是"场景对象没有 2D 条目（layer/view）"——param_1[0xF] 链为空或条目 bit31 禁用。下一步要找出"谁应该把 logo 的 2D 图层注册进场景对象"。**
+NEXT：
+```
+① [C2964] 探针扩展：打印 param_1[1]（状态）、param_1[0xF]（条目链头）、遍历条目数/每项 [0x13]
+② 找场景条目注册函数：app 的 2D scene/view API（对 0x859BF220/859BF940 场景对象写入 [0xF] 链的函数）
+   —— 用 Ghidra refs 找 859BF220 来源 / appGx scene 创建（可能与 LOGODRAW 的 appGx 绘制同一层）
+③ 检查场景对象 [1] 状态位 0x18 是否被设置（若被设置则整个函数跳过）
+④ 若条目链因游戏逻辑未注册 → 修正 HLE 使注册路径执行（可能是某个被我们 stub 成 0 的 API 返回值）
+⑤ 条目注册后：FUN_811B6B12 → FUN_811ADAFE → array2 非空 → FUN_811C0654=0 → FUN_811EC172 → SceGxm_* → 画面
+```
+验证：`out80m_m1116ada.txt`、`c2964.txt`、`gate654.txt`、`submit_dis.txt`。 |
+| §18.4615 | m1116 pushes the gate analysis one level further: at the gfd frame-submit entry the actual state is frame=0 a2=850FD960 g730=0x03000000 and all array2 bucket0/1 list heads are 0 (b0op/b0tr/b1op/b1tr=0) - both gates skip; and the 2D scene dispatcher FUN_811C2964 IS called every frame by the main thread (120 times, r0=859BF220/859BF940 = two scene objects), but it never reaches FUN_811B6B12/FUN_811ADAFE - the scene entry list (param_1[0xF]) is empty or all entries are disabled. m1116 (P5D_PUMPMAIN=1, n=64.3M, exit 0): [GSUBX] #1 tid=40016000 desc=847F4264 frame=0 a2=850FD960 g730=03000000 b0op=0 b0tr=0 b1op=0 b1tr=0 (array2 empty); [GSUBMIT] #1 tid=40016000 r0=847F4264 r1=811F3495 lr=811E6936; [GPUPREP2] #1 tid=40016000 r0=0 lr=811F3548 (frame 0 only); [C2964] 120 lines: tid=0 (main thread) r0=859BF220/859BF940 r1=81199FDB/0 r2=0x1398 lr=81199FF6; [B6B12]=0 [B6546]=0 [B7EC4]=0 [ADA]=0 [19E02]=0 (2D path not entered); [FLUSHX] a1=850FD9A0 a2=850FD960 a3=850FCF20 a3 bucket11 op=8F142000; [ENQ] type=0x0B x9 + 0x4B; [LOGO] 202 [LOGODRAW] 80 [BADMEM] 0; [ABIBEGIN] 1 [ABIEND] 0 [PRESENT] 1. FUN_811C2964 decompiled (c2964.txt): if ((param_1[1] & 0x18) == 0) { DAT_816cd950 = *param_1; for (piVar5=(int*)param_1[0xF]; piVar5 != NULL; piVar5=(int*)piVar5[0x10]) { if ((piVar5[0x13] & 0x80000000U)==0) { if (piVar5[0xE]!=0) for 3 times FUN_811b29e6(piVar5[0xE],i,material); *(uint*)(*piVar5+0x10) |= 0x80000; FUN_811b6b12(piVar5[0xB]); } } FUN_811e64f4(); ... second chain param_1[0x19] -> FUN_811cd376 ...; callback param_1[0x2D] }. FUN_811B6B12 head (1306B): param_1=entry id, param_2=object ptr; gates (uVar4=*(param_2+0x10) & 0x400 -> LAB_811b6ec0), &0x200000 -> triple-buffer copy, &0x20, and when (uVar4 & 0xD)==8 with iVar5=*(param_2+0x1C) valid -> FUN_811b67c2 (which generates the draw batch / calls FUN_811ADAFE to fill array2). Conclusion: it is not a submit-side problem but that the scene object has no 2D entries (layers/views) - param_1[0xF] chain empty or entries bit31-disabled. NEXT: (1) extend [C2964] probe to print param_1[1], param_1[0xF] head, entry count and each [0x13]; (2) find the scene-entry registration function (app 2D scene/view API that fills [0xF] on 0x859BF220/859BF940) using Ghidra refs to those scene objects / appGx scene creation; (3) check scene [1] status bit 0x18; (4) if entries are never registered because of game logic, fix the HLE return value that gates registration; (5) once entries registered: FUN_811B6B12 -> FUN_811ADAFE -> array2 non-empty -> FUN_811C0654=0 -> FUN_811EC172 -> SceGxm_* -> picture. |
 m1115（P5D_PUMPMAIN=1，title 阶段 n=61.4M）：
 ```
 [GSUBMIT] #1 tid=40016000 r0=847F4264 r1=811F3495 lr=811E6936 sp=847F4258   ← worker 执行提交描述符
@@ -497565,3 +497605,40 @@ NEXT：
 ANTI-FORGETTING ENTRY. Keywords: M1069 m1115 worker 40016000 executed gfd submit descriptor ([GSUBMIT] r0=847F4264 r1=811F3495 lr=811E6936) and entered FUN_811EBB90 once ([GPUPREP2] r0=0 lr=811F3548); FUN_811F3494 disassembly: r4=*descriptor=frame idx, r5=flags; gate1: bl 0x811c0654, bne 0x811f3512 (if nonzero skip GXM view draw FUN_811EC172->SceGxm_*); gate2: DAT_816CC730[frame] bit0 (ldr [r0,#0x100] after add r0=0x816cc630+r4*4), beq 0x811f3564 skips FUN_811EBB90 (GPU submit) and only does FUN_811C0464 cleanup; bl 0x811ebb90 seen once for frame 0. FUN_811C0654(array2=(&DAT_816CC6CC)[frame]): returns 0 if bucket0/1 +0xC or +0x14 non-empty, else returns 1 -> array2 empty => skip. array2's only writer FUN_811C05EC is called only by FUN_811ADAFE (2D sprite batch renderer), and [ADA]/[ENQ2]=0 -> FUN_811ADAFE never runs; FUN_811ADAFE callers = FUN_811B6B12 (4 sites), FUN_811B6B12 callers = FUN_811C2964/FUN_81219E02/0x81216xxx. m1115 also: [FLUSHX] a1=850FD9A0 a2=850FD960 a3=850FCF20 a3 bucket11 op=8F142000; [ENQ] type=0x0B x9 + 0x4B; [SUBMIT] 93; [LOGODRAW] 80; [LOGO] 167; [BADMEM] 0; [ABIBEGIN] 1. NEXT: print array2 bucket0/1 heads + DAT_816CC730[frame] at FUN_811F3494 entry; add [ADA]/[B6B12]/[C2964] probes; decompile FUN_811B6B12/FUN_811C2964; find and trigger the 2D render dispatch entry; once array2 non-empty -> FUN_811EC172 -> SceGxm_* HLE -> per-frame GXM -> picture.
 
 LOOKUP: M1069, [GSUBMIT] tid=40016000 r0=847F4264 r1=811F3495 lr=811E6936, [GPUPREP2] FUN_811EBB90 r0=0 lr=811F3548, FUN_811F3494 gates FUN_811C0654 gate654.txt, DAT_816CC730[frame] bit0 at [r0+0x100] from 0x816cc630, FUN_811C0654 array2 816CC6CC bucket0/1 +0xC/+0x14 returns 1 when empty, FUN_811ADAFE 2D sprite batch renderer never runs [ADA]=0 [ENQ2]=0, FUN_811C05EC only caller FUN_811ADAFE, FUN_811B6B12, FUN_811C2964, FUN_81219E02, FUN_811EC172 SceGxm calls, FUN_811EBB90 GPU submit, out80m_m1115gwalk.txt, submit_dis.txt, gate654.txt, ada_refs.txt, b6b12_refs.txt -> §18.4613 [relevant: thread pump works], §18.4608 [relevant: walkers], §18.4605 [relevant: opaque chain]
+### 18.4615 PORT M1070: 2D 场景条目为空——FUN_811C2964 每帧调用但到不了 FUN_811B6B12
+
+1) m1116（n=64.3M，exit 0）：
+```
+[GSUBX] #1 tid=40016000 desc=847F4264 frame=0 a2=850FD960 g730=03000000
+        b0op=00000000 b0tr=00000000 b1op=00000000 b1tr=00000000
+[C2964] 120：tid=0（主线程）r0=859BF220/859BF940 r1=81199FDB/0 r2=00001398 lr=81199FF6
+[B6B12]=0 [B6546]=0 [B7EC4]=0 [ADA]=0 [19E02]=0
+[FLUSHX] a1=850FD9A0 a2=850FD960 a3=850FCF20，a3 bucket11 op=8F142000
+[ABIBEGIN]=1 [ABIEND]=0 [PRESENT]=1 [BADMEM]=0
+```
+2) FUN_811C2964（`c2964.txt`）：
+```c
+if ((param_1[1] & 0x18) == 0) {
+  DAT_816cd950 = *param_1;
+  for (piVar5=(int*)param_1[0xF]; piVar5; piVar5=(int*)piVar5[0x10]) {
+    if ((piVar5[0x13] & 0x80000000U) == 0) {
+      if (piVar5[0xE] != 0) for (3 次) FUN_811b29e6(piVar5[0xE],i,material);
+      *(uint*)(*piVar5 + 0x10) |= 0x80000;
+      FUN_811b6b12(piVar5[0xB]);       // → 2D 批次渲染
+    } }
+  FUN_811e64f4(); … param_1[0x19] 链 FUN_811cd376 …; 回调 param_1[0x2D]
+}
+```
+3) FUN_811B6B12 头部：`*(param_2+0x10)&0x400` → 跳；`&0x200000` 三缓冲拷贝；`&0x20`；`(uVar4&0xD)==8` 且 `*(param_2+0x1C)` 合法 → FUN_811b67c2（填 array2）
+4) 结论：**场景对象没有 2D 条目（layer/view）**，不是提交端问题
+NEXT：
+```
+① [C2964] 扩展：param_1[1]、param_1[0xF] 链头、条目数与 [0x13]
+② 找场景条目注册函数（向 [0xF] 写链的 appGx scene/view API）
+③ 检查场景 [1] 状态位 0x18
+④ 若注册路径被 HLE 返回值挡住 → 修 HLE
+⑤ 条目注册 → FUN_811B6B12 → FUN_811ADAFE → array2 → FUN_811C0654=0 → FUN_811EC172 → 画面
+```
+验证：`out80m_m1116ada.txt`、`c2964.txt`、`gate654.txt`。
+
+ANTI-FORGETTING ENTRY. Keywords: M1070 m1116: gfd submit entry actual state frame=0 a2=850FD960 g730=0x03000000 array2 bucket0/1 heads all 0 (b0op/b0tr/b1op/b1tr=0) so both submit gates skip; 2D scene dispatcher FUN_811C2964 IS called every frame by main thread (120 times, r0=859BF220/859BF940 two scene objects, r1=81199FDB/0, r2=0x1398, lr=81199FF6) but never reaches FUN_811B6B12/FUN_811ADAFE -> scene entry list param_1[0xF] empty or entries disabled. FUN_811C2964 decompiled: if ((param_1[1] & 0x18)==0) { DAT_816cd950=*param_1; for (piVar5=(int*)param_1[0xF]; piVar5; piVar5=(int*)piVar5[0x10]) { if ((piVar5[0x13]&0x80000000U)==0) { if (piVar5[0xE]!=0) for 3 times FUN_811b29e6(piVar5[0xE],i,material); *(uint*)(*piVar5+0x10)|=0x80000; FUN_811b6b12(piVar5[0xB]); } } FUN_811e64f4(); second chain param_1[0x19] -> FUN_811cd376; callback param_1[0x2D] }. FUN_811B6B12 head: param_1=entry id, param_2=obj; gates *(param_2+0x10)&0x400 -> LAB_811b6ec0; &0x200000 triple-buffer copy; &0x20; (uVar4&0xD)==8 and *(param_2+0x1C) valid -> FUN_811b67c2 -> fills array2 via FUN_811ADAFE. So the scene object has no 2D entries (layers/views). NEXT: extend [C2964] probe (param_1[1], param_1[0xF], entries, [0x13]); find the scene-entry registration function (appGx scene/view API writing [0xF]); check scene [1] bit 0x18; fix gating HLE if registration blocked; once entries registered FUN_811B6B12 -> FUN_811ADAFE -> array2 non-empty -> FUN_811C0654=0 -> FUN_811EC172 -> SceGxm_* -> picture. |
