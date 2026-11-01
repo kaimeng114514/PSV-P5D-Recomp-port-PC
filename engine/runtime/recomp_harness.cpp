@@ -101,7 +101,7 @@ static int g_sem2_n = 0, g_sig2_n = 0, g_evt2_n = 0;
 static int g_thrst_n = 0;
 static int g_thrtrace = 0;   // 18.4232 trace off by default (P5D_THRTRACE=1 enables)
 static int g_thrtr_n = 0;
-static int g_thrpump_env = 0;
+static int g_thrpump_env = 0; static int g_pumpmain_env = -1; static int g_pcalls=0, g_pgate=0, g_ppumped=0, g_pblocked=0;
 static int g_thrpump3 = 0;   // M817: pump guest threads only at main-fiber idle points
 static int g_pump_force = 0; // M819: allow thread pump inside fiber exec during main-thread blocking waits
 static int g_timer_n = 0;    // M822: SceKernelTimer debug
@@ -3226,6 +3226,10 @@ extern "C" uint32_t hle_call(uint32_t stub_va, RecState* s) {
       break; }
     case 0x812B2AD0u: {                                               // sceKernelSignalSema
       uint32_t obj = s->r[0];
+      if ((obj & 0xFFFF0000u) == 0x50010000u) { static int _gs=0; if (_gs++ < 160) {
+        int _w=0; for (auto& _kv : g_thr) if (_kv.second.waiting && _kv.second.wait_obj==obj) ++_w;
+        std::fprintf(stderr,"[GSIG] obj=%08X count=%u waiters=%d thr=%08X lr=%08X blk=%08X n=%u\n", obj,
+          (g_sema.count(obj)?g_sema[obj]:0u), _w, g_cur_thr, s->r[14], g_cur_block, g_blkcnt_total); std::fflush(stderr); } }
       if (obj == 0x50018000u) { static int _gfs2=0; if (_gfs2++ < 100) { printf("[GFS] signal thr=%08X lr=%08X fib=%08X blk=%08X n=%u count=%u\n", g_cur_thr, s->r[14], g_cur_fiber, g_cur_block, g_blkcnt_total, (g_sema.count(obj)?g_sema[obj]:0u)); fflush(stdout); } }
       g_sema[obj] += 1;
       { uint32_t _tok = g_cur_thr ? g_cur_thr : (0xF0000000u | (g_cur_fiber & 0xFFFFFFu)); g_sema_owner[obj] = _tok; g_sema_owner_lr[obj] = s->r[14]; }
@@ -4450,6 +4454,7 @@ BlockFn fn = gbn(pc);
       }
     }
     s->r[15] = fn(s);
+    if (g_pumpmain_env > 0 && !g_cur_thr && ((g_blkcnt_total & 0x3FFu) == 0u)) { g_pump_force = 1; hle_thr_pump(s, 300); g_pump_force = 0; }
     g_mr_pc[g_mr_n % 40u] = pc; g_mr_nx[g_mr_n % 40u] = s->r[15]; ++g_mr_n;
     { uint32_t nx = s->r[15];
       if ((nx & ~1u) == 0x81206BDCu || (nx & ~1u) == 0x81206BDCu) {
@@ -5204,11 +5209,17 @@ static void hle_thr_pump(RecState* s, int quantum) {
       if (_tw.alive && _tw.waiting) { auto _itw = g_thr_wake_vt.find(_kvw.first);
         if (_itw != g_thr_wake_vt.end() && g_vtime_extra >= _itw->second) { _tw.waiting = 0; _tw.ready = 1; g_thr_wake_vt.erase(_itw); } } }
   }
-  if (g_in_fiber_exec && !g_thrpump_env && !g_thrpump3 && !g_pump_force) return;   // 18.4232: worker-trace mode (P5D_THRPUMP=1) allows pumping from the fiber world
+  if (g_in_fiber_exec && !g_thrpump_env && !g_thrpump3 && !g_pump_force) { ++g_pgate; return; }   // 18.4232: worker-trace mode (P5D_THRPUMP=1) allows pumping from the fiber world
+  { static int _pmenv=-1; if(_pmenv<0){ const char* _e=getenv("P5D_PUMPMAIN"); _pmenv=(_e&&atoi(_e))?1:0; g_pumpmain_env=_pmenv; } }
+  ++g_pcalls;   // M1068: pump diagnostics
   if (g_thrtrace && g_thrst_n++ < 20) { printf("[THRST] n=%zu:", g_thr.size()); for (auto& _kv : g_thr) { auto& _t=_kv.second; printf(" %08X(a%d,r%d,w%d,obj=%08X,bits=%08X,sp=%08X)", _kv.first, _t.alive?1:0, _t.ready?1:0, _t.waiting?1:0, _t.wait_obj, _t.wait_bits, _t.ctx.r[13]); } printf("\n"); fflush(stdout); }   // 18.4228: allow the pump from the main-loop world (g_cur_fiber is the app fiber there); never nest inside thread execution
   for (auto& kv : g_thr) {
     HThread& t = kv.second;
     if (!t.alive || !t.ready) continue;
+    { ++g_ppumped;
+      static int _pn=0; if (_pn++ < 120 || (g_ppumped % 200) == 0) {
+        std::fprintf(stderr,"[PUMP] #%d calls=%d gate=%d pumped=%d tid=%08X pc=%08X blocks=%d blk=%u fex=%d fib=%08X\n",
+          _pn, g_pcalls, g_pgate, g_ppumped, kv.first, t.ctx.r[15], 0, (unsigned)g_blkcnt_total, g_in_fiber_exec, g_cur_fiber); std::fflush(stderr); } }
     RecState saved = *s;
     std::memcpy(s->r, t.ctx.r, sizeof(t.ctx.r)); s->apsr = t.ctx.apsr; ctxchk(11, kv.first, s);
     g_cur_thr = kv.first; g_thr_blocked = 0;
@@ -5506,7 +5517,7 @@ int main(int argc, char** argv) {
   while (n < maxb) {
     if ((n & 0xFF) == 0) hle_pump_win_messages();   // 18.4489 M944
     if (g_pump_cool > 0) --g_pump_cool;   // 18.4181: pump cooldown tick
-    if ((n & 0x1FF) == 0 && !g_thr.empty()) hle_thr_pump(&s, 400);
+    if ((n & 0x1FF) == 0 && !g_thr.empty()) { int _f = (g_pumpmain_env > 0) ? 1 : 0; if (_f) g_pump_force = 1; hle_thr_pump(&s, 400); if (_f) g_pump_force = 0; }
     if (false && n == 20000) {   // 18.4176: INJECT disabled - the injected fake load-request nodes are what the wait callback 0x811830C8 was waiting on
       // 18.3841: inject MANY load requests (a linked chain) using real CPK names - one node = one file.
       // node format: +0 flags, +4 name ptr, +8 -1, +0xc/+0x10/+0x14 payload, +0x20 -1,

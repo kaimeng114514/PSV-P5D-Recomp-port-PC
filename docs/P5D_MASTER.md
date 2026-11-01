@@ -1083,6 +1083,40 @@
 | M1065 | §18.4610: **线程泵机制完整审计（`recomp_harness.cpp` `hle_thr_pump`）：guest 线程泵存在且有三重门控，关键是 fiber 世界内的泵被默认禁止；M1065 用 `P5D_THRPUMP=1` 重新试验（历史 M720 曾早期崩溃，之后大量修复未再验证）。**
 | M1066 | §18.4611: ★★★★★★★★★★ **gfd 作业队列全链路确认 + 精确卡点：job 已投递、信号量计数在涨、worker 线程却始终 waiting（从未被唤醒/被泵）**。m1112（THRPUMP=1）证据：
 | M1067 | §18.4612: ★★★★★★★★★★ **m1113（THRPUMP+THREADDUMP 短跑）铁证：13 个 guest 线程中 **7 个 ready=1、wait=0、却从不执行**；同时 6 个 gfd worker 在 gfdJobCountSema 上等待。信号量语义（SignalSema 唤醒/WaitSema 消费）已逐行核对正确——问题 100% 在"ready 线程不被调度执行"。**
+| M1068 | §18.4613: ★★★★★★★★★★★★ **M1068 线程泵修复成功：`P5D_PUMPMAIN=1` 让 guest 线程真正执行！2.5M+ 次线程执行、worker 进入 trampoline、帧计数器 ctr 从 0→221（引擎帧循环活了）、无 BADMEM、运行速度提升约 3 倍；但 title 阶段仍无 per-frame GXM 绘制调用——下一层：worker 是否执行 gfd 作业描述符。**
+**实现（`recomp_harness.cpp`，M1068）**：
+1. 新增 `g_pumpmain_env`（env `P5D_PUMPMAIN`）+ `[PUMP]` 诊断（调用数/门控拒绝/泵线程 tid/pc/块号）
+2. `hle_thr_pump` 门控处加计数：`if (g_in_fiber_exec && !g_thrpump_env && !g_thrpump3 && !g_pump_force) { ++g_pgate; return; }`
+3. fiber_exec 主循环每块后：`if (P5D_PUMPMAIN && !g_cur_thr && (g_blkcnt_total & 0x3FF)==0) { g_pump_force=1; hle_thr_pump(s,300); g_pump_force=0; }`
+4. 主循环泵：P5D_PUMPMAIN 时强制（`g_pump_force=1` 绕过 fiber 门控）
+5. `[GSIG]`（SignalSema 对 5001xxxx 打印 count/waiters）、`[WK]`（batch_016 blk_811E68C8 worker trampoline 入口）
+**m1114 结果（`out80m_m1114pumpmain.txt` / err，exit 0）**：
+```
+[PUMP] 12025 条（末尾 pumped=2,521,600+）：tid=40011000..40016000 首次泵到 pc=811E68C8（进入 trampoline）
+  之后线程大量运行：40017000 pc=81207612/811F22BC、40019000 pc=8101611A/811731D8、4001B000、4001E000 pc=812B0BB6…
+[WK] ×6：worker trampoline 入口 r0=00000008 r1=84xx5080/5100…（6 个 gfd worker 全部进入）
+[GSIG] ×160：obj=50017000/50018000 信号（waiters 有/无、唤醒正常）
+[THREXIT] tid=4001A000（显示线程）执行 11 块后正常退出；tid=40011000 曾 badblock pc=FFFFFFFD lr=811E6936
+[BADMEM] 0（无内存故障！）
+FRAMEDUMP 末尾：n=64,275,000 ctr=221  ← ★ 帧计数器 0→221（此前 title 阶段一直 ctr=0）
+运行结束：done: blocks=64,278,346 pc=8116F748 r0=85CF304C
+[CNT] 81198BEA=749 811E5CDA=749 811E5928=11 FSLOT=749；[CNT2] mgr=749 67E8=749 …
+[CONSUME] FHRead calls=0 bytes=0 FIOS-opens=12288
+[LOGO] 202  [LOGODRAW] 80  [DRAWSUB] 60  [FLUSH] 120  [SUBMIT] 121
+仍无：[ABIBEGIN]=1（仅启动时）、[ABIEND]=0、[GXM-BEGIN]=0、[PRESENT]=1、[TEXBIND]=1、[ABIVTX]=1
+```
+⇒ **线程调度根因已修复**（M1064/1066/1067 的推断全部验证）；引擎主循环/帧计数/logo 状态机现在真正推进（ctr=221，749 次 mgr tick）。**剩余问题：gfd worker 执行的作业没有走到 GXM 绘制**——需要确认哪个 worker 在消费 gfd 作业描述符（walkers 0x811F36C7/0x811F3751/0x811F37AD 与提交 0x811F3495 是否被 worker 执行）。
+NEXT：
+```
+① 探针：0x811F36C7 / 0x811F3751 / 0x811F37AD（descriptor walkers）、0x811F3495（提交）
+   加 [GWALK]/[GSUBMIT] 打印 tid/fib/blk，确认 gfd 作业是否被 worker 取出执行
+② 探针：batch_017 的 [BLD1/2/3] 与 [SUBMIT] 在 worker 上下文的出现（g_cur_thr != 0）
+③ 检查 gfdJobCountSema 50011000/50013000/50015000 是否被消费（[SEMA] 计数变化）
+④ 若 descriptor 执行但未到 GXM → 打印 FUN_811F3494 内部分支（FUN_811ec280/ec0a4/ec172 返回值与门控）
+⑤ 目标：worker 执行 gfd GPU 提交 → per-frame GXM HLE 调用（BeginScene/Draw/EndScene）→ 画面
+```
+验证：`out80m_m1114pumpmain.txt`、`err80m_m1114pumpmain.txt`、`recomp_harness.cpp`（hle_thr_pump/主循环）、§18.4612/18.4611/18.4609。 |
+| §18.4613 | M1068 thread-pump fix SUCCEEDED: P5D_PUMPMAIN=1 makes guest threads really execute! 2.5M+ thread executions, workers enter the trampoline, the frame counter ctr goes 0->221 (the engine frame loop is alive), no BADMEM, ~3x faster runs; but title phase still has no per-frame GXM draw calls - next layer: do workers execute the gfd job descriptors? Implementation (recomp_harness.cpp, M1068): (1) new g_pumpmain_env (env P5D_PUMPMAIN) + [PUMP] diagnostics (call count/gate rejections/pumped tid/pc/block); (2) hle_thr_pump gate now counts: if (g_in_fiber_exec && !g_thrpump_env && !g_thrpump3 && !g_pump_force) { ++g_pgate; return; }; (3) after each block in the fiber_exec main loop: if (P5D_PUMPMAIN && !g_cur_thr && (g_blkcnt_total & 0x3FF)==0) { g_pump_force=1; hle_thr_pump(s,300); g_pump_force=0; }; (4) main-loop pump forced when P5D_PUMPMAIN (g_pump_force=1 bypasses the fiber gate); (5) [GSIG] (SignalSema prints count/waiters for 5001xxxx), [WK] (batch_016 blk_811E68C8 worker trampoline entry). m1114 results (out80m_m1114pumpmain.txt / err, exit 0): [PUMP] 12025 lines (pumped=2,521,600+ at the end): tids 40011000..40016000 first pumped to pc=811E68C8 (entering the trampoline), then many threads run: 40017000 pc=81207612/811F22BC, 40019000 pc=8101611A/811731D8, 4001B000, 4001E000 pc=812B0BB6; [WK] x6: worker trampoline entries r0=00000008 r1=84xx5080/5100 (all 6 gfd workers entered); [GSIG] x160: obj=50017000/50018000 signals (waiters present/absent, wakes working); [THREXIT] tid=4001A000 (display thread) ran 11 blocks then exited normally; tid=40011000 once badblock pc=FFFFFFFD lr=811E6936; [BADMEM] 0 (no memory faults!); FRAMEDUMP tail: n=64,275,000 ctr=221 (frame counter 0->221, previously always ctr=0 in title phase); run end: done: blocks=64,278,346 pc=8116F748 r0=85CF304C; [CNT] 81198BEA=749 811E5CDA=749 811E5928=11 FSLOT=749; [CNT2] mgr=749 67E8=749 ...; [CONSUME] FHRead calls=0 bytes=0 FIOS-opens=12288; [LOGO] 202 [LOGODRAW] 80 [DRAWSUB] 60 [FLUSH] 120 [SUBMIT] 121; still none: [ABIBEGIN]=1 (boot only) [ABIEND]=0 [GXM-BEGIN]=0 [PRESENT]=1 [TEXBIND]=1 [ABIVTX]=1. So the thread-scheduling root cause is FIXED (M1064/1066/1067 inferences all validated); the engine main loop/frame counter/logo state machine now really advance (ctr=221, 749 mgr ticks). Remaining problem: the gfd worker-executed jobs do not reach GXM drawing - need to confirm which worker consumes the gfd job descriptors (walkers 0x811F36C7/0x811F3751/0x811F37AD and submit 0x811F3495). NEXT: (1) probes on 0x811F36C7/0x811F3751/0x811F37AD (descriptor walkers), 0x811F3495 (submit) with [GWALK]/[GSUBMIT] printing tid/fib/blk to confirm workers dequeue+execute gfd jobs; (2) probes on batch_017 [BLD1/2/3] and [SUBMIT] in worker context (g_cur_thr != 0); (3) check gfdJobCountSema 50011000/50013000/50015000 consumption ([SEMA] count changes); (4) if descriptor executes but never reaches GXM print FUN_811F3494 internals (FUN_811ec280/ec0a4/ec172 return values and gates); (5) goal: worker gfd GPU submit -> per-frame GXM HLE calls (BeginScene/Draw/EndScene) -> picture. |
 m1113 [TDUMP]（n=500,000 时快照，13 threads）：
 ```
 tid=40011000 entry=811E68C9 ready=0 wait=1 obj=50011000 mode=5E4A ctxpc=811E68FC   ← gfd worker ×6
@@ -497397,3 +497431,41 @@ NEXT：
 ANTI-FORGETTING ENTRY. Keywords: M1067 m1113 TDUMP at n=500000: 13 guest threads, 6 gfd workers (tid=40011000..40016000 entry=811E68C9) waiting on gfdJobCountSema 50011000/50013000/50015000 mode=5E4A ctxpc=811E68FC, and 7 READY threads (ready=1 wait=0) that never execute: 40017000 entry=8120767D ctxpc=811F22BC, 40018000/40019000/4001B000/4001C000 entry=8120767D ctxpc=8120767C, 4001A000 entry=8127C1D3 (display), 4001D000 entry=811539F3. Semaphore HLE verified correct: SignalSema 0x812B2AD0 increments then wakes matching waiters (mode 5E4A token transfer: count-=need, waiting=0, ready=1; other modes ready=1); WaitSema 0x812B27A0 consumes if have>=need else in thread context sets g_thr_blocked/wait_obj/bits/mode=5E4A, in main context pumps up to 4000 times with g_pump_force. So the only gap is execution of ready threads; the pump gate if (g_in_fiber_exec && !g_thrpump_env && !g_thrpump3 && !g_pump_force) return; blocks the main-loop pump during nested fiber execution (n<1.5M); [WD] loop=2 cnt=1499999/165240976/55001011/0 shows loop0 equals the 1.5M nested quota. NEXT: [PUMP] diagnostics (call count/gate rejects/per-thread blocks/blocked reason); P5D_PUMPMAIN=1 forced pump every 0x400 blocks in fiber_exec loop and main loop; short 8-10 min run and TDUMP at n>2M to see ready threads execute; fix appJob worker HLE (entry 0x8120767D) if it crashes; on success consume 50015000 queue (440 pending) -> GXM draw -> picture.
 
 LOOKUP: M1067, m1113 TDUMP n=500000, 7 ready threads never execute 40017000 entry 8120767D ctxpc 811F22BC, 40018000/40019000/4001B000/4001C000 entry 8120767D ctxpc 8120767C, 4001A000 entry 8127C1D3 display, 4001D000 entry 811539F3, 6 gfd workers 40011000-40016000 entry 811E68C9 wait obj 50011000/50013000/50015000 mode 5E4A ctxpc 811E68FC, SignalSema 0x812B2AD0 token transfer, WaitSema 0x812B27A0 g_thr_blocked, hle_thr_pump fiber gate g_in_fiber_exec, [WD] loop=2 cnt=1499999/165240976/55001011/0, P5D_PUMPMAIN plan, out80m_m1113thrtrace.txt -> §18.4612? no -> §18.4611 [relevant: gfd job queue], §18.4610 [relevant: pump gates], §18.4609 [relevant: worker root cause]
+### 18.4613 PORT M1068: 线程泵修复成功——guest 线程真正执行，帧计数器 0→221
+
+1) 实现（`recomp_harness.cpp`）：
+```cpp
+// (1) env + 诊断
+static int g_pumpmain_env = -1; static int g_pcalls=0,g_pgate=0,g_ppumped=0;
+// (2) 门控计数
+if (g_in_fiber_exec && !g_thrpump_env && !g_thrpump3 && !g_pump_force) { ++g_pgate; return; }
+// (3) fiber_exec 循环每 0x400 块强制泵
+if (g_pumpmain_env > 0 && !g_cur_thr && ((g_blkcnt_total & 0x3FFu) == 0u))
+  { g_pump_force = 1; hle_thr_pump(s, 300); g_pump_force = 0; }
+// (4) 主循环泵强制
+// (5) [GSIG] SignalSema 5001xxxx / [WK] batch_016 blk_811E68C8
+```
+2) m1114 结果（exit 0）：
+```
+[PUMP] 12025 条（pumped 2,521,600+）：40011000..40016000 首次泵到 pc=811E68C8（trampoline）
+  之后 40017000 pc=81207612、40019000 pc=8101611A/811731D8、4001B000、4001E000 pc=812B0BB6 大量运行
+[WK] ×6：6 个 gfd worker 全部进入 trampoline（r0=8 r1=84xx5080）
+[BADMEM] 0
+FRAMEDUMP 末尾：n=64,275,000 ctr=221   ← ★ 帧计数器 0→221
+[CNT] 81198BEA=749 811E5CDA=749 811E5928=11 FSLOT=749  ← 引擎帧循环 749 次
+仍无 per-frame GXM：[ABIBEGIN]=1（启动）、[ABIEND]=0、[GXM-BEGIN]=0、[TEXBIND]=1、[ABIVTX]=1
+```
+3) 结论：**线程调度根因已修复**；引擎主循环/帧计数/logo 状态机真正推进
+NEXT：
+```
+① [GWALK]/[GSUBMIT]：0x811F36C7/0x811F3751/0x811F37AD（walker）、0x811F3495（提交）
+② [BLD1/2/3]/[SUBMIT] 在 worker 上下文出现
+③ gfdJobCountSema 消费情况
+④ FUN_811F3494 内部门控诊断
+⑤ worker gfd 提交 → per-frame GXM 调用 → 画面
+```
+验证：`out80m_m1114pumpmain.txt`、`err80m_m1114pumpmain.txt`、`recomp_harness.cpp`。
+
+ANTI-FORGETTING ENTRY. Keywords: M1068 thread-pump fix SUCCEEDED with P5D_PUMPMAIN=1. Implementation in recomp_harness.cpp: g_pumpmain_env from env P5D_PUMPMAIN; [PUMP] diagnostics (calls/gate/pumped/tid/pc); hle_thr_pump gate now counts g_pgate; forced pump every 0x400 blocks in the fiber_exec loop (g_pump_force=1; hle_thr_pump(s,300); g_pump_force=0); main-loop pump forced via g_pump_force; [GSIG] for SignalSema on 5001xxxx; [WK] probe at batch_016 blk_811E68C8 (worker trampoline). m1114 (out80m_m1114pumpmain.txt, exit 0): [PUMP] 12025 lines, pumped 2,521,600+ executions; gfd workers 40011000..40016000 first pumped at pc=811E68C8 then run; threads 40017000 pc=81207612, 40019000 pc=8101611A/811731D8, 4001B000, 4001E000 pc=812B0BB6 all execute; [WK] x6 all 6 workers enter trampoline r0=8; [BADMEM] 0; FRAMEDUMP tail n=64,275,000 ctr=221 (frame counter 0->221, previously 0); run ends done blocks=64,278,346 pc=8116F748; [CNT] 81198BEA=749 811E5CDA=749 811E5928=11 FSLOT=749; [CNT2] mgr=749; [CONSUME] FHRead=0 FIOS-opens=12288; [LOGO] 202 [LOGODRAW] 80 [DRAWSUB] 60 [FLUSH] 120 [SUBMIT] 121; still [ABIBEGIN]=1 [ABIEND]=0 [GXM-BEGIN]=0 [PRESENT]=1 [TEXBIND]=1 [ABIVTX]=1. So thread scheduling root cause fixed; engine frame loop/logo state machine advance; remaining: gfd worker-executed jobs do not reach GXM. NEXT: add [GWALK]/[GSUBMIT] probes on descriptor walkers 0x811F36C7/0x811F3751/0x811F37AD and submit 0x811F3495 printing tid; check [BLD1/2/3]/[SUBMIT] in worker context; check gfdJobCountSema consumption; print FUN_811F3494 internal gates (FUN_811ec280/ec0a4/ec172); goal worker gfd submit -> per-frame GXM (BeginScene/Draw/EndScene) -> picture.
+
+LOOKUP: M1068 P5D_PUMPMAIN success, g_pumpmain_env, [PUMP] diagnostics g_pcalls g_pgate g_ppumped, forced pump fiber_exec loop every 0x400 g_pump_force, hle_thr_pump(s,300), main loop forced pump, [GSIG] 5001xxxx, [WK] blk_811E68C8 worker trampoline, m1114 out80m_m1114pumpmain.txt, pumped 2,521,600, tid 40011000..40016000 pc=811E68C8, 40017000 pc=81207612, 40019000 pc=8101611A/811731D8, FRAMEDUMP ctr=221, [CNT] 81198BEA=749 FSLOT=749 mgr=749, [ABIBEGIN]=1 still, next [GWALK] 0x811F36C7/0x811F3751/0x811F37AD, [GSUBMIT] 0x811F3495, FUN_811F3494 gates FUN_811ec280/ec0a4/ec172 -> §18.4612 [relevant: ready threads], §18.4611 [relevant: gfd job queue], §18.4609 [relevant: worker root cause]
