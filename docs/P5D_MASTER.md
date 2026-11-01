@@ -1074,6 +1074,39 @@
 | M1056 | §18.4601: **m1108 关键证据：(1) [ENQ] 确认游戏真的在建绘制命令链——type=0x0B 命令连续入队（bucket base=851CC770，链表头从 8F142000→8F142170 递增，command 对象按 0x30 间隔分配 8F142000/2030/2060…），随后 type=0x4B；(2) HLEDUMP 未触发（默认阈值 n=62M，本次运行只到 n≈61.03M）——需 P5D_HLEDUMP_AT=60000000。队列管理函数反编译完成（FUN_811C07C6 分配队列缓冲/FUN_811C0464/FUN_811C04B6 重置/FUN_811C0828 释放/FUN_811C067C 写计数），它们是 GXM 命令缓冲管理，不是执行器**。m1108：
 | M1057 | §18.4602: ★★★★★★★★★ **找到 appGx 的帧提交函数 `FUN_8119934A`（gfd flush/submit）！反编译：它遍历命令链 → 调用绘制列表构建器（FUN_811F347E/FUN_811F3468/FUN_811F3452）→ `FUN_811E649A(type, builder)` 提交 → `FUN_811E6498()` 刷新命令缓冲 → 推进三缓冲帧索引 `DAT_816CC700`（mod 3）→ `FUN_811EA460()`。M1057 加 [FLUSH]/[SUBMIT]/[CMDFLUSH]/[BLD1..3] 探针，并修正 HLEDUMP 阈值（P5D_HLEDUMP_AT=60000000）以拿到 title 阶段 HLE 调用画像**。反编译（`gfd_flush.txt`）：
 | M1058 | §18.4603: ★★★★★★★★ **m1109 重大证据：gfd 帧提交流程每帧真的在跑！[FLUSH] 120（frame 0→1→2 循环）、[SUBMIT] 121（type=0/2）、[CMDFLUSH] 80；但 [BLD1/2/3] 全 0——flush 扫描的三个链表都是空的。HLEDUMP（title 阶段 60M→64M）拿到 53 个 HLE stub 调用画像：**只有同步/线程类 API 高频（sem/eflag wait/set、vblank 等），GXM 类只有极少量初始化调用（0x812B1720 DisplayQueueAddEntry ×2、0x812B1340 TextureInitLinear ×1、0x812B16A0 ×3 等），没有 per-frame 的 sceGxmDraw**。⇒ gfd 提交链在运行，但**我们入队的 type=0xB/0x4B 命令不在 flush 扫描的 bucket 里**。m1109：
+| M1059 | §18.4604: **type=0xB/0x4B 命令来源定位：xrefs 显示 `FUN_811ADAFE`（2D sprite/primitive 批处理渲染器）是入队主力（大量调用 FUN_811C041C/FUN_811C05EC/FUN_811C0754），另有 FUN_81163ABC（我们已知的 2D sprite 提交）、FUN_811C5580/FUN_811C57F2（pipeline 设置）等。M1059 加 [FLUSHX]（打印 DAT_816CC6F4、三数组指针 6E4/6CC/6D8 与每 bucket 的 +0xC/+0x14 链表头）、[ENQ2]（FUN_811C0754 → 数组1 sprite 链）、[ADA]（FUN_811ADAFE 入口）探针，定位 type 0xB 命令最终落入哪个数组/链表、flush 是否扫描**。xrefs（`enq_refs.txt`）：
+```
+== refs to 811C041C ==
+  from 81163cee func=FUN_81163abc/81163abc      ← 2D sprite 提交（我们已知的 DRAWSUB）
+  from 811bf9a6/811bfa3a/811bfa68/811bfb0a/811bfb40/811bfde6/811bfe22 func=FUN_811bfxxx
+  from 811c0168/811c01a4 func=FUN_811c0138
+  from 811c55aa func=FUN_811c5580 / 811c581c func=FUN_811c57f2   ← pipeline 设置
+  from 811af060/811af14c/811af4cc/811af512 func=FUN_811afxxx
+  from 81163f2e/81163f68 func=FUN_81163d0e
+  from 811aecdc func=FUN_811aec34
+  from 811add80…811ae21e func=FUN_811adafe      ← ★ 2D sprite 批处理渲染器（大量入队）
+== refs to 811C05EC == 全部 from FUN_811adafe
+== refs to 811C0754 == from 811adc2e func=FUN_811adafe
+```
+**M1059 探针**：
+```
+blk_8119934A（[FLUSHX]）→ frame、DAT_816CC6F4、(&DAT_816CC6E4/6CC/6D8)[frame] 指针、
+                         a3 数组前 16 个 bucket 的 +0xC/+0x14 链表头（非空才打印）
+blk_811C0754（[ENQ2]）→ cmd
+blk_811ADAFE（[ADA]）→ r0..r3
+```
+编译：batch_013/batch_014 exit 0；exe 重链 exit 0（57,068,934B，21:54:34）。
+验证运行：`out80m_m1110flushx.txt`（FORCETITLE+FIOSFILL+WAITFORCE+SCNFORCE+[FLUSHX]/[ENQ2]/[ADA]）已启动。
+NEXT：
+```
+① [FLUSHX]：DAT_816CC6F4 数值、三数组指针、哪些 bucket 的 +0xC/+0x14 非空
+② [ENQ2]/[ADA]：2D sprite 批处理是否运行、向数组1 入队
+③ 对比 [ENQ] 的 type=0xB 落点（数组3 bucket 0xB）与 [FLUSHX] 扫描范围 → 确认 mismatch
+④ 找到 type 0xB 命令的真正消费者（可能不是 FUN_8119934A 而是另一帧提交路径）
+⑤ 让消费者执行 → GXM draw → logo 上屏
+```
+验证：`enq_refs.txt`、`out80m_m1109flush.txt`、`out80m_m1110flushx.txt`（生成中）。 |
+| §18.4604 | Located the source of type=0xB/0x4B commands: xrefs show FUN_811ADAFE (2D sprite/primitive batch renderer) is the main enqueuer (many calls to FUN_811C041C/FUN_811C05EC/FUN_811C0754), plus FUN_81163ABC (our known 2D sprite submit), FUN_811C5580/FUN_811C57F2 (pipeline setup). M1059 adds [FLUSHX] (prints DAT_816CC6F4, the three array pointers 6E4/6CC/6D8 and each bucket's +0xC/+0x14 list heads), [ENQ2] (FUN_811C0754 -> array1 sprite chain) and [ADA] (FUN_811ADAFE entry) probes to find where type 0xB commands land and whether the flush scans them. xrefs (enq_refs.txt): refs to 811C041C from 81163cee func=FUN_81163abc (2D sprite submit = our DRAWSUB); from 811bf9a6/811bfa3a/811bfa68/811bfb0a/811bfb40/811bfde6/811bfe22 func=FUN_811bfxxx; from 811c0168/811c01a4 func=FUN_811c0138; from 811c55aa func=FUN_811c5580 / 811c581c func=FUN_811c57f2 (pipeline setup); from 811af060/811af14c/811af4cc/811af512 func=FUN_811afxxx; from 81163f2e/81163f68 func=FUN_81163d0e; from 811aecdc func=FUN_811aec34; from 811add80...811ae21e func=FUN_811adafe (2D sprite batch renderer, heavy enqueue). refs to 811C05EC all from FUN_811adafe; refs to 811C0754 from 811adc2e func=FUN_811adafe. M1059 probes: blk_8119934A [FLUSHX] frame/DAT_816CC6F4/(&DAT_816CC6E4/6CC/6D8)[frame] pointers + first 16 buckets of a3 with +0xC/+0x14 non-empty; blk_811C0754 [ENQ2] cmd; blk_811ADAFE [ADA] r0..r3. batch_013/batch_014 compile exit 0; exe relink exit 0 (57,068,934B 21:54:34). Verification run out80m_m1110flushx.txt started. NEXT: [FLUSHX] DAT_816CC6F4 value, array pointers, which buckets have non-empty +0xC/+0x14; [ENQ2]/[ADA] whether the 2D sprite batch runs and enqueues into array1; compare [ENQ] type=0xB landing (array3 bucket 0xB) with [FLUSHX] scan -> confirm mismatch; find the real consumer of type 0xB commands (maybe not FUN_8119934A but another frame submit path); make the consumer execute -> GXM draw -> logo on screen. |
 ```
 [FLUSH] #1 frame=0  #2 frame=1  #3 frame=2  …（120 条，三缓冲循环）
 [SUBMIT] #1 type=2 builder=848563D0
@@ -496833,3 +496866,36 @@ FUN_811C0544(i,frame) => (&DAT_816CC6D8)[frame]+i*0x20          // 数组3（我
 ANTI-FORGETTING ENTRY. Keywords: M1058 m1109: gfd frame submit flow runs every frame ([FLUSH] 120 frame 0->1->2 cycling, [SUBMIT] 121 type=0/2, [CMDFLUSH] 80) but [BLD1/2/3] all 0 - the scanned lists are empty; HLEDUMP title phase (60M->64M) distinct=53: top sync/thread APIs (812B28A0 unlock mutex 1171057, 812B2830 lock mutex 1165757, 812B2880 wait eflag 1164981, 812B2AE0 set eflag 752331, 812B1810 vblank wait 752269, 812B2A50 delay 76008), GXM only init calls (812B1720 DisplayQueueAddEntry x2, 812B1340 TextureInitLinear x1, 812B16A0 x3), no per-frame sceGxmDraw/BeginScene/EndScene. Flush internals: FUN_811C077C(frame)=(&DAT_816CC6E4)[frame] (array1); FUN_811C063A(type,frame)=(&DAT_816CC6CC)[frame]+(type&0xFFFFFF)*0x20 (array2); FUN_811C0544(i,frame)=(&DAT_816CC6D8)[frame]+i*0x20 (array3, our enqueue target). Flush scans array1 [+0xC], array2 types 0/1 [+0x14], array3 i<DAT_816CC6F4 [+0x14]; our [ENQ] goes to array3 bucket type=0xB [+0xC] -> outside. NEXT: extend [FLUSH] probe with DAT_816CC6F4 + three array pointers + bucket heads; decompile writers of arrays 6E4/6CC (FUN_811C07xx family) to map type 0xB to a queue; find the consumer of type=0xB/0x4B commands (who walks bucket 0xB +0xC chain, maybe FUN_811C0754 / 2D-sprite submit); if F4 too small check FUN_811C07C6 init params; once consumed -> GXM draw -> logo on screen.
 
 LOOKUP: M1058, [FLUSH] 120 frame 0/1/2, [SUBMIT] 121 type=0/2 builder=848562B0/848563D0, [CMDFLUSH] 80, [BLD1/2/3] 0, HLEDUMP distinct=53 812B28A0 1171057 unlock, 812B2830 lock, 812B2880 wait eflag, 812B2AE0 set eflag, 812B1810 vblank, 812B1720 x2 DisplayQueueAddEntry, 812B1340 TextureInitLinear, 812B16A0 x3, no sceGxmDraw, FUN_811C077C 816CC6E4, FUN_811C063A 816CC6CC, FUN_811C0544 816CC6D8, DAT_816CC6F4, bucket type 0xB opaque +0xC vs scanned +0x14, [ENQ] type=0000000B ×9 type=0000004B, out80m_m1109flush.txt, gfd_flush.txt, buckets.txt -> §18.4602 [relevant: gfd flush found], §18.4601 [relevant: command chains], §18.4599 [relevant: DRAWSUB]
+### 18.4604 PORT M1059: type=0xB 命令来源 = FUN_811ADAFE（2D sprite 批处理），加 [FLUSHX]/[ENQ2]/[ADA] 探针
+
+1) xrefs（`enq_refs.txt`）：
+```
+FUN_811C041C 调用者：
+  FUN_81163abc（2D sprite 提交，我们的 DRAWSUB）
+  FUN_811bfxxx / FUN_811c0138 / FUN_811c5580 / FUN_811c57f2 / FUN_81163d0e / FUN_811aec34
+  FUN_811adafe ← ★ 2D sprite 批处理渲染器（大量入队）
+FUN_811C05EC 调用者：全部 FUN_811adafe
+FUN_811C0754 调用者：FUN_811adafe（811adc2e）
+```
+2) M1059 探针：
+```
+blk_8119934A → [FLUSHX] frame、DAT_816CC6F4、(&DAT_816CC6E4/6CC/6D8)[frame]、
+               a3 前 16 bucket 的 +0xC/+0x14 非空链表头
+blk_811C0754 → [ENQ2] cmd
+blk_811ADAFE → [ADA] r0..r3
+```
+3) 编译：batch_013/batch_014 exit 0；exe 57,068,934B（21:54:34）
+4) 验证运行 `out80m_m1110flushx.txt` 已启动
+NEXT：
+```
+① [FLUSHX]：F4 值、三数组指针、哪些 bucket 非空
+② [ENQ2]/[ADA]：2D 批处理是否运行
+③ 对比 [ENQ] type=0xB 落点与 flush 扫描范围
+④ 找 type 0xB 真正消费者
+⑤ 消费者执行 → GXM draw → logo 上屏
+```
+验证：`enq_refs.txt`、`out80m_m1110flushx.txt`（生成中）。
+
+ANTI-FORGETTING ENTRY. Keywords: M1059 located the type=0xB/0x4B command source: FUN_811ADAFE (2D sprite/primitive batch renderer) is the main enqueuer (calls FUN_811C041C/FUN_811C05EC/FUN_811C0754; the latter two are called only from FUN_811adafe). Other FUN_811C041C callers: FUN_81163abc (our DRAWSUB 2D sprite submit), FUN_811bfxxx, FUN_811c0138, FUN_811c5580, FUN_811c57f2 (pipeline setup), FUN_81163d0e, FUN_811aec34. M1059 probes: blk_8119934A [FLUSHX] frame/DAT_816CC6F4/(&DAT_816CC6E4/6CC/6D8)[frame] + first 16 a3 buckets with +0xC/+0x14 heads; blk_811C0754 [ENQ2] cmd; blk_811ADAFE [ADA] r0..r3. batch_013/batch_014 compile exit 0; exe relink exit 0 (57,068,934B 21:54:34). Verification run out80m_m1110flushx.txt (FORCETITLE+FIOSFILL+WAITFORCE+SCNFORCE) started. NEXT: [FLUSHX] F4 value, three array pointers, non-empty buckets; [ENQ2]/[ADA] whether the 2D batch runs and enqueues into array1; compare [ENQ] type=0xB landing (array3 bucket 0xB) with the flush scan -> confirm mismatch; find the real consumer of type 0xB commands (maybe not FUN_8119934A but another frame submit path); make it execute -> GXM draw -> logo on screen.
+
+LOOKUP: M1059, type 0xB source FUN_811ADAFE 2D sprite batch renderer, FUN_811C041C callers FUN_81163abc/FUN_811bfxxx/FUN_811c0138/FUN_811c5580/FUN_811c57f2/FUN_81163d0e/FUN_811aec34/FUN_811adafe, FUN_811C05EC only from FUN_811adafe, FUN_811C0754 from 811adc2e, [FLUSHX] DAT_816CC6F4 arrays 816CC6E4/6CC/6D8 bucket +0xC/+0x14 heads, [ENQ2] blk_811C0754, [ADA] blk_811ADAFE, enq_refs.txt, out80m_m1110flushx.txt, exe 57,068,934B -> §18.4603 [relevant: flush scans empty], §18.4602 [relevant: gfd flush], §18.4601 [relevant: enqueue]
