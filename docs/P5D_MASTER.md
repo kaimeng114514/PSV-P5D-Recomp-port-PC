@@ -1093,6 +1093,55 @@
 | M1075 | §18.4620: ★★★★★★★★★★ **m1121 铁证：整个运行期（boot→title→n=64M）"添加 2D 视图"相关探针全部为 0——游戏从未调用 FUN_811C30D4/FUN_811C1FE0，也从未进入 FUN_81015E1A/FUN_81015E36/FUN_81015E84/FUN_810418AA。场景对象存在、每帧相机/调度都在跑、logo 状态机也在走，但 2D 绘制上下文从未创建 → 视图注册永远不会发生。**
 | M1076 | §18.4621: ★★★★★★★★★★ **找到"2D 上下文从未创建"的真正原因：不是门控，而是【跑得还不够远】——当前 64.3M blocks 只推进了 221 帧（ctr=221），logo 状态机停留在 state 5/8（未到 done 0xD），title 页内容资源（title_p5.bin/title.spr4 等）尚未被加载，所以 2D 绘制上下文/视图自然还没创建。M1076 改为 250M blocks 长跑验证。**
 | M1077 | §18.4622: ★★★★★★★★★★★ **发现 250M 长跑提前结束的原因：guest 主线程在 **64,278,346 blocks 处返回**（`done: blocks=64278346 pc=8116F748`），harness 随即退出——max_blocks 根本不是限制。真实 Vita 上主线程返回后其他线程（显示/worker）继续驱动游戏世界，而我们的 harness 直接结束。M1077 实现 `P5D_POSTMAIN=1`：主线程返回后进入"后续线程泵"阶段（虚拟时间每轮 +16666us ≈1 帧、vblank 递增、持续 `hle_thr_pump`），让 guest 线程继续推进。**
+| M1078 | §18.4623: ★★★★★★★★★★★ **找到运行在 64,278,346 blocks 终止的真正原因：`[INDIRECT-MISS] reg1=8115849F target=8115849E block=8116F748`——app-job trampoline 通过函数指针调用 **0x8115849E 处的真实 Thumb 函数**，而该函数**不在 function_bounds.json（12,921 个函数）中**、也**不在我们的 AOT 批次（12,532 函数）里**。反汇编确认它是完整函数：`push {r4,r5,r6,r7,lr}; vpush {s16,s17}; sub sp,#0x104; …`。⇒ AOT 覆盖存在系统性缺口（12,921 − 12,532 = **389 个函数从未生成**），这是流程中断的根因，而非运行时门控。**
+m1124（POSTMAIN）证据：
+```
+[POSTMAIN] it=76000..108500 blocks=1500000 vblank=23040208→25212320 thr=15 alive=13 ready=3-5
+        ↑ POSTMAIN 机制工作（13 个 guest 线程保持存活、ready 3-5 个），但游戏世界不再推进
+[INDIRECT-MISS] reg1=00000000 target=00000000 block=811E6928   （早期无害）
+[INDIRECT-MISS] reg1=8115849F target=8115849E block=8116F748   （★ 致命）
+[HARNESS] indirect miss at pc=8116F748 after 64278346 blocks (block 0x8116F748)
+[LOGO] 200 条，最后全是 state=8（不再前进）
+[FIOSFILL] 仍只打开字体×3 + title/logo.bin×2
+```
+0x8115849E 反汇编（从 `p5d_true.elf` 直接读取，`_rdis849e.py`）：
+```
+8115849C: 00bf        nop
+8115849E: f0b5        push {r4,r5,r6,r7,lr}      ← 真实函数入口（Thumb）
+811584A0: 2ded028a    vpush {s16,s17}
+811584A4: c1b0        sub sp, #0x104
+811584A6: 44f24c17    movw r7, #0x414c
+811584AA: c8f22b17    movt r7, #0x812b
+811584AE: 3968        ldr r1, [r7]
+811584B0: 4091        str r1, [sp, #0x100]
+811584B2: 051c        adds r5, r0, #0
+811584B4: 17f0f8f9    bl #0x8116f8a8        ← 调用 appJob 节点 arg getter
+811584B8: 041c        adds r4, r0, #0
+811584BA: 6168        ldr r1, [r4, #4]
+811584BC: 0029        cmp r1, #0
+811584BE: 03dc        bgt #0x811584c8
+...
+```
+**AOT 覆盖缺口（`function_bounds.json`）**：
+```
+总函数数 = 12,921
+已生成 block 的函数 ≈ 12,532（batch_000..033）
+缺口 = 389 个函数从未 AOT 生成（包括 0x8115849E 这个函数指针目标）
+function_bounds.json 邻域：0x81158200(size 0x29c) 结束于 0x8115849C，下一个已知函数 0x81158720
+   → 0x8115849E 函数被 Ghidra 漏识别（只能通过函数指针到达，符合 [INDIRECT-MISS] 路径）
+```
+⇒ **修复方向：为缺失的 389 个函数补生成 AOT block（至少先补 0x8115849E 所在函数），追加到 batch 表；之后流程可越过 64.28M，继续 logo 完成→title 内容→2D 上下文→GXM 绘制。**
+NEXT：
+```
+① 用现有生成器（`C:\dev\tmp\_gen_batch2.py`，capstone + function_bounds.json）为 0x8115849E
+   函数生成 blocks（需要确定函数范围：0x8115849E 到下一个已知函数 0x81158720 之间）
+② 把生成的 block 追加到某个 batch 文件（含 g_blocks 表项/声明），重新编译链接
+③ 重跑验证是否越过 64,278,346 blocks（不再 indirect miss 0x8115849E）
+④ 若有新的 indirect miss → 同样补块（预计 389 缺口中有多个会被走到）
+⑤ 越过 64.28M 后：观察 logo 完成→title 资源加载→2D 上下文/视图→array2→GXM→画面
+```
+验证：`out80m_m1124postmain.txt`、`_rdis849e.py`、`function_bounds.json`、`_gen_batch2.py`。 |
+| §18.4623 | The real reason the run terminates at 64,278,346 blocks: [INDIRECT-MISS] reg1=8115849F target=8115849E block=8116F748 - the app-job trampoline calls through a function pointer a REAL Thumb function at 0x8115849E that is NOT in function_bounds.json (12,921 functions) and NOT in our AOT batches (12,532 functions). Disassembly confirms a complete function: 8115849E push {r4,r5,r6,r7,lr}; 811584A0 vpush {s16,s17}; 811584A4 sub sp,#0x104; 811584A6 movw r7,#0x414c; 811584AE ldr r1,[r7]; 811584B2 adds r5,r0,#0; 811584B4 bl 0x8116f8a8 (appJob node arg getter); 811584B8 adds r4,r0,#0; ... So AOT coverage has a SYSTEMATIC gap (12,921 - 12,532 = 389 functions never generated), which is the root cause of the flow interruption, not a runtime gate. m1124 (POSTMAIN) evidence: [POSTMAIN] it=76000..108500 blocks=1500000 vblank=23040208->25212320 thr=15 alive=13 ready=3-5 (POSTMAIN works: 13 guest threads stay alive, 3-5 ready) but the game world no longer advances; [INDIRECT-MISS] reg1=8115849F target=8115849E block=8116F748 (fatal); [HARNESS] indirect miss at pc=8116F748 after 64278346 blocks; [LOGO] 200 lines ending at state=8 (no progress); [FIOSFILL] still fonts x3 + title/logo.bin x2. function_bounds.json neighbourhood: 0x81158200 (size 0x29c) ends at 0x8115849C, next known function 0x81158720 -> the 0x8115849E function was missed by Ghidra (reachable only via a function pointer, consistent with the [INDIRECT-MISS] path). NEXT: (1) use the existing generator (C:\dev\tmp\_gen_batch2.py, capstone + function_bounds.json) to generate blocks for the 0x8115849E function (extent from 0x8115849E to the next known function 0x81158720); (2) append the generated blocks to a batch file (with g_blocks entries/declarations), rebuild and relink; (3) rerun and verify the run passes 64,278,346 blocks (no more indirect miss at 0x8115849E); (4) if new indirect misses appear, fill those blocks too (several of the 389 gaps may be hit); (5) after passing 64.28M watch for logo completion -> title asset load -> 2D context/views -> array2 -> GXM -> picture. |
 m1123（maxb=250M）证据：
 ```
 done: blocks=64278346 pc=8116F748 last_block=0x8116F748 r0=85CF304C r9=00000000
@@ -498158,3 +498207,43 @@ NEXT：
 ANTI-FORGETTING ENTRY. Keywords: M1077 the run ends early because the guest main thread RETURNS at 64,278,346 blocks (done: blocks=64278346 pc=8116F748 last_block=0x8116F748 r0=85CF304C r9=0), not because of max_blocks (m1123 maxb=250M unused); on a real Vita other threads keep driving the game world after main returns. Implemented P5D_POSTMAIN=1 in recomp_harness.cpp: after the main loop exits, if P5D_POSTMAIN then print '[POSTMAIN] main thread returned at blocks=%d; continuing guest threads (maxb=%d)' and loop while (n<maxb && _its<4000000 && !g_shutdown) { ++_its; g_pump_force=1; hle_thr_pump(&s,800); g_pump_force=0; g_vtime_extra += 16666ull (~1 frame); ++g_vblank_n; hle_pump_win_messages(); n=(int)g_blkcnt_total; every 500 iterations print [POSTMAIN] it/blocks/vblank/thr/alive/ready; if no alive guest threads break; } then print '[POSTMAIN] end it=... blocks=... vblank=...'. recomp_harness compile exit 0; exe relink exit 0 (57,087,154B 03:29:25). Verification run out80m_m1124postmain.txt (maxb=300M, env FORCETITLE+FIOSFILL+WAITFORCE+SCNFORCE+THRPUMP+PUMPMAIN+POSTMAIN) started. m1123 evidence: [COUNT] present=2 begin_pass=1 draw=0; [PUMP] millions of thread pumps; [FIOSFILL] fonts x3 + title/logo.bin x2 only; [SCENE] head0F=0; [LOGO] state 5/8 not finished. NEXT: check [POSTMAIN] thread progression (blocks/vblank grow, alive/ready); watch logo state 5->6->8->0xD and title-asset FIOSFILL opens; if the post-main pump advances the game world -> 2D context creation -> view registration -> array2 -> GXM draw -> picture; if the world does not advance inspect thread wait objects/event flags; if too slow increase pump quantum/virtual time step.
 
 LOOKUP: M1077, guest main thread returns at 64278346 blocks pc=8116F748 last_block 0x8116F748 r0=85CF304C, max_blocks unused, P5D_POSTMAIN post-main thread pump, g_pump_force hle_thr_pump(&s,800), g_vtime_extra += 16666, g_vblank_n, hle_pump_win_messages, [POSTMAIN] logs, m1123 maxb=250M done blocks, [COUNT] present=2 begin_pass=1 draw=0, [FIOSFILL] fonts + logo.bin only, [SCENE] head0F=0, [LOGO] state 5/8, out80m_m1123long.txt, out80m_m1124postmain.txt -> §18.4621 [relevant: not enough frames], §18.4613 [relevant: pump/ctr], §18.4609 [relevant: worker threads]
+### 18.4623 PORT M1078: 运行在 64.28M 终止的真因 = AOT 缺块（函数指针目标 0x8115849E 未生成）
+
+1) m1124（POSTMAIN）终端证据：
+```
+[POSTMAIN] it=76000..108500 blocks=1500000 vblank=23040208→25212320 thr=15 alive=13 ready=3-5
+[INDIRECT-MISS] reg1=8115849F target=8115849E block=8116F748     ← ★ 致命
+[HARNESS] indirect miss at pc=8116F748 after 64278346 blocks (block 0x8116F748)
+[LOGO] 200 条，最后全是 state=8
+[FIOSFILL] 字体×3 + title/logo.bin×2
+```
+2) 0x8115849E 反汇编（`p5d_true.elf`，`_rdis849e.py`）：
+```
+8115849E: f0b5        push {r4,r5,r6,r7,lr}      ← 真实函数入口
+811584A0: 2ded028a    vpush {s16,s17}
+811584A4: c1b0        sub sp, #0x104
+811584A6: 44f24c17    movw r7, #0x414c
+811584AA: c8f22b17    movt r7, #0x812b
+811584AE: 3968        ldr r1, [r7]
+811584B0: 4091        str r1, [sp, #0x100]
+811584B2: 051c        adds r5, r0, #0
+811584B4: 17f0f8f9    bl #0x8116f8a8        ← appJob 节点 arg getter
+811584B8: 041c        adds r4, r0, #0
+811584BA: 6168        ldr r1, [r4, #4]
+811584BC: 0029        cmp r1, #0
+…
+```
+3) AOT 缺口：function_bounds.json 12,921 函数 vs 已生成 12,532 → **389 个函数从未生成**；0x8115849E 被 Ghidra 漏识别（邻域：0x81158200 size 0x29c → 结束 0x8115849C；下一函数 0x81158720）
+NEXT：
+```
+① 用 _gen_batch2.py 为 0x8115849E 函数（0x8115849E..0x81158720）生成 blocks
+② 追加到 batch 文件（表项+声明），重编译链接
+③ 重跑验证是否越过 64,278,346 blocks
+④ 新的 indirect miss → 继续补块（389 缺口中的多个）
+⑤ 越过 64.28M → logo 完成 → title 资源 → 2D 上下文 → array2 → GXM → 画面
+```
+验证：`out80m_m1124postmain.txt`、`_rdis849e.py`、`function_bounds.json`、`_gen_batch2.py`。
+
+ANTI-FORGETTING ENTRY. Keywords: M1078 run terminates at 64,278,346 blocks because [INDIRECT-MISS] reg1=8115849F target=8115849E block=8116F748 - the app-job trampoline calls through a function pointer a real Thumb function at 0x8115849E that is NOT in function_bounds.json (12,921 functions) nor in the AOT batches (12,532) - AOT coverage has a systematic gap of 389 functions. Disassembly at 0x8115849E: push {r4,r5,r6,r7,lr}; vpush {s16,s17}; sub sp,#0x104; movw r7,#0x414c; movt r7,#0x812b; ldr r1,[r7]; str r1,[sp,#0x100]; adds r5,r0,#0; bl 0x8116f8a8 (appJob node arg getter); adds r4,r0,#0; ldr r1,[r4,#4]; cmp r1,#0; ... Bytes at 0x81158490: 0db0bdec028af0bd5af1bae900bff0b52ded028ac1b044f24c17c8f22b1739684091051c17f0f8f9041c6168002903dc. Neighbourhood in function_bounds.json: 0x81158200 size 0x29c ends 0x8115849C, next function 0x81158720. m1124 POSTMAIN works ([POSTMAIN] it=76000..108500 blocks=1500000 vblank=23040208->25212320 thr=15 alive=13 ready=3-5) but the world does not advance because the main flow dies at this indirect miss; [LOGO] stuck at state=8; [FIOSFILL] only fonts+title/logo.bin. NEXT: generate blocks for the 0x8115849E function (range 0x8115849E..0x81158720) with _gen_batch2.py, append to a batch file with table entries/declarations, rebuild, rerun and verify passing 64,278,346 blocks; fill further indirect misses as they appear; after passing watch logo completion -> title assets -> 2D context/views -> array2 -> GXM -> picture.
+
+LOOKUP: M1078, indirect miss reg1=8115849F target=8115849E block=8116F748, [HARNESS] indirect miss after 64278346 blocks, missing Thumb function 0x8115849E push {r4,r5,r6,r7,lr} vpush {s16,s17} sub sp,#0x104 bl 0x8116f8a8, function_bounds.json 12921 vs 12532 = 389 missing functions, Ghidra missed 0x8115849E (next known 0x81158720), bytes 0db0bdec028af0bd5af1bae900bff0b52ded028a..., _gen_batch2.py capstone generator, _rdis849e.py, POSTMAIN 13 threads alive ready 3-5 but world stalls, [LOGO] state=8, out80m_m1124postmain.txt -> §18.4622 [relevant: POSTMAIN], §18.4620 [relevant: context probes], §18.4613 [relevant: ctr/frames]
