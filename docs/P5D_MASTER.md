@@ -1031,6 +1031,36 @@
 | M1013 | §18.4558: ★★★★★★★★★★ **`setSequence(6) delay=0` 成功！title 状态机 worker（0x81198173）**真正运行**（WFDBG #11 / JOBEXEC #1）——但随即暴露下一个精确卡点：`FUN_8116f8a8()` 返回**已释放内存（0xE5E5E5E5 毒值）**导致 `[BADMEM] guest va=0xE5E5E5E9 @block=0x81178F18`**。证据（`out80m_m1080titlestart.txt` / `err80m_m1080titlestart.txt`）：
 | M1014 | §18.4559: **崩溃点精确定位：`FUN_8116f8a8` 语义 = `return *(u32*)(param_1 + 8)`（job 节点 [2] = 任务 arg 指针）；BADMEM 说明 title job 节点 85B8586C 的 [2]/arg = 0xE5E5E5E5（被 guest 分配器 free 填充毒值）——即 title task 已被提前释放**。反编译（`gettask.txt`）：
 | M1015 | §18.4560: ★★★★★★★★★ **参考 totk-pc-recomp（塞尔达：王国之泪静态重编译移植）架构 + 采纳其"覆盖率 oracle"做法：首次 AOT 全函数覆盖率审计，新增 batch_032 补齐 23 个缺失函数（Ghidra 12,532 函数中缺失 entry 从 38 → 20，剩余内部缺口仅 5 个）**。
+| M1016 | §18.4561: ★★★★★★★★★★ **AOT 内部函数覆盖率 100%：batch_033 补齐最后 5 个内部函数（Ghidra 12,532 函数全命中；缺失 entry 仅剩 14 个 HLE import + module_start = 预期无 block）**。原因：这 5 个函数在 `function_bounds.json` 里是 **size=1 的退化条目**（生成器跳过），但 Ghidra 知道真实尺寸：
+```
+0x810108DE size=532   FUN_810108de
+0x8112D9C8 size=818   FUN_8112d9c8
+0x8112EA42 size=1654  FUN_8112ea42
+0x8112F630 size=690   FUN_8112f630
+0x811307D0 size=6530  FUN_811307d0   ← 最大
+```
+**补齐流程（可复用）**：
+```
+gap2_bounds.json（5 函数，Ghidra 真实 size）→ _gen_split_gap2.py 8 1 → recomp_gap2/batch_000.cpp（196,799B, .o 139,647B）
+→ 改名 batch_033.cpp（batch_000→batch_033 / g_blocks_000→g_blocks_033 / find_block_000→find_block_033 / get_table_000→get_table_033）
+→ harness：FB(033) + get_table_033 声明 + ALL_FINDERS[34]（find_block_031, find_block_032, find_block_033）
+→ batch_033.o 编译 exit 0；harness 重编 exit 0
+```
+**最终覆盖率**：blocks **230,243**；Ghidra 函数 12,532；**missing = 15**：
+```
+14 × SceLibm_*/SceNpActivity_*（HLE stub，无需 AOT block）
+ 1 × module_start（HLE 入口）
+```
+⇒ **内部函数缺口 = 0**（TOTK 覆盖率 oracle 目标达成）。
+**回归运行**：`out80m_m1081batch32.txt`（batch_032 版本 exe，P5D_NOMOVIE=1 + OT/STEPFORCE + VDEC + delay=0 + hybrid force）已启动；exe 重链待运行结束后（文件占用）。
+NEXT：
+```
+① m1081 跑完 → 把 batch_032/033 一起重链进 exe → 再跑一次确认无回退
+② 回到 title 主线：修复 "title task 被提前释放"（0xE5E5E5E5）→ title 状态机继续
+③ 参考 TOTK：考虑真实线程/虚拟核调度（强制完成 hack 的根源）
+```
+验证：`gap2_bounds.json`、`batch_033.cpp`、`batch_033.o`、`recomp_harness.o`、覆盖率复核脚本输出。 |
+| §18.4561 | AOT internal function coverage now 100%: batch_033 fills the last 5 internal functions (all 12,532 Ghidra functions matched; missing entry blocks now only 14 HLE imports + module_start = expected to have no blocks). Reason: these 5 functions were degenerate size=1 entries in function_bounds.json (the generator skips them) while Ghidra knows the real sizes: 0x810108DE size=532 FUN_810108de; 0x8112D9C8 size=818 FUN_8112d9c8; 0x8112EA42 size=1654 FUN_8112ea42; 0x8112F630 size=690 FUN_8112f630; 0x811307D0 size=6530 FUN_811307d0 (largest). Gap-fill flow: gap2_bounds.json (5 fns with real Ghidra sizes) -> _gen_split_gap2.py 8 1 -> recomp_gap2/batch_000.cpp (196,799B, .o 139,647B) -> renamed batch_033.cpp -> harness FB(033) + get_table_033 declaration + ALL_FINDERS[34] -> batch_033.o compile exit 0; harness recompiled exit 0. Final coverage: blocks 230,243; Ghidra functions 12,532; missing = 15: 14 SceLibm_*/SceNpActivity_* (HLE stubs, no AOT blocks needed) + 1 module_start (HLE entry) => internal function gaps = 0 (TOTK coverage-oracle goal achieved). Regression run out80m_m1081batch32.txt (batch_032 exe, P5D_NOMOVIE=1 + OT/STEPFORCE + VDEC + delay=0 + hybrid force) started; exe relink pending until the run ends (file in use). NEXT: after m1081 finishes relink with batch_032/033 and rerun to confirm no regression; return to title main line - fix 'title task freed early' (0xE5E5E5E5) so the title state machine continues; consider real threads/virtual core scheduling per TOTK. |
 **TOTK Recomp 架构（参考源码 README/docs/architecture.md，MIT）**：
 ```
 CPU：LAS Recomp 的 lifter：ARM64 → C（每 guest 函数一个 C 函数；BL 直接调用；间接分支用"地址索引表"）
@@ -493924,3 +493954,39 @@ NEXT：
 ANTI-FORGETTING ENTRY. Keywords: M1015 studied totk-pc-recomp (TOTK static recompilation port, MIT) and adopted its coverage-oracle practice. TOTK architecture: CPU = LAS Recomp lifter ARM64->C (one C function per guest function, direct BL calls, address-keyed table for indirect branches) + MacNativeGames OS boundary (~163 nn::* SDK functions by symbol + 38 SVCs) + coverage oracle (NSO rewriter lists every OS-touching site: SVC/TLS/counter/x18/exclusive/jump table; 68,968 sites in 1.4.3 main); memory guest address == host address (<2^39) with MEM_WRITE_WATCH; threads = real host threads + virtual 3-core Horizon scheduler (priority, preemption at SVC/indirect calls, async preemption); graphics NVN front end + Vulkan back end (SPIR-V, pipeline library, precompiled shaders); toolchain MSYS2 UCRT64 clang+LLD, Ghidra Switch loader + Capstone; installer builds on player machine. Lessons: coverage oracle instead of whack-a-mole; mechanical gap filling because we HAVE the AOT generator (_gen_batch2.py + _gen_split.py/_gen_split_4031.py with function_bounds.json); real host threads + virtual core scheduling (our fibers cause forced-completion hacks); precompiled shaders; runtime probes. This round: P5DListFunctions.java -> allfuncs.tsv = 12,532 Ghidra functions; batch_000..031 = 229,797 blocks; 38 functions missing entry blocks (24 internal + 13 SceLibm/SceNpActivity imports + module_start). Gap fill: gap_bounds.json (23 fns) -> _gen_split_gap.py 24 1 -> recomp_gap/batch_000.cpp (74,487B, .o 70,574B) -> renamed batch_032.cpp -> harness FB(032)+get_table_032+ALL_FINDERS[33] -> batch_032.o exit 0; exe relink exit 0 (56,870,752B 9:31). Recheck: missing 38 -> 20; remaining = 5 internal functions 0x810108DE, 0x8112D9C8, 0x8112EA42, 0x8112F630, 0x811307D0 (in function_bounds.json but not emitted) + 14 HLE imports + module_start. NEXT: investigate the 5 (bounds overlap/unsupported instruction/emit failure); add generator semantics or hand-write; long term real threads + virtual core scheduling; full regression with batch_032.
 
 LOOKUP: M1015, totk-pc-recomp, LAS Recomp, MacNativeGames, coverage oracle, 68,968 sites, virtual 3-core scheduler, NVN->Vulkan, P5DListFunctions.java, allfuncs.tsv, 12,532 functions, 229,797 blocks, 38 missing, gap_bounds.json, _gen_split_gap.py, batch_032.cpp, batch_032.o, FB(032), get_table_032, ALL_FINDERS[33], 0x810108DE, 0x8112D9C8, 0x8112EA42, 0x8112F630, 0x811307D0, function_bounds.json, _gen_batch2.py, _gen_split_4031.py -> §18.4559 [relevant: title task free], §18.4558 [relevant: title worker run], §18.4560 [this]
+### 18.4561 PORT M1016: AOT 内部函数覆盖率 100%（batch_033）
+
+1) 最后 5 个内部函数在 `function_bounds.json` 中是 **size=1 退化条目**（生成器跳过），Ghidra 真实尺寸：
+```
+0x810108DE size=532   FUN_810108de
+0x8112D9C8 size=818   FUN_8112d9c8
+0x8112EA42 size=1654  FUN_8112ea42
+0x8112F630 size=690   FUN_8112f630
+0x811307D0 size=6530  FUN_811307d0
+```
+2) 补齐流程：
+```
+gap2_bounds.json → py _gen_split_gap2.py 8 1 → recomp_gap2/batch_000.cpp（196,799B / .o 139,647B）
+→ 改名 batch_033.cpp（batch_000→batch_033 / g_blocks_000→g_blocks_033 / find_block_000→find_block_033 / get_table_000→get_table_033）
+→ harness：FB(033) + get_table_033 声明 + ALL_FINDERS[34]
+→ batch_033.o 编译 exit 0；harness 重编 exit 0
+```
+3) 最终覆盖率：
+```
+blocks: 230,243    Ghidra functions: 12,532    missing: 15
+  14 × SceLibm_*/SceNpActivity_*（HLE stub，无需 block）
+   1 × module_start（HLE 入口）
+⇒ 内部函数缺口 = 0
+```
+4) 回归运行 `out80m_m1081batch32.txt` 已启动；exe 重链待运行结束后执行。
+NEXT：
+```
+① m1081 跑完 → batch_032/033 重链 → 再跑确认无回退
+② title 主线：修 title task 提前释放（0xE5E5E5E5）
+③ 长期：真实线程/虚拟核调度
+```
+验证：`gap2_bounds.json`、`batch_033.cpp`、`batch_033.o`、`recomp_harness.o`、覆盖率复核输出。
+
+ANTI-FORGETTING ENTRY. Keywords: M1016 AOT internal function coverage now 100%: batch_033 fills the last 5 internal functions. All 12,532 Ghidra functions matched; missing entry blocks only 14 HLE imports + module_start (expected no blocks). The 5 were degenerate size=1 entries in function_bounds.json so the generator skipped them, while Ghidra has the real sizes: 0x810108DE size=532 FUN_810108de; 0x8112D9C8 size=818 FUN_8112d9c8; 0x8112EA42 size=1654 FUN_8112ea42; 0x8112F630 size=690 FUN_8112f630; 0x811307D0 size=6530 FUN_811307d0. Flow: gap2_bounds.json -> _gen_split_gap2.py 8 1 -> recomp_gap2/batch_000.cpp (196,799B, .o 139,647B) -> renamed batch_033.cpp -> harness FB(033)+get_table_033+ALL_FINDERS[34] -> batch_033.o compile exit 0; harness recompiled exit 0. Final coverage: blocks 230,243; functions 12,532; missing 15 = 14 SceLibm_*/SceNpActivity_* HLE stubs + module_start => internal function gaps 0. Regression run out80m_m1081batch32.txt (batch_032 exe, P5D_NOMOVIE=1 + OT/STEPFORCE + VDEC + delay=0 + hybrid force) started; exe relink pending until run ends. NEXT: relink batch_032/033 and rerun; fix title task freed early (0xE5E5E5E5); consider real threads/virtual core scheduling.
+
+LOOKUP: M1016, batch_033, 5 internal functions, 0x810108DE, 0x8112D9C8, 0x8112EA42, 0x8112F630, 0x811307D0, size=1 degenerate bounds, gap2_bounds.json, _gen_split_gap2.py, recomp_gap2, FB(033), ALL_FINDERS[34], 230,243 blocks, 12,532 functions, missing 15 = 14 HLE imports + module_start, out80m_m1081batch32.txt -> §18.4560 [relevant: coverage oracle], §18.4559 [relevant: title task free]
