@@ -1090,6 +1090,52 @@
 | M1072 | §18.4617: ★★★★★★★★★★ **m1118 定位到"场景已注册、但 2D 视图从未注册"：`FUN_811C2A4C`（场景/视图注册器）**从未被调用**（[SCREATE]# = 0）；场景对象 859BF220/859BF940 是由场景注册 API `FUN_811BF900(index, scene)` 写入 `(&DAT_816CC664)[index]` 的（该 API 还调用 FUN_811C3438(scene) 初始化、*scene=index；替换旧场景时调用 FUN_811C222E）。**
 | M1073 | §18.4618: ★★★★★★★★★★ **m1119 拿到场景注册的真实调用点：FUN_811BF900 在 title 初始化时被调用 2 次（index=0/scene=859BF220，index=1/scene=859BF940，调用者 0x8115A0E0/0x8115A314）；FUN_811C3438 只是互斥锁初始化；每帧 FUN_811C241E（[SCBUILD]）是场景相机矩阵计算（非视图构建）；P5D_PTRSCAN 扫描 939MB guest 镜像找 0x811C2A4C/0x811C2964 等指针 → 0 命中（说明该函数没有静态函数表入口，或镜像代码段非原始布局）。**
 | M1074 | §18.4619: ★★★★★★★★★★ **找到"添加 2D 视图"API：`FUN_811C30D4(scene, geometry, name)`——分配 0x50 视图节点、按类型挂入场景的每类型链表（type 2 的链表头就是 scene+0x3C，即 FUN_811C2964 遍历的 2D 视图链）；调用者是游戏代码 FUN_81015E1A/FUN_81015E36/FUN_81015E84 与 FUN_810418AA。** 反编译（`viewapi.txt`）：
+| M1075 | §18.4620: ★★★★★★★★★★ **m1121 铁证：整个运行期（boot→title→n=64M）"添加 2D 视图"相关探针全部为 0——游戏从未调用 FUN_811C30D4/FUN_811C1FE0，也从未进入 FUN_81015E1A/FUN_81015E36/FUN_81015E84/FUN_810418AA。场景对象存在、每帧相机/调度都在跑、logo 状态机也在走，但 2D 绘制上下文从未创建 → 视图注册永远不会发生。**
+m1121（P5D_PUMPMAIN=1，n=64.3M，exit 0）：
+```
+[VIEWADD]=0 [VIEWDEL]=0          ← add/remove view API 从未被调用
+[G15E1A]=0 [G15E36]=0 [G15E84]=0 [G418AA]=0   ← 游戏侧调用点也从未执行
+[SCENE] 120：p=859BF220/859BF940 st=1 head0F=0 head19=0 cnt=0
+[C2964]=120 [B6B12]=0 [ADA]=0
+[LOGO]=202  [BADMEM]=0  [GSUBX] frame=0 a2=850FD960 g730=03000000 b0*=0
+```
+**反编译游戏侧调用链（`gamecallers.txt` / `gamecallers_refs.txt`）**：
+```c
+// FUN_81015E1A(scene, unused, geomPtr)：为几何对象创建视图
+void FUN_81015e1a(int scene,int unused,undefined4 *geom) {
+  if (unused != 0) FUN_811bc14c(*(undefined4*)(scene+0x24));
+  uVar1 = FUN_811c30d4(scene, *geom, 0);      // ★ 添加视图
+  geom[1] = uVar1; }
+// FUN_81015E36 / FUN_81015E84 类似（先 FUN_811b5be2/FUN_811cc3f0 绑定资源，再 FUN_811c30d4）
+// FUN_810418AA(ctx, scene)：懒初始化——第一次使用时把视图挂到全局场景 0
+undefined4 FUN_810418aa(int ctx,int scene) {
+  if (*(int*)(ctx+0x20) == 0) {
+    if (scene == 0) scene = FUN_811bf928(0);   // ★ 取全局 scene 0
+    *(int*)(ctx+0x20) = scene;
+    …FUN_811b527c / FUN_811cc0a4 / FUN_811bc14c…
+    if (*(int*)(ctx+0x18) != 0) *(int*)(ctx+0x24) = FUN_811c30d4(scene, *(int*)(ctx+0x18), 0);
+    if (*(int*)(ctx+0x14) != 0) *(int*)(ctx+0x24) = FUN_811c30d4(scene, *(int*)(ctx+0x14), 0);
+    return 1; }
+  return 0; }
+```
+**调用者链（xrefs）**：
+```
+FUN_810418AA ← FUN_8103E956
+FUN_81015E1A ← FUN_81007FB0
+FUN_81015E36 ← FUN_81007FF8 / FUN_81007FB0
+FUN_81015E84 ← FUN_81008060
+```
+**⇒ 缺失环节 = 2D 绘制上下文创建路径（FUN_81007FB0 / FUN_81007FF8 / FUN_81008060 / FUN_8103E956）从未执行**——这些是 appGx 侧"几何/绘制上下文创建"API（创建时会懒加载视图并挂全局场景 0）。
+NEXT：
+```
+① 探针：[CTX7FB0] FUN_81007FB0、[CTX7FF8] FUN_81007FF8、[CTX8060] FUN_81008060、[CTX3E95] FUN_8103E956
+② 若均未调用 → 反编译它们的调用者（继续向上追），找到游戏本应在 title/logo 绘制时调用的上下文创建入口
+③ 检查该入口是否依赖某个 HLE 返回值（字体/纹理/精灵句柄为 0 可能导致提前返回）
+④ 打通上下文创建 → FUN_811C30D4 → scene+0x3C 非空 → FUN_811C2964 → FUN_811B6B12 → FUN_811ADAFE → array2 → GXM → 画面
+⑤ 若上下文创建路径是 app 层（非 gfd）→ 检查其初始化是否在我们的 title 流程被跳过
+```
+验证：`out80m_m1121viewadd.txt`、`gamecallers.txt`、`gamecallers_refs.txt`、`viewapi.txt`。 |
+| §18.4620 | m1121 hard evidence: across the whole run (boot->title->n=64M) all 'add 2D view' probes are zero - the game never calls FUN_811C30D4/FUN_811C1FE0 and never enters FUN_81015E1A/FUN_81015E36/FUN_81015E84/FUN_810418AA. Scene objects exist, per-frame camera/dispatch runs, the logo state machine advances, but the 2D drawing context is never created so view registration can never happen. m1121 (P5D_PUMPMAIN=1, n=64.3M, exit 0): [VIEWADD]=0 [VIEWDEL]=0 [G15E1A]=0 [G15E36]=0 [G15E84]=0 [G418AA]=0; [SCENE] 120 p=859BF220/859BF940 st=1 head0F=0 head19=0 cnt=0; [C2964] 120 [B6B12]=0 [ADA]=0; [LOGO] 202; [BADMEM] 0; [GSUBX] frame=0 a2=850FD960 g730=03000000 b0op=b0tr=b1op=b1tr=0. Decompiled game callers (gamecallers.txt / gamecallers_refs.txt): FUN_81015E1A(scene, unused, geomPtr) { if (unused!=0) FUN_811bc14c(*(u32*)(scene+0x24)); uVar1=FUN_811c30d4(scene,*geom,0) (add view); geom[1]=uVar1; }; FUN_81015E36/FUN_81015E84 similar (bind resource via FUN_811b5be2/FUN_811cc3f0 then add view); FUN_810418AA(ctx, scene) lazy init: if (*(int*)(ctx+0x20)==0) { if (scene==0) scene=FUN_811bf928(0) (global scene 0); *(int*)(ctx+0x20)=scene; ...FUN_811b527c/FUN_811cc0a4/FUN_811bc14c...; if (*(int*)(ctx+0x18)!=0) *(int*)(ctx+0x24)=FUN_811c30d4(scene,*(int*)(ctx+0x18),0); if (*(int*)(ctx+0x14)!=0) *(int*)(ctx+0x24)=FUN_811c30d4(scene,*(int*)(ctx+0x14),0); return 1; } return 0; }. Caller chain (xrefs): FUN_810418AA <- FUN_8103E956; FUN_81015E1A <- FUN_81007FB0; FUN_81015E36 <- FUN_81007FF8 / FUN_81007FB0; FUN_81015E84 <- FUN_81008060. So the missing piece is the 2D drawing-context creation path (FUN_81007FB0 / FUN_81007FF8 / FUN_81008060 / FUN_8103E956) which never runs - these are appGx-side geometry/draw-context creation APIs that lazily add views to global scene 0. NEXT: (1) probes [CTX7FB0] FUN_81007FB0, [CTX7FF8] FUN_81007FF8, [CTX8060] FUN_81008060, [CTX3E95] FUN_8103E956; (2) if none are called, decompile their callers and keep walking up to the context-creation entry the game should call when drawing title/logo; (3) check whether that entry is gated by an HLE return value (font/texture/sprite handle 0 could make it return early); (4) once context creation works -> FUN_811C30D4 -> scene+0x3C non-empty -> FUN_811C2964 -> FUN_811B6B12 -> FUN_811ADAFE -> array2 -> GXM -> picture; (5) if the context creation path is app-level (not gfd) check whether its initialization is skipped in our title flow. |
 ```c
 void FUN_811c30d4(int *scene, int *geom, undefined1 *name) {
   piVar2 = (int*)FUN_811da55c(0x50); FUN_811e6a40(piVar2,0x50);   // 分配 0x50 视图节点
@@ -497936,3 +497982,38 @@ NEXT：
 ANTI-FORGETTING ENTRY. Keywords: M1074 found add-2D-view API FUN_811C30D4(scene, geom, name): allocates 0x50 view node (FUN_811da55c(0x50); FUN_811e6a40(piVar2,0x50)), piVar2[0x13]=-0x80000000 (bit31 initially disabled), piVar2[0xB]=0xF00001, material slots piVar2+0xC.., FUN_811de07e(piVar2+1,name), chain A scene[0x1F] head/scene[0x20] tail with next +0x44/prev +0x48, *piVar2=geom, FUN_811bd66a(geom), iVar6=*geom (type), callback table &DAT_813E15A0+iVar6*0x14, chain B by type scene[iVar6*2+0xB] with node next +0x10 (+0x40) and prev link at +0x3C, scene[iVar6*2+0xB]=piVar2, type==2 -> scene+0x3C = 2D view chain (what FUN_811C2964 iterates), type==7 special ids 0xF00002/0xF00005; FUN_811C1FE0 = remove/free view (unlink + FUN_811da56e). Callers of FUN_811C30D4: FUN_81015E1A/FUN_81015E36/FUN_81015E84/FUN_810418AA (game code); callers of FUN_811C1FE0: FUN_811C20FE/FUN_811C3280/FUN_811C32A4. So scene+0x3C is the type-2 2D view chain. NEXT: probe [VIEWADD] FUN_811C30D4 (scene/geom/name/type/tid/lr); probe [G15E] FUN_81015E1A/36/84 and [G418] FUN_810418AA; if called with a different scene find the right scene; if not called find the upstream gate (2D sprite draw/scene setup path, possibly an HLE return value); once views registered FUN_811C2964 -> FUN_811B6B12 -> FUN_811ADAFE -> array2 -> GXM -> picture.
 
 LOOKUP: M1074, add-view API FUN_811C30D4 scene geom name, 0x50 view node FUN_811da55c, FUN_811e6a40, piVar2[0x13]=-0x80000000, piVar2[0xB]=0xF00001, FUN_811de07e name, chain A scene[0x1F]/[0x20] next +0x44 +0x48, chain B type scene[iVar6*2+0xB] next +0x40 prev +0x3C, type 2 = scene+0x3C 2D view chain, type 7 0xF00002/0xF00005, FUN_811C1FE0 remove view FUN_811da56e, callers FUN_81015E1A/FUN_81015E36/FUN_81015E84/FUN_810418AA, callback table DAT_813E15A0 / DAT_813E15A4, FUN_811c2f32, viewapi.txt, viewadd_refs.txt, store3c_gfd.txt -> §18.4618 [relevant: view registration missing], §18.4617 [relevant: scene registration API], §18.4616 [relevant: scene lists empty]
+### 18.4620 PORT M1075: 游戏从未创建 2D 绘制上下文 → add-view API 从未被调用
+
+1) m1121（n=64.3M，exit 0）：
+```
+[VIEWADD]=0 [VIEWDEL]=0
+[G15E1A]=0 [G15E36]=0 [G15E84]=0 [G418AA]=0
+[SCENE] 120 p=859BF220/859BF940 st=1 head0F=0 head19=0
+[C2964]=120 [B6B12]=0 [ADA]=0
+[LOGO]=202 [BADMEM]=0
+```
+2) 游戏侧调用链（`gamecallers.txt`）：
+```c
+void FUN_81015e1a(int scene,int unused,undefined4 *geom) {   // 为几何对象创建视图
+  if (unused != 0) FUN_811bc14c(*(undefined4*)(scene+0x24));
+  uVar1 = FUN_811c30d4(scene, *geom, 0);
+  geom[1] = uVar1; }
+// FUN_81015E36/FUN_81015E84 类似
+// FUN_810418AA(ctx,scene) 懒初始化：if (ctx+0x20==0) { if (scene==0) scene=FUN_811bf928(0);
+//   ctx+0x20=scene; …; FUN_811c30d4(scene, ctx+0x18); FUN_811c30d4(scene, ctx+0x14); }
+```
+3) xrefs：FUN_810418AA ← FUN_8103E956；FUN_81015E1A ← FUN_81007FB0；FUN_81015E36 ← FUN_81007FF8/81007FB0；FUN_81015E84 ← FUN_81008060
+4) 结论：**2D 绘制上下文创建路径（0x81007FB0/81007FF8/81008060/8103E956）从未执行 → 视图注册永远不会发生**
+NEXT：
+```
+① [CTX*] 探针四个上下文创建函数
+② 未调用 → 向上追调用者
+③ 检查是否依赖 HLE 返回值（字体/纹理/精灵句柄 0 → 提前返回）
+④ 打通上下文创建 → FUN_811C30D4 → scene+0x3C 非空 → … → GXM → 画面
+⑤ app 层初始化是否在 title 流程被跳过
+```
+验证：`out80m_m1121viewadd.txt`、`gamecallers.txt`、`gamecallers_refs.txt`。
+
+ANTI-FORGETTING ENTRY. Keywords: M1075 m1121: whole run (boot->title->n=64M) all add-view probes are zero - [VIEWADD]=0 [VIEWDEL]=0 [G15E1A]=0 [G15E36]=0 [G15E84]=0 [G418AA]=0, so the game never creates the 2D drawing context and view registration never happens, though scenes exist ([SCENE] p=859BF220/859BF940 st=1 head0F=0 head19=0), per-frame camera/dispatch runs ([C2964]=120) and logo state machine advances ([LOGO]=202). Decompiled game callers (gamecallers.txt): FUN_81015E1A(scene,unused,geomPtr) { if(unused!=0) FUN_811bc14c(*(u32*)(scene+0x24)); uVar1=FUN_811c30d4(scene,*geom,0); geom[1]=uVar1; }; FUN_81015E36 uses FUN_811b5be2 then FUN_811c30d4; FUN_81015E84 uses FUN_811cc3f0 then FUN_811c30d4; FUN_810418AA(ctx,scene) lazy init: if(*(int*)(ctx+0x20)==0){ if(scene==0) scene=FUN_811bf928(0) (global scene 0); *(int*)(ctx+0x20)=scene; ...FUN_811b527c/FUN_811cc0a4/FUN_811bc14c...; if(*(int*)(ctx+0x18)!=0) *(int*)(ctx+0x24)=FUN_811c30d4(scene,*(int*)(ctx+0x18),0); if(*(int*)(ctx+0x14)!=0) *(int*)(ctx+0x24)=FUN_811c30d4(scene,*(int*)(ctx+0x14),0); return 1; } return 0; }. Caller chain: FUN_810418AA <- FUN_8103E956; FUN_81015E1A <- FUN_81007FB0; FUN_81015E36 <- FUN_81007FF8 / FUN_81007FB0; FUN_81015E84 <- FUN_81008060. Missing piece = the 2D drawing-context creation path FUN_81007FB0/FUN_81007FF8/FUN_81008060/FUN_8103E956 never runs. NEXT: probe [CTX7FB0]/[CTX7FF8]/[CTX8060]/[CTX3E95]; if none called decompile their callers and walk up to the context-creation entry used when drawing title/logo; check whether it is gated by an HLE return value (font/texture/sprite handle 0); once context creation works FUN_811C30D4 -> scene+0x3C non-empty -> FUN_811C2964 -> FUN_811B6B12 -> FUN_811ADAFE -> array2 -> GXM -> picture.
+
+LOOKUP: M1075, m1121 view add probes all zero, [VIEWADD] FUN_811C30D4, [VIEWDEL] FUN_811C1FE0, [G15E1A]/[G15E36]/[G15E84]/[G418AA]=0, FUN_81015E1A scene geom FUN_811c30d4, FUN_81015E36 FUN_811b5be2, FUN_81015E84 FUN_811cc3f0, FUN_810418AA ctx+0x20 scene FUN_811bf928(0) lazy init views ctx+0x18/ctx+0x14, callers FUN_8103E956 / FUN_81007FB0 / FUN_81007FF8 / FUN_81008060, next [CTX7FB0] [CTX7FF8] [CTX8060] [CTX3E95], out80m_m1121viewadd.txt, gamecallers.txt, gamecallers_refs.txt, viewapi.txt -> §18.4619 [relevant: add-view API found], §18.4618 [relevant: view registration missing], §18.4617 [relevant: scene registration API]
