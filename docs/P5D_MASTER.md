@@ -1037,6 +1037,48 @@
 | M1019 | §18.4564: ★★★★★★★★★★ **关键真相：title task 没有被提前释放！worker 入口 node[2]=85B8583C 是合法 task 指针——崩溃在 appFade 路径深处：`FUN_81178F0A` 用 worker 的残留 r0 调 `FUN_8116f8a8` 得到 **0xE5E5E5E5**（某个"fade 对象"字段是毒值）**。batch 级探针结果（`out80m_m1083batchprobe.txt` / err）：
 | M1020 | §18.4565: ★★★★★★★★★★ **appFade 真相闭环：管理器创建正常、fade 对象来自被"全强制完成"的周期 job 节点——对象 +8 字段（job arg）已被 completion 回调释放成 0xE5。根因 = 我们的 all-force worker 强制策略破坏了 appFade/序列等周期 job 的状态；修复方向改为"只强制 boot init 系列 job，放行周期 job"**。`out80m_m1084fadeprobe.txt` / err：
 | M1021 | §18.4566: **按 M1020 结论实施"只强制 6 个 init worker、其余 job 全部真跑"的选择性强制（batch_011 blk_8116FA5C），并加 JOBNORM 探针记录每个真跑 worker——用于验证 appFade/序列周期 job 的状态是否恢复正常**。新 blk_8116FA5C：
+| M1022 | §18.4567: ★★★★★★★★★★ **选择性强制成功！周期 job 全部真跑（JOBNORM 28 条，含 appFade 0x811792B3 ×2、sequence 0x811857C3、title 0x81198173）+ appFade 状态修复（`[TTF8] g8a8ret=85A9E42C`，不再是 0xE5E5E5E5）→ title 状态机推进到 case1/2，并在**声音对象查找**上撞到新缺口：`FUN_81171BEA` 返回 0（sound object 未创建，因为 init-sound worker 0x811848B7 仍被强制跳过）**。`out80m_m1085selforce.txt` / err：
+```
+[JOBNORM] 28 条：
+  wf=81159CB1 node=85A8FC8C ×3   wf=81185309 node=85A9E13C ×3
+  wf=810222F9 node=85A9E65C ×3   wf=811792B3 node=85A9E46C ×3   ← appFade 真跑
+  wf=811792B3 node=85A9E4FC ×3   wf=8102A501 node=85B428AC ×3
+  wf=810274E9 node=85B42A3C ×3   wf=811853C3 node=85A9E18C ×3
+  wf=811857C3 node=85B843AC ×3   ← sequence manager 真跑
+  wf=81159CCB node=85A8FCDC ×3   wf=81198173 node=85B86A2C ×1   ← ★ title worker 真跑
+[TTF8] g8a8ret=85A9E42C        ← ★ appFade 字段恢复合法（不再 E5）
+[TTC] task=85B869FC
+[BADMEM] guest va=0x00000004 @block=0x81172386
+rg_ring: 811981B6 81178CE2 81178D12 81178D38 811981BC 81178DCE 8116F8A8 81178DD8 … 81178E16/18/1C
+         8102AB58 … 81178E22/E32/E46 811981C4 811981D0 81172470 81171BEA 81016296 810162B4 81171C10 81171C46
+```
+**新崩溃点反编译**：
+```c
+// FUN_81172374(param) — sound 请求，无空指针检查
+iVar1 = FUN_81171bea(&DAT_8130733c);      // 查找 sound object
+if ((*(u32*)(iVar1+4) & 1) == 0) ASSERT;  // ← iVar1==0 时读 [0+4] → BADMEM va=0x4
+*(u32*)(iVar1+0x44) = 0;  uVar2 = FUN_81172d08(iVar1,param);  *(u64*)(iVar1+0x58)=uVar2;
+// FUN_81172470() — "COMSE" 版本有 null 检查（beq 跳过）
+iVar1 = FUN_81171bea("COMSE"); if (iVar1 != 0) { ... }
+// FUN_81171BEA(name) = sound object 查找（遍历 DAT_813AFCA0 列表；找不到返回 0）
+```
+⇒ **根因**：init-sound worker（0x811848B7，创建 BGM/COMSE/EVENT/EVENT_ENV/DCOMMON 声音对象）仍在我们强制列表里被跳过 → 声音对象列表为空 → title 的 `FUN_81172374` 解引用 null → 崩溃。
+**M1022 修复**：从强制列表**移除 sound worker 0x811848B7**（让 init-sound 真正执行；STEPFORCE 仍强制其完成检查 0x811848D6/0x811848DA）：
+```
+强制列表变为：trophy 0x81184809 / gamedata 0x81184965 / msgwindow 0x81184A89 / mainmenu 0x81184B39 / initDataRead 0x81184FFF
+（sound 0x811848B7 放行真跑）
+```
+编译：batch_011 exit 0；exe 重链 exit 0（57,049,753B，11:11:09）。验证运行：`out80m_m1086soundrun.txt` 已启动。
+NEXT：
+```
+① [JOBNORM] 出现 wf=811848B7（init-sound worker 真跑）
+② 声音对象（BGM/COMSE/EVENT/EVENT_ENV/DCOMMON）是否创建 → FUN_81171BEA 返回非 0
+③ title worker 继续 case1/2/… → FUN_81172470/FUN_81172374 通过
+④ 若下一个缺口是 msgwindow/mainmenu 对象 → 同样放行对应 init worker
+⑤ title 对象创建 → 引擎自绘标题
+```
+验证：`out80m_m1085selforce.txt`、`out80m_m1086soundrun.txt`（生成中）、`title_audio.txt`。 |
+| §18.4567 | Selective force SUCCEEDED: all periodic jobs really run (JOBNORM 28 lines incl. appFade 0x811792B3 x2, sequence 0x811857C3, title 0x81198173) and the appFade state is fixed ([TTF8] g8a8ret=85A9E42C, no longer 0xE5E5E5E5) -> the title state machine advanced to case1/2 and hit a NEW gap at the SOUND OBJECT lookup: FUN_81171BEA returns 0 (sound objects not created because the init-sound worker 0x811848B7 is still force-skipped). out80m_m1085selforce.txt / err: [JOBNORM] 28 lines: wf=81159CB1 node=85A8FC8C x3; wf=81185309 node=85A9E13C x3; wf=810222F9 node=85A9E65C x3; wf=811792B3 node=85A9E46C x3 (appFade really running); wf=811792B3 node=85A9E4FC x3; wf=8102A501 node=85B428AC x3; wf=810274E9 node=85B42A3C x3; wf=811853C3 node=85A9E18C x3; wf=811857C3 node=85B843AC x3 (sequence manager really running); wf=81159CCB node=85A8FCDC x3; wf=81198173 node=85B86A2C x1 (title worker really running); [TTF8] g8a8ret=85A9E42C (appFade field valid, no longer E5); [TTC] task=85B869FC; [BADMEM] guest va=0x00000004 at block=0x81172386; rg_ring 811981B6 81178CE2 81178D12 81178D38 811981BC 81178DCE 8116F8A8 81178DD8 ... 81178E16/18/1C 8102AB58 ... 81178E22/E32/E46 811981C4 811981D0 81172470 81171BEA 81016296 810162B4 81171C10 81171C46. New crash point decompiled: FUN_81172374(param) = sound request with NO null check: iVar1=FUN_81171bea(&DAT_8130733c); if((*(u32*)(iVar1+4)&1)==0) ASSERT; (when iVar1==0 reading [0+4] => BADMEM va=0x4); *(u32*)(iVar1+0x44)=0; uVar2=FUN_81172d08(iVar1,param); *(u64*)(iVar1+0x58)=uVar2. FUN_81172470() = 'COMSE' version WITH null check (beq skip): iVar1=FUN_81171bea('COMSE'); if(iVar1!=0){...}. FUN_81171BEA(name) = sound object lookup (walks DAT_813AFCA0 list, returns 0 if not found). Root cause: the init-sound worker (0x811848B7, creates BGM/COMSE/EVENT/EVENT_ENV/DCOMMON sound objects) is still force-skipped so the sound object list is empty and the title's FUN_81172374 dereferences null. M1022 fix: REMOVE sound worker 0x811848B7 from the force list (init-sound now really runs; STEPFORCE still forces its completion checks 0x811848D6/0x811848DA). Force list is now: trophy 0x81184809 / gamedata 0x81184965 / msgwindow 0x81184A89 / mainmenu 0x81184B39 / initDataRead 0x81184FFF (sound 0x811848B7 allowed to run). batch_011 exit 0; exe relink exit 0 (57,049,753B 11:11:09). Verification run out80m_m1086soundrun.txt started. NEXT: [JOBNORM] shows wf=811848B7; whether the sound objects are created (FUN_81171BEA non-zero); title worker continues case1/2; if the next gap is msgwindow/mainmenu objects allow those init workers too; title object -> engine-drawn title. |
 ```cpp
 uint32_t blk_8116FA5C(RecState* s) { g_cur_block = 0x8116FA5Cu;
   uint32_t _node = s->r[0] ? rd32(s, s->r[0] + 0x34u) : 0u;
@@ -494329,3 +494371,47 @@ NEXT：
 ANTI-FORGETTING ENTRY. Keywords: M1021 implemented selective force per M1020 - force ONLY the 6 boot-init workers and let every other job really run. batch_011 blk_8116FA5C: _node=s->r[0]?rd32(s,s->r[0]+0x34):0; _wf=_node?rd32(s,_node):0; WFDBG prints each distinct worker; if(_wf==0x81184809||0x811848B7||0x81184965||0x81184A89||0x81184B39||0x81184FFF){ s->r[0]=0xFFFFFFFF; return s->r[14]; } else { [JOBNORM] log first 40; push lr/r4; s->r[0]=_node; s->r[14]=0x8116FA64; return 0x8116F748; }. Force list trophy 0x81184809 / sound 0x811848B7 / gamedata 0x81184965 / msgwindow 0x81184A89 / mainmenu 0x81184B39 / initDataRead 0x81184FFF; allowed appFade 0x811792B3, sequence 0x811857C3, title 0x81198173. batch_011 compile exit 0; exe relink exit 0 (57,049,753B 10:50:23). Verification run out80m_m1085selforce.txt (NOMOVIE + OT/STEPFORCE + VDEC + delay=0) started. NEXT: whether [JOBNORM] shows appFade/sequence/title workers really running; first failure point in err tail; [JOBCOMP] and page6 switch; whether title worker passes appFade ([TTF8] not E5, no BADMEM); title state machine advances -> title object -> engine-drawn title. M1007's first selective-force attempt ended early at n≈59.74M with 1 JOBCOMP.
 
 LOOKUP: M1021, selective force, batch_011 blk_8116FA5C, 6 init workers, trophy 0x81184809, sound 0x811848B7, gamedata 0x81184965, msgwindow 0x81184A89, mainmenu 0x81184B39, initDataRead 0x81184FFF, appFade 0x811792B3, sequence 0x811857C3, title 0x81198173, JOBNORM, WFDBG, out80m_m1085selforce.txt, exe 57,049,753B -> §18.4565 [relevant: appFade root cause], §18.4564 [relevant: appFade probes], §18.4553 [relevant: selective force history]
+### 18.4567 PORT M1022: 选择性强制成功 → title 推进到声音对象缺口 → 放行 init-sound worker
+
+1) `out80m_m1085selforce.txt` / err：
+```
+[JOBNORM] 28 条（周期 job 全部真跑）：
+  wf=811792B3 node=85A9E46C ×3   ← appFade
+  wf=811857C3 node=85B843AC ×3   ← sequence manager
+  wf=81198173 node=85B86A2C ×1   ← ★ title worker
+[TTF8] g8a8ret=85A9E42C          ← ★ appFade 字段恢复合法（不再 E5）
+[TTC] task=85B869FC
+[BADMEM] guest va=0x00000004 @block=0x81172386
+rg_ring: … 81178E22 81178E32 81178E46 811981C4 811981D0 81172470 81171BEA 81016296 810162B4 81171C10 81171C46
+```
+2) 新崩溃点反编译（`title_audio.txt`）：
+```c
+FUN_81172374(param):                     // sound 请求，无 null 检查
+  iVar1 = FUN_81171bea(&DAT_8130733c);
+  if ((*(u32*)(iVar1+4) & 1) == 0) ASSERT;   // iVar1==0 → 读 [0+4]=0x4 → BADMEM
+  *(u32*)(iVar1+0x44)=0; uVar2=FUN_81172d08(iVar1,param); *(u64*)(iVar1+0x58)=uVar2;
+FUN_81172470():                          // "COMSE"，有 null 检查
+  iVar1 = FUN_81171bea("COMSE"); if (iVar1 != 0) { ... }
+FUN_81171BEA(name) = sound object 查找（遍历 DAT_813AFCA0，找不到返回 0）
+```
+⇒ 根因：init-sound worker（0x811848B7）仍被强制跳过 → BGM/COMSE/EVENT/EVENT_ENV/DCOMMON 对象未创建 → title 声音请求解引用 null。
+3) M1022 修复：从强制列表移除 sound worker 0x811848B7（init-sound 真跑；STEPFORCE 仍强制其完成检查）：
+```
+强制列表 = trophy 0x81184809 / gamedata 0x81184965 / msgwindow 0x81184A89 / mainmenu 0x81184B39 / initDataRead 0x81184FFF
+（sound 0x811848B7 放行）
+```
+4) 编译：batch_011 exit 0；exe 重链 exit 0（57,049,753B 11:11:09）。
+5) 验证运行 `out80m_m1086soundrun.txt` 已启动。
+NEXT：
+```
+① [JOBNORM] 出现 wf=811848B7
+② 声音对象创建 → FUN_81171BEA 非 0
+③ title worker 继续 case1/2/…
+④ 下一个缺口（msgwindow/mainmenu 对象）→ 同样放行
+⑤ title 对象 → 引擎自绘标题
+```
+验证：`out80m_m1085selforce.txt`、`out80m_m1086soundrun.txt`（生成中）、`title_audio.txt`。
+
+ANTI-FORGETTING ENTRY. Keywords: M1022 selective force SUCCEEDED - [JOBNORM] 28 lines show all periodic jobs really running (appFade 0x811792B3 node=85A9E46C/85A9E4FC; sequence 0x811857C3 node=85B843AC; title 0x81198173 node=85B86A2C) and appFade state fixed ([TTF8] g8a8ret=85A9E42C, no E5). Title state machine advanced to case1/2 and hit a NEW gap at the SOUND OBJECT lookup: FUN_81171BEA returns 0 because the init-sound worker 0x811848B7 is still force-skipped. Evidence out80m_m1085selforce.txt: [TTC] task=85B869FC; [BADMEM] guest va=0x00000004 at block=0x81172386; rg_ring ... 81178E46 811981C4 811981D0 81172470 81171BEA 81016296 810162B4 81171C10 81171C46. Decompiled title_audio.txt: FUN_81172374(param) = sound request with NO null check: iVar1=FUN_81171bea(&DAT_8130733c); if((*(u32*)(iVar1+4)&1)==0) ASSERT; *(u32*)(iVar1+0x44)=0; uVar2=FUN_81172d08(iVar1,param); *(u64*)(iVar1+0x58)=uVar2. FUN_81172470() = 'COMSE' version WITH null check (iVar1=FUN_81171bea('COMSE'); if(iVar1!=0){...}). FUN_81171BEA(name) = sound object lookup walking DAT_813AFCA0, returns 0 if not found. Root cause: init-sound worker (0x811848B7, creates BGM/COMSE/EVENT/EVENT_ENV/DCOMMON objects) force-skipped => sound object list empty => FUN_81172374 dereferences null. M1022 fix: remove sound worker 0x811848B7 from the force list (init-sound really runs; STEPFORCE still forces its completion checks 0x811848D6/0x811848DA). Force list now trophy 0x81184809 / gamedata 0x81184965 / msgwindow 0x81184A89 / mainmenu 0x81184B39 / initDataRead 0x81184FFF. batch_011 exit 0; exe relink exit 0 (57,049,753B 11:11:09). Verification run out80m_m1086soundrun.txt started. NEXT: [JOBNORM] wf=811848B7; sound objects created (FUN_81171BEA non-zero); title worker continues case1/2; next gap (msgwindow/mainmenu objects) -> allow those init workers; title object -> engine-drawn title.
+
+LOOKUP: M1022, selective force success, [JOBNORM] 28, appFade 0x811792B3, sequence 0x811857C3, title 0x81198173, [TTF8] g8a8ret=85A9E42C, [TTC] task=85B869FC, [BADMEM] va=0x4 block 0x81172386, FUN_81172374, FUN_81172470, FUN_81171BEA, DAT_813AFCA0, sound object lookup, init-sound worker 0x811848B7, STEPFORCE 0x811848D6/0x811848DA, force list trophy 0x81184809/gamedata 0x81184965/msgwindow 0x81184A89/mainmenu 0x81184B39/initDataRead 0x81184FFF, out80m_m1086soundrun.txt, title_audio.txt -> §18.4566 [relevant: selective force], §18.4565 [relevant: appFade root cause]
