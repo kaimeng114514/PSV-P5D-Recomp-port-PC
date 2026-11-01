@@ -1068,6 +1068,37 @@
 | M1050 | §18.4595: ★★★★★★★★★ **重大发现：显示队列由 5 个 guest 线程（entry=0x8127C1D3，"CriThread"）服务——FUN_8127BE58 用 sceKernelCreateThread(entry=0x8127C1D3)+sceKernelStartThread 创建它们（tid 4001A000/4001E000/4001F000/40020000/40021000）；PDUMP 显示它们等待各自的事件标志（obj=60016000/60018000/6001A000/6001C000，bits=1）——**这些事件标志应由显示队列回调/提交路径设置，但主线程卡在等待状态，形成互等死锁**。M1050 实施 WAITFORCE 实验：在等待循环把 `[p+0xBC]` 强制置 0（st!=1）让主循环继续，验证下游 title 绘制链路**。m1103/m1104 证据：
 | M1051 | §18.4596: ★★★★★★★★★★ **WAITFORCE 成功解锁：S0_LOGO 状态机开始真实运行！logo 序列从 state=0→3→4→5（69 帧计数×138 次）→6→8（54 次），并创建了**第二个 logo 任务**（task=85D0B78C）；[TMX] 增加到 96 条（更多 logo 容器/TGA 加载）；事件标志 obj=60016000 bits=1 被 guest 反复设置 200+ 次，5 个显示线程全部被唤醒（TDUMP ready=1）；无 BADMEM**。但**仍无绘制调用**（[ABIEND]/draw 计数不变）——S0 logo 的绘制回调（注册在 FUN_81193704 尾部的 0x8119351D）尚未被调用。M1051 加 [LOGODRAW]/[VFW2] 探针定位绘制回调。m1105 证据：
 | M1052 | §18.4597: ★★★★★★★★★★ **m1106 里程碑：logo 绘制回调真的被调用了！[LOGODRAW] 80 条（两个 logo 任务 85B8759C/85D0B7DC 交替绘制，回调参数 r2=0x8119351D 与注册值一致），[LOGO] 状态机继续推进 127 条，无 BADMEM。但绘制函数内部被"场景就绪门控"挡住：FUN_8119351C→FUN_81160B7E/FUN_811610A4 都先调用 `FUN_81160814()` 检查，返回 0 时跳过 `FUN_81163ABC(...)` 提交——所以仍无 GXM 绘制调用（[ABIBEGIN] 1/[ABIEND] 0）**。m1106 证据：
+| M1053 | §18.4598: ★★★★★★★★ **门控定位到单个字节：`FUN_81160814()` = `(DAT_8155545C == 0)`（0x81555438+0x24）；DAT_8155545C 非 0 时 logo 绘制被跳过。M1053 实施 SCNFORCE 实验：门控函数直接返回 1（强制场景就绪），并加 [DRAWSUB] 探针确认提交路径 FUN_81163ABC 真正执行**。反编译证据（`scnready.txt`）：
+```c
+// FUN_81160814（22 字节）——场景就绪门控
+bool FUN_81160814(void) {
+  // movw r0,#0x5438; movt r0,#0x8155 → 0x81555438; ldrsb r1,[r0,#0x24] → 0x8155545C
+  return (char)DAT_8155545C == '\0';     // ← 该字节为 0 = 就绪
+}
+// FUN_81163ABC（592 字节）——最终提交（appGx primitive → GXM）
+// 取 primitive 类型表，FUN_811637D8()/FUN_8116397A 组装顶点，FUN_811C5580/811C57F2 设置 pipeline，
+// FUN_811E3960/FUN_811E3B54 生成 draw command，FUN_811C041C 入队 → 后续 GXM 提交
+```
+**M1053 修改（`batch_010.cpp`）**：
+```cpp
+// blk_81160814 入口
+{ if (P5D_SCNFORCE) { static int _n=0; if(_n++<40) fprintf(stderr,"[SCNFORCE] #%d force scene-ready (byte 8155545C=%02X)\n",_n, rd32(s,0x8155545Cu)&0xFF);
+    s->r[0] = 1u; return s->r[14]; } }
+// blk_81163ABC 入口（提交路径探针）
+{ if(_n++<60) fprintf(stderr,"[DRAWSUB] p1..p6"); }
+```
+编译：batch_010 exit 0；exe 重链 exit 0（57,065,862B，20:10:22）。
+验证运行：`out80m_m1107scnforce.txt`（FORCETITLE + FIOSFILL + WAITFORCE + SCNFORCE）已启动。
+NEXT：
+```
+① [SCNFORCE] 触发 → FUN_81160814 恒返回 1 → FUN_81163ABC 提交路径执行
+② [DRAWSUB] 出现（提交参数：顶点/索引/primitive 类型）
+③ GXM HLE 收到 draw/vertex 调用（[ABIVTX]/[TEXBIND]/[ABIDRAW]）
+④ 截帧检查：ATLUS logo 是否出现在画面
+⑤ 若仍无画面 → 检查 BeginScene/EndScene 是否缺失（绘制需要活动 render pass）
+```
+验证：`scnready.txt`、`out80m_m1107scnforce.txt`（生成中）。 |
+| §18.4598 | The gate is a single byte: FUN_81160814() = (DAT_8155545C == 0) (address 0x81555438+0x24); when DAT_8155545C is non-zero the logo draw is skipped. M1053 implements the SCNFORCE experiment: the gate function directly returns 1 (forces scene-ready), plus a [DRAWSUB] probe to confirm the submit path FUN_81163ABC really executes. Decompiled evidence (scnready.txt): FUN_81160814 (22 bytes): bool FUN_81160814(void) { // movw r0,#0x5438; movt r0,#0x8155 -> 0x81555438; ldrsb r1,[r0,#0x24] -> 0x8155545C return (char)DAT_8155545C == '\0'; } (byte 0 = ready). FUN_81163ABC (592 bytes) is the final submit (appGx primitive -> GXM): takes the primitive type table, FUN_811637D8()/FUN_8116397A build vertices, FUN_811C5580/811C57F2 set pipelines, FUN_811E3960/FUN_811E3B54 generate the draw command, FUN_811C041C enqueues -> later GXM submit. M1053 changes (batch_010.cpp): blk_81160814 entry: if P5D_SCNFORCE { print [SCNFORCE] (byte 8155545C) ; s->r[0]=1u; return s->r[14]; } blk_81163ABC entry: [DRAWSUB] probe p1..p6. batch_010 compile exit 0; exe relink exit 0 (57,065,862B 20:10:22). Verification run out80m_m1107scnforce.txt (FORCETITLE + FIOSFILL + WAITFORCE + SCNFORCE) started. NEXT: [SCNFORCE] fires -> FUN_81160814 always returns 1 -> FUN_81163ABC submission executes; [DRAWSUB] appears (vertex/index/primitive params); GXM HLE receives draw/vertex calls ([ABIVTX]/[TEXBIND]/[ABIDRAW]); check frames for the ATLUS logo; if still no picture check whether BeginScene/EndScene are missing (drawing needs an active render pass). |
 ```
 [LOGODRAW] #1 arg=85A8FF14 r1=85B8759C r2=8119351D r3=0
 [LOGODRAW] #7 arg=85A8FF30 r1=85D0B7DC r2=8119351D r3=1   ← 两个 logo 任务交替绘制
@@ -496421,3 +496452,38 @@ NEXT：
 ANTI-FORGETTING ENTRY. Keywords: M1052 the logo draw callback IS being called: [LOGODRAW] 80 lines (two logo tasks 85B8759C/85D0B7DC alternating, r2=0x8119351D matching registration); [LOGO] 127 lines; no BADMEM; but the draw functions are blocked by a 'scene ready' gate: FUN_8119351C -> FUN_81160B7E/FUN_811610A4 call FUN_81160814() first and skip FUN_81163ABC submission when it returns 0 -> still no GXM draw calls ([ABIBEGIN] 1/[ABIEND] 0). m1106: [LOGODRAW] #1 arg=85A8FF14 r1=85B8759C r2=8119351D r3=0; #7 arg=85A8FF30 r1=85D0B7DC r2=8119351D r3=1; [WAITFORCE] 3; [ABIBEGIN] 1; [ABIEND] 0; [PRESENT] 1; run reaches n=60,990,000+. FUN_8119351C decompiled: task=FUN_8116f8a8(param_2) (param_2 draw object r1); width/height from FUN_81003EEC/FUN_81003F10; switch(*task) case 4/5/6: tex=task[5] (logoTMX texobj piVar3[1] when *piVar3==3); case 7/8/9: tex=task[7] (altuslogo); case 10/0xb/0xc: tex=task[6] (p-studio); calls FUN_81160B7E(0,0xFF,&rect,1) + FUN_811610A4(...,&uv,tex,1). FUN_81160B7E/FUN_811610A4 build sprite vertices and only submit when FUN_81160814() != 0: if (FUN_81160814() != 0) { FUN_8115FF12(); FUN_81163ABC(0,&verts,4,&indices,...); } -> the gate. NEXT: decompile FUN_81160814 (scene/batch ready) and FUN_81163ABC (submit, would call GXM HLE), find the return-0 condition; add [SCNREADY]/[DRAWSUB] probes; if the gate depends on BeginScene/EndScene find the title page BeginScene caller; fix the gate state -> submit -> GXM draw -> frames show the logo.
 
 LOOKUP: M1052, draw callback called, [LOGODRAW] 80 lines, two logo tasks 85B8759C/85D0B7DC, r2=8119351D, [LOGO] 127, scene ready gate FUN_81160814, FUN_81163ABC submit, FUN_81160B7E, FUN_811610A4, FUN_811605FC, FUN_8115FF12, FUN_81160516, screen w/h FUN_81003EEC/FUN_81003F10, tex switch *task case 4/5/6 task[5], 7/8/9 task[7], 10/b/c task[6], no ABIEND, exe 57,065,196B, out80m_m1106drawprobe.txt, logodraw.txt, logodraw2.txt -> §18.4596 [relevant: WAITFORCE unlock], §18.4595 [relevant: display threads], §18.4587 [relevant: S0 logo]
+### 18.4598 PORT M1053: 场景就绪门控 = 单字节 DAT_8155545C，SCNFORCE 强制返回 1
+
+1) 反编译（`scnready.txt`）：
+```c
+// FUN_81160814（22B）
+bool FUN_81160814(void) {
+  // 0x81555438+0x24 = 0x8155545C
+  return (char)DAT_8155545C == '\0';       // 0 = 就绪
+}
+// FUN_81163ABC（592B）最终提交（appGx primitive → GXM）：
+// 类型表 → FUN_811637D8/FUN_8116397A 组顶点 → FUN_811C5580/811C57F2 设 pipeline
+// → FUN_811E3960/811E3B54 生成 draw command → FUN_811C041C 入队
+```
+2) M1053（batch_010.cpp）：
+```cpp
+// blk_81160814 入口
+{ if (P5D_SCNFORCE) { print("[SCNFORCE] byte=%02X"); s->r[0]=1u; return s->r[14]; } }
+// blk_81163ABC 入口
+{ print("[DRAWSUB] p1..p6"); }
+```
+3) 编译：batch_010 exit 0；exe 57,065,862B（20:10:22）
+4) 验证运行 `out80m_m1107scnforce.txt` 已启动
+NEXT：
+```
+① [SCNFORCE] → 门控恒 1 → FUN_81163ABC 提交
+② [DRAWSUB] 出现（顶点/索引参数）
+③ GXM HLE 收到 draw 调用（[ABIVTX]/[TEXBIND]）
+④ 截帧看 ATLUS logo
+⑤ 仍无画面 → 检查 BeginScene/EndScene 缺失
+```
+验证：`scnready.txt`、`out80m_m1107scnforce.txt`（生成中）。
+
+ANTI-FORGETTING ENTRY. Keywords: M1053 the gate is a single byte: FUN_81160814() = (DAT_8155545C == 0) at address 0x8155545C (0x81555438+0x24); non-zero means not ready and the logo draw is skipped. SCNFORCE experiment: gate returns 1 (forces scene-ready) + [DRAWSUB] probe on FUN_81163ABC. scnready.txt: FUN_81160814 (22 bytes) bool FUN_81160814(void) { movw r0,#0x5438; movt r0,#0x8155 -> 0x81555438; ldrsb r1,[r0,#0x24] -> 0x8155545C; return (char)DAT_8155545C == '\0'; }; FUN_81163ABC (592 bytes) final submit: primitive table, FUN_811637D8()/FUN_8116397A build vertices, FUN_811C5580/811C57F2 pipelines, FUN_811E3960/FUN_811E3B54 draw command, FUN_811C041C enqueue. M1053 (batch_010.cpp): blk_81160814 if P5D_SCNFORCE { print [SCNFORCE]; s->r[0]=1u; return s->r[14]; } blk_81163ABC [DRAWSUB] probe p1..p6. batch_010 compile exit 0; exe relink exit 0 (57,065,862B 20:10:22). Verification run out80m_m1107scnforce.txt (FORCETITLE + FIOSFILL + WAITFORCE + SCNFORCE) started. NEXT: [SCNFORCE] fires -> gate always 1 -> FUN_81163ABC executes; [DRAWSUB] appears; GXM HLE receives draw/vertex calls; check frames for the ATLUS logo; if still no picture check BeginScene/EndScene (drawing needs an active render pass).
+
+LOOKUP: M1053, scene-ready gate FUN_81160814 -> DAT_8155545C == 0, addr 0x81555438+0x24, SCNFORCE returns 1, [DRAWSUB] probe FUN_81163ABC, appGx primitive submit, FUN_811637D8, FUN_8116397A, FUN_811C5580, FUN_811C57F2, FUN_811E3960, FUN_811E3B54, FUN_811C041C, batch_010 blk_81160814, exe 57,065,862B, out80m_m1107scnforce.txt, scnready.txt -> §18.4597 [relevant: draw callback + gate], §18.4596 [relevant: WAITFORCE], §18.4587 [relevant: S0 logo]
