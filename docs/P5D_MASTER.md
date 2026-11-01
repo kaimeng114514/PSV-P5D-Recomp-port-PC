@@ -1077,6 +1077,28 @@
 | M1059 | §18.4604: **type=0xB/0x4B 命令来源定位：xrefs 显示 `FUN_811ADAFE`（2D sprite/primitive 批处理渲染器）是入队主力（大量调用 FUN_811C041C/FUN_811C05EC/FUN_811C0754），另有 FUN_81163ABC（我们已知的 2D sprite 提交）、FUN_811C5580/FUN_811C57F2（pipeline 设置）等。M1059 加 [FLUSHX]（打印 DAT_816CC6F4、三数组指针 6E4/6CC/6D8 与每 bucket 的 +0xC/+0x14 链表头）、[ENQ2]（FUN_811C0754 → 数组1 sprite 链）、[ADA]（FUN_811ADAFE 入口）探针，定位 type 0xB 命令最终落入哪个数组/链表、flush 是否扫描**。xrefs（`enq_refs.txt`）：
 | M1060 | §18.4605: ★★★★★★★★★★ **m1110 决定性证据：命令落点与 flush 扫描范围不匹配被完全确认！[FLUSHX]：DAT_816CC6F4=0x82（130 个 bucket）、三帧数组 a1/a2/a3 循环；**数组3（6D8）的 bucket11（type 0xB）不透明链（+0xC）非空：8F142000 / 8F343050 / 8F544050**（正是我们的 type=0xB 命令！），后续帧还有 bucket0/bucket10；而 FUN_8119934A 的 array3 扫描循环只检查 **+0x14（透明链）** → **命令在 +0xC 不透明链，flush 从不消费它们**。这解释了 [BLD1/2/3]=0、[SUBMIT] 只有 type=0/2、以及 HLEDUMP 无 per-frame GXM 调用**。m1110：
 | M1061 | §18.4606: **m1060 定位到"命令在 array3 的 +0xC 不透明链、flush 只扫 +0x14 透明链"后，M1061 实施 FLUSHWIRE 交叉接线实验：在 FUN_8119934A 入口把 array3 各 bucket 的 +0xC 链表头复制到 +0x14（仅当 +0x14 为空），让 gfd flush 的三个绘制列表构建器（FUN_811F3452 等）真正消费我们的 type=0xB 命令，验证"命令一旦被 flush 消费是否能一路走到 GXM 绘制"**。实现（`batch_013.cpp` blk_8119934A 入口，env `P5D_FLUSHWIRE=1`）：
+| M1062 | §18.4607: ★★★★★★★★★★ **m1111（FLUSHWIRE）结果：交叉接线成功、flush 真的消费了命令，但 builder 崩溃——证明"不透明链+0xC 的命令不是给透明链 builder 用的"。证据链完整：[WIRE] #1（bucket11 op=8F142000 → tr）→ [BLD3] #1（bucket=851CC8D0，flush 开始消费）→ [SUBMIT] #1（type=1，提交路径触发）→ **BADMEM guest va=0x00000004 @block=0x811F371A stub=0x812B28A0**（builder 内某处 0+4 解引用空指针崩溃）。说明：**+0xC 不透明链需要它自己的消费者/命令布局**（命令对象 +0x1C 标志区分不透明/透明，builder FUN_811F3452 只理解透明链布局）；同时 m1111 再次确认 [FLUSHX] bucket11 op=8F142000 tr=8F142000（WIRE 已接线）**。m1111：
+```
+[WIRE] #1 frame=0 bucket11 op=8F142000 -> tr
+[BLD3] #1 bucket=851CC8D0
+[SUBMIT] #1 type=1 builder=848563D0
+[BADMEM] guest va=0x00000004 unmapped block=0x811F371A stub=812B28A0（崩溃，exit code 1）
+[FLUSHX] #1 frame=0 f4=82 a1=851CD1F0 a2=851CD1B0 a3=851CC770 bucket11 op=8F142000 tr=8F142000
+[FLUSH] 1  [ABIBEGIN] 0  [BADMEM] 1
+```
+**架构修正（更完整理解）**：DAT_816CC6CC / DAT_816CC6D8 / DAT_816CC6E4 是三个**按帧索引的指针数组**（各 3 项，对应三缓冲），每个指针指向一个 bucket 数组；flush（FUN_8119934A）分别扫描：6E4 数组的 +0xC（BLD1/FUN_811F347E）、6CC 数组 type0/1 的 +0x14（BLD2/FUN_811F3468）、6D8 数组各 bucket 的 +0x14（BLD3/FUN_811F3452）。我们入队的命令在 6D8 数组 bucket 的 +0xC —— 它的消费者不是 flush 的三个 builder（证据：builder 崩溃）。
+NEXT：
+```
+① 反编译 FUN_811F3452/3468/347E（三个 builder）：对比它们对命令对象的字段假设
+   （命令对象 +0 执行器指针、+0x14/0x18 链、+0x1C 透明标志、其他布局）
+② 找 6D8 bucket +0xC 链的真正消费者：搜索「cmd→[0x14] 遍历 + 调用 cmd→[0]」模式的函数
+   （executor = &LAB_811E44AE_1 → 0x811E44AD/AE 指针；xrefs 可能存为 thumb 奇数 0x811E44AD）
+③ 检查命令对象在 +0xC 链上的布局和 FUN_811E3B54 创建路径（命令类型 0xB/0x4B 对应哪个 builder）
+④ 若消费者是显示线程/GPU 线程（5 个 display thread）→ 检查其调度与事件标志
+⑤ 修复消费者 → 命令执行 → GXM draw → logo 上屏
+```
+验证：`out80m_m1111wire.txt`、`err80m_m1111wire.txt`、`out80m_m1110flushx.txt`。 |
+| §18.4607 | m1111 (FLUSHWIRE) result: the cross-wire worked and the flush really consumed the commands, but the builder crashed - proving the +0xC opaque-chain commands are not for the transparent-chain builder. The evidence chain is complete: [WIRE] #1 (bucket11 op=8F142000 -> tr) -> [BLD3] #1 (bucket=851CC8D0, flush starts consuming) -> [SUBMIT] #1 (type=1, submit path fired) -> BADMEM guest va=0x00000004 at block=0x811F371A stub=0x812B28A0 (a null+4 dereference inside the builder). So: the +0xC opaque chain needs its own consumer/command layout (command objects use the +0x1C flag to distinguish opaque/transparent; builder FUN_811F3452 only understands the transparent layout); m1111 also re-confirmed [FLUSHX] bucket11 op=8F142000 tr=8F142000 (wire applied). m1111: [WIRE] #1 frame=0 bucket11 op=8F142000 -> tr; [BLD3] #1 bucket=851CC8D0; [SUBMIT] #1 type=1 builder=848563D0; [BADMEM] guest va=0x00000004 unmapped block=0x811F371A stub=812B28A0 (crash, exit code 1); [FLUSHX] #1 frame=0 f4=82 a1=851CD1F0 a2=851CD1B0 a3=851CC770 bucket11 op=8F142000 tr=8F142000; [FLUSH] 1; [ABIBEGIN] 0; [BADMEM] 1. Architecture refinement (fuller understanding): DAT_816CC6CC / DAT_816CC6D8 / DAT_816CC6E4 are three per-frame pointer arrays (3 entries each for triple buffering), each pointing to a bucket array; flush scans: 6E4 array +0xC (BLD1/FUN_811F347E), 6CC array type0/1 +0x14 (BLD2/FUN_811F3468), 6D8 array buckets +0x14 (BLD3/FUN_811F3452). Our enqueued commands are in the 6D8 array bucket +0xC - its consumer is not one of the flush's three builders (proof: builder crash). NEXT: (1) decompile FUN_811F3452/3468/347E comparing their command-object field assumptions (+0 executor pointer, +0x14/0x18 chains, +0x1C transparency flag, other layout); (2) find the real consumer of the 6D8 bucket +0xC chain: search for functions with the pattern 'cmd = cmd->[0x14]; call cmd->[0]' (executor &LAB_811E44AE_1 -> 0x811E44AD/AE pointer; xrefs may store thumb odd 0x811E44AD); (3) inspect the command object layout on the +0xC chain and the FUN_811E3B54 creation path (which builder corresponds to command types 0xB/0x4B); (4) if the consumer is the display/GPU thread (the 5 display threads) check its scheduling and event flags; (5) fix the consumer -> command executes -> GXM draw -> logo on screen. |
 ```cpp
 { if (P5D_FLUSHWIRE) { uint32_t _fr=rd32(s,0x816CC700);
     uint32_t _a3=rd32(s,0x816CC6D8 + _fr*4);
@@ -497005,3 +497027,31 @@ NEXT：
 ANTI-FORGETTING ENTRY. Keywords: M1061 FLUSHWIRE cross-wire experiment: at FUN_8119934A entry (env P5D_FLUSHWIRE=1) copy each array3 bucket's +0xC opaque list head into +0x14 transparent (only if +0x14 empty) so the gfd flush's BLD3 (FUN_811F3452 -> FUN_811E649A) consumes our type=0xB commands, validating whether command consumption reaches GXM drawing. Implementation in batch_013.cpp blk_8119934A: { if (P5D_FLUSHWIRE) { uint32_t _fr=rd32(s,0x816CC700); uint32_t _a3=rd32(s,0x816CC6D8 + _fr*4); if (_a3) for (int _i=0;_i<64;_i++) { uint32_t _p=_a3+_i*0x20; uint32_t _op=rd32(s,_p+0xC), _tr=rd32(s,_p+0x14); if (_op && !_tr) { wr32(s,_p+0x14,_op); fprintf(stderr,'[WIRE] #%d frame=%u bucket%d op=%08X -> tr'); } } } }. batch_013 compile exit 0; exe relink exit 0 (57,069,551B 22:40:53). Verification run out80m_m1111wire.txt (FORCETITLE+FIOSFILL+WAITFORCE+SCNFORCE+P5D_FLUSHWIRE=1) started. NEXT: [WIRE] fires?; [BLD3] appears (flush consumes commands)?; [SUBMIT] changes?; GXM HLE draw/state calls?; frames show ATLUS logo?; if BLD3 fires but no GXM inspect the command executor vtable 0x811E44AE and FUN_811E649A internals.
 
 LOOKUP: M1061, FLUSHWIRE, batch_013 blk_8119934A, array3 (816CC6D8)[frame], bucket +0xC opaque -> +0x14 transparent, [WIRE] probe, BLD3 FUN_811F3452, FUN_811E649A submit, command executor vtable 0x811E44AE, gfd flush, out80m_m1111wire.txt, exe 57,069,551B -> §18.4605 [relevant: mismatch confirmed], §18.4603 [relevant: flush scans empty]
+### 18.4607 PORT M1062: FLUSHWIRE 证明链条通但 builder 崩溃（不透明链需要自己的消费者）
+
+1) m1111 证据：
+```
+[WIRE] #1 frame=0 bucket11 op=8F142000 -> tr
+[BLD3] #1 bucket=851CC8D0
+[SUBMIT] #1 type=1 builder=848563D0
+[BADMEM] guest va=0x00000004 unmapped block=0x811F371A stub=812B28A0（exit 1）
+[FLUSHX] #1 frame=0 f4=82 a1=851CD1F0 a2=851CD1B0 a3=851CC770 bucket11 op=8F142000 tr=8F142000
+```
+2) 结论：
+- 交叉接线让 flush 消费了命令（WIRE→BLD3→SUBMIT），但 builder 崩溃
+- 命令对象用 +0x1C 标志区分不透明/透明链；builder FUN_811F3452 只理解透明链布局
+- **6D8 bucket +0xC 链需要它自己的消费者**
+3) 架构修正：6CC/6D8/6E4 = 三个按帧索引的指针数组（各 3 项，三缓冲），各指向 bucket 数组；flush 扫 6E4+0xC（BLD1）、6CC type0/1+0x14（BLD2）、6D8 各 bucket+0x14（BLD3）
+NEXT：
+```
+① 反编译 FUN_811F3452/3468/347E 对比命令对象字段假设
+② 找 6D8 bucket +0xC 真正消费者（cmd=cmd->[0x14]; call cmd->[0] 模式）
+③ 检查命令类型 0xB/0x4B 对应哪个创建路径（FUN_811E3B54）
+④ 消费者可能是 display/GPU 线程（5 个显示线程）→ 查调度/事件
+⑤ 修复 → 命令执行 → GXM draw → logo 上屏
+```
+验证：`out80m_m1111wire.txt`、`out80m_m1110flushx.txt`。
+
+ANTI-FORGETTING ENTRY. Keywords: M1062 m1111 FLUSHWIRE result: cross-wire worked and flush consumed commands ([WIRE] #1 bucket11 op=8F142000 -> tr; [BLD3] #1 bucket=851CC8D0; [SUBMIT] #1 type=1 builder=848563D0) but the builder crashed with BADMEM guest va=0x00000004 at block=0x811F371A stub=812B28A0 (null+4 deref) -> the +0xC opaque chain commands are not for the transparent-chain builder; command objects use +0x1C flag to distinguish opaque/transparent and builder FUN_811F3452 only understands the transparent layout. Architecture refinement: DAT_816CC6CC/6D8/6E4 are per-frame pointer arrays (3 entries) to bucket arrays; flush scans 6E4 +0xC (BLD1/FUN_811F347E), 6CC type0/1 +0x14 (BLD2/FUN_811F3468), 6D8 buckets +0x14 (BLD3/FUN_811F3452); our commands in 6D8 bucket +0xC need their own consumer. NEXT: decompile FUN_811F3452/3468/347E comparing command field assumptions (+0 executor, +0x14/0x18 chains, +0x1C flag); find the real 6D8 +0xC consumer by searching for 'cmd=cmd->[0x14]; call cmd->[0]' patterns (executor &LAB_811E44AE_1, thumb-odd 0x811E44AD); inspect the FUN_811E3B54 command creation path for types 0xB/0x4B; if consumer is the display/GPU thread check scheduling/event flags; fix consumer -> command executes -> GXM draw -> logo on screen.
+
+LOOKUP: M1062, FLUSHWIRE, [WIRE] bucket11 8F142000, [BLD3] bucket=851CC8D0, [SUBMIT] type=1 builder=848563D0, BADMEM va=4 block=0x811F371A stub=812B28A0, command +0x1C opaque/transparent flag, builder FUN_811F3452 transparent layout, arrays 816CC6CC/6D8/6E4 per-frame pointer arrays, BLD1 FUN_811F347E BLD2 FUN_811F3468 BLD3 FUN_811F3452, command executor LAB_811E44AE_1, FUN_811E3B54 creation, out80m_m1111wire.txt, out80m_m1110flushx.txt -> §18.4606 [relevant: FLUSHWIRE], §18.4605 [relevant: mismatch confirmed], §18.4602 [relevant: gfd flush]
