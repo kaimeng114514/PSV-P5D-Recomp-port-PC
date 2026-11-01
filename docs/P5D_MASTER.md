@@ -1071,6 +1071,38 @@
 | M1053 | §18.4598: ★★★★★★★★ **门控定位到单个字节：`FUN_81160814()` = `(DAT_8155545C == 0)`（0x81555438+0x24）；DAT_8155545C 非 0 时 logo 绘制被跳过。M1053 实施 SCNFORCE 实验：门控函数直接返回 1（强制场景就绪），并加 [DRAWSUB] 探针确认提交路径 FUN_81163ABC 真正执行**。反编译证据（`scnready.txt`）：
 | M1054 | §18.4599: ★★★★★★★★★★ **m1107 里程碑：appGx 绘制提交真的在执行！[DRAWSUB] 60 条（FUN_81163ABC 被反复调用，参数 p2/p4 指向栈上顶点/索引数组，p3=4 顶点、p5=6 索引——游戏正在为 logo 提交真实绘制图元）；[LOGODRAW] 80、[LOGO] 111、[SCNFORCE] 40（该字节本来就是 00，门控不是本运行的阻塞点）；但仍无 BeginScene/EndScene/GXM 提交，且末段显示线程在 `sceDisplayWaitVblankStartMultiCB(0x812B1810)` + `SetEventFlag(0x812B2AE0)` 循环——appGx 批次没有被 flush 到 GXM**。m1107 证据：
 | M1055 | §18.4600: **appGx 绘制架构解析完成：绘制分两步——(1) `FUN_8115FF12` 把期望 GXM 状态刷到硬件（FUN_811634F6/540/552/5B8/5CA/604/61C/6C8/6DA/794/D0 = GXM 状态设置器）；(2) `FUN_811E3960`/`FUN_811E3B54` 分配 draw command 对象（0x34 字节，vtable=&LAB_811E44AE_1），`FUN_811C041C` 按 bucket 入队：`(&DAT_816CC6D8)[DAT_816CC700] + param_1*0x20`，两条链表 +0x0C/+0x10（不透明）与 +0x14/+0x18（透明），由 param_2+0x1C 选择。→ command 对象需由**命令执行器（flush 阶段）**遍历执行才会提交 GXM；目前该 flush 未发生**。M1055 加 [ENQ] 探针 + HLEDUMP 运行（title 阶段 HLE 调用画像，确认 GXM draw API 是否被调用、被谁调用）。反编译证据（`gxflush.txt`）：
+| M1056 | §18.4601: **m1108 关键证据：(1) [ENQ] 确认游戏真的在建绘制命令链——type=0x0B 命令连续入队（bucket base=851CC770，链表头从 8F142000→8F142170 递增，command 对象按 0x30 间隔分配 8F142000/2030/2060…），随后 type=0x4B；(2) HLEDUMP 未触发（默认阈值 n=62M，本次运行只到 n≈61.03M）——需 P5D_HLEDUMP_AT=60000000。队列管理函数反编译完成（FUN_811C07C6 分配队列缓冲/FUN_811C0464/FUN_811C04B6 重置/FUN_811C0828 释放/FUN_811C067C 写计数），它们是 GXM 命令缓冲管理，不是执行器**。m1108：
+```
+[ENQ] #1 type=0000000B idx=0 base=851CC770 ptr=851CC8D0 A=00000000/00000000 B=0/0 cmd=8F142000
+[ENQ] #2 type=0000000B ... A=8F142000/8F142000 ... cmd=8F142030
+[ENQ] #3 type=0000000B ... A=8F142000/8F142030 ... cmd=8F142060
+...
+[ENQ] #10 type=0000004B idx=0 base=851CC770 ptr=851CD0D0 A=0/0 cmd=8F142250
+[DRAWSUB] 60   [LOGODRAW] 80   [LOGO] 131   [SCNFORCE] 40   [WAITFORCE] 3
+[SCNFORCE] byte 8155545C=00（门控本来就通过）
+[ABIBEGIN] 1  [ABIEND] 0  [PRESENT] 1（无新 GXM 调用）
+[HLEDUMP] 0（阈值未到：运行到 n≈61,030,000 结束）
+```
+**队列管理函数反编译（`cmdq_flush.txt`）**：
+```c
+void FUN_811C0828(void) { for 3 buckets: if ([+0x2a]) { FUN_811DA554(free); [+0x2a]=0; } ... DAT_816CC6F4=0; }
+void FUN_811C0464(int p1,int p2,int p3) { ptr=(&DAT_816CC6D8)[p1] + p2*0x20; ... 等 [ptr] bit31 清零 ... }
+void FUN_811C04B6(int p1,int p2) { ptr=(&DAT_816CC6D8)[DAT_816CC700] + p1*0x20; ... }
+void FUN_811C067C(uint p1,uint p2) { *(u32*)(DAT_816CC6CC + (p1&0xf0ffffff)*0x20 + 4)=p2; ... }
+undefined4 FUN_811C07C6(int p1) { 分配 3×(p1*0x20 / 0x40 / 0x20) 缓冲并清零; DAT_816CC6F4=p1; return 1; }
+```
+⇒ 这些是 GXM 命令缓冲池管理；**真正遍历命令链并执行 vtable（0x811E44AE）的 flush 函数尚未定位**
+NEXT：
+```
+① 用 P5D_HLEDUMP_AT=60000000 重跑：title 阶段 HLE 调用画像（GXM draw/state API 是否被调用）
+② 反编译 0x811F380C（读 DAT_816CC700 的另一个函数）与队列相关 FUN_811C05xx/FUN_811C055A 系列，
+   找遍历链表并调用 command vtable 的 flush 循环
+③ 在候选 flush 函数加 [GXFLUSH] 探针（是否被调用/卡在哪）
+④ 若 flush 存在但被跳过 → 检查 BeginScene/EndScene 是否在其中（无活动 pass 时命令可能被丢弃）
+⑤ 打通后 command vtable 执行 → GXM draw → logo 上屏
+```
+验证：`out80m_m1108enq.txt`、`cmdq_refs.txt`、`cmdq_flush.txt`、`exec_refs.txt`。 |
+| §18.4601 | m1108 key evidence: (1) [ENQ] confirms the game really builds draw-command chains - type=0x0B commands enqueued repeatedly (bucket base=851CC770, list head grows 8F142000->8F142170, command objects allocated 0x30 apart 8F142000/2030/2060...), then type=0x4B; (2) HLEDUMP did not fire (default threshold n=62M, this run only reached n≈61.03M) - needs P5D_HLEDUMP_AT=60000000. Queue management functions decompiled (FUN_811C07C6 allocates queue buffers/FUN_811C0464/FUN_811C04B6 reset/FUN_811C0828 frees/FUN_811C067C writes count) - they are GXM command-buffer management, not the executor. m1108: [ENQ] #1 type=0000000B idx=0 base=851CC770 ptr=851CC8D0 A=0/0 B=0/0 cmd=8F142000; #2 A=8F142000/8F142000 cmd=8F142030; #3 A=8F142000/8F142030 cmd=8F142060; ... ; #10 type=0000004B ptr=851CD0D0 cmd=8F142250; [DRAWSUB] 60; [LOGODRAW] 80; [LOGO] 131; [SCNFORCE] 40 (byte 8155545C=00); [WAITFORCE] 3; [ABIBEGIN] 1; [ABIEND] 0; [PRESENT] 1; [HLEDUMP] 0 (threshold not reached: run ended at n≈61,030,000). Decompiled (cmdq_flush.txt): FUN_811C0828 frees 3 buckets ([+0x2a]/[+0x27]/[+0x2d] via FUN_811DA554) and clears DAT_816CC6F4; FUN_811C0464/FUN_811C04B6 reset command slots (wait [ptr] bit31 clear); FUN_811C067C writes a count into 3 queue arrays at DAT_816CC6CC/DAT_816CC6D0/DAT_816CC6D4; FUN_811C07C6 allocates 3x(p1*0x20 / 0x40 / 0x20) buffers and sets DAT_816CC6F4=p1. So these are command buffer pool management; the actual flush loop that walks the chains and calls the command vtable (0x811E44AE) is not located yet. NEXT: (1) rerun with P5D_HLEDUMP_AT=60000000 for the title-phase HLE profile (are GXM draw/state APIs called?); (2) decompile FUN_811F380C (another reader of DAT_816CC700) and the FUN_811C05xx/FUN_811C055A family, find the flush loop that walks the lists and calls the command vtable; (3) add [GXFLUSH] probes to candidate flush functions; (4) if flush exists but is skipped check BeginScene/EndScene inside it; (5) once works, command vtable executes -> GXM draw -> logo on screen. |
 ```c
 void FUN_811C041C(int param_1,int param_2) {           // 入队
   int iVar1 = (&DAT_816CC6D8)[DAT_816CC700] + param_1*0x20;
@@ -496618,3 +496650,37 @@ NEXT：
 ANTI-FORGETTING ENTRY. Keywords: M1055 appGx draw architecture = state flush + command enqueue. FUN_811C041C enqueues command objects per bucket: (&DAT_816CC6D8)[DAT_816CC700] + param_1*0x20, two lists (+0xC/+0x10 opaque, +0x14/+0x18 transparent selected by param_2+0x1C). FUN_811E3960/FUN_811E3B54 allocate 0x34-byte commands with vtable &LAB_811E44AE_1. FUN_8115FF12 (1354B) = GXM state diff+flush (desired DAT_81555438 vs applied DAT_81555460, per-bit calls FUN_811634F6/63540/635B8/635CA/63604/6361C/636C8/636DA/63794/634D0). M1055 probe batch_014.cpp blk_811C041C: [ENQ] type/idx/base/ptr/list heads/cmd. batch_014 compile exit 0; exe relink exit 0 (57,066,425B 20:42:36). Verification run out80m_m1108enq.txt (FORCETITLE + FIOSFILL + WAITFORCE + SCNFORCE + P5D_HLEDUMP=1) started; HLEDUMP prints title-phase top-48 HLE stub stats at n>=62M. NEXT: HLEDUMP for GXM draw/state calls; [ENQ] enqueue stats; if only enqueue find the flush stage (walker of DAT_816CC6D8/DAT_816CC700, likely gfd draw manager / FUN_811E44AE caller); if flush present check BeginScene; goal: command executor runs -> GXM draw -> logo on screen.
 
 LOOKUP: M1055, appGx draw = state flush + command enqueue, FUN_811C041C enqueue bucket (&DAT_816CC6D8)[DAT_816CC700]+type*0x20, lists +0xC/+0x10 opaque and +0x14/+0x18 transparent, FUN_811E3960/FUN_811E3B54 command 0x34 bytes vtable LAB_811E44AE_1, FUN_8115FF12 GXM state diff flush DAT_81555438 vs DAT_81555460, FUN_811634F6 63540 635B8 635CA 63604 6361C 636C8 636DA 63794 634D0, [ENQ] probe batch_014 blk_811C041C, P5D_HLEDUMP title phase top-48 HLE stub stats, out80m_m1108enq.txt, gxflush.txt -> §18.4599 [relevant: DRAWSUB], §18.4598 [relevant: scene gate], §18.4597 [relevant: draw callback]
+### 18.4601 PORT M1056: 命令链入队确认（[ENQ]），HLEDUMP 阈值问题，队列管理函数解析
+
+1) m1108 证据：
+```
+[ENQ] #1 type=0000000B idx=0 base=851CC770 ptr=851CC8D0 A=00000000/00000000 B=0/0 cmd=8F142000
+[ENQ] #2 type=0000000B ... A=8F142000/8F142000 ... cmd=8F142030
+[ENQ] #3 type=0000000B ... A=8F142000/8F142030 ... cmd=8F142060
+…
+[ENQ] #10 type=0000004B idx=0 ptr=851CD0D0 cmd=8F142250
+[DRAWSUB] 60  [LOGODRAW] 80  [LOGO] 131  [SCNFORCE] 40  [WAITFORCE] 3
+[ABIBEGIN] 1  [ABIEND] 0  [PRESENT] 1
+[HLEDUMP] 0（默认阈值 62M，本次运行只到 n≈61,030,000）
+```
+2) 队列管理函数（`cmdq_flush.txt`）：
+```c
+void FUN_811C0828(void) { 3 buckets: [+0x2a]/[+0x27]/[+0x2d] 非空 → FUN_811DA554 free；DAT_816CC6F4=0; }
+void FUN_811C0464(int p1,int p2,int p3) { ptr=(&DAT_816CC6D8)[p1]+p2*0x20; 等 [ptr] bit31 清; ... }
+void FUN_811C04B6(int p1,int p2) { ptr=(&DAT_816CC6D8)[DAT_816CC700]+p1*0x20; ... }
+void FUN_811C067C(uint p1,uint p2) { DAT_816CC6CC/D0/D4 + (p1&0xf0ffffff)*0x20 + 4 = p2; }
+undefined4 FUN_811C07C6(int p1) { 分配 3×(p1*0x20/0x40/0x20) 清零; DAT_816CC6F4=p1; return 1; }
+```
+3) NEXT：
+```
+① P5D_HLEDUMP_AT=60000000 重跑 → title 阶段 HLE 调用画像
+② 反编译 FUN_811F380C / FUN_811C05xx 家族 → 找遍历链表+执行 vtable 的 flush 循环
+③ [GXFLUSH] 探针
+④ 检查 flush 内 BeginScene/EndScene
+⑤ 执行器跑起来 → GXM draw → logo 上屏
+```
+验证：`out80m_m1108enq.txt`、`cmdq_refs.txt`、`cmdq_flush.txt`。
+
+ANTI-FORGETTING ENTRY. Keywords: M1056 m1108: [ENQ] confirms real draw-command chains (type=0x0B x9, bucket base=851CC770, list head 8F142000->8F142170, command objects 0x30 apart 8F142000/2030/2060..., then type=0x4B); HLEDUMP didn't fire (default threshold 62M, run ended n≈61.03M) -> use P5D_HLEDUMP_AT=60000000. Queue managers decompiled: FUN_811C0828 frees 3 buckets (+0x2a/+0x27/+0x2d via FUN_811DA554) and clears DAT_816CC6F4; FUN_811C0464/FUN_811C04B6 reset command slots; FUN_811C067C writes counts into DAT_816CC6CC/D0/D4 + (p1&0xf0ffffff)*0x20 + 4; FUN_811C07C6 allocates 3x(p1*0x20/0x40/0x20) buffers, DAT_816CC6F4=p1. The flush loop walking the chains and calling command vtable 0x811E44AE is still not located. m1108 also: [DRAWSUB] 60; [LOGODRAW] 80; [LOGO] 131; [SCNFORCE] 40 byte 8155545C=00; [WAITFORCE] 3; [ABIBEGIN] 1; [ABIEND] 0; [PRESENT] 1. NEXT: rerun with P5D_HLEDUMP_AT=60000000; decompile FUN_811F380C and FUN_811C05xx/FUN_811C055A to find the flush loop; add [GXFLUSH] probes; check BeginScene/EndScene inside flush; once works command vtable executes -> GXM draw -> logo on screen.
+
+LOOKUP: M1056, [ENQ] type=0x0B bucket 851CC770 list 8F142000->8F142170 cmd 8F142000/2030/2060, type=0x4B, HLEDUMP threshold P5D_HLEDUMP_AT=60000000, FUN_811C0828 free buckets FUN_811DA554 DAT_816CC6F4, FUN_811C0464/FUN_811C04B6 reset slots bit31, FUN_811C067C counts DAT_816CC6CC/D0/D4, FUN_811C07C6 alloc 3 buffers, FUN_811F380C, command vtable 0x811E44AE, [GXFLUSH], out80m_m1108enq.txt, cmdq_refs.txt, cmdq_flush.txt -> §18.4600 [relevant: enqueue architecture], §18.4599 [relevant: DRAWSUB], §18.4597 [relevant: draw callback]
