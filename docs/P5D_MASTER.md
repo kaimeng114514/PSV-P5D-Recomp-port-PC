@@ -1045,6 +1045,46 @@
 | M1027 | §18.4572: **init 链仍不推进的下一层原因分析：`FUN_8116F748` 丢弃 worker 返回值（`(*(code*)*param_1)();` 不取返回值）；completion 由 job[8] countdown（200 帧）到期触发；worker 只有返回 -1 才会立即完成。batch 级检查强制已加但 JOBCOMP 仍 1 ⇒ 怀疑 trophy worker 卡在 state0 的初始化调用（`FUN_8102d53c`）而非检查 block。已加 EXECRET/TPATH 探针验证执行路径**。m1089（batch_012 18 个检查强制后）结果：
 | M1028 | §18.4573: **EXECRET/TPATH 探针给出决定性数据：trophy worker 确实走到检查 block 并返回 -1 路径；trampoline 30 次返回中绝大部分 0、有 1 次 -1 ⇒ 完成机制有被触发，但 init 链仍不推进 → 下一步必须反编译 page1 init 主状态机（FUN_8118479C）搞清"推进条件"**。`out80m_m1090execpath.txt` / err：
 | M1029 | §18.4574: ★★★★★★★★★★ **找到 8 步 init 链驱动器本体：`FUN_81184FFE`（= "initDataRead" worker 0x81184FFF）内含 9 项函数指针表 + 状态机，逐步创建并等待各 step job**。反编译（`idr_worker.txt`）：
+| M1030 | §18.4575: **推进条件语义确认 + 用户外部审计回应：`FUN_8116f8d2(step_job)` 的"完成"定义 = step job 的 appProcess 节点从 DAT_815554C4 链表移除或 node[0xC]==0；trophy 已完成（sound step 已创建），卡点确定在 step1 sound。新增 SSTEP/DRV 探针精确定位**。`jobdone.txt` 反编译：
+```c
+undefined4 FUN_8116f8d2(int param_1) {        // init 链推进条件
+  iVar1 = DAT_815554c4;                        // appProcess 链表头
+  if (param_1 != 0) {
+    for (; iVar1 != 0; iVar1 = *(int*)(iVar1+0x10)) {
+      if (iVar1 == param_1) {
+        if (*(int*)(param_1 + 0xc) == 0) return 0;    // node[3]==0 → 视为完成
+        return FUN_8116fa38();                         // 否则返回进程状态（非 0）
+      }
+    }
+  }
+  return 0;                                    // 不在链表（已释放）→ 完成
+}
+// driver FUN_81184FFE state==2: if (FUN_8116f8d2(handle)==0) { state=1; step++ }
+```
+⇒ **完成 = job 的 appProcess 节点被 FUN_8116F75E 完成回调释放/移除**（node[1] 回调 + FUN_8115d43c 释放）⇒ trophy step 通过（sound job 已创建，WFDBG #49）；**卡在 step1 sound 的完成**（sound worker 被调用一次但 job 未完成）。
+**外部审计回应（用户提供 ChatGPT 审计）**：
+- ✅ 同意核心判断：风险在运行时语义/线程调度/GXM 正确性，而非 ARM 翻译；第一阻断点是 init 链与调度。
+- ✅ 审计建议的"阶段 A：消除启动链强制补丁"正是当前工作（M1022-M1026 已移除大部分强制；仅剩 STEPFORCE 检查通过 + init 检查 batch 级强制）。
+- ⚠️ 审计提出"M1028：初始化链自然完成专项"，而我们的 M1029 已更进一步：**找到 init 链驱动器 FUN_81184FFE 与推进条件 FUN_8116F8D2**，卡点缩小到 step1 sound。
+- 📋 采纳其工程建议：README 版本号同步（M940→最新）、里程碑记录含 commit SHA/编译/游戏数据/运行 blocks/状态机推进/BADMEM/画面证据。
+**M1030 探针（exe 57,052,362B 14:16:24）**：
+```
+batch_012 811848D6/DA/DE（sound step 路径）→ [SSTEPD6/DA/DE] r0/r1
+batch_012 811850A6（driver 调 step 创建者）→ [DRVA6] r0/r1/step
+batch_012 811850B2（driver 查 FUN_8116F8D2）→ [DRVB2] r0/r1/step
+batch_012 811850BC（driver step 索引递增）→ [DRVBC] ...
+```
+验证运行：`out80m_m1091drvprobe.txt` 已启动。
+NEXT：
+```
+① [SSTEPD6/DA/DE]：sound worker 是否执行到检查/返回 -1
+② [DRVB2]：driver 查 FUN_8116F8D2 的 handle 与 step 索引（确认停在 step1）
+③ 若 sound worker 未返回 -1 → 查 FUN_8115478e/检查函数卡点
+④ 若 sound job 完成但节点未释放 → 查完成回调 0x811848E8/FUN_8116F75E
+⑤ 修复后 driver 依次创建 gamedata→msgwindow→mainmenu→step5 → -1 → setSequence(6) → page6 标题
+```
+验证：`jobdone.txt`、`idr_worker.txt`、`out80m_m1090execpath.txt`（TPATH/EXECRET）、`recomp_harness.exe`（57,052,362B）、`out80m_m1091drvprobe.txt`（生成中）。 |
+| §18.4575 | Advancement condition semantics confirmed + response to the user's external audit: FUN_8116f8d2(step_job) defines 'done' as the step job's appProcess node being removed from the DAT_815554C4 list or node[0xC]==0; trophy already completed (sound step was created), so the blocker is step1 sound. Added SSTEP/DRV probes to locate it precisely. jobdone.txt decompiled: undefined4 FUN_8116f8d2(int param_1) { iVar1=DAT_815554c4; if (param_1 != 0) { for (; iVar1 != 0; iVar1=*(int*)(iVar1+0x10)) { if (iVar1==param_1) { if (*(int*)(param_1+0xc)==0) return 0; return FUN_8116fa38(); } } } return 0; } and driver FUN_81184FFE state==2: if (FUN_8116f8d2(handle)==0) { state=1; step++ }. So completion = the job's appProcess node freed/removed by the completion callback FUN_8116F75E (node[1] callback + FUN_8115d43c free) => trophy step passed (sound job created, WFDBG #49); stuck at step1 sound completion (sound worker invoked once but job not completed). External audit response (user-provided ChatGPT audit): agree the core judgment that risks are runtime semantics/thread scheduling/GXM correctness rather than ARM translation, and that the first blocker is the init chain + scheduling. The audit's 'Stage A: eliminate startup-chain force patches' is exactly the current work (M1022-M1026 removed most forcing; only STEPFORCE check-pass and batch-level init check forces remain). Note the audit proposed 'M1028 init chain natural completion', while our M1029 went further: found the init chain driver FUN_81184FFE and the advancement condition FUN_8116F8D2, narrowing the blocker to step1 sound. Also adopted its engineering suggestions: sync README version (M940 -> latest), milestone records with commit SHA/compile/game data version/blocks run/state machine advancement/BADMEM/visual evidence. M1030 probes (exe 57,052,362B 14:16:24): batch_012 811848D6/DA/DE (sound step path) -> [SSTEPD6/DA/DE]; 811850A6 (driver calls step creator) -> [DRVA6]; 811850B2 (driver checks FUN_8116F8D2) -> [DRVB2]; 811850BC (driver step index++) -> [DRVBC]. Verification run out80m_m1091drvprobe.txt started. NEXT: [SSTEP] whether sound worker reaches the check/returns -1; [DRVB2] the handle and step index (confirm stuck at step1); if the sound worker does not return -1 check FUN_8115478e/check function; if the sound job completes but the node is not freed check the completion callback 0x811848E8/FUN_8116F75E; after the fix the driver creates gamedata->msgwindow->mainmenu->step5 -> -1 -> setSequence(6) -> page6 title. |
 ```c
 // FUN_81184FFE = initDataRead worker = 8 步 init 链驱动状态机
 piVar1 = FUN_8116f8a8();           // task 状态结构
@@ -494860,3 +494900,47 @@ NEXT：
 ANTI-FORGETTING ENTRY. Keywords: M1029 found the 8-step init chain driver FUN_81184FFE = 'initDataRead' worker 0x81184FFF: 9-entry function table + state machine. Decompiled idr_worker.txt: piVar1=FUN_8116f8a8(); state=piVar1[0]; if state==0 { piVar1[0]=1; piVar1[1]=0; } else if state==1 { table[0]=0x8118484E trophy; table[1]=0x811848FC sound; table[2]=0x81184A06 gamedata; table[3]=0x81184ACE; table[4]=0x81184D40; table[5]=0x81184BBE; table[6]=0x81184E40; table[7]=0x81184F7A; table[8]=0x81184C74; table[9]=0 terminator -> return 0xFFFFFFFF; if(table[piVar1[1]]==0) return 0xFFFFFFFF; iVar3=table[piVar1[1]](param_1); piVar1[2]=iVar3; piVar1[0]=2; } else if state==2 { if(FUN_8116f8d2(piVar1[2])==0){ piVar1[0]=1; piVar1[1]++; } } return 0. FUN_8118479C (called by page1 start 0x8118591E) only creates the initDataRead job (the driver). FUN_811848FC creates 'init sound' job (completion 0x811848E8); FUN_81184A06 creates 'init gamedata' job (completion 0x811849F2); FUN_811850DA (driver completion) = FUN_8116f8a8() task -> FUN_8115d43c free -> setSequence(6,0,0,5). Advancement condition = FUN_8116F8D2(step_job)==0 (step job completion flag), not the worker return itself. Evidence: WFDBG #18 trophy job created node=85B86A1C; #49 sound job created node=85B8861C => driver passed step0 and is stuck at step1 sound. NEXT: probes for sound step blk_811848D6/DA/DE; driver probes blk_811850B2 (state==2 check) and blk_811850BC/0x811850C2 (step increment); check FUN_8116F8D2 flag (job+0xC); after fix the driver creates gamedata->msgwindow->mainmenu->step5 -> returns -1 -> setSequence(6) -> page6 title page.
 
 LOOKUP: M1029, init chain driver, FUN_81184FFE, initDataRead worker 0x81184FFF, 9-entry table, table[0]=0x8118484E trophy, table[1]=0x811848FC sound, table[2]=0x81184A06 gamedata, table[3]=0x81184ACE, table[4]=0x81184D40, table[5]=0x81184BBE, table[6]=0x81184E40, table[7]=0x81184F7A, table[8]=0x81184C74, terminator 0 -> -1, FUN_8116f8d2(step_job)==0 advancement, FUN_8118479C creates initDataRead job, FUN_811848FC init sound job completion 0x811848E8, FUN_81184A06 init gamedata completion 0x811849F2, FUN_811850DA setSequence(6,0,0,5), WFDBG #18 trophy 85B86A1C, WFDBG #49 sound 85B8861C, idr_worker.txt, initmaster.txt -> §18.4573 [relevant: init chain stuck], §18.4569 [relevant: real init chain], §18.4567 [relevant: sound worker]
+### 18.4575 PORT M1030: 推进条件语义 + SSTEP/DRV 探针 + 外部审计回应
+
+1) `FUN_8116f8d2` 语义（`jobdone.txt`）：
+```c
+undefined4 FUN_8116f8d2(int param_1) {
+  iVar1 = DAT_815554c4;                    // appProcess 链表
+  if (param_1 != 0) {
+    for (; iVar1 != 0; iVar1 = *(int*)(iVar1+0x10)) {
+      if (iVar1 == param_1) {
+        if (*(int*)(param_1 + 0xc) == 0) return 0;   // node[3]==0 → 完成
+        return FUN_8116fa38();                        // 否则非 0
+      } } }
+  return 0;                                 // 不在链表（已释放）→ 完成
+}
+// driver: if (FUN_8116f8d2(handle) == 0) { state=1; step++; }
+```
+⇒ 完成 = step job 的 appProcess 节点被完成回调 FUN_8116F75E 释放/移除
+⇒ trophy step 已通过（sound job 已创建）；**卡在 step1 sound 完成**
+2) 外部审计回应（用户提供 ChatGPT 审计）：
+- ✅ 同意：风险在运行时语义/线程调度/GXM 正确性；第一阻断点是 init 链
+- ✅ 审计"阶段 A 消除启动链强制补丁"= 当前工作（M1022–M1026 已大幅移除强制）
+- ⚠️ 审计"M1028 初始化链自然完成"已被 M1029 超越：已找到 driver FUN_81184FFE + 推进条件
+- 📋 采纳工程建议：README 版本同步、里程碑记录含 SHA/编译/数据版本/blocks/状态机/BADMEM/画面证据
+3) M1030 探针（exe 57,052,362B 14:16:24）：
+```
+811848D6/DA/DE → [SSTEPD6/DA/DE]      （sound step 路径）
+811850A6       → [DRVA6]              （driver 调 step 创建者）
+811850B2       → [DRVB2]              （driver 查 FUN_8116F8D2）
+811850BC       → [DRVBC]              （driver step 索引递增）
+```
+4) 验证运行 `out80m_m1091drvprobe.txt` 已启动。
+NEXT：
+```
+① [SSTEP] sound worker 是否返回 -1
+② [DRVB2] handle 与 step 索引
+③ sound 未返回 -1 → 查 FUN_8115478e
+④ sound job 完成但节点未释放 → 查 0x811848E8/FUN_8116F75E
+⑤ 修复 → driver 走完 8 步 → setSequence(6) → page6
+```
+验证：`jobdone.txt`、`idr_worker.txt`、`out80m_m1090execpath.txt`、`out80m_m1091drvprobe.txt`（生成中）。
+
+ANTI-FORGETTING ENTRY. Keywords: M1030 advancement condition semantics confirmed + external audit response. FUN_8116f8d2(step_job) defines done as the step job's appProcess node removed from DAT_815554C4 list or node[0xC]==0. jobdone.txt: undefined4 FUN_8116f8d2(int param_1){ iVar1=DAT_815554c4; if(param_1!=0){ for(;iVar1!=0;iVar1=*(int*)(iVar1+0x10)){ if(iVar1==param_1){ if(*(int*)(param_1+0xc)==0) return 0; return FUN_8116fa38(); } } } return 0; }; driver FUN_81184FFE state==2: if(FUN_8116f8d2(handle)==0){ state=1; step++; }. Done = the appProcess node freed/removed by completion callback FUN_8116F75E. Trophy passed (sound job created, WFDBG #49); stuck at step1 sound completion. External audit (ChatGPT): agree risks are runtime semantics/thread scheduling/GXM correctness, first blocker init chain; its 'Stage A' matches current work; its 'M1028 init chain natural completion' is superseded by our M1029 (found driver FUN_81184FFE + condition FUN_8116F8D2; blocker narrowed to step1 sound). Adopted engineering suggestions: sync README version, milestone records with commit SHA/compile/data version/blocks/state/BADMEM/visual evidence. M1030 probes (exe 57,052,362B 14:16:24): 811848D6/DA/DE -> [SSTEPD6/DA/DE]; 811850A6 -> [DRVA6]; 811850B2 -> [DRVB2]; 811850BC -> [DRVBC]. Verification run out80m_m1091drvprobe.txt started. NEXT: [SSTEP] whether the sound worker returns -1; [DRVB2] handle/step; if not, check FUN_8115478e; if the job completes but node not freed check 0x811848E8/FUN_8116F75E; after fix driver runs 8 steps -> setSequence(6) -> page6.
+
+LOOKUP: M1030, FUN_8116f8d2 semantics, appProcess node removed = done, node[0xC]==0, DAT_815554c4 list, FUN_8116F75E completion free, trophy passed, stuck step1 sound, external audit response ChatGPT, Stage A eliminate startup force patches, README version sync, SSTEP probes 811848D6/DA/DE, DRV probes 811850A6/B2/BC, jobdone.txt, out80m_m1091drvprobe.txt, exe 57,052,362B -> §18.4574 [relevant: init chain driver], §18.4573 [relevant: init chain stuck], §18.4572 [relevant: EXECRET/TPATH]
