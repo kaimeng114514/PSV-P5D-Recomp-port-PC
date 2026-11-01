@@ -1094,6 +1094,40 @@
 | M1076 | §18.4621: ★★★★★★★★★★ **找到"2D 上下文从未创建"的真正原因：不是门控，而是【跑得还不够远】——当前 64.3M blocks 只推进了 221 帧（ctr=221），logo 状态机停留在 state 5/8（未到 done 0xD），title 页内容资源（title_p5.bin/title.spr4 等）尚未被加载，所以 2D 绘制上下文/视图自然还没创建。M1076 改为 250M blocks 长跑验证。**
 | M1077 | §18.4622: ★★★★★★★★★★★ **发现 250M 长跑提前结束的原因：guest 主线程在 **64,278,346 blocks 处返回**（`done: blocks=64278346 pc=8116F748`），harness 随即退出——max_blocks 根本不是限制。真实 Vita 上主线程返回后其他线程（显示/worker）继续驱动游戏世界，而我们的 harness 直接结束。M1077 实现 `P5D_POSTMAIN=1`：主线程返回后进入"后续线程泵"阶段（虚拟时间每轮 +16666us ≈1 帧、vblank 递增、持续 `hle_thr_pump`），让 guest 线程继续推进。**
 | M1078 | §18.4623: ★★★★★★★★★★★ **找到运行在 64,278,346 blocks 终止的真正原因：`[INDIRECT-MISS] reg1=8115849F target=8115849E block=8116F748`——app-job trampoline 通过函数指针调用 **0x8115849E 处的真实 Thumb 函数**，而该函数**不在 function_bounds.json（12,921 个函数）中**、也**不在我们的 AOT 批次（12,532 函数）里**。反汇编确认它是完整函数：`push {r4,r5,r6,r7,lr}; vpush {s16,s17}; sub sp,#0x104; …`。⇒ AOT 覆盖存在系统性缺口（12,921 − 12,532 = **389 个函数从未生成**），这是流程中断的根因，而非运行时门控。**
+| M1079 | §18.4624: ★★★★★★★★★★★ **补上缺失函数：用现有 gap 生成器（`_gen_split_gap2.py` 语义 + capstone）为 Ghidra 漏识别的函数 **0x8115849E 生成 82 个 AOT block**，组装成 `batch_034.cpp` 并接入 harness（FB(034)/ALL_FINDERS[35]/build_all_blocks 扩展）——这是让运行越过 64,278,346 blocks 死亡点的关键补丁。**
+**AOT 覆盖核对（`_miss_list_1090.py`）**：
+```
+function_bounds.json 函数数 = 12,921
+batch 中已有 block 起点 = 230,243
+无 block 的函数 = 1 个（0x8117E184 size=1，可疑）
+⇒ 之前"389 缺口"推断有误：bounds 内函数基本全覆盖，真正缺口是 Ghidra 完全漏识别的
+   函数指针目标（如 0x8115849E，只能通过 blx 到达）
+```
+**生成过程**：
+1. 构造 `C:\dev\tmp\miss_bounds.json` = {0x8115849E size 0x282 FUN_8115849E_miss, 0x8117E184 size 1}
+2. 复制 `_gen_split_gap2.py` → `_gen_miss_blocks.py`（BOUNDS/OUTDIR 改指向 miss/beng）
+3. 运行：`py _gen_miss_blocks.py 500 4` → `gap-filled functions: 0`；`functions: 2 batches: 1 batch size: 500`；生成 1 个 batch（82 blocks），g++ 编译 rc=0（obj 30,180B，315 行）
+4. 组装 `batch_034.cpp`：替换生成文件的 P() 为当前 batch_017 的扩展地址映射（含 0xA0000000/0xA2000000/0x9F000000 窗口）、符号 `_000`→`_034`、表名/finder 名改 `_034`
+**harness 接入（`_p_batch34_1091.py`）**：
+```
+FB(034) 宏
+extern get_table_034 / find_block_034
+ALL_FINDERS[34] → [35]，追加 find_block_034
+build_all_blocks：循环 32→35；三元链补 032/033/034；去重循环 31→34（高 batch 优先）
+```
+编译结果：batch_034 exit 0；recomp_harness exit 0；exe 重链 exit 0（57,110,759B，04:00:22）
+**验证运行 m1125**：`recomp_harness.exe 0x81198464 300000000`，env 同 m1124（FORCETITLE+FIOSFILL+WAITFORCE+SCNFORCE+THRPUMP+PUMPMAIN+POSTMAIN），输出 `out80m_m1125batch34.txt`，已启动后台。
+**关键验证点**：运行到 64,278,346 blocks 时不再 `[INDIRECT-MISS] target=8115849E`，而是进入补上的 82 个 block（0x8115849E 函数的 prologue `push {r4,r5,r6,r7,lr}; vpush {s16,s17}; sub sp,#0x104` 等），继续 loop/logo 流程。
+NEXT：
+```
+① 监控 m1125：blocks 是否 > 64,278,346；是否还有 [INDIRECT-MISS]
+② 若又出现新的 indirect miss → 同样用 miss_bounds + 生成器补块（重复 M1079 流程）
+③ 越过死亡点后：观察 logo 状态 5→6→8→0xD、title 资源 FIOSFILL OPEN、[SCENE] head0F
+④ 之后：FUN_811C2964 → FUN_811B6B12 → FUN_811ADAFE → array2 → GXM → 画面
+⑤ 记录新出现的 missing 函数，逐个补齐（Ghidra 漏识别的函数指针目标）
+```
+验证：`miss_bounds.json`、`_gen_miss_blocks.py`、`batch_034.cpp`、`out80m_m1125batch34.txt`（生成中）。 |
+| §18.4624 | Filled the missing function: using the existing gap generator (_gen_split_gap2.py semantics + capstone) generated 82 AOT blocks for the Ghidra-missed function 0x8115849E, assembled them into batch_034.cpp and wired it into the harness (FB(034)/ALL_FINDERS[35]/build_all_blocks extended) - the key patch to get the run past the 64,278,346-block death point. AOT coverage check (_miss_list_1090.py): function_bounds.json has 12,921 functions, batches have 230,243 block starts, and only 1 bounds function lacks a block (0x8117E184 size=1) -> the earlier '389 gaps' inference was wrong: bounds functions are essentially fully covered; the real gap is functions Ghidra missed entirely (function-pointer targets like 0x8115849E reachable only via blx). Generation: (1) built C:\dev\tmp\miss_bounds.json = {0x8115849E size 0x282 FUN_8115849E_miss, 0x8117E184 size 1}; (2) copied _gen_split_gap2.py to _gen_miss_blocks.py with BOUNDS/OUTDIR redirected; (3) ran py _gen_miss_blocks.py 500 4 -> gap-filled functions: 0; functions: 2 batches: 1 batch size: 500; generated one batch with 82 blocks, g++ compile rc=0 (obj 30,180B, 315 lines); (4) assembled batch_034.cpp: replaced the generated P() with the current batch_017 extended address mapping (0xA0000000/0xA2000000/0x9F000000 windows), renamed symbols _000->_034 (table/finder names too). Harness integration (_p_batch34_1091.py): FB(034) macro; extern get_table_034/find_block_034; ALL_FINDERS[34]->[35] appending find_block_034; build_all_blocks loops 32->35, ternary chain extended 032/033/034, dedupe loop 31->34 (higher batch wins). Build: batch_034 exit 0; recomp_harness exit 0; exe relink exit 0 (57,110,759B 04:00:22). Verification run m1125: recomp_harness.exe 0x81198464 300000000, same env as m1124 (FORCETITLE+FIOSFILL+WAITFORCE+SCNFORCE+THRPUMP+PUMPMAIN+POSTMAIN), out80m_m1125batch34.txt, started in background. Key check: at 64,278,346 blocks there should be no more [INDIRECT-MISS] target=8115849E but rather entry into the 82 added blocks (0x8115849E prologue push {r4,r5,r6,r7,lr}; vpush {s16,s17}; sub sp,#0x104), continuing the loop/logo flow. NEXT: (1) monitor m1125: blocks > 64,278,346 and no [INDIRECT-MISS]; (2) if a new indirect miss appears, repeat the same miss_bounds+generator fill procedure; (3) after passing the death point watch logo state 5->6->8->0xD, title-asset FIOSFILL OPENs, [SCENE] head0F; (4) then FUN_811C2964 -> FUN_811B6B12 -> FUN_811ADAFE -> array2 -> GXM -> picture; (5) record newly appearing missing functions and fill them one by one (Ghidra-missed function-pointer targets). |
 m1124（POSTMAIN）证据：
 ```
 [POSTMAIN] it=76000..108500 blocks=1500000 vblank=23040208→25212320 thr=15 alive=13 ready=3-5
@@ -498247,3 +498281,44 @@ NEXT：
 ANTI-FORGETTING ENTRY. Keywords: M1078 run terminates at 64,278,346 blocks because [INDIRECT-MISS] reg1=8115849F target=8115849E block=8116F748 - the app-job trampoline calls through a function pointer a real Thumb function at 0x8115849E that is NOT in function_bounds.json (12,921 functions) nor in the AOT batches (12,532) - AOT coverage has a systematic gap of 389 functions. Disassembly at 0x8115849E: push {r4,r5,r6,r7,lr}; vpush {s16,s17}; sub sp,#0x104; movw r7,#0x414c; movt r7,#0x812b; ldr r1,[r7]; str r1,[sp,#0x100]; adds r5,r0,#0; bl 0x8116f8a8 (appJob node arg getter); adds r4,r0,#0; ldr r1,[r4,#4]; cmp r1,#0; ... Bytes at 0x81158490: 0db0bdec028af0bd5af1bae900bff0b52ded028ac1b044f24c17c8f22b1739684091051c17f0f8f9041c6168002903dc. Neighbourhood in function_bounds.json: 0x81158200 size 0x29c ends 0x8115849C, next function 0x81158720. m1124 POSTMAIN works ([POSTMAIN] it=76000..108500 blocks=1500000 vblank=23040208->25212320 thr=15 alive=13 ready=3-5) but the world does not advance because the main flow dies at this indirect miss; [LOGO] stuck at state=8; [FIOSFILL] only fonts+title/logo.bin. NEXT: generate blocks for the 0x8115849E function (range 0x8115849E..0x81158720) with _gen_batch2.py, append to a batch file with table entries/declarations, rebuild, rerun and verify passing 64,278,346 blocks; fill further indirect misses as they appear; after passing watch logo completion -> title assets -> 2D context/views -> array2 -> GXM -> picture.
 
 LOOKUP: M1078, indirect miss reg1=8115849F target=8115849E block=8116F748, [HARNESS] indirect miss after 64278346 blocks, missing Thumb function 0x8115849E push {r4,r5,r6,r7,lr} vpush {s16,s17} sub sp,#0x104 bl 0x8116f8a8, function_bounds.json 12921 vs 12532 = 389 missing functions, Ghidra missed 0x8115849E (next known 0x81158720), bytes 0db0bdec028af0bd5af1bae900bff0b52ded028a..., _gen_batch2.py capstone generator, _rdis849e.py, POSTMAIN 13 threads alive ready 3-5 but world stalls, [LOGO] state=8, out80m_m1124postmain.txt -> §18.4622 [relevant: POSTMAIN], §18.4620 [relevant: context probes], §18.4613 [relevant: ctr/frames]
+### 18.4624 PORT M1079: 补上 Ghidra 漏识别函数 0x8115849E（82 blocks → batch_034 接入）
+
+1) AOT 覆盖核对：
+```
+function_bounds.json 函数 = 12,921
+batch 已含 block 起点 = 230,243
+无 block 的 bounds 函数 = 1（0x8117E184 size=1）
+⇒ 真正缺口 = Ghidra 漏识别的函数指针目标（如 0x8115849E）
+```
+2) 生成（capstone 语义复用 `_gen_split_gap2.py`）：
+```
+miss_bounds.json = {0x8115849E size 0x282, 0x8117E184 size 1}
+_gen_miss_blocks.py 500 4
+→ functions: 2, batches: 1, 82 blocks；g++ obj 30,180B；315 行
+```
+3) batch_034.cpp 组装：
+- 生成文件 P() 替换为 batch_017 的完整地址映射（0xA0000000/0xA2000000/0x9F000000 窗口）
+- 符号 `_000` → `_034`（g_blocks/find_block/get_table）
+4) harness 接入（`_p_batch34_1091.py`）：
+```cpp
+FB(034)
+extern "C" const void* get_table_034(unsigned* cnt);
+extern "C" BlockFn find_block_034(uint32_t pc);
+static FinderFn ALL_FINDERS[35] = { ..., find_block_034 };
+build_all_blocks: for i<35; 三元链 i==32/33/34；去重循环 i=34..0
+```
+5) 编译：batch_034 exit 0；harness exit 0；exe 57,110,759B（04:00:22）
+6) 验证运行 m1125（300M maxb + POSTMAIN）已启动
+NEXT：
+```
+① blocks > 64,278,346 且无 [INDIRECT-MISS]
+② 新 miss → 重复补块流程
+③ logo 5→6→8→0xD、title 资源 OPEN、[SCENE] head0F
+④ FUN_811C2964 → FUN_811B6B12 → FUN_811ADAFE → array2 → GXM → 画面
+⑤ 逐个补 Ghidra 漏识别函数
+```
+验证：`miss_bounds.json`、`_gen_miss_blocks.py`、`batch_034.cpp`、`out80m_m1125batch34.txt`（生成中）。
+
+ANTI-FORGETTING ENTRY. Keywords: M1079 filled the Ghidra-missed function 0x8115849E with 82 generated AOT blocks into batch_034.cpp and wired it into the harness (FB(034), ALL_FINDERS[35], build_all_blocks loops 32->35, ternary chain +032/033/034, dedupe loop 34..0). AOT coverage check: function_bounds.json 12,921 functions; batches have 230,243 block starts; only 1 bounds function lacks a block (0x8117E184 size=1) -> the earlier 389-gap inference was wrong; the real gap is functions Ghidra missed entirely (function-pointer targets like 0x8115849E). Generation: miss_bounds.json = {0x8115849E size 0x282 FUN_8115849E_miss, 0x8117E184 size 1}; copied _gen_split_gap2.py to _gen_miss_blocks.py with BOUNDS=C:\dev\tmp\miss_bounds.json OUTDIR=C:\dev\tmp\recomp_miss; ran py _gen_miss_blocks.py 500 4 -> gap-filled 0; functions 2; batches 1; 82 blocks; g++ compile rc=0 (obj 30,180B, 315 lines). Assembled batch_034.cpp: replaced generated P() with batch_017 extended mapping (0xA0000000/0xA2000000/0x9F000000 windows), renamed _000->_034. Harness patches: FB(034); extern get_table_034/find_block_034; ALL_FINDERS[34]->[35] appending find_block_034; build_all_blocks loops 32->35 and chain extended; dedupe loop 31->34 (higher batch index wins). Build: batch_034 exit 0; recomp_harness exit 0; exe relink exit 0 (57,110,759B 04:00:22). Verification run m1125: recomp_harness.exe 0x81198464 300000000, env FORCETITLE+FIOSFILL+WAITFORCE+SCNFORCE+THRPUMP+PUMPMAIN+POSTMAIN, out80m_m1125batch34.txt, background. NEXT: monitor blocks > 64,278,346 and no [INDIRECT-MISS]; if a new indirect miss appears repeat the miss_bounds+generator procedure; after passing watch logo 5->6->8->0xD, title-asset FIOSFILL opens, [SCENE] head0F; then FUN_811C2964 -> FUN_811B6B12 -> FUN_811ADAFE -> array2 -> GXM -> picture; record/fill newly missing functions.
+
+LOOKUP: M1079, batch_034.cpp 82 blocks, missing function 0x8115849E size 0x282, miss_bounds.json, _gen_miss_blocks.py from _gen_split_gap2.py, C:\dev\tmp\recomp_miss, harness FB(034) ALL_FINDERS[35] build_all_blocks i<35 chain 032/033/034 dedupe 34..0, exe 57,110,759B 04:00:22, m1125 out80m_m1125batch34.txt, verify passing 64,278,346 blocks, AOT coverage 12921 bounds vs 230243 block starts only 0x8117E184 missing, Ghidra missed 0x8115849E function-pointer target -> §18.4623 [relevant: indirect miss root cause], §18.4622 [relevant: POSTMAIN], §18.4621 [relevant: run length]
