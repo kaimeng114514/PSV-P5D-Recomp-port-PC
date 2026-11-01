@@ -1106,6 +1106,47 @@
 | M1088 | §18.4633: ★★★★★★★★★ **m1133 抓到崩溃那次 movie 回调的入口现场：FUN_81159276 被以 LR=0x81178F10 进入，sp=0x84856290，入口栈为 [0]=0x816CDA48 [4]=0x811DACFC [8]=0x8116FA67 [0xC]=0x8116FA5D。其中 0x8116FA67/0x8116FA5D 是 appJob 跳板的 **Thumb 函数指针**（0x8116FA66|1、0x8116FA5C|1），0x811DACFC 正是之前见过的"错位地址"。⇒ 游戏自身的**协作式 job 调度器**在操纵 LR/恢复地址：0x8116F75E 跳板把 job 结构字段 +0x10/+0x14 当作"保存的 LR / 恢复 PC"来回倒换（`ldr.w lr,[r4,#0x10]; str.w lr,[r1,#0x10]; mov ip,lr; ... bl 0x8115D614; bl 0x8115D43C`），而 0x8115D614/0x8115D43C 就是 job 切换原语。LR=0x81178F10 是 FUN_81178F0A 里 `bl 0x8116F8A8` 的返回地址——说明某个 job 的"恢复地址"字段被错误地设成了这个值，随后该 job 以错误 LR 恢复了另一个任务（movie 回调）→ 栈帧错位 → 0x811DACFC 乱跳 → 崩溃。**
 | M1089 | §18.4634: ★★★★★★★★ **修正上一轮的解释并定位到最可能的真实根因：`gbn_back` 的"块内目标 → 从块首执行"回退策略。0x8115D614/0x8115D43C 反编译后**不是** job 调度原语——0x8115D614 只是 `return DAT_813AF830`（appAllocator 全局读），0x8115D43C 是 appAllocatorHandler 的槽位计算函数（引用 "appAllocatorHandler.c"）；0x8116F75E 跳板里 +0x10/+0x14 字段操作是**双向链表指针**（str [lr,#0x14] 等），不是"保存 LR/恢复 PC"。⇒ "协作式 job 调度器 LR 协议"假设被否决。**
 | M1090 | §18.4635: ★★★★★★★ **m1134 [GBACK] 统计否决了"gbn_back 是 movie 崩溃真凶"的假设：到崩溃前共 400 次块内回退，只有 2 个唯一目标——`0x811E53D2→块0x811E53CC back=6`（395 次，热循环 worker 入口）和 `0x8120767C→块0x8120767A back=2`（5 次）。**没有任何 movie 路径目标（0x8115927x）出现** ⇒ gbn_back 只在固定的两个已知点生效，与 movie 崩溃无关。GBACK 假设被否决。⇒ 改为直接探针"谁调用了 FUN_81159276"：在 `id_reg`（寄存器间接跳转）里对 target==0x81159276/0x811DACFC/0x81178F10 打印调用点 block、LR、SP、fiber 与 PC ring（`[CB9276]`）。**
+| M1091 | §18.4636: ★★★★★★★★★★★ **找到 Movie 崩溃的最终根因：batch_034 生成的 `blx r2` 块漏设 LR！m1135 `[CB9276] reg2 target=81159276 from_blk=81158504 lr=81178F10 sp=84856290` + ring `81178F10 81178F18 81178F1E 81178F2A 81178F36 811584DE 811584E4 81158504` 证明调用点是 0x81158504（我们补块函数 FUN_8115849E 内），而 batch_034 该块代码为 `s->r[2]=s->r[1]; s->r[0]=1; s->r[1]=s->r[4]; return id_reg(2,s);`——**没有设置 `s->r[14]`（LR）**！ARM `blx r2` 的正确语义是"LR=下一条指令地址，然后跳到 r2"；漏设 LR 让 movie 完成回调 FUN_81159276 带着 stale LR=0x81178F10 进入，其 epilogue `pop {r4,r5,r6,pc}` 于是返回 0x81178F10（FUN_81178F0A 中段）→ 错位返回链 → 0x811DACFC → 崩溃。这与所有观察完全吻合。**
+m1135（`out80m_m1135cb9276.txt`）决定性证据：
+```
+[CB9276] reg2 target=81159276 from_blk=81158504 lr=81178F10 sp=84856290 fib=848463A0
+         ring: 81178F10 81178F18 81178F1E 81178F2A 81178F36 811584DE 811584E4 81158504
+[MOVCB-ENT] sp=84856290 lr=81178F10 r6=0 fib=848463A0
+             stk: 816CDA48 811DACFC 8116FA67 8116FA5D 00000000 …
+             ring: 81178F18 81178F1E 81178F2A 81178F36 811584DE 811584E4 81158504 81159276
+[MOVCB-EPI] sp=84856268 lr=81159298 r6=812B414C
+             ring: 81157F4C 81157F6A 81159298 8115929E 811592AA 811592B4 811592B6 811592BE
+[ACFC-SAFE] #1500000 …  ← 下游症状
+[BADMEM] va=0xBF800008 @0x811EFFD6  ← 下游症状
+```
+**batch_034 的 5 个 `blx rN` 块全部漏设 LR（capstone 确认指令序列）**：
+```
+0x81158504: adds r2,r1,#0; movs r0,#1; adds r1,r4,#0; blx r2     → 正确 LR=0x8115850C
+0x811585A8: movs r0,#3; adds r1,r4,#0; blx r2                     → 正确 LR=0x811585AE
+0x8115860E: movs r0,#2; adds r1,r4,#0; blx r2                     → 正确 LR=0x81158614
+0x811586B6: adds r2,r1,#0; movs r0,#5; adds r1,r4,#0; blx r2      → 正确 LR=0x811586BE
+0x81158700: adds r2,r1,#0; movs r0,#6; adds r1,r4,#0; blx r2      → 正确 LR=0x81158708
+```
+**M1091 修复（batch_034.cpp）**：为每个 `return id_reg(N,s);` 前插入 `s->r[14] = <下一条指令地址>u;`：
+```cpp
+// 例：0x81158504 块
+s->r[2] = s->r[1]; s->r[0] = 1; s->r[1] = s->r[4];
+s->r[14] = 0x8115850Cu;     // ★ blx r2 的返回地址
+return id_reg(2, s);
+```
+编译：batch_034 exit 0；harness exit 0；exe 重链 exit 0（57,118,250B，07:23:33）。验证运行 `out80m_m1136blxfix.txt` 已启动。
+**预期**：movie 完成回调 FUN_81159276 将以正确 LR=0x8115850C 进入/返回 → 栈帧不再错位 → 不再出现 0x81178F10/0x811DACFC 错位返回 → ACFC-SAFE 不再被触发 → GXM 绘制链可能真正推进。
+NEXT：
+```
+① 读 m1136：[CB9276] 是否显示 lr=0x8115850C（正确）；[MOVCB-ENT] 入口 lr 是否正确
+② 是否越过 n=64,278,346 且无 BADMEM/[ACFC-SAFE]
+③ 若崩溃消失 → 观察 FIOSFILL title 资源 OPEN、[SCENE] head0F、[VIEWADD]/[CTX*]、GXM 调用
+④ 若仍有崩溃 → 继续核对其它 batch 的 blx 生成（主批次可能也有类似问题：
+   检查所有 batch 中 "return id_reg(" 前是否都有 s->r[14] 赋值）
+⑤ 最终：SceGxmDraw/BeginScene → 画面
+```
+验证：`out80m_m1135cb9276.txt`、`out80m_m1136blxfix.txt`（生成中）、batch_034.cpp。 |
+| §18.4636 | FINAL ROOT CAUSE of the movie crash: batch_034's generated `blx r2` blocks do not set LR! m1135 [CB9276] reg2 target=81159276 from_blk=81158504 lr=81178F10 sp=84856290 + ring 81178F10 81178F18 81178F1E 81178F2A 81178F36 811584DE 811584E4 81158504 prove the call site is 0x81158504 (inside our gap-filled function FUN_8115849E), while batch_034's block code is `s->r[2]=s->r[1]; s->r[0]=1; s->r[1]=s->r[4]; return id_reg(2,s);` - it does NOT set s->r[14] (LR)! The correct ARM `blx r2` semantics is 'LR = next instruction address, then jump to r2'; the missing LR makes the movie completion callback FUN_81159276 start with the stale LR=0x81178F10, so its epilogue pop {r4,r5,r6,pc} returns to 0x81178F10 (middle of FUN_81178F0A) -> misaligned return chain -> 0x811DACFC -> crash. This matches ALL observations. m1135 evidence: [CB9276] reg2 target=81159276 from_blk=81158504 lr=81178F10 sp=84856290 fib=848463A0 ring 81178F10 81178F18 81178F1E 81178F2A 81178F36 811584DE 811584E4 81158504; [MOVCB-ENT] sp=84856290 lr=81178F10 r6=0 fib=848463A0 stack 816CDA48 811DACFC 8116FA67 8116FA5D 00000000 ring 81178F18 81178F1E 81178F2A 81178F36 811584DE 811584E4 81158504 81159276; [MOVCB-EPI] sp=84856268 lr=81159298 r6=812B414C ring 81157F4C 81157F6A 81159298 8115929E 811592AA 811592B4 811592B6 811592BE; [ACFC-SAFE] #1500000; [BADMEM] va=0xBF800008 at 0x811EFFD6. All 5 `blx rN` blocks in batch_034 were missing LR (capstone confirms): 0x81158504 adds r2,r1,#0; movs r0,#1; adds r1,r4,#0; blx r2 -> correct LR=0x8115850C; 0x811585A8 movs r0,#3; adds r1,r4,#0; blx r2 -> LR=0x811585AE; 0x8115860E movs r0,#2; adds r1,r4,#0; blx r2 -> LR=0x81158614; 0x811586B6 adds r2,r1,#0; movs r0,#5; adds r1,r4,#0; blx r2 -> LR=0x811586BE; 0x81158700 adds r2,r1,#0; movs r0,#6; adds r1,r4,#0; blx r2 -> LR=0x81158708. M1091 fix in batch_034.cpp: before each `return id_reg(N,s);` insert `s->r[14] = <next instruction address>u;` e.g. for block 0x81158504: s->r[2]=s->r[1]; s->r[0]=1; s->r[1]=s->r[4]; s->r[14]=0x8115850Cu; return id_reg(2,s); Build: batch_034 exit 0; harness exit 0; exe relink exit 0 (57,118,250B 07:23:33). Verification run out80m_m1136blxfix.txt started. EXPECTED: the movie completion callback FUN_81159276 enters/returns with correct LR=0x8115850C, the stack frame no longer misaligns, no 0x81178F10/0x811DACFC misaligned returns, ACFC-SAFE no longer triggers, and the GXM draw chain may truly advance. NEXT: read m1136 whether [CB9276] shows lr=0x8115850C (correct) and [MOVCB-ENT] entry LR; whether it passes n=64,278,346 with no BADMEM/[ACFC-SAFE]; if the crash is gone watch FIOSFILL title-asset OPENs, [SCENE] head0F, [VIEWADD]/[CTX*], GXM calls; if other crashes persist audit other batches' blx generation (check every `return id_reg(` in all batches has an s->r[14] assignment); finally SceGxmDraw/BeginScene -> picture. |
 m1134（`out80m_m1134gback.txt`）GBACK 统计（cap 400 全部）： 
 ```
 395× [GBACK] target=811E53D2 -> block=811E53CC back=6 skipped_bytes=0008F115 6060
@@ -499096,3 +499137,45 @@ NEXT：
 ANTI-FORGETTING ENTRY. Keywords: M1090 m1134 [GBACK] statistics reject the gbn_back hypothesis: 400 block-interior fallbacks before the crash but only 2 unique targets - 0x811E53D2 -> block 0x811E53CC back=6 (395x, hot worker entry) and 0x8120767C -> block 0x8120767A back=2 (5x); NO movie-path target (0x8115927x) appeared, so gbn_back only fires at two fixed known points and is unrelated to the movie crash. The GBACK hypothesis is rejected. New approach: probe directly who calls FUN_81159276 by adding [CB9276] logging inside id_reg (register-indirect jump) when target==0x81159276/0x811DACFC/0x81178F10: printf("[CB9276] reg%d target=%08X from_blk=%08X lr=%08X sp=%08X fib=%08X ring:", idx, t, g_cur_block, s->r[14], s->r[13], g_cur_fiber) plus 8 PC-ring entries; cap 60. Also fixed the MOVCB probe printf arg shift (stk:",_n-1,0u,) so future [MOVCB-ENT]/[MOVCB-EPI] data is readable with ring. m1134 also: FRAMEDUMP last n=62675000 ctr=145 pc=8116F748 blk=8116FA5C (appJob chain active); [BADMEM]=0 [ACFC-SAFE]=0 (that run had not reached the crash point); the 0x811E53D2 skipped instructions include 0x6060 str r0,[r4,#4] a repeated same-address store (harmless). Build: batch_010 exit 0; harness exit 0; exe 57,118,250B 06:59:54. Verification run out80m_m1135cb9276.txt started. NEXT: read m1135 [CB9276]: target=0x81159276's from_blk (call site), LR, ring -> determine who jumps there with the wrong LR; if from_blk is task/callback dispatch code check that dispatch path's LR convention; fix the calling convention (manual block override of the call site if needed setting LR/stack correctly); then the movie callback return address is correct so ACFC-SAFE can be removed and the GXM draw chain advances naturally; finally SceGxmDraw/BeginScene -> picture.
 
 LOOKUP: M1090 GBACK hypothesis rejected, 400 fallbacks only 2 unique targets 811E53D2->811E53CC back6 and 8120767C->8120767A back2, no movie path targets, new id_reg probe [CB9276] target 0x81159276 0x811DACFC 0x81178F10 from_blk lr sp fib ring cap 60, MOVCB printf arg fixed _n-1, exe 57,118,250B 06:59:54, out80m_m1134gback.txt out80m_m1135cb9276.txt, next identify call site LR convention -> §18.4634 [relevant: gbn_back hypothesis], §18.4633 [relevant: movie callback entry], §18.4632 [relevant: MOVCB probes]
+### 18.4636 PORT M1091: Movie 崩溃最终根因 = batch_034 的 `blx r2` 块漏设 LR → 回调带 stale LR 进入 → 错位返回链
+
+1) m1135 决定性证据：
+```
+[CB9276] reg2 target=81159276 from_blk=81158504 lr=81178F10 sp=84856290 fib=848463A0
+         ring: 81178F10 81178F18 81178F1E 81178F2A 81178F36 811584DE 811584E4 81158504
+[MOVCB-ENT] sp=84856290 lr=81178F10 r6=0 fib=848463A0
+             stk: 816CDA48 811DACFC 8116FA67 8116FA5D 00000000 …
+             ring: 81178F18 81178F1E 81178F2A 81178F36 811584DE 811584E4 81158504 81159276
+[MOVCB-EPI] sp=84856268 lr=81159298 r6=812B414C
+             ring: 81157F4C 81157F6A 81159298 8115929E 811592AA 811592B4 811592B6 811592BE
+[ACFC-SAFE] #1500000 … → [BADMEM] va=0xBF800008 @0x811EFFD6（下游症状）
+```
+2) batch_034 的 0x81158504 块生成代码：
+```cpp
+s->r[2] = s->r[1]; s->r[0] = 1; s->r[1] = s->r[4];
+return id_reg(2, s);          // ★ 漏了 s->r[14]（LR）赋值！
+```
+正确语义应为 `s->r[14] = 0x8115850C; return id_reg(2,s);`
+3) 全部 5 处 `blx rN` 均漏设 LR（capstone 确认）：
+```
+0x81158504 → LR=0x8115850C    0x811585A8 → LR=0x811585AE
+0x8115860E → LR=0x81158614    0x811586B6 → LR=0x811586BE
+0x81158700 → LR=0x81158708
+```
+4) M1091 修复（batch_034.cpp）：每个 `return id_reg(N,s);` 前插入 `s->r[14] = <下一条指令地址>u;`
+5) 编译：batch_034 exit 0；harness exit 0；exe 57,118,250B（07:23:33）
+6) 验证运行 `out80m_m1136blxfix.txt` 已启动
+预期：回调 LR 正确 → 栈帧不错位 → ACFC-SAFE 不触发 → GXM 绘制链真正推进
+NEXT：
+```
+① [CB9276] 是否 lr=0x8115850C、[MOVCB-ENT] 入口 lr 是否正确
+② 是否越过 64,278,346 且无 BADMEM/[ACFC-SAFE]
+③ 崩溃消失 → title 资源/[SCENE] head0F/[VIEWADD]/GXM 调用
+④ 若仍崩 → 审计所有 batch 的 "return id_reg(" 前是否都有 LR 赋值
+⑤ 最终 SceGxmDraw/BeginScene → 画面
+```
+验证：`out80m_m1135cb9276.txt`、`out80m_m1136blxfix.txt`（生成中）、batch_034.cpp。
+
+ANTI-FORGETTING ENTRY. Keywords: M1091 FINAL root cause of the movie crash - batch_034 generated `blx r2` blocks do not set LR. m1135 [CB9276] reg2 target=81159276 from_blk=81158504 lr=81178F10 sp=84856290 fib=848463A0 ring 81178F10 81178F18 81178F1E 81178F2A 81178F36 811584DE 811584E4 81158504; [MOVCB-ENT] sp=84856290 lr=81178F10 r6=0 fib=848463A0 stk 816CDA48 811DACFC 8116FA67 8116FA5D 00000000 ring ... 811584E4 81158504 81159276; [MOVCB-EPI] sp=84856268 lr=81159298 r6=812B414C ring 81157F4C 81157F6A 81159298 8115929E 811592AA 811592B4 811592B6 811592BE; [ACFC-SAFE] #1500000; [BADMEM] va=0xBF800008 at 0x811EFFD6. batch_034 block 0x81158504 code: s->r[2]=s->r[1]; s->r[0]=1; s->r[1]=s->r[4]; return id_reg(2,s); - it does NOT set s->r[14] (LR)! Correct ARM `blx r2` semantics: LR = next instruction address, then jump to r2. Missing LR makes movie completion callback FUN_81159276 start with stale LR=0x81178F10 so its pop {r4,r5,r6,pc} returns to 0x81178F10 (middle of FUN_81178F0A), causing the misaligned return chain -> 0x811DACFC -> crash. All 5 blx rN blocks in batch_034 were missing LR (capstone): 0x81158504 adds r2,r1,#0; movs r0,#1; adds r1,r4,#0; blx r2 -> LR=0x8115850C; 0x811585A8 movs r0,#3; adds r1,r4,#0; blx r2 -> LR=0x811585AE; 0x8115860E movs r0,#2; adds r1,r4,#0; blx r2 -> LR=0x81158614; 0x811586B6 adds r2,r1,#0; movs r0,#5; adds r1,r4,#0; blx r2 -> LR=0x811586BE; 0x81158700 adds r2,r1,#0; movs r0,#6; adds r1,r4,#0; blx r2 -> LR=0x81158708. M1091 fix in batch_034.cpp: before each `return id_reg(N,s);` insert `s->r[14] = <next instruction address>u;` (e.g. block 0x81158504: s->r[2]=s->r[1]; s->r[0]=1; s->r[1]=s->r[4]; s->r[14]=0x8115850Cu; return id_reg(2,s);). Build: batch_034 exit 0; harness exit 0; exe relink exit 0 (57,118,250B 07:23:33). Verification run out80m_m1136blxfix.txt started. EXPECTED: callback enters/returns with correct LR=0x8115850C, no stack misalignment, no 0x81178F10/0x811DACFC misaligned returns, ACFC-SAFE no longer triggers, GXM draw chain advances. NEXT: read m1136 whether [CB9276] lr=0x8115850C and entry LR correct; whether it passes n=64,278,346 without BADMEM/[ACFC-SAFE]; if crash gone watch FIOSFILL title-asset OPENs, [SCENE] head0F, [VIEWADD]/[CTX*], GXM calls; if other crashes persist audit every `return id_reg(` in all batches for missing s->r[14]; finally SceGxmDraw/BeginScene -> picture.
+
+LOOKUP: M1091 blx missing LR root cause, batch_034 block 0x81158504 return id_reg(2,s) without s->r[14], 5 blx blocks fixed with LR 0x8115850C 0x811585AE 0x81158614 0x811586BE 0x81158708, movie callback FUN_81159276 stale LR 0x81178F10, misaligned return chain 0x811DACFC, [CB9276] reg2 target=81159276 from_blk=81158504, [MOVCB-ENT] lr=81178F10, [MOVCB-EPI] lr=81159298, exe 57,118,250B 07:23:33, out80m_m1136blxfix.txt, next verify crash gone + audit other batches id_reg LR -> §18.4635 [relevant: CB9276 probe], §18.4634 [relevant: gbn_back rejected], §18.4633 [relevant: callback entry], §18.4630 [relevant: ACFC-SAFE]
