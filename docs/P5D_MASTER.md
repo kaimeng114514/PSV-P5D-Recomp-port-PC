@@ -1038,6 +1038,29 @@
 | M1020 | §18.4565: ★★★★★★★★★★ **appFade 真相闭环：管理器创建正常、fade 对象来自被"全强制完成"的周期 job 节点——对象 +8 字段（job arg）已被 completion 回调释放成 0xE5。根因 = 我们的 all-force worker 强制策略破坏了 appFade/序列等周期 job 的状态；修复方向改为"只强制 boot init 系列 job，放行周期 job"**。`out80m_m1084fadeprobe.txt` / err：
 | M1021 | §18.4566: **按 M1020 结论实施"只强制 6 个 init worker、其余 job 全部真跑"的选择性强制（batch_011 blk_8116FA5C），并加 JOBNORM 探针记录每个真跑 worker——用于验证 appFade/序列周期 job 的状态是否恢复正常**。新 blk_8116FA5C：
 | M1022 | §18.4567: ★★★★★★★★★★ **选择性强制成功！周期 job 全部真跑（JOBNORM 28 条，含 appFade 0x811792B3 ×2、sequence 0x811857C3、title 0x81198173）+ appFade 状态修复（`[TTF8] g8a8ret=85A9E42C`，不再是 0xE5E5E5E5）→ title 状态机推进到 case1/2，并在**声音对象查找**上撞到新缺口：`FUN_81171BEA` 返回 0（sound object 未创建，因为 init-sound worker 0x811848B7 仍被强制跳过）**。`out80m_m1085selforce.txt` / err：
+| M1023 | §18.4568: **关键发现：init 链的 sound 等 worker 根本没被调度（JOBNORM 28 条里没有 wf=811848B7），因为 M998 强制 page1 update=0 让 init 状态机在 initDataRead 处就提前结束。新方案：移除 page1 提前结束强制 + 取消全部 worker 强制，让真实 init 链跑完（STEPFORCE 只让各 worker 的完成检查通过）**。`out80m_m1086soundrun.txt`（放行 sound worker 后）与 m1085 完全一致：
+```
+[JOBNORM] 28 条：只有 10 个周期 job ×3 + title worker ×1 —— **没有 wf=811848B7（sound worker 未被调度）**
+[TTF8] g8a8ret=85A9E42C（appFade 正常）  [TTC] task=85B869FC
+[BADMEM] guest va=0x00000004 @81172386（同一处：FUN_81172374 声音对象 null）
+[JOBCOMP] 1（只有 initDataRead 完成）
+```
+⇒ **init 链的 trophy/sound/gamedata/msgwindow/mainmenu 等 worker 从未被调度**：M998 的 `page1 update=0` 强制让 page1 在 initDataRead 后立刻结束，init 状态机不再推进后续步骤 ⇒ sound 对象永远不创建 ⇒ title 声音请求 null 崩溃。
+**M1023 修复（两处）**：
+1) `batch_012.cpp` blk_81185936：**移除 M998 强制**（`s->r[0] = 0u;` 删除）→ page1 update 用真实的 `FUN_8116F900("initDataRead")` 结果决定何时结束；
+2) `batch_011.cpp` blk_8116FA5C：**强制列表清空**（`/*M1023: NO forced workers - all init jobs really run*/`）→ trophy/sound/gamedata/msgwindow/mainmenu/initDataRead 全部真实执行；STEPFORCE 仍把各 worker 内部完成检查置通过（0x811848D6/0x811848DA/0x811849A4.../0x81184AA8/0x81184B6C/0x81184D1A）→ 让它们跑完真实初始化后返回 -1（完成）。
+编译：batch_011/batch_012 exit 0；exe 重链 exit 0（57,049,753B，11:42:27）。
+验证运行：`out80m_m1087realinit.txt`（常规 milestone env）已启动。
+NEXT：
+```
+① [JOBNORM] 是否出现 init 链 worker（0x81184809/811848B7/81184965/81184A89/81184B39）
+② [JOBCOMP] 数量（应为完整 8 步 init 链 + 后续）
+③ initDataRead 完成后 page1 真实结束 → setSequence(6,0,0,0) → page6 start
+④ sound 对象创建（FUN_81171BEA 非 0）→ title case0/1 通过
+⑤ title 状态机推进 → title 对象 → 引擎自绘标题
+```
+验证：`out80m_m1086soundrun.txt`、`out80m_m1085selforce.txt`、`recomp_harness.exe`（57,049,753B 11:42:27）、`out80m_m1087realinit.txt`（生成中）。 |
+| §18.4568 | KEY FINDING: the init-chain workers (sound 0x811848B7 etc.) are never scheduled at all (JOBNORM has no wf=811848B7) because the M998 force page1 update=0 makes the init state machine finish early at initDataRead. New approach: remove the page1 early-finish force AND remove all worker forcing, so the real init chain runs to completion (STEPFORCE only makes each worker's completion checks pass). out80m_m1086soundrun.txt (after allowing the sound worker) is identical to m1085: [JOBNORM] 28 lines = only the 10 periodic jobs x3 + title worker x1 - NO wf=811848B7 (sound worker never scheduled); [TTF8] g8a8ret=85A9E42C (appFade fine); [TTC] task=85B869FC; [BADMEM] guest va=0x00000004 at 81172386 (same FUN_81172374 sound object null); [JOBCOMP] 1 (only initDataRead completed). So the init chain's trophy/sound/gamedata/msgwindow/mainmenu workers were never scheduled: the M998 page1 update=0 force makes page1 end right after initDataRead and the init state machine stops advancing => sound objects are never created => the title's sound request dereferences null. M1023 fix (two places): (1) batch_012.cpp blk_81185936: REMOVE the M998 force (drop s->r[0]=0u) so page1 update uses the real FUN_8116F900('initDataRead') result to decide when to end; (2) batch_011.cpp blk_8116FA5C: clear the force list (/*M1023: NO forced workers - all init jobs really run*/) so trophy/sound/gamedata/msgwindow/mainmenu/initDataRead all really execute; STEPFORCE still forces each worker's internal completion checks (0x811848D6/0x811848DA/0x811849A4.../0x81184AA8/0x81184B6C/0x81184D1A) so they return -1 after doing the real init. batch_011/batch_012 exit 0; exe relink exit 0 (57,049,753B 11:42:27). Verification run out80m_m1087realinit.txt started. NEXT: whether [JOBNORM] shows the init-chain workers (0x81184809/811848B7/81184965/0x81184A89/0x81184B39); [JOBCOMP] count (full 8-step init chain); page1 really ends after initDataRead -> setSequence(6,0,0,0) -> page6 start; sound objects created (FUN_81171BEA non-zero) -> title case0/1 passes; title state machine advances -> title object -> engine-drawn title. |
 ```
 [JOBNORM] 28 条：
   wf=81159CB1 node=85A8FC8C ×3   wf=81185309 node=85A9E13C ×3
@@ -494415,3 +494438,36 @@ NEXT：
 ANTI-FORGETTING ENTRY. Keywords: M1022 selective force SUCCEEDED - [JOBNORM] 28 lines show all periodic jobs really running (appFade 0x811792B3 node=85A9E46C/85A9E4FC; sequence 0x811857C3 node=85B843AC; title 0x81198173 node=85B86A2C) and appFade state fixed ([TTF8] g8a8ret=85A9E42C, no E5). Title state machine advanced to case1/2 and hit a NEW gap at the SOUND OBJECT lookup: FUN_81171BEA returns 0 because the init-sound worker 0x811848B7 is still force-skipped. Evidence out80m_m1085selforce.txt: [TTC] task=85B869FC; [BADMEM] guest va=0x00000004 at block=0x81172386; rg_ring ... 81178E46 811981C4 811981D0 81172470 81171BEA 81016296 810162B4 81171C10 81171C46. Decompiled title_audio.txt: FUN_81172374(param) = sound request with NO null check: iVar1=FUN_81171bea(&DAT_8130733c); if((*(u32*)(iVar1+4)&1)==0) ASSERT; *(u32*)(iVar1+0x44)=0; uVar2=FUN_81172d08(iVar1,param); *(u64*)(iVar1+0x58)=uVar2. FUN_81172470() = 'COMSE' version WITH null check (iVar1=FUN_81171bea('COMSE'); if(iVar1!=0){...}). FUN_81171BEA(name) = sound object lookup walking DAT_813AFCA0, returns 0 if not found. Root cause: init-sound worker (0x811848B7, creates BGM/COMSE/EVENT/EVENT_ENV/DCOMMON objects) force-skipped => sound object list empty => FUN_81172374 dereferences null. M1022 fix: remove sound worker 0x811848B7 from the force list (init-sound really runs; STEPFORCE still forces its completion checks 0x811848D6/0x811848DA). Force list now trophy 0x81184809 / gamedata 0x81184965 / msgwindow 0x81184A89 / mainmenu 0x81184B39 / initDataRead 0x81184FFF. batch_011 exit 0; exe relink exit 0 (57,049,753B 11:11:09). Verification run out80m_m1086soundrun.txt started. NEXT: [JOBNORM] wf=811848B7; sound objects created (FUN_81171BEA non-zero); title worker continues case1/2; next gap (msgwindow/mainmenu objects) -> allow those init workers; title object -> engine-drawn title.
 
 LOOKUP: M1022, selective force success, [JOBNORM] 28, appFade 0x811792B3, sequence 0x811857C3, title 0x81198173, [TTF8] g8a8ret=85A9E42C, [TTC] task=85B869FC, [BADMEM] va=0x4 block 0x81172386, FUN_81172374, FUN_81172470, FUN_81171BEA, DAT_813AFCA0, sound object lookup, init-sound worker 0x811848B7, STEPFORCE 0x811848D6/0x811848DA, force list trophy 0x81184809/gamedata 0x81184965/msgwindow 0x81184A89/mainmenu 0x81184B39/initDataRead 0x81184FFF, out80m_m1086soundrun.txt, title_audio.txt -> §18.4566 [relevant: selective force], §18.4565 [relevant: appFade root cause]
+### 18.4568 PORT M1023: 真实 init 链（移除 page1 提前结束 + 取消全部 worker 强制）
+
+1) `out80m_m1086soundrun.txt`（放行 sound worker 后）与 m1085 完全一致：
+```
+[JOBNORM] 28 条：10 个周期 job ×3 + title worker ×1 —— 没有 wf=811848B7（sound worker 从未被调度）
+[TTF8] g8a8ret=85A9E42C  [TTC] task=85B869FC
+[BADMEM] guest va=0x00000004 @81172386（FUN_81172374 声音对象 null）
+[JOBCOMP] 1（只有 initDataRead）
+```
+2) 根因：**M998 的 page1 update=0 强制让 page1 在 initDataRead 后立刻结束**，init 状态机不再推进 trophy/sound/gamedata/msgwindow/mainmenu ⇒ sound 对象永不创建。
+3) M1023 修复：
+```cpp
+// batch_012.cpp blk_81185936: 移除 M998 强制（s->r[0] = 0u; 删除）
+/*M1023: page1 finish force REMOVED - let the real initDataRead object lookup decide page end*/
+// batch_011.cpp blk_8116FA5C: 强制列表清空
+/*M1023: NO forced workers - all init jobs really run (STEPFORCE makes their checks pass)*/
+```
+4) STEPFORCE 仍强制 worker 内部完成检查（0x811848D6/0x811848DA/0x811849A4.../0x81184AA8/0x81184B6C/0x81184D1A）→ 真实初始化后返回 -1。
+5) 编译：batch_011/batch_012 exit 0；exe 重链 exit 0（57,049,753B 11:42:27）。
+6) 验证运行 `out80m_m1087realinit.txt` 已启动。
+NEXT：
+```
+① [JOBNORM] 出现 init 链 worker
+② [JOBCOMP] 完整 8 步 init 链
+③ page1 真实结束 → setSequence(6,0,0,0) → page6 start
+④ sound 对象创建 → title case0/1 通过
+⑤ title 状态机推进 → title 对象 → 引擎自绘标题
+```
+验证：`out80m_m1086soundrun.txt`、`out80m_m1085selforce.txt`、`out80m_m1087realinit.txt`（生成中）。
+
+ANTI-FORGETTING ENTRY. Keywords: M1023 KEY FINDING - the init-chain workers (sound 0x811848B7 etc.) are never scheduled because the M998 force page1 update=0 makes the init state machine finish early at initDataRead. out80m_m1086soundrun.txt (after allowing the sound worker) identical to m1085: [JOBNORM] 28 lines = only the 10 periodic jobs x3 + title worker x1, NO wf=811848B7; [TTF8] g8a8ret=85A9E42C; [TTC] task=85B869FC; [BADMEM] guest va=0x00000004 at 81172386 (FUN_81172374 sound object null); [JOBCOMP] 1 (only initDataRead). Root cause: M998's page1 update=0 force makes page1 end right after initDataRead and the init state machine stops advancing => sound objects never created => title sound request null. M1023 fix: (1) batch_012.cpp blk_81185936 remove the M998 force (drop s->r[0]=0u) so page1 update uses the real FUN_8116F900('initDataRead') result; (2) batch_011.cpp blk_8116FA5C clear the force list (no forced workers - all init jobs really run); STEPFORCE still forces each worker's internal completion checks (0x811848D6/0x811848DA/0x811849A4.../0x81184AA8/0x81184B6C/0x81184D1A) so they return -1 after doing the real init. batch_011/batch_012 exit 0; exe relink exit 0 (57,049,753B 11:42:27). Verification run out80m_m1087realinit.txt started. NEXT: [JOBNORM] shows the init-chain workers; [JOBCOMP] full 8-step chain; page1 really ends after initDataRead -> setSequence(6,0,0,0) -> page6 start; sound objects created (FUN_81171BEA non-zero) -> title case0/1 passes; title state machine advances -> title object -> engine-drawn title.
+
+LOOKUP: M1023, init chain workers never scheduled, JOBNORM no wf=811848B7, M998 page1 update=0 force, page1 early finish, batch_012 blk_81185936 force removed, batch_011 force list cleared, real init chain, STEPFORCE checks 0x811848D6/0x811848DA/0x811849A4/0x81184AA8/0x81184B6C/0x81184D1A, out80m_m1087realinit.txt, out80m_m1086soundrun.txt, exe 57,049,753B -> §18.4567 [relevant: sound worker], §18.4550 [relevant: page1 finish force], §18.4553 [relevant: selective force]
