@@ -1027,6 +1027,40 @@
 | M1009 | §18.4554: ★★★★★★★★ **找到 title 页恒黑的真正原因：M1008 强制 page6 update=1 只让页"活着"，但 title 的绘制/状态推进由 job "title sequence" 的 worker（0x81198172 状态机）驱动，而全强制把它跳过了 → 恒黑。新方案：全强制但放行 title worker（`0x81198173`）**。检查 AOT 覆盖：**title worker 0x81198172 存在于 batch_013.cpp**（无缺口）。反编译 `FUN_81198172`（286B 状态机）：
 | M1010 | §18.4555: **Hybrid 强制首跑：行为与全强制完全一致（JOBEXEC 0 = title worker 未被调度）→ 加 WFDBG 诊断确认 worker 检测值**。`out80m_m1077titleworker.txt`（全强制但放行 title worker）：
 | M1011 | §18.4556: **WFDBG 诊断首跑无效（发现多个 recomp_harness 实例并存 → 日志/运行互相干扰），清理后单实例重跑**。检查 `out80m_m1078wfdbg.txt`（Start-Process 启动）：
+| M1012 | §18.4557: ★★★★★★★★★ **WFDBG 诊断成功：worker 检测完全正确，但发现 init 链 job 根本没被调用；title 页未启动的原因 = setSequence(6) 的 delay=5 依赖序列 update 帧（observer 任务未跑）→ patch delay 5→0 让标题页**立即启动**！** WFDBG 输出（`err80m_m1079wfdbg2.txt`，单实例）：
+```
+[WFDBG] #1  ctx=84617C40 node=85A8FC8C wf=81159CB1
+[WFDBG] #2  ctx=84617D20 node=85A9E13C wf=81185309
+[WFDBG] #3  ctx=84617EE0 node=85A9E65C wf=810222F9
+[WFDBG] #4  ctx=84617E00 node=85A9E46C wf=811792B3
+[WFDBG] #5  ctx=84617F50 node=85B428AC wf=8102A501
+[WFDBG] #6  ctx=84617FC0 node=85B42A3C wf=810274E9
+[WFDBG] #7  ctx=846180A0 node=85B846EC wf=81184FFF   ← initDataRead worker
+[WFDBG] #8  ctx=84617D90 node=85A9E18C wf=811853C3
+[WFDBG] #9  ctx=84618030 node=85B843AC wf=811857C3
+[WFDBG] #10 ctx=84617CB0 node=85A8FCDC wf=81159CCB
+```
+**解读**：
+1) **检测机制完全正确**（ctx/node/wf 与 JOBCOMP/JOBDONE 的节点一一对应：11 个 JOBCOMP = 这 10 个 + initDataRead）；
+2) **init 链 job（trophy 0x81184809/sound 0x811848B7/gamedata/msgwindow/mainmenu）从未出现** ⇒ 当前配置下（page1 update 被强制 0 提前结束）init 状态机不再驱动这些 job；
+3) title 切换实际来自 **initDataRead 完成回调（#8）→ setSequence(6,0,0,5)**；
+4) **page6 的 start（FUN_8119807C → 提交 "title sequence" job）迟迟不执行** = setSequence 的 **delay=5 依赖序列 update 帧**（FUN_811857c2 每帧 delay--），若 observer 任务没被调度，标题页永不启动 ⇒ title job 永不提交 ⇒ 无 title worker ⇒ 全黑。
+**M1012 修复（batch_012.cpp blk_811850EC）**：把 initDataRead 回调节奏从 `setSequence(6,0,0,5)` 改为 **delay=0**：
+```cpp
+s->r[3] = 0x0u;  /*M1012: delay 5->0 so setSequence(6) starts the TITLE page immediately*/
+```
+按反编译 FUN_81185616 语义：`if (param_4 == 0) { ...直接调用 start fn(param_2)... }` ⇒ **start（FUN_8119807C）立即执行 → 提交 "title sequence" job → trampoline 放行 worker 0x81198173（M1009 hybrid）→ title 状态机真正开始跑**。
+编译：`batch_012.o` 重编 exit 0；`recomp_harness.exe` 重链 exit 0。
+验证运行：`P5D_NOMOVIE=1 P5D_OTFORCE=1 P5D_STEPFORCE=1` + VDEC → `out80m_m1080titlestart.txt`
+NEXT：
+```
+① [SEQREQ] #2 page=6 后 start 立即执行（FUN_8119807C）
+② WFDBG 出现 wf=81198173（title worker 被调度）
+③ title 状态机推进（FUN_81178ce2 等）→ title 对象创建
+④ draw 变化（vc≠3 / RT 非黑）→ 引擎自绘标题画面
+```
+关键：这是首次把"标题页启动"从"依赖 observer 帧循环"改为"立即执行"，绕开未调度的序列 update 任务。 |
+| §18.4557 | WFDBG diagnostics succeeded: worker detection is fully correct, but discovered the init-chain jobs are never invoked; the reason the title page never started = setSequence(6)'s delay=5 depends on sequence update frames (observer task not running) -> patch delay 5->0 to start the title page IMMEDIATELY. WFDBG output (err80m_m1079wfdbg2.txt, single instance): [WFDBG] #1 ctx=84617C40 node=85A8FC8C wf=81159CB1; #2 ctx=84617D20 node=85A9E13C wf=81185309; #3 ctx=84617EE0 node=85A9E65C wf=810222F9; #4 ctx=84617E00 node=85A9E46C wf=811792B3; #5 ctx=84617F50 node=85B428AC wf=8102A501; #6 ctx=84617FC0 node=85B42A3C wf=810274E9; #7 ctx=846180A0 node=85B846EC wf=81184FFF (initDataRead worker); #8 ctx=84617D90 node=85A9E18C wf=811853C3; #9 ctx=84618030 node=85B843AC wf=811857C3; #10 ctx=84617CB0 node=85A8FCDC wf=81159CCB. Interpretation: (1) the detection mechanism is fully correct (ctx/node/wf correspond one-to-one with the JOBCOMP/JOBDONE nodes; the 11 JOBCOMP = these 10 + initDataRead); (2) the init-chain jobs (trophy 0x81184809/sound 0x811848B7/gamedata/msgwindow/mainmenu) NEVER appear => in the current configuration (page1 update forced 0 to finish early) the init state machine no longer drives those jobs; (3) the title transition actually comes from the initDataRead completion callback (#8) -> setSequence(6,0,0,5); (4) page6's start (FUN_8119807C -> submit 'title sequence' job) is delayed because setSequence's delay=5 depends on sequence update frames (FUN_811857c2 decrements delay each frame); if the observer task is not scheduled the title page never starts => title job never submitted => no title worker => black forever. M1012 fix (batch_012.cpp blk_811850EC): change the initDataRead callback rhythm from setSequence(6,0,0,5) to delay=0: s->r[3]=0x0u; per FUN_81185616 semantics if(param_4==0){ ...call start fn(param_2) immediately... } => start (FUN_8119807C) runs immediately -> submits the 'title sequence' job -> the trampoline lets worker 0x81198173 through (M1009 hybrid) -> the title state machine really starts. batch_012.o recompiled exit 0; recomp_harness.exe relinked exit 0. Verification run P5D_NOMOVIE=1 P5D_OTFORCE=1 P5D_STEPFORCE=1 + VDEC -> out80m_m1080titlestart.txt. NEXT: [SEQREQ] #2 page=6 then start executes immediately (FUN_8119807C); WFDBG shows wf=81198173 (title worker scheduled); title state machine advances (FUN_81178ce2 etc.) -> title object created; draws change (vc≠3 / RT non-black) -> engine-drawn title screen. Key: first time the title page start is made immediate instead of depending on the observer frame loop. |
 ```
 out 文件最后写入 8:38:17（仅 3 分钟后停更），err 最后写入 8:35:37
 [WD] loop=0 cnt=472002/830/1718/0 total=472003 blk=81206832 fib=84836300 fex=1 ex=1
@@ -493644,3 +493678,41 @@ NEXT：
 ANTI-FORGETTING ENTRY. Keywords: M1011 first WFDBG diagnostic run invalid because multiple recomp_harness instances ran concurrently (31604 no CPU, 50548 CPU 1003s); out80m_m1078wfdbg.txt out file stopped at 8:38:17, err at 8:35:37; [WD] loop=0 cnt=472002 total=472003 blk=81206832 fib=84836300 fex=1 ex=1, [WDRING] 811F007C ... 8120682A 81206832 81198BF6. [WFDBG] 0 lines in err (expected: job trampolines only after page1 n≥59M). Actions: killed all recomp_harness, confirmed [WFDBG] string in exe (count=1), relaunched single-instance run out80m_m1079wfdbg2.txt (P5D_NOMOVIE=1 + OT/STEPFORCE + VDEC). NEXT: read [WFDBG] from err80m_m1079wfdbg2.txt after page1; verify ctx/node/wf; if no 0x81198173 then the title job was not scheduled -> probe 0x8119807C / 'title sequence' registration; if wf always 0 -> wrong detection offset -> derive from [JOBEXEC] known nodes.
 
 LOOKUP: M1011, multiple recomp_harness instances, out80m_m1078wfdbg.txt invalid, [WFDBG], err80m_m1079wfdbg2.txt, WFDBG in exe count=1, out80m_m1079wfdbg2.txt -> §18.4555 [relevant: WFDBG diagnostic added], §18.4554 [relevant: hybrid force]
+### 18.4557 PORT M1012: WFDBG 证实检测正确 + setSequence(6) delay 5→0 让标题页立即启动
+
+1) WFDBG（`err80m_m1079wfdbg2.txt`，单实例）：
+```
+[WFDBG] #1  ctx=84617C40 node=85A8FC8C wf=81159CB1
+[WFDBG] #2  ctx=84617D20 node=85A9E13C wf=81185309
+[WFDBG] #3  ctx=84617EE0 node=85A9E65C wf=810222F9
+[WFDBG] #4  ctx=84617E00 node=85A9E46C wf=811792B3
+[WFDBG] #5  ctx=84617F50 node=85B428AC wf=8102A501
+[WFDBG] #6  ctx=84617FC0 node=85B42A3C wf=810274E9
+[WFDBG] #7  ctx=846180A0 node=85B846EC wf=81184FFF   ← initDataRead
+[WFDBG] #8  ctx=84617D90 node=85A9E18C wf=811853C3
+[WFDBG] #9  ctx=84618030 node=85B843AC wf=811857C3
+[WFDBG] #10 ctx=84617CB0 node=85A8FCDC wf=81159CCB
+```
+2) 结论：
+- 检测机制**完全正确**（与 JOBCOMP/JOBDONE 节点一一对应）；
+- init 链 job（trophy/sound/gamedata/msgwindow/mainmenu）**从未出现**（page1 update 被强制 0 提前结束 → init 状态机不再驱动）；
+- title 切换来自 initDataRead 完成回调（#8）→ setSequence(6,0,0,5)；
+- **page6 start 迟迟不执行 = delay=5 依赖序列 update 帧**（observer 未调度）⇒ 标题页永不启动。
+3) M1012 修复（batch_012.cpp blk_811850EC）：
+```cpp
+s->r[3] = 0x0u;  /*delay 5->0 so setSequence(6) starts the TITLE page immediately*/
+```
+（FUN_81185616 中 param_4==0 ⇒ 立即调用 start fn(param_2)；即 FUN_8119807C 立即执行 → 提交 "title sequence" job → hybrid 放行 worker 0x81198173）
+4) 编译/链接 exit 0；验证运行 `out80m_m1080titlestart.txt`（P5D_NOMOVIE=1 + OT/STEPFORCE + VDEC）
+NEXT：
+```
+① page=6 后 start 立即执行
+② WFDBG 出现 wf=81198173
+③ title 状态机推进 → title 对象创建
+④ draw 变化（vc≠3/RT 非黑）→ 引擎自绘标题
+```
+验证：`err80m_m1079wfdbg2.txt`、`out80m_m1080titlestart.txt`（生成中）。
+
+ANTI-FORGETTING ENTRY. Keywords: M1012 WFDBG diagnostics succeeded - worker detection is correct. WFDBG output from err80m_m1079wfdbg2.txt: #1 ctx=84617C40 node=85A8FC8C wf=81159CB1; #2 ctx=84617D20 node=85A9E13C wf=81185309; #3 ctx=84617EE0 node=85A9E65C wf=810222F9; #4 ctx=84617E00 node=85A9E46C wf=811792B3; #5 ctx=84617F50 node=85B428AC wf=8102A501; #6 ctx=84617FC0 node=85B42A3C wf=810274E9; #7 ctx=846180A0 node=85B846EC wf=81184FFF (initDataRead); #8 ctx=84617D90 node=85A9E18C wf=811853C3; #9 ctx=84618030 node=85B843AC wf=811857C3; #10 ctx=84617CB0 node=85A8FCDC wf=81159CCB. The 11 JOBCOMP = these 10 + initDataRead. Init-chain jobs (trophy 0x81184809 / sound 0x811848B7 / gamedata / msgwindow / mainmenu) never appear because page1 update is forced 0 (finishes early) so the init state machine no longer drives them. Title transition comes from the initDataRead completion callback (#8) -> setSequence(6,0,0,5). Page6 start (FUN_8119807C -> submit 'title sequence' job) never ran because setSequence's delay=5 depends on sequence update frames (FUN_811857c2 delay--) and the observer task is not scheduled. M1012 fix batch_012.cpp blk_811850EC: s->r[3]=0x0u (delay 5->0) so FUN_81185616 with param_4==0 calls the start fn (FUN_8119807C) immediately -> submits the 'title sequence' job -> hybrid trampoline lets worker 0x81198173 through -> title state machine starts. batch_012.o/exe rebuilt exit 0. Verification run out80m_m1080titlestart.txt. NEXT: page=6 start immediate; WFDBG shows wf=81198173; title state machine advances -> title object; draws change (vc≠3 / RT non-black) -> engine-drawn title.
+
+LOOKUP: M1012, [WFDBG], err80m_m1079wfdbg2.txt, worker detection correct, initDataRead #8, node 85B846EC, wf 81184FFF, setSequence(6,0,0,5), delay 5, blk_811850EC, s->r[3]=0x0u, delay 0 immediate start, FUN_8119807C, title worker 0x81198173, batch_012.cpp, out80m_m1080titlestart.txt -> §18.4555 [relevant: WFDBG], §18.4557 [relevant: title page start semantics], §18.4554 [relevant: hybrid force]
