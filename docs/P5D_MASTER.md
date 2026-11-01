@@ -1065,6 +1065,43 @@
 | M1047 | §18.4592: **为定位"显示队列等待"卡点加 [WAITLOOP]/[DQPROC] 探针：在 FUN_8128EA20 等待循环打印 `[+0xBC]` 状态、`DAT_8153FD60/FDA8`、`DAT_8153FD64` 队列槽、以及 HLE 侧 `dispq/present/endscene/displaycb` 计数；在显示队列回调处理器 FUN_8127B7C8 / 忙分支 FUN_8127B36A 打印队列状态**。m1102 关键补充：title 启动后 **只有 1 次 [ABIBEGIN]（n=59.585M），没有 EndScene/DisplayQueueAddEntry** ⇒ 主循环在等待一个"显示队列完成"状态，但显示提交路径未再被触发。实现：
 | M1048 | §18.4593: ★★★★★★★★ **m1103 决定性数据：等待循环参数 p=84D8D368、`[p+0xBC]` 恒为 1、`DAT_8153FD60=1`、`DAT_8153FDA8=0x816A0AC0`（busy 指针永不清）、`DAT_8153FD64` 队列槽 q0=**0x812264B5**（待执行回调！）、q1=0；HLE 侧 dispq/present/endscene 全 0。⇒ app 显示队列里有一个待执行回调 0x812264B5，但 `DAT_8153FDA8 != 0` 让 FUN_8127B7C8 永远走 busy 分支（调用 0x816A0AC0 的注册回调），**从不处理自己的队列槽** → 状态永不清除。M1048 实施 DQFORCE 实验：队列有回调（q0 != 0）且 busy 标志非 0 时，把 `DAT_8153FDA8` 清 0，让 FUN_8127B7C8 走正常路径处理回调队列**。m1103 证据：
 | M1049 | §18.4594: **m1104（DQFORCE）结果：busy 指针 `DAT_8153FDA8` 被成功清 0（早期一次），title 阶段 [WAITLOOP] 显示 `a8=00000000`、q0=812264B5 仍在队列中，但 `st=[p+0xBC]` 仍恒为 1——说明"清 busy → 处理队列回调"不是清除状态的关键；且运行后期出现新 BADMEM（va=0 @block=0x811C3FD4，stub=0x812B1BA0），说明 DQFORCE 破坏了某条路径。结论：显示队列的系统比预想复杂——需要先搞清 `[p+0xBC]` 状态由谁设置/清除、回调 0x812264B5 做什么、以及 app 注册的显示回调 0x8127BB29 与 HLE GXM 显示完成的关系**。m1104 证据：
+| M1050 | §18.4595: ★★★★★★★★★ **重大发现：显示队列由 5 个 guest 线程（entry=0x8127C1D3，"CriThread"）服务——FUN_8127BE58 用 sceKernelCreateThread(entry=0x8127C1D3)+sceKernelStartThread 创建它们（tid 4001A000/4001E000/4001F000/40020000/40021000）；PDUMP 显示它们等待各自的事件标志（obj=60016000/60018000/6001A000/6001C000，bits=1）——**这些事件标志应由显示队列回调/提交路径设置，但主线程卡在等待状态，形成互等死锁**。M1050 实施 WAITFORCE 实验：在等待循环把 `[p+0xBC]` 强制置 0（st!=1）让主循环继续，验证下游 title 绘制链路**。m1103/m1104 证据：
+```
+[THR2] create tid=4001A000 entry=8127C1D3 lr=8127BF18
+[THR2] start  tid=4001A000 entry=8127C1D3 arglen=4 argp=84855F78
+[THR2] create tid=4001E000/4001F000/40020000/40021000 entry=8127C1D3（共 5 个显示线程）
+[TCREATE2] tid=4001A000 entry=8127C1D3 prio=100000E4 stack=00002000
+[PDUMP] tid=4001A000 entry=8127C1D3 alive=1 ready=0 wait=1 obj=60016000 bits=00000001 ctxpc=8127BE1C
+[PDUMP] tid=4001E000/4001F000/40020000 同样等待 60018000/6001A000/6001C000
+[PDUMP] tid=40018000/40019000 entry=8120767D ready=1（可运行）
+```
+**关键反编译（`disp_thread.txt`）**：
+```c
+// FUN_8127BE58: 创建显示线程（"CriThread"）
+iVar1 = SceLibKernel_C5C11EE7(param_6 /*name*/, 0x8127C1D3 /*entry*/, iVar3, param_3, 0, iVar1, 0);  // sceKernelCreateThread
+SceLibKernel_F08DE149(iVar1, 4, &local_30);   // sceKernelStartThread
+// FUN_8127BAAF（app 注册的显示回调，busy 分支调用）: 处理 DAT_8153FD64 队列（8 槽），锁用 DAT_816A0B64
+// FUN_812264B4（队列回调 0x812264B5 所在函数）: 更新 DAT_8153F2F8 计时/统计，不清状态
+```
+⇒ 显示线程在等事件标志；事件标志应由**显示提交路径（EndScene/DisplayQueueAddEntry 后的完成回调）**设置；主线程卡在 `[p+0xBC]` 等待同一系统 → **两个线程互等**（我们的 HLE 只 stub 了 GXM 显示队列，没有按 guest 语义设置这些事件标志）
+**M1050 实现（`batch_022.cpp` blk_8128EA36 入口）**：
+```cpp
+{ if (P5D_WAITFORCE) { uint32_t _p=s->r[6];
+    if (_p) { uint32_t _st=rd32(s,_p+0xBCu); if (_st==1u) { wr32(s,_p+0xBCu,0u);
+      fprintf(stderr,"[WAITFORCE] #%d p=%08X st=1 -> 0\n",...); } } } }
+```
+编译：batch_022 exit 0；exe 重链 exit 0（57,064,070B，19:06:30）。
+验证运行：`out80m_m1105waitforce.txt`（FORCETITLE + FIOSFILL + WAITFORCE）已启动。
+NEXT：
+```
+① [WAITFORCE] 触发 → 主循环退出等待 → title 代码继续（state=4/5）
+② logoDrawProc 绘制 → [ABIBEGIN]/[ABIEND]/[TEXBIND]/[TEXUPLOAD]/[PRESENT] → 截帧出现 logo
+③ 若继续前进但有渲染问题 → 修复 GXM 纹理/绘制路径
+④ 正式修复（后续）：让显示线程的事件标志在 HLE 显示队列提交后按 guest 语义被设置
+   （找到 0x60016000 等事件标志的 setter：应为显示提交路径）
+```
+验证：`out80m_m1103waitloop.txt`、`out80m_m1104dqforce.txt`、`disp_thread.txt`、`out80m_m1105waitforce.txt`（生成中）。 |
+| §18.4595 | MAJOR FINDING: the display queue is serviced by 5 guest threads (entry=0x8127C1D3, 'CriThread') - FUN_8127BE58 creates them via sceKernelCreateThread(entry=0x8127C1D3)+sceKernelStartThread (tid 4001A000/4001E000/4001F000/40020000/40021000); PDUMP shows they wait on their own event flags (obj=60016000/60018000/6001A000/6001C000, bits=1) - those event flags should be set by the display queue callback/submit path, but the main thread is stuck in its wait state, forming a mutual deadlock. M1050 implements the WAITFORCE experiment: in the wait loop force [p+0xBC] to 0 (st!=1) so the main loop continues, validating the downstream title drawing chain. m1103/m1104 evidence: [THR2] create tid=4001A000 entry=8127C1D3 lr=8127BF18; [THR2] start tid=4001A000 entry=8127C1D3 arglen=4 argp=84855F78; [THR2] create tid=4001E000/4001F000/40020000/40021000 entry=8127C1D3 (5 display threads); [TCREATE2] tid=4001A000 entry=8127C1D3 prio=100000E4 stack=00002000; [PDUMP] tid=4001A000 entry=8127C1D3 alive=1 ready=0 wait=1 obj=60016000 bits=00000001 ctxpc=8127BE1C; [PDUMP] tid=4001E000/4001F000/40020000 wait on 60018000/6001A000/6001C000; [PDUMP] tid=40018000/40019000 entry=8120767D ready=1. Decompiled (disp_thread.txt): FUN_8127BE58: iVar1 = SceLibKernel_C5C11EE7(name, 0x8127C1D3 /*entry*/, iVar3, param_3, 0, iVar1, 0) (sceKernelCreateThread); SceLibKernel_F08DE149(iVar1, 4, &local_30) (sceKernelStartThread). FUN_8127BAAF (app-registered display callback, busy branch) processes the DAT_8153FD64 8-slot queue with lock DAT_816A0B64. FUN_812264B4 (contains queue callback 0x812264B5) updates DAT_8153F2F8 timing/stats and does not clear the state. So the display threads wait on event flags; the event flags should be set by the display submit path (EndScene/DisplayQueueAddEntry completion); the main thread waits on [p+0xBC] of the same system -> mutual deadlock (our HLE only stubbed the GXM display queue without setting these guest event flags). M1050 change (batch_022.cpp blk_8128EA36): if P5D_WAITFORCE { uint32_t _p=s->r[6]; if(_p){ uint32_t _st=rd32(s,_p+0xBCu); if(_st==1u){ wr32(s,_p+0xBCu,0u); fprintf(stderr,'[WAITFORCE] #%d p=%08X st=1 -> 0'); } } } batch_022 compile exit 0; exe relink exit 0 (57,064,070B 19:06:30). Verification run out80m_m1105waitforce.txt (FORCETITLE + FIOSFILL + WAITFORCE) started. NEXT: [WAITFORCE] fires -> main loop exits the wait -> title code continues (state=4/5); logoDrawProc draws -> [ABIBEGIN]/[ABIEND]/[TEXBIND]/[TEXUPLOAD]/[PRESENT] -> frames show the logo; if it advances but rendering issues appear fix the GXM texture/draw path; formal fix (later): make the display threads' event flags get set per guest semantics after the HLE display-queue submit (find the setters of event flags 0x60016000 etc., which should be the display submit path). |
 ```
 [DQFORCE] #1 clear busy a8=816A0AC0 q0=812264B5               ← busy 清除成功
 [WAITLOOP] #1..#60 st=1 p=84D8D368 disq60=1 a8=00000000 q=812264B5/0 dispq=0 present=0 end=0 cb=1
@@ -496198,3 +496235,43 @@ NEXT：
 ANTI-FORGETTING ENTRY. Keywords: M1049 m1104 DQFORCE: busy pointer DAT_8153FDA8 cleared (a8=0 at title), q0=812264B5 still queued, but st=[p+0xBC] stays 1; late BADMEM va=0 at block=0x811C3FD4 stub=0x812B1BA0 (DQFORCE side effect) -> display queue system more complex; must find who sets/clears [p+0xBC], what 0x812264B5 does, how app display callback 0x8127BB29 relates to HLE GXM display completion. m1104: [DQFORCE] #1 clear busy a8=816A0AC0 q0=812264B5; [WAITLOOP] 60 identical st=1 p=84D8D368 disq60=1 a8=0 q=812264B5/0 dispq=0 present=0 end=0 cb=1; [LOGO] #2 state=3; [TMX] all ret=1; [ABIBEGIN] 1; [ABIEND] 0; [PRESENT] 1; [BADMEM] va=0 block=0x811C3FD4 stub=812B1BA0. DQPROC2 struct dump 0x816A0AC0: r0=816A0AC0 cbp(0x10)=8127BB29 cbarg(0x14)=8153FDB0 w0=8127BAAF w4=0 w8=8127BB21 wC=8153FDB0 (three fn/arg pairs 0x8127BAAF, 0x8127BB21, 0x8127BB29). Analysis: [p+0xBC] setter unknown (p=84D8D368 app display manager); queue callback 0x812264B5 does not clear st; busy callback 0x8127BB29 called every frame does not clear st; real clearer likely an unscheduled guest display thread or HLE GXM display-completion event. NEXT: decompile 0x812264B5 and 0x8127BB29/0x8127BAAF/0x8127BB21 to find [p+0xBC] writers; dump p=84D8D368 0xC0~0xE0 and write-watch [p+0xBC]; identify stub 0x812B1BA0; pump the guest display thread if unscheduled; alternative P5D_WAITFORCE (force st non-1) to validate title drawing chain first.
 
 LOOKUP: M1049, m1104 DQFORCE, a8=0 but st=1, q0=812264B5 not executed, [WAITLOOP] p=84D8D368 st=1, DQPROC2 struct 0x816A0AC0 cbp=8127BB29 cbarg=8153FDB0 w0=8127BAAF w8=8127BB21, BADMEM va=0 block=0x811C3FD4 stub=812B1BA0, [LOGO] state=3, exe 57,063,965B, out80m_m1104dqforce.txt -> §18.4593 [relevant: DQFORCE], §18.4592 [relevant: wait loop probes]
+### 18.4595 PORT M1050: 显示队列由 5 个 guest 显示线程服务（event flag 等待）→ WAITFORCE 强制等待退出
+
+1) 线程证据（m1103/m1104）：
+```
+[THR2] create tid=4001A000 entry=8127C1D3 lr=8127BF18
+[THR2] start  tid=4001A000 entry=8127C1D3 arglen=4 argp=84855F78
+[THR2] create tid=4001E000/4001F000/40020000/40021000 entry=8127C1D3（5 个显示线程）
+[TCREATE2] tid=4001A000 entry=8127C1D3 prio=100000E4 stack=00002000
+[PDUMP] tid=4001A000 entry=8127C1D3 alive=1 ready=0 wait=1 obj=60016000 bits=1 ctxpc=8127BE1C
+[PDUMP] tid=4001E000/4001F000/40020000 等 60018000/6001A000/6001C000
+[PDUMP] tid=40018000/40019000 entry=8120767D ready=1
+```
+2) 反编译（`disp_thread.txt`）：
+```c
+// FUN_8127BE58：创建显示线程
+iVar1 = SceLibKernel_C5C11EE7(name, 0x8127C1D3/*entry*/, iVar3, param_3, 0, iVar1, 0); // sceKernelCreateThread
+SceLibKernel_F08DE149(iVar1, 4, &local_30);                                            // sceKernelStartThread
+// FUN_8127BAAF：app 注册显示回调（busy 分支），处理 DAT_8153FD64 队列（8 槽，锁 DAT_816A0B64）
+// FUN_812264B4（含 0x812264B5）：更新 DAT_8153F2F8 计时统计，不清状态
+```
+⇒ 显示线程等事件标志；事件标志应由显示提交路径（EndScene/DisplayQueueAddEntry 完成）设置；主线程等 `[p+0xBC]` → 互等死锁
+3) M1050（batch_022.cpp blk_8128EA36）：
+```cpp
+{ if (P5D_WAITFORCE) { uint32_t _p=s->r[6];
+    if (_p) { uint32_t _st=rd32(s,_p+0xBCu); if (_st==1u) { wr32(s,_p+0xBCu,0u); print("[WAITFORCE] ..."); } } } }
+```
+4) 编译：batch_022 exit 0；exe 57,064,070B（19:06:30）
+5) 验证运行 `out80m_m1105waitforce.txt` 已启动
+NEXT：
+```
+① [WAITFORCE] → 主循环退出等待 → title state=4/5
+② logoDrawProc 绘制 → 截帧出现 logo
+③ 渲染问题 → 修 GXM 纹理/绘制路径
+④ 正式修复：HLE 显示队列提交后按 guest 语义设置显示线程的事件标志
+```
+验证：`out80m_m1103waitloop.txt`、`out80m_m1104dqforce.txt`、`disp_thread.txt`、`out80m_m1105waitforce.txt`（生成中）。
+
+ANTI-FORGETTING ENTRY. Keywords: M1050 display queue serviced by 5 guest threads (entry=0x8127C1D3 'CriThread'): FUN_8127BE58 creates them via sceKernelCreateThread (SceLibKernel_C5C11EE7(name,0x8127C1D3,arg,param_3,0,flags,0)) + sceKernelStartThread (SceLibKernel_F08DE149(tid,4,&local_30)); tids 4001A000/4001E000/4001F000/40020000/40021000; PDUMP shows them waiting on event flags obj=60016000/60018000/6001A000/6001C000 bits=1 ctxpc=8127BE1C; threads 40018000/40019000 entry=8120767D ready=1. FUN_8127BAAF (app-registered display callback, busy branch) processes the DAT_8153FD64 8-slot queue with lock DAT_816A0B64; FUN_812264B4 (callback 0x812264B5) updates DAT_8153F2F8 timing stats, does not clear the state. So display threads wait on event flags that should be set by the display submit path (EndScene/DisplayQueueAddEntry completion) while the main thread waits on [p+0xBC] -> mutual deadlock (HLE only stubbed the GXM display queue without setting the guest event flags). M1050 WAITFORCE: batch_022.cpp blk_8128EA36 if P5D_WAITFORCE { uint32_t _p=s->r[6]; if(_p){ uint32_t _st=rd32(s,_p+0xBCu); if(_st==1u){ wr32(s,_p+0xBCu,0u); print [WAITFORCE]; } } } batch_022 compile exit 0; exe relink exit 0 (57,064,070B 19:06:30). Verification run out80m_m1105waitforce.txt (FORCETITLE + FIOSFILL + WAITFORCE) started. NEXT: [WAITFORCE] fires -> main loop exits -> title state=4/5; logoDrawProc draws -> frames show the logo; fix GXM texture/draw if needed; formal fix: set the display threads' event flags per guest semantics after the HLE display-queue submit (find setters of 0x60016000 etc.).
+
+LOOKUP: M1050, display threads 5x entry=8127C1D3 CriThread, FUN_8127BE58 sceKernelCreateThread SceLibKernel_C5C11EE7 + sceKernelStartThread SceLibKernel_F08DE149, tids 4001A000/4001E000/4001F000/40020000/40021000, event flags 60016000/60018000/6001A000/6001C000 bits=1 ctxpc=8127BE1C, PDUMP, WAITFORCE blk_8128EA36 wr32 p+0xBC=0, [p+0xBC] wait state, deadlock, exe 57,064,070B, out80m_m1105waitforce.txt -> §18.4594 [relevant: DQFORCE], §18.4593 [relevant: busy flag], §18.4592 [relevant: wait loop]
