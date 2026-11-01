@@ -1076,6 +1076,29 @@
 | M1058 | §18.4603: ★★★★★★★★ **m1109 重大证据：gfd 帧提交流程每帧真的在跑！[FLUSH] 120（frame 0→1→2 循环）、[SUBMIT] 121（type=0/2）、[CMDFLUSH] 80；但 [BLD1/2/3] 全 0——flush 扫描的三个链表都是空的。HLEDUMP（title 阶段 60M→64M）拿到 53 个 HLE stub 调用画像：**只有同步/线程类 API 高频（sem/eflag wait/set、vblank 等），GXM 类只有极少量初始化调用（0x812B1720 DisplayQueueAddEntry ×2、0x812B1340 TextureInitLinear ×1、0x812B16A0 ×3 等），没有 per-frame 的 sceGxmDraw**。⇒ gfd 提交链在运行，但**我们入队的 type=0xB/0x4B 命令不在 flush 扫描的 bucket 里**。m1109：
 | M1059 | §18.4604: **type=0xB/0x4B 命令来源定位：xrefs 显示 `FUN_811ADAFE`（2D sprite/primitive 批处理渲染器）是入队主力（大量调用 FUN_811C041C/FUN_811C05EC/FUN_811C0754），另有 FUN_81163ABC（我们已知的 2D sprite 提交）、FUN_811C5580/FUN_811C57F2（pipeline 设置）等。M1059 加 [FLUSHX]（打印 DAT_816CC6F4、三数组指针 6E4/6CC/6D8 与每 bucket 的 +0xC/+0x14 链表头）、[ENQ2]（FUN_811C0754 → 数组1 sprite 链）、[ADA]（FUN_811ADAFE 入口）探针，定位 type 0xB 命令最终落入哪个数组/链表、flush 是否扫描**。xrefs（`enq_refs.txt`）：
 | M1060 | §18.4605: ★★★★★★★★★★ **m1110 决定性证据：命令落点与 flush 扫描范围不匹配被完全确认！[FLUSHX]：DAT_816CC6F4=0x82（130 个 bucket）、三帧数组 a1/a2/a3 循环；**数组3（6D8）的 bucket11（type 0xB）不透明链（+0xC）非空：8F142000 / 8F343050 / 8F544050**（正是我们的 type=0xB 命令！），后续帧还有 bucket0/bucket10；而 FUN_8119934A 的 array3 扫描循环只检查 **+0x14（透明链）** → **命令在 +0xC 不透明链，flush 从不消费它们**。这解释了 [BLD1/2/3]=0、[SUBMIT] 只有 type=0/2、以及 HLEDUMP 无 per-frame GXM 调用**。m1110：
+| M1061 | §18.4606: **m1060 定位到"命令在 array3 的 +0xC 不透明链、flush 只扫 +0x14 透明链"后，M1061 实施 FLUSHWIRE 交叉接线实验：在 FUN_8119934A 入口把 array3 各 bucket 的 +0xC 链表头复制到 +0x14（仅当 +0x14 为空），让 gfd flush 的三个绘制列表构建器（FUN_811F3452 等）真正消费我们的 type=0xB 命令，验证"命令一旦被 flush 消费是否能一路走到 GXM 绘制"**。实现（`batch_013.cpp` blk_8119934A 入口，env `P5D_FLUSHWIRE=1`）：
+```cpp
+{ if (P5D_FLUSHWIRE) { uint32_t _fr=rd32(s,0x816CC700);
+    uint32_t _a3=rd32(s,0x816CC6D8 + _fr*4);
+    if (_a3) for (int _i=0;_i<64;_i++) { uint32_t _p=_a3+_i*0x20;
+      uint32_t _op=rd32(s,_p+0xC), _tr=rd32(s,_p+0x14);
+      if (_op && !_tr) { wr32(s,_p+0x14,_op);
+        fprintf(stderr,"[WIRE] #%d frame=%u bucket%d op=%08X -> tr\n",...); } } } }
+```
+⇒ flush 的 BLD3 分支（FUN_811F3452 → FUN_811E649A）会处理这些命令 → 命令执行器（vtable 0x811E44AE）→ GXM 绘制链路。
+编译：batch_013 exit 0；exe 重链 exit 0（57,069,551B，22:40:53）。
+验证运行：`out80m_m1111wire.txt`（FORCETITLE+FIOSFILL+WAITFORCE+SCNFORCE+**FLUSHWIRE**）已启动。
+NEXT：
+```
+① [WIRE] 是否触发（bucket11 等的不透明链被接到透明链）
+② [BLD3] 是否开始出现（flush 开始消费命令）
+③ [SUBMIT] 是否增加 type/参数变化 → FUN_811E649A 提交
+④ GXM HLE 是否出现 draw/state 调用（[ABIVTX]/[TEXBIND]/[ABIDRAW]）
+⑤ 截图/帧检查：ATLUS logo 是否出现在画面
+⑥ 若 BLD3 触发但无 GXM → 检查命令执行器 vtable 0x811E44AE 与 FUN_811E649A 内部
+```
+验证：`out80m_m1110flushx.txt`、`out80m_m1111wire.txt`（生成中）、`gfd_flush.txt`。 |
+| §18.4606 | After M1060 located 'commands in array3's +0xC opaque chain while the flush only scans +0x14 transparent', M1061 implements the FLUSHWIRE cross-wire experiment: at the FUN_8119934A entry copy each array3 bucket's +0xC list head into +0x14 (only when +0x14 is empty) so the gfd flush's three draw-list builders (FUN_811F3452 etc.) actually consume our type=0xB commands, validating whether 'once consumed, the commands reach GXM drawing'. Implementation (batch_013.cpp blk_8119934A entry, env P5D_FLUSHWIRE=1): { if (P5D_FLUSHWIRE) { uint32_t _fr=rd32(s,0x816CC700); uint32_t _a3=rd32(s,0x816CC6D8 + _fr*4); if (_a3) for (int _i=0;_i<64;_i++) { uint32_t _p=_a3+_i*0x20; uint32_t _op=rd32(s,_p+0xC), _tr=rd32(s,_p+0x14); if (_op && !_tr) { wr32(s,_p+0x14,_op); fprintf(stderr,'[WIRE] #%d frame=%u bucket%d op=%08X -> tr'); } } } } => the flush's BLD3 branch (FUN_811F3452 -> FUN_811E649A) will process these commands -> command executor (vtable 0x811E44AE) -> GXM draw chain. batch_013 compile exit 0; exe relink exit 0 (57,069,551B 22:40:53). Verification run out80m_m1111wire.txt (FORCETITLE+FIOSFILL+WAITFORCE+SCNFORCE+P5D_FLUSHWIRE=1) started. NEXT: whether [WIRE] fires (bucket11 etc. opaque chains wired to transparent); whether [BLD3] starts appearing (flush consumes commands); whether [SUBMIT] increases/changes (FUN_811E649A); whether GXM HLE receives draw/state calls ([ABIVTX]/[TEXBIND]/[ABIDRAW]); check frames for the ATLUS logo; if BLD3 fires but no GXM, inspect the command executor vtable 0x811E44AE and FUN_811E649A internals. |
 ```
 [FLUSHX] #1 frame=0 f4=82 a1=851CD1F0 a2=851CD1B0 a3=851CC770
 [FLUSHX]   bucket11 op=8F142000 tr=00000000          ← ★ 不透明链非空
@@ -496954,3 +496977,31 @@ NEXT：
 ANTI-FORGETTING ENTRY. Keywords: M1060 m1110 decisive: command landing vs flush scan mismatch fully confirmed. [FLUSHX]: DAT_816CC6F4=0x82 (130 buckets), three frame arrays a1/a2/a3 cycle; array3 (818CC6D8) bucket11 (type 0xB) OPAQUE chain (+0xC) non-empty: 8F142000/8F343050/8F544050 (our type 0xB commands), later buckets 0/10 too; but FUN_8119934A's array3 loop only checks +0x14 (transparent) -> commands in +0xC are never consumed; explains [BLD1/2/3]=0, [SUBMIT] only type 0/2, HLEDUMP no per-frame GXM. m1110: [FLUSHX] #1 frame=0 f4=82 a1=851CD1F0 a2=851CD1B0 a3=851CC770 bucket11 op=8F142000 tr=0; #2 frame=1 a3=851CD210 bucket11 op=8F343050; #3 frame=2 a3=851CDCB0 bucket11 op=8F544050; #5 bucket0 op=8F3431C0 bucket10 op=8F3432D0 bucket11 op=8F343050; [BLD1] 0 [BLD2] 0 [BLD3] 0; [FLUSH] 100; [SUBMIT] 107 type=0/2; [ABIBEGIN] 1; [ABIEND] 0. Conclusion: FUN_811C041C puts commands into (&DAT_816CC6D8)[frame]+type*0x20 +0xC opaque chain; FUN_8119934A scans array3 only +0x14; the consumer of array3 +0xC opaque chain is another function whose command vtable &LAB_811E44AE_1 executor lives there. NEXT: decompile FUN_811E649A/FUN_811E6498 (do they walk +0xC?); find the array3 +0xC consumer among DAT_816CC6D8 readers (FUN_811C0464/4B6/5D2/75C) checking +0xC; add submit-count probes; if gated print gate vars; consumer likely a FUN_811DBxxx/gfd frame-end path needing WAITFORCE-style lifting; once connected array3 +0xC chain -> command executes -> GXM draw -> logo on screen.
 
 LOOKUP: M1060, [FLUSHX] f4=82 130 buckets, a1=851CD1F0 a2=851CD1B0 a3=851CC770, bucket11 op=8F142000/8F343050/8F544050 tr=0, bucket0 op=8F3431C0, bucket10 op=8F3432D0, array3 +0xC opaque chain vs flush +0x14 transparent, FUN_8119934A scan, FUN_811C041C enqueue +0xC, command vtable LAB_811E44AE_1, BLD1/2/3 0, SUBMIT 107 type=0/2, out80m_m1110flushx.txt, gfd_flush.txt -> §18.4604 [relevant: type 0xB source], §18.4603 [relevant: flush scans empty], §18.4602 [relevant: gfd flush]
+### 18.4606 PORT M1061: FLUSHWIRE —— 把 +0xC 不透明链接到 +0x14 让 flush 消费命令
+
+1) 实现（batch_013.cpp blk_8119934A 入口，env P5D_FLUSHWIRE=1）：
+```cpp
+{ if (P5D_FLUSHWIRE) { uint32_t _fr=rd32(s,0x816CC700);
+    uint32_t _a3=rd32(s,0x816CC6D8 + _fr*4);
+    if (_a3) for (int _i=0;_i<64;_i++) { uint32_t _p=_a3+_i*0x20;
+      uint32_t _op=rd32(s,_p+0xC), _tr=rd32(s,_p+0x14);
+      if (_op && !_tr) { wr32(s,_p+0x14,_op);
+        fprintf(stderr,"[WIRE] #%d frame=%u bucket%d op=%08X -> tr\n",...); } } } }
+```
+⇒ flush 的 BLD3（FUN_811F3452 → FUN_811E649A）消费命令 → 执行器 vtable 0x811E44AE → GXM
+2) 编译：batch_013 exit 0；exe 57,069,551B（22:40:53）
+3) 验证运行 `out80m_m1111wire.txt` 已启动
+NEXT：
+```
+① [WIRE] 是否触发
+② [BLD3] 是否出现（flush 消费命令）
+③ [SUBMIT] 变化
+④ GXM HLE 出现 draw/state 调用
+⑤ 截图：ATLUS logo 是否出现
+⑥ BLD3 触发但无 GXM → 查命令执行器 vtable 0x811E44AE/FUN_811E649A
+```
+验证：`out80m_m1110flushx.txt`、`out80m_m1111wire.txt`（生成中）。
+
+ANTI-FORGETTING ENTRY. Keywords: M1061 FLUSHWIRE cross-wire experiment: at FUN_8119934A entry (env P5D_FLUSHWIRE=1) copy each array3 bucket's +0xC opaque list head into +0x14 transparent (only if +0x14 empty) so the gfd flush's BLD3 (FUN_811F3452 -> FUN_811E649A) consumes our type=0xB commands, validating whether command consumption reaches GXM drawing. Implementation in batch_013.cpp blk_8119934A: { if (P5D_FLUSHWIRE) { uint32_t _fr=rd32(s,0x816CC700); uint32_t _a3=rd32(s,0x816CC6D8 + _fr*4); if (_a3) for (int _i=0;_i<64;_i++) { uint32_t _p=_a3+_i*0x20; uint32_t _op=rd32(s,_p+0xC), _tr=rd32(s,_p+0x14); if (_op && !_tr) { wr32(s,_p+0x14,_op); fprintf(stderr,'[WIRE] #%d frame=%u bucket%d op=%08X -> tr'); } } } }. batch_013 compile exit 0; exe relink exit 0 (57,069,551B 22:40:53). Verification run out80m_m1111wire.txt (FORCETITLE+FIOSFILL+WAITFORCE+SCNFORCE+P5D_FLUSHWIRE=1) started. NEXT: [WIRE] fires?; [BLD3] appears (flush consumes commands)?; [SUBMIT] changes?; GXM HLE draw/state calls?; frames show ATLUS logo?; if BLD3 fires but no GXM inspect the command executor vtable 0x811E44AE and FUN_811E649A internals.
+
+LOOKUP: M1061, FLUSHWIRE, batch_013 blk_8119934A, array3 (816CC6D8)[frame], bucket +0xC opaque -> +0x14 transparent, [WIRE] probe, BLD3 FUN_811F3452, FUN_811E649A submit, command executor vtable 0x811E44AE, gfd flush, out80m_m1111wire.txt, exe 57,069,551B -> §18.4605 [relevant: mismatch confirmed], §18.4603 [relevant: flush scans empty]
