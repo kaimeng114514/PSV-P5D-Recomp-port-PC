@@ -1080,6 +1080,38 @@
 | M1062 | §18.4607: ★★★★★★★★★★ **m1111（FLUSHWIRE）结果：交叉接线成功、flush 真的消费了命令，但 builder 崩溃——证明"不透明链+0xC 的命令不是给透明链 builder 用的"。证据链完整：[WIRE] #1（bucket11 op=8F142000 → tr）→ [BLD3] #1（bucket=851CC8D0，flush 开始消费）→ [SUBMIT] #1（type=1，提交路径触发）→ **BADMEM guest va=0x00000004 @block=0x811F371A stub=0x812B28A0**（builder 内某处 0+4 解引用空指针崩溃）。说明：**+0xC 不透明链需要它自己的消费者/命令布局**（命令对象 +0x1C 标志区分不透明/透明，builder FUN_811F3452 只理解透明链布局）；同时 m1111 再次确认 [FLUSHX] bucket11 op=8F142000 tr=8F142000（WIRE 已接线）**。m1111：
 | M1063 | §18.4608: ★★★★★★★★★★ **架构级突破：gfd 绘制"builder"其实是"延迟作业描述符"，而真正的链→GPU 提交函数是 FUN_811F3572/FUN_811F361C！** 反编译三个 builder（`builders.txt`）：它们只做三件事——`param_1[1]=bucket`、`*param_1 = <walker code ptr>`、`*bucket |= 0x80000000`（标记忙碌），然后 `FUN_811E649A(type,builder)` **同步执行该描述符的 walker**（我们 m1111 的崩溃就发生在 walker 内部，证明是同步执行）。walker（`walkers.txt`）逻辑：
 | M1064 | §18.4609: ★★★★★★★★★★★★ **第 1030 轮里程碑级突破：黑屏的最终根因找到了——不是图形 API、不是命令链，而是【guest 工作线程从未被调度执行】！gfd 的 GPU 提交是"投递到 worker 队列 + 异步线程执行"模型，而我们的 guest 线程调度器没有真正运行 ready 线程，导致所有 GPU 作业永不执行、GXM HLE 调用为零。** 三条决定性证据：
+| M1065 | §18.4610: **线程泵机制完整审计（`recomp_harness.cpp` `hle_thr_pump`）：guest 线程泵存在且有三重门控，关键是 fiber 世界内的泵被默认禁止；M1065 用 `P5D_THRPUMP=1` 重新试验（历史 M720 曾早期崩溃，之后大量修复未再验证）。**
+`hle_thr_pump(s, quantum)` 核心逻辑：
+```c
+static void hle_thr_pump(RecState* s,int quantum) {
+  if (g_cur_thr || g_hostthreads) return;                       // 已在线程内/主机线程模式 → 不重入
+  if (g_thryield_env || g_periodpump_env)                        // ★ THRYIELD/PERIODPUMP：虚拟时间到期的等待线程 → ready
+    for (auto& _kvw : g_thr) { if (alive && waiting && g_vtime_extra >= deadline) { waiting=0; ready=1; } }
+  if (g_in_fiber_exec && !g_thrpump_env && !g_thrpump3 && !g_pump_force) return;   // ★★ 核心门控：fiber 世界内默认不泵
+  for (auto& kv : g_thr) { if (!alive || !ready) continue;
+    RecState saved=*s; memcpy(s->r, t.ctx.r); g_cur_thr=tid;
+    run up to quantum blocks from t.ctx.r[15];
+    if (g_thr_blocked) { ready=0; waiting=1; wait_obj/bits/mode; break; }   // 阻塞则保存语义
+  } }
+```
+调用点（全部）：
+- 主循环每 0x200 blocks：`hle_thr_pump(&s,400)`（但受 fiber 门控）
+- DelayThread HLE：`g_in_fex==0 && !g_in_fiber_exec` → 泵；或 `g_thrpump_env && !g_cur_thr && n>1.5M` → 泵 20000
+- 信号量等待：主线程 `g_pump_force=1; hle_thr_pump(s,400)`（强制泵，绕过 fiber 门控）
+- 事件标志等待：主线程同样强制泵
+- 主循环 `g_thrpump_env && n>1.5M && n%20000==0` → 泵 20000
+- `g_thrpump3 && n%0x40==0 && pc∈{0x8120682A,0x812067A0}` → 泵 80
+**M1065 实验 m1112**：env = 标准（含 `P5D_THRYIELD=1 P5D_PERIODPUMP=1 P5D_VTIME=1`）+ FORCETITLE+FIOSFILL+WAITFORCE+SCNFORCE + **`P5D_THRPUMP=1`**，运行已启动（`out80m_m1112pump.txt`）。启动后 n=20.1M 仍稳定（无 BADMEM、无早期崩溃，CPU≈237s），说明 M720 时代的早期崩溃已被后续修复解决——**继续观察 title 阶段 worker 是否开始执行 GPU 作业（GXM HLE 调用）**。
+NEXT：
+```
+① m1112 结果：title 阶段是否出现 GXM HLE 调用/per-frame draw/[LOGO]/[ABIBEGIN]
+② 若无泵发生 → 加 [PUMP] 探针（hle_thr_pump 调用数、门控拒绝数、各 tid 执行块数）
+③ 专门泵 worker 线程 entry=0x811E68C9：在 blk_811E68C9 加探针看作业出队
+④ 若 worker 出队但作业执行崩溃 → 修 HLE 语义（信号量/队列）
+⑤ 最终目标：worker 执行 gfd GPU 作业 → per-frame GXM draw → 画面出现
+```
+验证：`recomp_harness.cpp`（hle_thr_pump）、`out80m_m1112pump.txt`（生成中）、§18.4232/18.4265/18.4609。 |
+| §18.4610 | Thread-pump mechanism audit (recomp_harness.cpp hle_thr_pump): the guest-thread pump exists with three gates, and crucially pumping from the fiber world is disabled by default; M1065 re-tests P5D_THRPUMP=1 (historical M720 crashed early, but many fixes since were never re-validated). hle_thr_pump(s,quantum) core: if (g_cur_thr || g_hostthreads) return; if (g_thryield_env || g_periodpump_env) for each guest thread alive&&waiting with g_vtime_extra >= deadline -> waiting=0, ready=1; if (g_in_fiber_exec && !g_thrpump_env && !g_thrpump3 && !g_pump_force) return; (core gate: no pumping inside the fiber world by default); for each alive&&ready thread: save RecState, memcpy(s->r,t.ctx.r), g_cur_thr=tid, run up to quantum blocks from t.ctx.r[15], and if g_thr_blocked -> ready=0, waiting=1, wait_obj/bits/mode. Call sites: main loop every 0x200 blocks hle_thr_pump(&s,400) (fiber-gated); DelayThread HLE when g_in_fex==0 && !g_in_fiber_exec, or when g_thrpump_env && !g_cur_thr && n>1.5M (20000 quantum); semaphore wait from main thread uses g_pump_force=1 hle_thr_pump(s,400) (forces past the fiber gate); event-flag wait likewise; main loop g_thrpump_env && n>1.5M && n%20000==0 -> pump 20000; g_thrpump3 && n%0x40==0 && pc in {0x8120682A,0x812067A0} -> pump 80. M1065 experiment m1112: env = standard (P5D_THRYIELD=1 P5D_PERIODPUMP=1 P5D_VTIME=1) + FORCETITLE+FIOSFILL+WAITFORCE+SCNFORCE + P5D_THRPUMP=1, run started (out80m_m1112pump.txt); at n=20.1M still stable (no BADMEM, no early crash, CPU 237s) so M720-era early crash is fixed by later milestones - keep watching whether title-phase workers start executing GPU jobs (GXM HLE calls). NEXT: (1) m1112 result: any GXM HLE calls/per-frame draw/[LOGO]/[ABIBEGIN] in title phase; (2) if no pump happens add a [PUMP] probe (hle_thr_pump call count, gate rejections, per-tid executed block counts); (3) pump the worker thread entry=0x811E68C9 specifically: probe blk_811E68C9 for dequeued jobs; (4) if workers dequeue but job execution crashes fix the HLE semantics (semaphore/queue); (5) final goal: workers execute gfd GPU jobs -> per-frame GXM draw -> picture appears. |
 **(1) FUN_811E649A = 向 worker 队列投递 0x20 字节作业（异步）**（`e649a.txt`）：
 ```c
 void FUN_811e649a(int type,int *msg) {          // type=0/1/2 → 三个 worker 通道
@@ -497199,3 +497231,32 @@ NEXT：
 ANTI-FORGETTING ENTRY. Keywords: M1064 ROUND-1030 root cause of black screen = guest worker threads never scheduled/executed. FUN_811E649A posts 0x20-byte job to worker queue DAT_8169E080[type] (lock FUN_81207344, copy FUN_811e6a4c, unlock FUN_81207352, wake SceThreadmgr_E6B761D1(*puVar1,1)); FUN_811E6330 posts barrier job 0x811E6967 then waits SceLibKernel_83C0E2AF(puVar1[2],1,2,0,0); FUN_811E6498 is a no-op return. Worker threads created at startup: 6 threads tid=40011000..40016000 entry=0x811E68C9 (THR log) waiting on semas 50011000/50013000/50015000 (TDUMP wait=1); 5 display threads entry=0x8127C1D3 wait on eflags 60016000/...; some threads ready=1 but never run. So gfd posts draw jobs every frame, worker threads should dequeue+execute them (the job runs the command chain / calls GXM HLE), but our scheduler only runs the main thread so jobs pile up, GXM HLE calls are zero and the screen stays black. This matches the external audit: the biggest risk is runtime semantics/thread scheduling. NEXT: make guest threads really run (HThread ready-queue switching / sema-eflag wakeups / P5D_HOSTTHREADS); probe blk_811E68C9 worker trampoline for dequeued jobs (type/descriptor/code); probe SceThreadmgr_E6B761D1 and SceLibKernel_83C0E2AF for signal/wait pairing; once workers execute, per-frame GXM HLE calls (BeginScene/Draw/EndScene) should appear; then command chains get consumed and the picture appears.
 
 LOOKUP: M1064 round 1030 black screen root cause worker threads never scheduled, FUN_811E649A posts 0x20-byte job to DAT_8169E080[type] worker queue, FUN_81207344 lock FUN_811e6a4c copy FUN_81207352 unlock SceThreadmgr_E6B761D1 wake, FUN_811E6330 barrier 0x811E6967 wait SceLibKernel_83C0E2AF, FUN_811E6498 no-op, worker threads 6x entry 0x811E68C9 tid 40011000..40016000 semas 50011000/50013000/50015000, display threads 5x entry 0x8127C1D3 eflags 60016000, TDUMP ready=1 threads never run, external audit runtime semantics thread scheduling, HLEDUMP no GXM calls, e649a.txt, gfd_gpu.txt, submit_fn.txt, out80m_m1109flush.txt -> §18.4608 [relevant: builders/walkers], §18.4607 [relevant: FLUSHWIRE crash], §18.4605 [relevant: opaque chain mismatch], §18.4595 [relevant: display threads]
+### 18.4610 PORT M1065: 线程泵（hle_thr_pump）机制审计 + THRPUMP=1 重新试验
+
+1) `hle_thr_pump` 核心（recomp_harness.cpp）：
+```c
+static void hle_thr_pump(RecState* s,int quantum) {
+  if (g_cur_thr || g_hostthreads) return;
+  if (g_thryield_env || g_periodpump_env)          // 虚拟时间到期 → ready
+    for (auto& _kvw : g_thr) { ... waiting=0; ready=1; ... }
+  if (g_in_fiber_exec && !g_thrpump_env && !g_thrpump3 && !g_pump_force) return;   // ★ 核心门控
+  for (auto& kv : g_thr) { if (!alive || !ready) continue;
+    RecState saved=*s; memcpy(s->r, t.ctx.r); g_cur_thr=tid;
+    run up to quantum blocks; if (g_thr_blocked) { ready=0; waiting=1; ...; break; } }
+}
+```
+2) 调用点：主循环每 0x200 块（fiber 门控）；DelayThread（fiber 外或 THRPUMP 且 n>1.5M）；信号量/事件标志等待用 `g_pump_force=1` 强制泵；主循环 THRPUMP 且 n%20000==0 泵 20000；THRPUMP3 在特定 pc 泵 80
+3) m1112 实验：标准 env + THRPUMP=1，已启动；n=20.1M 稳定（无 BADMEM，CPU≈237s），M720 早期崩溃已被修复
+NEXT：
+```
+① m1112 title 阶段是否出现 GXM HLE 调用
+② 无泵 → [PUMP] 探针（调用数/门控拒绝/tid 块数）
+③ blk_811E68C9 worker 探针（作业出队）
+④ worker 出队崩溃 → 修 HLE 语义
+⑤ worker 执行 GPU 作业 → per-frame GXM draw → 画面
+```
+验证：`recomp_harness.cpp`、`out80m_m1112pump.txt`（生成中）。
+
+ANTI-FORGETTING ENTRY. Keywords: M1065 thread-pump audit: hle_thr_pump(s,quantum) has gates: (g_cur_thr||g_hostthreads) return; THRYIELD/PERIODPUMP wakes waiting threads whose virtual deadline passed (g_vtime_extra >= deadline -> waiting=0 ready=1); core gate if (g_in_fiber_exec && !g_thrpump_env && !g_thrpump3 && !g_pump_force) return; then for each alive&&ready thread save RecState, memcpy(s->r,t.ctx.r), g_cur_thr=tid, run quantum blocks, on g_thr_blocked set ready=0 waiting=1 wait_obj/bits/mode. Call sites: main loop every 0x200 blocks pump(400); DelayThread when g_in_fex==0&&!g_in_fiber_exec or (g_thrpump_env&&!g_cur_thr&&n>1.5M) pump(20000); sema-wait and eflag-wait from main thread use g_pump_force=1 pump(400); main loop THRPUMP && n%20000==0 pump 20000; THRPUMP3 at pc 0x8120682A/0x812067A0 pump 80. Experiment m1112: standard env (P5D_THRYIELD=1 P5D_PERIODPUMP=1 P5D_VTIME=1) + FORCETITLE+FIOSFILL+WAITFORCE+SCNFORCE + P5D_THRPUMP=1, out80m_m1112pump.txt, at n=20.1M stable (no BADMEM, no early crash, CPU 237s) so M720-era early crash is fixed; watch title phase for GXM HLE calls. NEXT: title-phase GXM calls?; if no pump add [PUMP] probe (call count/gate rejects/per-tid blocks); probe blk_811E68C9 worker for dequeued jobs; if job execution crashes fix HLE semantics; goal workers run gfd GPU jobs -> per-frame GXM draw -> picture.
+
+LOOKUP: M1065, hle_thr_pump, g_thrpump_env P5D_THRPUMP, g_thrpump3 P5D_THRPUMP3, g_pump_force, g_in_fiber_exec gate, g_thryield_env P5D_THRYIELD, g_periodpump_env P5D_PERIODPUMP, g_vtime_extra deadline wake, g_cur_thr, g_hostthreads P5D_HOSTTHREADS, quantum 400/20000/80, main loop n%0x200, n%20000, pc 0x8120682A/0x812067A0, worker entry 0x811E68C9, out80m_m1112pump.txt, M720 early crash fixed -> §18.4609 [relevant: worker threads root cause], §18.4265 [relevant: THRPUMP wiring], §18.4232 [relevant: sema/eflag arg fix]
