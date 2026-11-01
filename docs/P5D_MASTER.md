@@ -1105,6 +1105,42 @@
 | M1087 | §18.4632: ★★★★★★★ **m1132 栈转储结果：GXM 路径早期调用（movie 之前）一切正常——[EFF9E-ENT] sp=848561A8 lr=811C56D0、[EFFCC]/[EFFD6] sp=84856150（帧 0x58 正确递减），说明 FUN_811EFE9E 本身和常规调用栈都正常；之前 0x811EFFD6 的 float 1.0 崩溃是 ACFC-SAFE 返回 NULL 后调用者未检查、用垃圾数据继续构建 GXM 批次导致的**下游后果**，不是独立 bug。⇒ 真正要解决的是最初 FUN_81159276 栈帧错位（返回 0x81178F10）的根因。M1087 改为在 movie 完成回调 FUN_81159276 的入口（0x81159276）与出口（0x811592BE）转储栈帧 + PC ring，直接观察被污染的那次调用。**
 | M1088 | §18.4633: ★★★★★★★★★ **m1133 抓到崩溃那次 movie 回调的入口现场：FUN_81159276 被以 LR=0x81178F10 进入，sp=0x84856290，入口栈为 [0]=0x816CDA48 [4]=0x811DACFC [8]=0x8116FA67 [0xC]=0x8116FA5D。其中 0x8116FA67/0x8116FA5D 是 appJob 跳板的 **Thumb 函数指针**（0x8116FA66|1、0x8116FA5C|1），0x811DACFC 正是之前见过的"错位地址"。⇒ 游戏自身的**协作式 job 调度器**在操纵 LR/恢复地址：0x8116F75E 跳板把 job 结构字段 +0x10/+0x14 当作"保存的 LR / 恢复 PC"来回倒换（`ldr.w lr,[r4,#0x10]; str.w lr,[r1,#0x10]; mov ip,lr; ... bl 0x8115D614; bl 0x8115D43C`），而 0x8115D614/0x8115D43C 就是 job 切换原语。LR=0x81178F10 是 FUN_81178F0A 里 `bl 0x8116F8A8` 的返回地址——说明某个 job 的"恢复地址"字段被错误地设成了这个值，随后该 job 以错误 LR 恢复了另一个任务（movie 回调）→ 栈帧错位 → 0x811DACFC 乱跳 → 崩溃。**
 | M1089 | §18.4634: ★★★★★★★★ **修正上一轮的解释并定位到最可能的真实根因：`gbn_back` 的"块内目标 → 从块首执行"回退策略。0x8115D614/0x8115D43C 反编译后**不是** job 调度原语——0x8115D614 只是 `return DAT_813AF830`（appAllocator 全局读），0x8115D43C 是 appAllocatorHandler 的槽位计算函数（引用 "appAllocatorHandler.c"）；0x8116F75E 跳板里 +0x10/+0x14 字段操作是**双向链表指针**（str [lr,#0x14] 等），不是"保存 LR/恢复 PC"。⇒ "协作式 job 调度器 LR 协议"假设被否决。**
+| M1090 | §18.4635: ★★★★★★★ **m1134 [GBACK] 统计否决了"gbn_back 是 movie 崩溃真凶"的假设：到崩溃前共 400 次块内回退，只有 2 个唯一目标——`0x811E53D2→块0x811E53CC back=6`（395 次，热循环 worker 入口）和 `0x8120767C→块0x8120767A back=2`（5 次）。**没有任何 movie 路径目标（0x8115927x）出现** ⇒ gbn_back 只在固定的两个已知点生效，与 movie 崩溃无关。GBACK 假设被否决。⇒ 改为直接探针"谁调用了 FUN_81159276"：在 `id_reg`（寄存器间接跳转）里对 target==0x81159276/0x811DACFC/0x81178F10 打印调用点 block、LR、SP、fiber 与 PC ring（`[CB9276]`）。**
+m1134（`out80m_m1134gback.txt`）GBACK 统计（cap 400 全部）： 
+```
+395× [GBACK] target=811E53D2 -> block=811E53CC back=6 skipped_bytes=0008F115 6060
+  5× [GBACK] target=8120767C -> block=8120767A back=2 skipped_bytes=B510BF00 2300
+（无 8115927x / 811DACFx / 81178F1x 目标）
+FRAMEDUMP 最后 n=62675000 ctr=145 pc=8116F748 blk=8116FA5C（appJob 链活跃）
+[BADMEM]=0 [ACFC-SAFE]=0（该运行未到崩溃点）
+```
+**分析**：
+1. gbn_back 的实际使用是**规则的两处**（热 worker 入口 0x811E53D2 与 0x8120767C），与 movie 完成路径无关 → 上一轮假设否决
+2. 但 0x811E53D2 的跳过指令含 `0x6060 str r0,[r4,#4]`（第三次写入）→ 重放会在目标路径上多执行一次 store；目前看未造成崩溃（热循环每帧重复，值重复写同址无害）
+3. ⇒ 需要新证据：**谁以 LR=0x81178F10 跳到 FUN_81159276**。由于没有任何 AOT 块 return 该地址、也不在 GBACK，最可能是 `id_reg`（bx/blx 寄存器间接）路径
+**M1090 探针（recomp_harness.cpp，加入 id_reg）**：
+```cpp
+if (t == 0x81159276u || t == 0x811DACFCu || t == 0x81178F10u) {
+  static int _cb_n = 0;
+  if (_cb_n++ < 60) {
+    printf("[CB9276] reg%d target=%08X from_blk=%08X lr=%08X sp=%08X fib=%08X ring:", idx, t, g_cur_block, s->r[14], s->r[13], g_cur_fiber);
+    for (int _k = 7; _k >= 0; --_k) printf(" %08X", g_pc_ring[(g_pc_ring_n - 1u - (uint32_t)_k) & 63u]);
+    printf("\n"); fflush(stdout);
+  }
+}
+```
+另外修正了 MOVCB 探针的 printf 参数错位（`stk:",_n-1,0u,`），后续 [MOVCB-ENT]/[MOVCB-EPI] 数据可直接阅读（含 ring）。
+编译：batch_010 exit 0；harness exit 0；exe 57,118,250B（06:59:54）。验证运行 `out80m_m1135cb9276.txt` 已启动。
+NEXT：
+```
+① 读 m1135 [CB9276]：target=0x81159276 的 from_blk（调用点）、LR、ring → 确定谁在用错误 LR 跳转
+② 若 from_blk 是任务/回调分发代码（appJob/回调寄存器）→ 检查该分发路径的 LR 约定
+③ 修复调用约定（必要时手动块覆盖调用点，正确设置 LR/栈）
+④ 之后 movie 回调返回地址正确 → ACFC-SAFE 可移除 → GXM 绘制链自然推进
+⑤ 最终：SceGxmDraw/BeginScene → 画面
+```
+验证：`out80m_m1134gback.txt`、`out80m_m1135cb9276.txt`（生成中）、`recomp_harness.cpp`（id_reg 探针）。 |
+| §18.4635 | The m1134 [GBACK] statistics reject the 'gbn_back is the movie-crash culprit' hypothesis: before the crash there were 400 block-interior fallbacks but only 2 unique targets - 0x811E53D2 -> block 0x811E53CC back=6 (395 times, hot worker entry) and 0x8120767C -> block 0x8120767A back=2 (5 times). NO movie-path target (0x8115927x) appeared at all => gbn_back only fires at two fixed known points and is unrelated to the movie crash. The GBACK hypothesis is rejected. New approach: probe directly who calls FUN_81159276 - inside id_reg (register-indirect jump) print call-site block/LR/SP/fiber and PC ring when target==0x81159276/0x811DACFC/0x81178F10 ([CB9276]). m1134 GBACK stats: 395x target=811E53D2 -> block=811E53CC back=6 skipped_bytes=0008F115 6060; 5x target=8120767C -> block=8120767A back=2 skipped_bytes=B510BF00 2300; no 8115927x/811DACFx/81178F1x targets; FRAMEDUMP last n=62675000 ctr=145 pc=8116F748 blk=8116FA5C (appJob chain active); [BADMEM]=0 [ACFC-SAFE]=0 (that run had not reached the crash point). Analysis: (1) gbn_back usage is regular at two points (hot worker entry 0x811E53D2 and 0x8120767C), unrelated to the movie completion path -> previous hypothesis rejected; (2) the skipped instructions for 0x811E53D2 include 0x6060 str r0,[r4,#4] (a third store) so replay would execute one extra store on the target path, but no crash is observed (hot loop repeats per frame, writing the same value to the same address is harmless); (3) so new evidence is needed: who jumps to FUN_81159276 with LR=0x81178F10 - since no AOT block returns that address and GBACK does not cover it, the most likely path is id_reg (bx/blx register-indirect). M1090 probe (recomp_harness.cpp, added to id_reg): if (t == 0x81159276u || t == 0x811DACFCu || t == 0x81178F10u) { static int _cb_n = 0; if (_cb_n++ < 60) { printf("[CB9276] reg%d target=%08X from_blk=%08X lr=%08X sp=%08X fib=%08X ring:", idx, t, g_cur_block, s->r[14], s->r[13], g_cur_fiber); for (int _k = 7; _k >= 0; --_k) printf(" %08X", g_pc_ring[(g_pc_ring_n - 1u - (uint32_t)_k) & 63u]); printf("\n"); fflush(stdout); } }. Also fixed the MOVCB probe printf arg shift (stk:",_n-1,0u,) so future [MOVCB-ENT]/[MOVCB-EPI] data is directly readable (with ring). Build: batch_010 exit 0; harness exit 0; exe 57,118,250B 06:59:54. Verification run out80m_m1135cb9276.txt started. NEXT: read m1135 [CB9276]: target=0x81159276's from_blk (call site), LR, ring -> determine who jumps there with the wrong LR; if from_blk is task/callback dispatch code (appJob/callback register) check that dispatch path's LR convention; fix the calling convention (manual block override of the call site if needed, setting LR/stack correctly); then the movie callback return address is correct -> ACFC-SAFE can be removed -> GXM draw chain advances naturally; finally SceGxmDraw/BeginScene -> picture.
 **修正后的关键推理**：
 1. m1133 [MOVCB-ENT] 真实数据（修正探针 printf 参数后）：sp=0x84856290、**lr=0x81178F10**、r6=0、fiber=0x848463A0；入口栈 [0]=0x816CDA48 [4]=0x811DACFC [8]=0x8116FA67 [9]=0x8116FA5D。
 2. 全局搜索确认：**没有任何 AOT 块 return 0x81159276**（只有函数表项本身）——即 FUN_81159276 不是直接被某个块 `b`/`bl` 进入的；但它的 LR 又是 0x81178F10（只有 FUN_81178F0A 中 `bl 0x8116F8A8` 这一条指令会产生这个 LR）。
@@ -499027,3 +499063,36 @@ NEXT：
 ANTI-FORGETTING ENTRY. Keywords: M1089 corrects M1088 - 0x8115D614 is just 'return DAT_813AF830' (appAllocator global read) and 0x8115D43C is an appAllocatorHandler slot computation referencing 'appAllocatorHandler.c' (ASSERT path E:\P3DP5D\xrd757\program\app\app_system\system\appAllocatorHandler\appAllocatorHandler.c line 0x4d), NOT job scheduling primitives; the 0x8116F75E trampoline's +0x10/+0x14 field manipulation is a doubly-linked-list pointer operation, not a saved-LR protocol; so the cooperative-job-scheduler LR hypothesis is rejected. Corrected root-cause direction: the gbn_back 'in-block target -> execute from block start' fallback. Why: (a) m1133 [MOVCB-ENT] real data: sp=0x84856290 lr=0x81178F10 r6=0 fiber=0x848463A0 and entry stack [0]=0x816CDA48 [4]=0x811DACFC [8]=0x8116FA67 [12]=0x8116FA5D; (b) a global search shows NO AOT block returns 0x81159276 (only the function-table entry), so FUN_81159276 was not entered by any block's b/bl, yet its LR=0x81178F10 can only be produced by the single instruction 'bl 0x8116F8A8' inside FUN_81178F0A; (c) the only self-consistent explanation is an INDIRECT JUMP into the middle of the block containing FUN_81159276 (case/continuation point) triggering gbn_back's containing-block-start fallback, so the block start 0x81159276 executes (prologue replay) with stale LR and caller-leftover stack; the same mechanism explains the earlier 0x811DACFC mid-function entry and the FUN_81178F0A pop chains; (d) gbn_back's own comment says 'safe only when the skipped instructions have no side effects - verified 0x811E5992 is lsls' - only one address was verified, all other in-block targets blindly replay side-effecting instructions (push/str/mov lr etc.), which is the systematic stack-corruption source. M1089 added [GBACK] logging inside gbn_back (target, chosen block, back distance, first 6 skipped bytes, current block; cap 400); build batch_010 exit 0, harness exit 0, exe 57,117,702B 06:45:08; run out80m_m1134gback.txt started. NEXT: read m1134 [GBACK] to confirm in-block fallbacks; if confirmed fix gbn_back (whitelist/provably side-effect-free skipped instructions only, otherwise miss) then generate real AOT blocks for those interior entry points with the M1079 pipeline (or interpreter fallback); if not confirmed inspect id_reg/id_regv gbn_back paths and fiber restore; after the fix the movie callback/render path starts at the correct position and the GXM chain advances; then SceGxmDraw/BeginScene -> picture.
 
 LOOKUP: M1089 appAllocatorHandler correction, 0x8115D614 return DAT_813AF830, 0x8115D43C appAllocatorHandler slot ASSERT, gbn_back in-block target block-start replay unsafe, no block returns 0x81159276, FUN_81159276 LR=0x81178F10 from FUN_81178F0A bl 0x8116F8A8, indirect jump into middle of block, [GBACK] probe target/block/back/skipped bytes cap 400, exe 57,117,702B 06:45:08, out80m_m1134gback.txt, fix whitelist or generate interior-entry blocks -> §18.4633 [relevant: M1088 wrong interpretation corrected], §18.4632 [relevant: MOVCB probes], §18.4630 [relevant: ACFC-SAFE]
+### 18.4635 PORT M1090: GBACK 假设被否决（仅 2 个固定回退点，无 movie 目标）→ 改为探针 0x81159276 的间接调用点
+
+1) m1134 GBACK 统计：
+```
+395× target=811E53D2 -> block=811E53CC back=6 skipped_bytes=0008F115 6060
+  5× target=8120767C -> block=8120767A back=2 skipped_bytes=B510BF00 2300
+无 8115927x / 811DACFx / 81178F1x
+[BADMEM]=0 [ACFC-SAFE]=0（该运行未到崩溃点）
+```
+2) 分析：
+- gbn_back 只在两个固定点生效（热 worker 入口 0x811E53D2、0x8120767C），与 movie 崩溃无关 → GBACK 假设否决
+- 0x811E53D2 的跳过指令含 `str r0,[r4,#4]`（重复写同址，无害）
+- 需要新证据：谁以 LR=0x81178F10 跳到 FUN_81159276（无块返回该地址、GBACK 不覆盖 → 最可能 id_reg 间接跳转）
+3) M1090 探针（id_reg）：target∈{0x81159276, 0x811DACFC, 0x81178F10} 时打印
+```
+[CB9276] reg%d target=%08X from_blk=%08X lr=%08X sp=%08X fib=%08X ring: …
+```
+并修正 MOVCB 探针 printf 参数错位
+4) 编译：batch_010 exit 0；harness exit 0；exe 57,118,250B（06:59:54）
+5) 验证运行 `out80m_m1135cb9276.txt` 已启动
+NEXT：
+```
+① [CB9276] 的 from_blk/LR/ring → 确定调用点
+② 若为任务/回调分发代码 → 检查 LR 约定
+③ 修复调用约定（必要时手动块覆盖）
+④ movie 回调返回地址正确 → 移除 ACFC-SAFE → GXM 绘制链推进
+⑤ SceGxmDraw/BeginScene → 画面
+```
+验证：`out80m_m1134gback.txt`、`out80m_m1135cb9276.txt`（生成中）。
+
+ANTI-FORGETTING ENTRY. Keywords: M1090 m1134 [GBACK] statistics reject the gbn_back hypothesis: 400 block-interior fallbacks before the crash but only 2 unique targets - 0x811E53D2 -> block 0x811E53CC back=6 (395x, hot worker entry) and 0x8120767C -> block 0x8120767A back=2 (5x); NO movie-path target (0x8115927x) appeared, so gbn_back only fires at two fixed known points and is unrelated to the movie crash. The GBACK hypothesis is rejected. New approach: probe directly who calls FUN_81159276 by adding [CB9276] logging inside id_reg (register-indirect jump) when target==0x81159276/0x811DACFC/0x81178F10: printf("[CB9276] reg%d target=%08X from_blk=%08X lr=%08X sp=%08X fib=%08X ring:", idx, t, g_cur_block, s->r[14], s->r[13], g_cur_fiber) plus 8 PC-ring entries; cap 60. Also fixed the MOVCB probe printf arg shift (stk:",_n-1,0u,) so future [MOVCB-ENT]/[MOVCB-EPI] data is readable with ring. m1134 also: FRAMEDUMP last n=62675000 ctr=145 pc=8116F748 blk=8116FA5C (appJob chain active); [BADMEM]=0 [ACFC-SAFE]=0 (that run had not reached the crash point); the 0x811E53D2 skipped instructions include 0x6060 str r0,[r4,#4] a repeated same-address store (harmless). Build: batch_010 exit 0; harness exit 0; exe 57,118,250B 06:59:54. Verification run out80m_m1135cb9276.txt started. NEXT: read m1135 [CB9276]: target=0x81159276's from_blk (call site), LR, ring -> determine who jumps there with the wrong LR; if from_blk is task/callback dispatch code check that dispatch path's LR convention; fix the calling convention (manual block override of the call site if needed setting LR/stack correctly); then the movie callback return address is correct so ACFC-SAFE can be removed and the GXM draw chain advances naturally; finally SceGxmDraw/BeginScene -> picture.
+
+LOOKUP: M1090 GBACK hypothesis rejected, 400 fallbacks only 2 unique targets 811E53D2->811E53CC back6 and 8120767C->8120767A back2, no movie path targets, new id_reg probe [CB9276] target 0x81159276 0x811DACFC 0x81178F10 from_blk lr sp fib ring cap 60, MOVCB printf arg fixed _n-1, exe 57,118,250B 06:59:54, out80m_m1134gback.txt out80m_m1135cb9276.txt, next identify call site LR convention -> §18.4634 [relevant: gbn_back hypothesis], §18.4633 [relevant: movie callback entry], §18.4632 [relevant: MOVCB probes]

@@ -4883,6 +4883,14 @@ static uint8_t* gimg_ptr() { return gp_img; }
 static int g_ind_n = 0;
 extern "C" uint32_t id_reg(int idx, RecState* s) {
   uint32_t t = s->r[idx & 15] & ~1u;
+  if (t == 0x81159276u || t == 0x811DACFCu || t == 0x81178F10u) {
+    static int _cb_n = 0;
+    if (_cb_n++ < 60) {
+      printf("[CB9276] reg%d target=%08X from_blk=%08X lr=%08X sp=%08X fib=%08X ring:", idx, t, g_cur_block, s->r[14], s->r[13], g_cur_fiber);
+      for (int _k = 7; _k >= 0; --_k) printf(" %08X", g_pc_ring[(g_pc_ring_n - 1u - (uint32_t)_k) & 63u]);
+      printf("\n"); fflush(stdout);
+    }
+  }
   if (t == 0x81198C0Au) { static int _c993 = 0; if (_c993++ < 20) { printf("[CALLER993] blk=%08X fib=%08X thr=%08X lr=%08X ring:", g_cur_block, g_cur_fiber, g_cur_thr, s->r[14]);
       for (int _k = 0; _k < 12; ++_k) printf(" %08X", g_pc_ring[(g_pc_ring_n - 12u + (uint32_t)_k) & 63u]); printf("\n"); fflush(stdout); } }
   if ((g_cur_block >= 0x81185600u && g_cur_block <= 0x81185900u) || (g_cur_block >= 0x81184F00u && g_cur_block <= 0x81185100u)) { static int _sc_n = 0; if (_sc_n++ < 300) { printf("[SEQCB] blk=%08X target=%08X ring:", g_cur_block, t);
