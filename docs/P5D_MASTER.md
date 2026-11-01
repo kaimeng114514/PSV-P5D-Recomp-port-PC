@@ -1100,6 +1100,46 @@
 | M1082 | §18.4627: ★★★★★★★★★★ **崩溃根因锁定：不是池、不是 r6 生命周期，而是我们自己的 [MOVIEFIN] 假完成 hack 破坏了 guest 栈/寄存器上下文！m1127 r6 追踪给出决定性证据：前 27 次 FUN_811DAB8C 调用 r6 全部合法（84617B60→846186C0，步长 0x70），第 28 次（lr=81159298，来自 FUN_81159276 回调栈帧）r6=0 并立即崩溃。rg_ring 显示程序从 0x811592BE `pop {r4,r5,r6,pc}` 返回到了 0x81178F10（FUN_81178F0A 中间的 cmp 指令）而不是正常返回点，然后再跳到 0x811DACFC —— 典型的"栈/返回地址被 hack 注入的回调污染"轨迹。**
 | M1083 | §18.4628: ★★★★★★★★ **M1082 的"MOVIEFIN 污染栈"结论被 m1128 否决：不设 P5D_MOVIEFIN（hack 不执行）时崩溃完全相同（同一 SNAP/同一 rg_ring：811592BE→81178F10→811DACFC→811DAD4A→811DAC9C，r6=0，BADMEM va=0）。真正的证据来自 m1128 BADMEM 前的探针交错顺序：崩溃调用的 [R6-ALLOC]（r5=85CF304C r7=81306538 sp=84856298）之后，先出现一次**正常**调用的 [R6-ACFC]/[R6-AD4A]/[R6-AC9C]（r6=846186C0），随后才出现**崩溃**调用的 [R6-ACFC]（r6=0，lr=81159298）——说明 FUN_811DAB8C 执行期间发生了**任务/纤程切换**，切回来时 r6 没有被正确恢复。⇒ 根因转向我们的 guest 线程/纤程上下文保存恢复（HLE 互斥锁 stub 0x81207344/0x81207352 内部可触发切换）。**
 | M1084 | §18.4629: ★★★★★★★ **fiber/线程身份探针结果：崩溃调用与正常调用在【同一纤程 848463A0、同一线程 0、同一 SP 84856298】上——排除"跨纤程恢复"假设。更诡异的现象：同一函数 FUN_811DAB8C 的尾段块（0x811DACFC/0x811DAD4A/0x811DAC9C）在崩溃前被执行【两次】：第一次 r6=846186C0（正常完成），紧接着第二次 r6=0（同一 SP / r4 / r5 / r7 / lr=81159298）→ BADMEM。这说明不是线程切换丢寄存器，而是**同一个调用路径被重放/重入**，且第二次进入时 r6 已被清零。M1084 加 pc-ring 前驱探针（harness_pc_ring hook，打印进入每个关键块前最后 6-8 个 PC）以确定第二次进入的直接前驱。**
+| M1085 | §18.4630: ★★★★★★★★★ **pc-ring 直接抓到第二次入口的前驱链：`81178F36 (pop {r4,pc}) → 811DACFC`。即 FUN_81178F0A 的 `pop {r4,pc}` 从栈上弹出了 0x811DACFC 作为返回地址，使执行直接落在 FUN_811DAB8C 的中段 0x811DACFC（跳过 0x811DABC2 的 r6 池分配），r6 保持调用者遗留的 0。正常调用的 ring 是 `811DAD6A→811DAD6E→811DAD80→811DACF6→81207352→812B28A0→8120735C→811DACFC`（完整函数路径），崩溃调用则是 `811592AA→811592B4→811592B6→811592BE→81178F10→81178F14→81178F36→811DACFC`——跨函数错位返回链。M1085 先用**手动块安全覆盖 0x811DACFC**（r6==0 时跳过节点插入、走正常 epilogue 返回 NULL）阻止 BADMEM，验证能否越过该点继续流程。**
+m1130（`out80m_m1130pcr.txt`）决定性 ring 对照：
+```
+正常调用 [R6-ACFC] ring: 811DAD6A 811DAD6E 811DAD80 811DACF6 81207352 812B28A0 8120735C 811DACFC
+崩溃调用 [R6-ACFC] ring: 811592AA 811592B4 811592B6 811592BE 81178F10 81178F14 81178F36 811DACFC
+                                                                    ↑ FUN_81178F0A 的 pop {r4,pc}（0x81178F36）直接返回 0x811DACFC
+```
+**分析**：
+1. 崩溃链中 0x811592BE（FUN_81159276 的 `add sp,#0x18; pop {r4,r5,r6,pc}`）之后落在 **0x81178F10**（FUN_81178F0A 中段，而非正常返回点）→ FUN_81159276 的栈帧已被污染
+2. 0x81178F14 设置 r0=1 → 0x81178F36 `pop {r4,pc}` → 弹出 **0x811DACFC**
+3. 0x811DACFC 是 FUN_811DAB8C 中段（`ldr r0,[sp,#0x14]`），该处没有函数初始化，r6 仍是调用者遗留 0 → BADMEM va=0
+4. 正常调用 ring 完整经过 0x811DAB8C 的函数体（811DAD6A/6E/80/ACF6 等），说明函数本身正常；异常发生在 movie 完成路径（lr=81159298）
+**M1085 手动块覆盖（`recomp_harness.cpp`，M785c 手动块机制）**：
+```cpp
+static uint32_t mb_811DACFC(RecState* s) {
+  if (s->r[6] == 0u) {          // 池分配失败/错误中段进入 → 不写 guest VA 0
+    if (_n++ < 60) printf("[ACFC-SAFE] #%d r6=0 -> skip insert, go epilogue lr=%08X sp=%08X fib=%08X\n", ...);
+    s->r[0] = 0u; return 0x811DAD86u;   // 走正常 epilogue（add sp,#0x1c; pop …）返回 NULL
+  }
+  // 正常语义：ldr r0,[sp,#0x14]; cmp r0,#0; beq 0x811DAD4A; else 0x811DAD02
+  { uint32_t _v = 0; uint8_t* _q = GP(s->r[13] + 0x14u); if (_q) std::memcpy(&_v, _q, 4); s->r[0] = _v;
+    if (_v == 0u) return 0x811DAD4Au; }
+  return 0x811DAD02u;
+}
+...
+g_manual_blocks[0x811DACFCu] = (BlockFn)mb_811DACFC;   // init_manual_blocks
+```
+确认 gbn() 先查 `g_manual_blocks`（命中即返回），覆盖生效。
+编译：harness exit 0；exe 57,114,282B（05:54:36）。验证运行 `out80m_m1131acfcsafe.txt` 已启动（maxb=300M，env 同 m1130）。
+**注意**：这是"防崩溃"补丁而非语义修复——真正修复仍需查明 FUN_81159276 栈帧被谁污染（movie 完成路径），但先验证能否越过该点进入 title 内容加载。
+NEXT：
+```
+① 读 m1131：[ACFC-SAFE] 是否触发、是否越过 n=64,278,346 且无 BADMEM
+② 若越过：观察后续 FIOSFILL title 资源 OPEN、[SCENE] head0F、[VIEWADD]/[CTX*]、GXM 调用
+③ 若流程推进：title 内容加载 → 2D 上下文 → array2 → GXM → 画面
+④ 若仍有其它崩溃：继续用同样方式定位（pc-ring + ring 对照）
+⑤ 语义修复：追 FUN_81159276 栈帧污染源（movie 完成回调路径 / 栈 canary / 异步回调）
+```
+验证：`out80m_m1130pcr.txt`、`out80m_m1131acfcsafe.txt`（生成中）、`recomp_harness.cpp`（mb_811DACFC）。 |
+| §18.4630 | The pc-ring caught the direct predecessor chain of the second entry: 81178F36 (pop {r4,pc}) -> 811DACFC. FUN_81178F0A's pop {r4,pc} popped 0x811DACFC from the stack as a return address, landing execution directly in the middle of FUN_811DAB8C at 0x811DACFC (skipping the r6 pool allocation at 0x811DABC2), so r6 keeps the caller's leftover 0. Normal call ring: 811DAD6A->811DAD6E->811DAD80->811DACF6->81207352->812B28A0->8120735C->811DACFC (full function path); crashing call ring: 811592AA->811592B4->811592B6->811592BE->81178F10->81178F14->81178F36->811DACFC (cross-function misaligned return chain). Analysis: (1) after 0x811592BE (FUN_81159276 add sp,#0x18; pop {r4,r5,r6,pc}) execution lands at 0x81178F10 (middle of FUN_81178F0A, not its normal caller) -> FUN_81159276's stack frame is corrupted; (2) 0x81178F14 sets r0=1 -> 0x81178F36 pop {r4,pc} -> pops 0x811DACFC; (3) 0x811DACFC is mid-function FUN_811DAB8C (ldr r0,[sp,#0x14]) with no function init, r6 remains caller leftover 0 -> BADMEM va=0; (4) the normal call ring passes through the full function body (811DAD6A/6E/80/ACF6 etc.), so the function itself is fine; the anomaly is on the movie-completion path (lr=81159298). M1085 manual block override (recomp_harness.cpp, M785c manual block mechanism): static uint32_t mb_811DACFC(RecState* s) { if (s->r[6] == 0u) { if (_n++ < 60) printf("[ACFC-SAFE] #%d r6=0 -> skip insert, go epilogue lr=%08X sp=%08X fib=%08X\n", ...); s->r[0] = 0u; return 0x811DAD86u; } { uint32_t _v = 0; uint8_t* _q = GP(s->r[13] + 0x14u); if (_q) std::memcpy(&_v, _q, 4); s->r[0] = _v; if (_v == 0u) return 0x811DAD4Au; } return 0x811DAD02u; } ... g_manual_blocks[0x811DACFCu] = (BlockFn)mb_811DACFC; gbn() checks g_manual_blocks first so the override is effective. Build: harness exit 0; exe 57,114,282B 05:54:36. Verification run out80m_m1131acfcsafe.txt started (maxb=300M, same env as m1130). NOTE: this is an anti-crash patch, not a semantic fix - the real fix still needs to find who corrupts FUN_81159276's stack frame (movie completion path), but first verify whether we can pass this point into title content loading. NEXT: (1) read m1131: did [ACFC-SAFE] trigger, did we pass n=64,278,346 without BADMEM; (2) if passed: watch subsequent FIOSFILL title-asset OPENs, [SCENE] head0F, [VIEWADD]/[CTX*], GXM calls; (3) if flow advances: title content -> 2D context -> array2 -> GXM -> picture; (4) if other crashes: locate the same way (pc-ring + ring comparison); (5) semantic fix: trace the FUN_81159276 stack frame corruption source (movie completion callback path / stack canary / async callback). |
 m1129（`out80m_m1129fiber.txt`）证据（BADMEM 前 8 行）：
 ```
 [PROCCREATE] #27 poolmgr=84617AE0 lr=8116FA26 n=0
@@ -498681,3 +498721,40 @@ NEXT：
 ANTI-FORGETTING ENTRY. Keywords: M1084 fiber/thread identity probes show the crashing call and the normal call are on the SAME fiber 848463A0, same thread 0, same SP 84856298 -> not cross-fiber. Stranger: FUN_811DAB8C tail blocks 0x811DACFC/0x811DAD4A/0x811DAC9C execute TWICE before the crash, first with r6=846186C0 (normal), then immediately again with r6=0 (same SP/r4/r5/r7/lr=81159298) -> BADMEM. Key difference: first pass r5=0 r7=816CD9F0 (values reloaded inside the function), second pass r5=85CF304C r7=812B414C (caller's original values) -> the second entry did NOT execute the function initialization (0x811DAB8C..0x811DACF4) including the r6 allocation; r6 keeps the caller's leftover 0 -> crash. So the immediate cause is a direct jump to 0x811DACFC as a 'second entry'. m1129 sequence: [PROCCREATE] #27 poolmgr=84617AE0; [R6-ALLOC] r6=0 r5=85CF304C r7=81306538 sp=84856298 lr=8120735C fib=848463A0; [R6-ACFC] r6=846186C0 r5=0 r7=816CD9F0; [R6-AD4A] r6=846186C0; [R6-AC9C] r6=846186C0 r4=2; [R6-ACFC] r6=0 r5=85CF304C r7=812B414C lr=81159298; [R6-AD4A] r6=0; [R6-AC9C] r6=0 r4=2 lr=81159298; [BADMEM] va=0 at 0x811DAC9C. Candidates: some block returns 0x811DACFC (AOT mis-generation/wrong target table), or FUN_81178F0A's pop {r4,pc} popped 0x811DACFC from a corrupted stack slot. M1084 probes: harness extern "C" uint32_t harness_pc_ring(int idx) returning the idx-th predecessor from g_pc_ring; batch_016 [R6-ALLOC]/[R6-ACFC] extended with r0 and ring: last 6-8 PCs. Build: batch_016 exit 0; harness exit 0; exe 57,114,358B 05:36:55. Verification run out80m_m1130pcr.txt started. NEXT: read m1130 direct predecessor of the second entry into 0x811DACFC - if 0x811DACF4/0x811DAD84 (normal in-function) then genuine mid-function re-entry (HLE callback/continuation); if 0x81178F36 (pop {r4,pc}) then stack misalignment (return address 0x811DACFC) -> find who wrote 0x811DACFC on the stack; if some batch block check its generated code; then fix so movie-path appProcessCreate completes; then title asset load -> 2D context -> array2 -> GXM -> picture.
 
 LOOKUP: M1084 same fiber 848463A0 same thread same SP, tail blocks executed twice, first r6=846186C0 r5=0 r7=816CD9F0, second r6=0 r5=85CF304C r7=812B414C lr=81159298, direct entry 0x811DACFC skipped function init incl r6 alloc, harness_pc_ring hook, [R6-*] ring probes, pc predecessors, candidates 0x811DACF4 0x811DAD84 0x81178F36 pop {r4,pc} stack misalignment AOT mis-generation, m1130 out80m_m1130pcr.txt, exe 57,114,358B 05:36:55 -> §18.4628 [relevant: fiber probes], §18.4627 [relevant: MOVIEFIN refuted], §18.4626 [relevant: r6 crash]
+### 18.4630 PORT M1085: pc-ring 抓到"第二次入口"前驱 = 0x81178F36 的 pop {r4,pc}；先以手动块安全覆盖 0x811DACFC 防崩溃
+
+1) m1130 ring 对照：
+```
+正常调用 ring: 811DAD6A 811DAD6E 811DAD80 811DACF6 81207352 812B28A0 8120735C 811DACFC
+崩溃调用 ring: 811592AA 811592B4 811592B6 811592BE 81178F10 81178F14 81178F36 811DACFC
+                                                        ↑ FUN_81178F0A 的 pop {r4,pc} 弹出 0x811DACFC
+```
+2) 分析：
+- 0x811592BE（FUN_81159276 epilogue）→ 落在 0x81178F10（FUN_81178F0A 中段）→ 栈帧污染
+- 0x81178F36 pop {r4,pc} → 弹出 0x811DACFC
+- 0x811DACFC 是 FUN_811DAB8C 中段，无初始化 → r6=0 → BADMEM
+3) M1085 安全覆盖（mb_811DACFC → g_manual_blocks）：
+```cpp
+static uint32_t mb_811DACFC(RecState* s) {
+  if (s->r[6] == 0u) { printf("[ACFC-SAFE] ..."); s->r[0] = 0u; return 0x811DAD86u; } // epilogue
+  { uint32_t _v = 0; uint8_t* _q = GP(s->r[13] + 0x14u); if (_q) std::memcpy(&_v, _q, 4); s->r[0] = _v;
+    if (_v == 0u) return 0x811DAD4Au; }
+  return 0x811DAD02u; }
+g_manual_blocks[0x811DACFCu] = (BlockFn)mb_811DACFC;
+```
+- gbn() 先查 g_manual_blocks → 覆盖生效
+4) 编译：harness exit 0；exe 57,114,282B（05:54:36）
+5) 验证运行 `out80m_m1131acfcsafe.txt` 已启动
+NEXT：
+```
+① [ACFC-SAFE] 是否触发、是否越过 64,278,346 无 BADMEM
+② 越过 → 观察 title 资源 OPEN / [SCENE] head0F / [VIEWADD] / GXM
+③ 流程推进 → title → 2D 上下文 → array2 → GXM → 画面
+④ 其它崩溃 → pc-ring 同法定位
+⑤ 语义修复：追 FUN_81159276 栈帧污染源
+```
+验证：`out80m_m1130pcr.txt`、`out80m_m1131acfcsafe.txt`（生成中）。
+
+ANTI-FORGETTING ENTRY. Keywords: M1085 pc-ring predecessor chain 81178F36 (pop {r4,pc}) -> 811DACFC; FUN_81178F0A's pop popped 0x811DACFC from the stack as return address, landing directly in mid-FUN_811DAB8C at 0x811DACFC (skipping the 0x811DABC2 r6 pool allocation) so r6 keeps caller leftover 0. Normal ring: 811DAD6A 811DAD6E 811DAD80 811DACF6 81207352 812B28A0 8120735C 811DACFC (full function path). Crash ring: 811592AA 811592B4 811592B6 811592BE 81178F10 81178F14 81178F36 811DACFC (cross-function misaligned return chain). After 0x811592BE (FUN_81159276 add sp,#0x18; pop {r4,r5,r6,pc}) execution lands at 0x81178F10 (middle of FUN_81178F0A) -> FUN_81159276's stack frame is corrupted; 0x81178F14 sets r0=1; 0x81178F36 pop {r4,pc} pops 0x811DACFC; 0x811DACFC is mid-FUN_811DAB8C (ldr r0,[sp,#0x14]) with no init, r6 remains 0 -> BADMEM va=0. The normal call ring passes the full function body so the function itself is fine; the anomaly is on the movie-completion path (lr=81159298). M1085 manual block override (M785c manual block mechanism): static uint32_t mb_811DACFC(RecState* s) { if (s->r[6] == 0u) { printf("[ACFC-SAFE] #%d r6=0 -> skip insert, go epilogue lr=%08X sp=%08X fib=%08X\n", ...); s->r[0] = 0u; return 0x811DAD86u; } { uint32_t _v = 0; uint8_t* _q = GP(s->r[13] + 0x14u); if (_q) std::memcpy(&_v, _q, 4); s->r[0] = _v; if (_v == 0u) return 0x811DAD4Au; } return 0x811DAD02u; } g_manual_blocks[0x811DACFCu] = (BlockFn)mb_811DACFC; gbn() checks g_manual_blocks first so the override is effective. Build: harness exit 0; exe 57,114,282B 05:54:36; run out80m_m1131acfcsafe.txt started. This is an anti-crash patch, not a semantic fix - the real fix still needs to find who corrupts FUN_81159276's stack frame; first verify passing this point into title content loading. NEXT: read m1131 whether [ACFC-SAFE] triggered and whether we pass n=64,278,346 without BADMEM; if passed watch FIOSFILL title-asset OPENs, [SCENE] head0F, [VIEWADD]/[CTX*], GXM calls; then title content -> 2D context -> array2 -> GXM -> picture; other crashes located the same way; semantic fix traces FUN_81159276 stack frame corruption source (movie completion callback path / stack canary / async callback).
+
+LOOKUP: M1085 pc-ring predecessor, 0x81178F36 pop {r4,pc} popped 0x811DACFC, mid-function entry 0x811DACFC skips r6 alloc, FUN_81159276 stack frame corrupted, normal ring 811DAD6A 811DAD6E 811DAD80 811DACF6 81207352 812B28A0 8120735C, crash ring 811592AA 811592B4 811592B6 811592BE 81178F10 81178F14 81178F36, mb_811DACFC manual block ACFC-SAFE r6=0 epilogue 0x811DAD86, g_manual_blocks registration, gbn checks manual first, exe 57,114,282B 05:54:36, out80m_m1131acfcsafe.txt, movie completion path lr=81159298 -> §18.4629 [relevant: pc-ring probes], §18.4628 [relevant: fiber same], §18.4627 [relevant: earlier crash analysis]

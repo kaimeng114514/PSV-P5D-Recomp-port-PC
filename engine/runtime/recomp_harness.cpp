@@ -4707,6 +4707,23 @@ static uint32_t mb_8102A50E(RecState* s) {
   s->r[4] = 0;
   return (s->r[5] == 0u) ? 0x8102A654u : 0x8102A516u;   // flags unused by the successor block (starts with ldr r1,[r5])
 }
+// M1085: safety override for FUN_811DAB8C's mid-function entry 0x811DACFC.
+// pc-ring proves a stray mid-function entry at 0x811DACFC happens with r6=0 (skipping the
+// 0x811DABC2 pool allocation). The real block would dereference r6 -> BADMEM va=0.
+// Safe path: when r6==0 (allocation failed / mis-entered), return 0 (NULL) through the
+// normal epilogue 0x811DAD86 instead of writing to guest VA 0.
+static uint32_t mb_811DACFC(RecState* s) {
+  if (s->r[6] == 0u) {
+    static int _n = 0;
+    if (_n++ < 60) { printf("[ACFC-SAFE] #%d r6=0 -> skip insert, go epilogue lr=%08X sp=%08X fib=%08X\n", (int)g_blkcnt_total, s->r[14], s->r[13], g_cur_fiber); fflush(stdout); }
+    s->r[0] = 0u;
+    return 0x811DAD86u;
+  }
+  // normal semantics: ldr r0,[sp,#0x14]; cmp r0,#0; beq 0x811DAD4A; else fall to 0x811DAD02
+  { uint32_t _v = 0; uint8_t* _q = GP(s->r[13] + 0x14u); if (_q) std::memcpy(&_v, _q, 4); s->r[0] = _v;
+    if (_v == 0u) return 0x811DAD4Au; }
+  return 0x811DAD02u;
+}
 static void init_manual_blocks(void) {
   g_manual_blocks[0x81032CF8u] = (BlockFn)mb_81032CF8;
   g_manual_blocks[0x81032CC8u] = (BlockFn)mb_81032CC8;
@@ -4719,6 +4736,7 @@ static void init_manual_blocks(void) {
   g_manual_blocks[0x811DB5E0u] = (BlockFn)mb_811DB5E0;
   g_manual_blocks[0x8102A50Eu] = (BlockFn)mb_8102A50E;
   g_manual_blocks[0x811EB930u] = (BlockFn)mb_811EB930;   // M845: null display-buffer guard (skip submit instead of abort)
+  g_manual_blocks[0x811DACFCu] = (BlockFn)mb_811DACFC;
 }
 static BlockFn gbn(uint32_t pc) {
   { static int _mg_env=-1; if (_mg_env<0) { const char* _e=getenv("P5D_MGRPROBE"); _mg_env=(_e&&atoi(_e)!=0)?1:0; }
