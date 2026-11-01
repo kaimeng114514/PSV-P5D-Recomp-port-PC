@@ -1043,6 +1043,30 @@
 | M1025 | §18.4570: **真实 init 链卡在 step0 trophy：反编译发现每个 init worker 都是「state 0→1 调初始化函数 + 每次调完成检查函数，检查非 0 → return -1」；STEPFORCE 缺 trophy 的检查 block（0x8118482C `cmp r0,#0` 后 beq pending），已补强制 r0=1**。反编译证据（`initsteps2.txt`）：
 | M1026 | §18.4571: **发现 STEPFORCE 对 init worker 无效的原因：init worker 经 nested runner 执行，不经过 job_probes → 把 18 个 init 完成检查 block 的强制从 harness 探针移到 batch_012 的 AOT block 内**。证据（m1088，trophy 检查已加 STEPFORCE）：
 | M1027 | §18.4572: **init 链仍不推进的下一层原因分析：`FUN_8116F748` 丢弃 worker 返回值（`(*(code*)*param_1)();` 不取返回值）；completion 由 job[8] countdown（200 帧）到期触发；worker 只有返回 -1 才会立即完成。batch 级检查强制已加但 JOBCOMP 仍 1 ⇒ 怀疑 trophy worker 卡在 state0 的初始化调用（`FUN_8102d53c`）而非检查 block。已加 EXECRET/TPATH 探针验证执行路径**。m1089（batch_012 18 个检查强制后）结果：
+| M1028 | §18.4573: **EXECRET/TPATH 探针给出决定性数据：trophy worker 确实走到检查 block 并返回 -1 路径；trampoline 30 次返回中绝大部分 0、有 1 次 -1 ⇒ 完成机制有被触发，但 init 链仍不推进 → 下一步必须反编译 page1 init 主状态机（FUN_8118479C）搞清"推进条件"**。`out80m_m1090execpath.txt` / err：
+```
+[TPATH820] lr=8118480E r0=85B869FC      ← trophy worker state 路径
+[TPATH828] lr=8120735C r0=84618180      ← 调 FUN_8102d544 前
+[TPATH82C] lr=8102D564 r0=00000001      ← ★ 检查 block 被执行（强制 r0=1 生效）
+[TPATH830] lr=8102D564 r0=00000001      ← ★ 返回 -1 路径被执行
+[EXECRET] 30 条：29 × r0=00000000，1 × r0=FFFFFFFF   ← trampoline 有返回 -1
+[JOBCOMP] 1（仍只有 #1）  [SEQREQ] 8（无 page=6）  [BADMEM] 0  n=60415000
+```
+**执行器语义（`jobmgr2.txt` FUN_811DB020 后半段）**：
+```c
+// running 列表：piVar6[0x20]（job[8]）--，到 0 → 移入 ready 列表，*job = 2
+// ready 列表循环：
+iVar4 = (*(code *)piVar6[10])(param_1, piVar6);   // trampoline(process, job)
+if (iVar4 == -1) FUN_811dad8c(piVar6);            // ★ completion
+else if (iVar4 != 0) piVar6[10] = iVar4;          // ★ 非 -1 非 0 → 替换 trampoline（状态机）
+```
+⇒ EXECRET 的 1 次 -1 说明至少一个 job 完成；但 **[JOBCOMP] 仍 1** ⇒ JOBCOMP 探针可能只统计部分完成路径，或 init 链的推进依赖**别的东西**（页面状态机观察的不是 job 完成，而是 `FUN_8116F900(名称)` 对象/步骤状态）。
+**下一步（明确）**：反编译 page1 init 主状态机 FUN_8118479C（page1 start 调 `FUN_8118479C` = init 步骤驱动）与 FUN_8118484C，弄清：
+1) 8 个步骤如何推进（每一步等待什么条件：job 完成？对象出现？标志位？）
+2) 我们的 init worker 完成后，步骤状态是否真的被更新（还是卡在等待某个 FUN_8116F900("xxx") 对象）
+3) 找到卡点后精确强制（batch 级）
+验证：`out80m_m1090execpath.txt`、`err80m_m1090execpath.txt`、`jobmgr2.txt`、`exec748.txt`。 |
+| §18.4573 | EXECRET/TPATH probes gave decisive data: the trophy worker really reaches its check block and the return -1 path executes; of 30 trampoline returns most are 0 and one is -1 => the completion mechanism is triggered at least once, but the init chain still does not advance => next must decompile the page1 init master state machine (FUN_8118479C) to learn the advancement condition. out80m_m1090execpath.txt / err: [TPATH820] lr=8118480E r0=85B869FC (trophy worker state path); [TPATH828] lr=8120735C r0=84618180 (before FUN_8102d544); [TPATH82C] lr=8102D564 r0=00000001 (the check block executes, forced r0=1 works); [TPATH830] lr=8102D564 r0=00000001 (the return -1 path executes); [EXECRET] 30 lines: 29 x r0=00000000, 1 x r0=FFFFFFFF (trampoline returned -1 once); [JOBCOMP] 1 (still only #1); [SEQREQ] 8 (no page=6); [BADMEM] 0; n=60415000. Executor semantics (jobmgr2.txt FUN_811DB020 second half): running list piVar6[0x20] (job[8])--; at 0 moved to the ready list with *job=2; ready list loop: iVar4=(*(code*)piVar6[10])(param_1,piVar6) (trampoline(process,job)); if (iVar4==-1) FUN_811dad8c(piVar6) (completion); else if (iVar4!=0) piVar6[10]=iVar4 (replace trampoline, state machine). So the single -1 in EXECRET proves at least one job completed, but [JOBCOMP] stays 1 => either the JOBCOMP probe only counts part of the completion paths, or the init chain advancement depends on something else (the page state machine may observe FUN_8116F900(name) objects/step states, not job completion). NEXT: decompile the page1 init master state machine FUN_8118479C (called by page1 start) and FUN_8118484C to learn: (1) how the 8 steps advance (waiting for job completion? object appearance? flags?); (2) whether our init worker completions actually update the step state (or it waits for some FUN_8116F900('xxx') object); (3) after finding the blocker, force it precisely at batch level. |
 ```
 [FRAMEDUMP] n=60445000（运行继续，无崩溃）
 [JOBCOMP] 1（仍只有 #1）  [SEQREQ] 8（无 page=6）  [BADMEM] 0
@@ -494729,3 +494753,33 @@ NEXT：
 ANTI-FORGETTING ENTRY. Keywords: M1027 next-layer analysis of why the init chain does not advance. FUN_8116F748 discards the worker return value ((*(code*)*param_1)();) and completion is triggered when the job[8] countdown (200 frames) expires; a worker only completes immediately if it returns -1. Batch-level check forcing is in place but JOBCOMP is still 1 => suspect the trophy worker is stuck in its state0 init call FUN_8102d53c before reaching the check block. m1089: [JOBCOMP] 1; [SEQREQ] 8 (no page=6); [BADMEM] 0; [WFDBG] 53 lines: trophy #18 85B86A1C wf=81184809 once; sound #49 85B8861C wf=811848B7 once; n=60445000. Decompiled exec748.txt/jobmgr2.txt: FUN_8116FA5C(ctx)=FUN_8116f748(*(u32*)(ctx+0x34)); FUN_8116F748(node): DAT_815554C0=node; (*(code*)*node)(); DAT_815554C0=0; FUN_811DB020: running list job[8]-- each frame; at 0 moved to ready list *job=2; ready list executes job[10] trampoline; if it returns -1 -> FUN_811dad8c(job) -> completion(job[1]). M1027 probes (exe 57,050,520B 13:33:15): batch_011 blk_8116FA64 -> [EXECRET] r0=...; batch_012 blk_81184820/28/2C/30 -> [TPATH820/828/82C/830] lr/r0. Diagnostic run out80m_m1090execpath.txt started. NEXT: [EXECRET] actual return value; [TPATH82C] whether the trophy check executes; if stuck in FUN_8102d53c decompile it for HLE deps; after fix JOBCOMP grows -> page1 ends -> page6 -> title.
 
 LOOKUP: M1027, init chain not advancing, FUN_8116F748 discards worker return, job[8] countdown 200, FUN_811DB020 process manager, ready list job[10] trampoline, return -1 completion, trophy worker stuck FUN_8102d53c, EXECRET probe blk_8116FA64, TPATH probes 81184820/28/2C/30, out80m_m1090execpath.txt, exec748.txt, jobmgr2.txt, exe 57,050,520B -> §18.4571 [relevant: batch-level forces], §18.4570 [relevant: trophy check], §18.4569 [relevant: init chain]
+### 18.4573 PORT M1028: trophy worker 确实返回 -1，但 init 链仍不推进 → 转向 page1 init 主状态机
+
+1) `out80m_m1090execpath.txt` / err：
+```
+[TPATH820] lr=8118480E r0=85B869FC      ← trophy worker state 路径
+[TPATH828] lr=8120735C r0=84618180      ← 调 FUN_8102d544 前
+[TPATH82C] lr=8102D564 r0=00000001      ← ★ 检查 block 执行（强制 r0=1 生效）
+[TPATH830] lr=8102D564 r0=00000001      ← ★ 返回 -1 路径执行
+[EXECRET] 30 条：29×r0=0，1×r0=FFFFFFFF  ← trampoline 有返回 -1
+[JOBCOMP] 1   [SEQREQ] 8（无 page=6）   [BADMEM] 0   n=60415000
+```
+2) 执行器语义（jobmgr2.txt FUN_811DB020）：
+```c
+iVar4 = (*(code *)piVar6[10])(param_1, piVar6);   // trampoline(process, job)
+if (iVar4 == -1) FUN_811dad8c(piVar6);            // completion
+else if (iVar4 != 0) piVar6[10] = iVar4;          // 替换 trampoline（状态机）
+```
+3) 结论：完成机制至少触发过 1 次，但 init 链不推进 ⇒ **推进条件不是简单的 job 完成**，需看 page1 init 主状态机。
+NEXT：
+```
+① 反编译 FUN_8118479C（page1 start 调用的 init 步骤驱动）与 FUN_8118484C
+② 弄清 8 步推进条件（job 完成/对象出现/标志位）
+③ 确认我们的 worker 完成是否更新步骤状态
+④ 找到卡点 → batch 级精确强制
+```
+验证：`out80m_m1090execpath.txt`、`err80m_m1090execpath.txt`、`jobmgr2.txt`。
+
+ANTI-FORGETTING ENTRY. Keywords: M1028 EXECRET/TPATH probes decisive: the trophy worker really reaches its check block and the return -1 path executes; of 30 trampoline returns most are 0 and one is -1 => the completion mechanism is triggered at least once, but the init chain still does not advance => next decompile the page1 init master state machine FUN_8118479C. out80m_m1090execpath.txt: [TPATH820] lr=8118480E r0=85B869FC; [TPATH828] lr=8120735C r0=84618180; [TPATH82C] lr=8102D564 r0=00000001; [TPATH830] lr=8102D564 r0=00000001; [EXECRET] 30 lines: 29 x 0, 1 x FFFFFFFF; [JOBCOMP] 1; [SEQREQ] 8 (no page=6); [BADMEM] 0; n=60415000. Executor semantics (jobmgr2.txt FUN_811DB020): running list job[8]--; at 0 move to ready list *job=2; ready list: iVar4=(*(code*)piVar6[10])(param_1,piVar6); if (iVar4==-1) FUN_811dad8c(piVar6); else if (iVar4!=0) piVar6[10]=iVar4. The single -1 proves at least one job completed but [JOBCOMP] stays 1 => the init chain advancement depends on something else (page state machine may observe FUN_8116F900(name) objects/step states, not job completion). NEXT: decompile the page1 init master state machine FUN_8118479C (called by page1 start) and FUN_8118484C: how the 8 steps advance (job completion? object appearance? flags?); whether worker completions update step state; after finding the blocker force it at batch level.
+
+LOOKUP: M1028, EXECRET 29x0 1xFFFFFFFF, TPATH820 8118480E, TPATH828 8120735C, TPATH82C 8102D564 r0=1, TPATH830 r0=1, trophy worker returns -1, JOBCOMP 1, SEQREQ 8, FUN_811DB020 ready list trampoline semantics, FUN_8118479C page1 init master, FUN_8118484C, out80m_m1090execpath.txt, jobmgr2.txt -> §18.4572 [relevant: EXECRET/TPATH], §18.4570 [relevant: init workers], §18.4569 [relevant: init chain]
