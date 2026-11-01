@@ -1064,6 +1064,35 @@
 | M1046 | §18.4591: **m1102 结果：强制上传完成生效（3 个 TGA 的 upload ret=1），但 [LOGO] 仍停在 state=3——不是单帧逻辑问题，而是主循环进入 app 显示管理器等待循环：`FUN_8128EA20` 每 1ms 休眠一次，等待 `[param+0xBC] != 1`（显示队列完成状态）；该状态由显示队列回调处理器 `FUN_8127B7C8`（队列 `DAT_8153FD64`，`DAT_8153FDA8` 控制）清除。即：title 代码在等"显示队列回调"完成，而我们的 HLE DisplayQueue 捕获路径可能绕过了 app 自己的队列登记，导致状态永不清除 → 主循环空转、S0_LOGO 不再被调度**。m1102 证据（`out80m_m1102tmxdone.txt`/err）：
 | M1047 | §18.4592: **为定位"显示队列等待"卡点加 [WAITLOOP]/[DQPROC] 探针：在 FUN_8128EA20 等待循环打印 `[+0xBC]` 状态、`DAT_8153FD60/FDA8`、`DAT_8153FD64` 队列槽、以及 HLE 侧 `dispq/present/endscene/displaycb` 计数；在显示队列回调处理器 FUN_8127B7C8 / 忙分支 FUN_8127B36A 打印队列状态**。m1102 关键补充：title 启动后 **只有 1 次 [ABIBEGIN]（n=59.585M），没有 EndScene/DisplayQueueAddEntry** ⇒ 主循环在等待一个"显示队列完成"状态，但显示提交路径未再被触发。实现：
 | M1048 | §18.4593: ★★★★★★★★ **m1103 决定性数据：等待循环参数 p=84D8D368、`[p+0xBC]` 恒为 1、`DAT_8153FD60=1`、`DAT_8153FDA8=0x816A0AC0`（busy 指针永不清）、`DAT_8153FD64` 队列槽 q0=**0x812264B5**（待执行回调！）、q1=0；HLE 侧 dispq/present/endscene 全 0。⇒ app 显示队列里有一个待执行回调 0x812264B5，但 `DAT_8153FDA8 != 0` 让 FUN_8127B7C8 永远走 busy 分支（调用 0x816A0AC0 的注册回调），**从不处理自己的队列槽** → 状态永不清除。M1048 实施 DQFORCE 实验：队列有回调（q0 != 0）且 busy 标志非 0 时，把 `DAT_8153FDA8` 清 0，让 FUN_8127B7C8 走正常路径处理回调队列**。m1103 证据：
+| M1049 | §18.4594: **m1104（DQFORCE）结果：busy 指针 `DAT_8153FDA8` 被成功清 0（早期一次），title 阶段 [WAITLOOP] 显示 `a8=00000000`、q0=812264B5 仍在队列中，但 `st=[p+0xBC]` 仍恒为 1——说明"清 busy → 处理队列回调"不是清除状态的关键；且运行后期出现新 BADMEM（va=0 @block=0x811C3FD4，stub=0x812B1BA0），说明 DQFORCE 破坏了某条路径。结论：显示队列的系统比预想复杂——需要先搞清 `[p+0xBC]` 状态由谁设置/清除、回调 0x812264B5 做什么、以及 app 注册的显示回调 0x8127BB29 与 HLE GXM 显示完成的关系**。m1104 证据：
+```
+[DQFORCE] #1 clear busy a8=816A0AC0 q0=812264B5               ← busy 清除成功
+[WAITLOOP] #1..#60 st=1 p=84D8D368 disq60=1 a8=00000000 q=812264B5/0 dispq=0 present=0 end=0 cb=1
+[LOGO] #2 state=3（仍无 state=4）
+[TMX] 上传 ret=1（全 3 个）  [ABIBEGIN] 1   [ABIEND] 0   [PRESENT] 1
+[BADMEM] guest va=0x00000000 unmapped block=0x811C3FD4 stub=812B1BA0   ← 新崩溃（DQFORCE 副作用）
+```
+**DQPROC2（busy 分支结构 0x816A0AC0）首次完整 dump**：
+```
+r0=816A0AC0 cbp(0x10)=8127BB29 cbarg(0x14)=8153FDB0
+w0=8127BAAF w4=00000000 w8=8127BB21 wC=8153FDB0
+```
+⇒ 该结构有 3 组函数指针/参数：0x8127BAAF、0x8127BB21、0x8127BB29（均带参数 0x8153FDB0 或结构自身）
+**分析**：
+- `[p+0xBC]` 状态的设置者尚未找到（p=84D8D368 是 app 显示管理器对象）
+- 队列回调 0x812264B5 执行后并不清除 `st`（或未执行）
+- busy 回调 0x8127BB29 每帧被调用（m1103），但也不清 `st`
+- 可能真正清除者是一个未被调度的 **guest 显示线程**（其入口可能在 0x8127BB29 或 0x812264B5 内部调用链中），或依赖 HLE 的 GXM 显示完成事件
+NEXT：
+```
+① 反编译 0x812264B5（队列回调）与 0x8127BB29/0x8127BAAF/0x8127BB21（显示线程回调组），看谁写 [p+0xBC]
+② dump p=84D8D368 对象全文（0xC0~0xE0 字节）+ 状态迁移历史：加写监视（g_watch_on/wr32_watch）到 [p+0xBC] 的地址
+③ 检查 stub 0x812B1BA0 是什么（BADMEM stub），修复 null 参数路径
+④ 若确认是"guest 显示线程未被调度" → 用 loadpump/schedfix 或主动 pump 该线程
+⑤ 备选：实验性在等待循环强制 st=0/2/3（P5D_WAITFORCE），先验证 title 绘制链路，再回补真实语义
+```
+验证：`out80m_m1104dqforce.txt`、`err80m_m1104dqforce.txt`、`dq_busy.txt`。 |
+| §18.4594 | m1104 (DQFORCE) result: the busy pointer DAT_8153FDA8 was successfully cleared (once, early), and at title time [WAITLOOP] shows a8=00000000 with q0=812264B5 still in the queue, but st=[p+0xBC] is still constantly 1 - so 'clear busy -> process queue callbacks' is not the key to clearing the state; and late in the run a new BADMEM appeared (va=0 at block=0x811C3FD4, stub=0x812B1BA0), meaning DQFORCE broke some path. Conclusion: the display queue system is more complex than expected - we must find who sets/clears the [p+0xBC] state, what callback 0x812264B5 does, and how the app-registered display callback 0x8127BB29 relates to HLE GXM display completion. m1104 evidence: [DQFORCE] #1 clear busy a8=816A0AC0 q0=812264B5 (busy cleared); [WAITLOOP] #1..#60 st=1 p=84D8D368 disq60=1 a8=00000000 q=812264B5/0 dispq=0 present=0 end=0 cb=1; [LOGO] #2 state=3 (still no state=4); [TMX] uploads ret=1 (all 3); [ABIBEGIN] 1; [ABIEND] 0; [PRESENT] 1; [BADMEM] guest va=0x00000000 unmapped block=0x811C3FD4 stub=812B1BA0 (new crash, DQFORCE side effect). DQPROC2 first full dump of busy-branch struct 0x816A0AC0: r0=816A0AC0 cbp(0x10)=8127BB29 cbarg(0x14)=8153FDB0 w0=8127BAAF w4=00000000 w8=8127BB21 wC=8153FDB0 (three function pointer/arg pairs: 0x8127BAAF, 0x8127BB21, 0x8127BB29). Analysis: the setter of [p+0xBC] is not found yet (p=84D8D368 is the app display-manager object); queue callback 0x812264B5 does not clear st (or is not executed); busy callback 0x8127BB29 is called every frame (m1103) but also does not clear st; the real clearer is probably an unscheduled guest display thread (entry probably inside 0x8127BB29 or 0x812264B5), or depends on an HLE GXM display-completion event. NEXT: (1) decompile 0x812264B5 (queue callback) and 0x8127BB29/0x8127BAAF/0x8127BB21 (display thread callback set) to find who writes [p+0xBC]; (2) dump object p=84D8D368 (0xC0~0xE0 bytes) and add a write watch on [p+0xBC]; (3) identify stub 0x812B1BA0 (BADMEM stub) and fix the null-argument path; (4) if it is confirmed the guest display thread is not scheduled, use loadpump/schedfix or actively pump that thread; (5) alternative: experimentally force st to 0/2/3 in the wait loop (P5D_WAITFORCE) to first validate the title drawing chain, then restore the real semantics. |
 ```
 [WAITLOOP] #1 st=1 p=84D8D368 disq60=00000001 a8=816A0AC0 q=812264B5/00000000 dispq=0 present=0 end=0 cb=1
 （cap 60 全部相同：st=1、q0=0x812264B5 一直挂着）
@@ -496137,3 +496166,35 @@ NEXT：
 ANTI-FORGETTING ENTRY. Keywords: M1048 m1103 decisive data: wait-loop param p=84D8D368, [p+0xBC] always 1, DAT_8153FD60=1, DAT_8153FDA8=0x816A0AC0 busy pointer never cleared, DAT_8153FD64 queue slot q0=0x812264B5 pending callback, q1=0, HLE dispq/present/endscene all 0. So the app display queue has a pending callback but the busy flag keeps FUN_8127B7C8 on the busy branch so it never processes its own queue slots -> state never clears. DQFORCE experiment: when q0 != 0 and DAT_8153FDA8 != 0 clear DAT_8153FDA8 so FUN_8127B7C8 takes the normal path. m1103: [WAITLOOP] 60 identical st=1 q=812264B5/0 dispq=0 present=0 end=0 cb=1; [DQPROC] 60 d60=1 a8=816A0AC0 q0=0; [DQPROC2] 30 busy d60=1 a8=816A0AC0; [LOGO] #2 state=3; [TMX] all ret=1; [BADMEM] 0. FUN_8127B36A: void FUN_8127b36a(int param_1) { if (*(code**)(param_1+0x10)) (**(code**)(param_1+0x10))(*(u32*)(param_1+0x14)); } param_1=DAT_8153FDA8=0x816A0AC0. M1048 in batch_022.cpp blk_8127B7C8: if P5D_DQFORCE and q0!=0 and a8!=0 then wr32(0x8153FDA8,0) print [DQFORCE]; DQPROC2 extended with r0/[+0x10]/[+0x14]/struct dump. batch_022 compile exit 0; exe relink exit 0 (57,063,965B 18:43:01). Verification run out80m_m1104dqforce.txt (FORCETITLE + FIOSFILL + DQFORCE) started. NEXT: [DQFORCE] fires; FUN_8127B7C8 processes the queue and runs 0x812264B5; [WAITLOOP] st becomes non-1 -> wait exits -> [LOGO] state=4/5; logoDrawProc draws -> frames show the logo; if stuck check 0x812264B5 or the legitimate DAT_8153FDA8 clearing path.
 
 LOOKUP: M1048, [WAITLOOP] st=1 p=84D8D368, [0x8153FD64] q0=812264B5 pending callback, DAT_8153FDA8=0x816A0AC0 busy, DAT_8153FD60=1, [DQPROC]/[DQPROC2], FUN_8127B36A callback at [+0x10] arg [+0x14], DQFORCE clear busy, batch_022 blk_8127B7C8, [LOGO] state=3, exe 57,063,965B, out80m_m1103waitloop.txt, out80m_m1104dqforce.txt -> §18.4592 [relevant: wait loop probes], §18.4591 [relevant: display wait]
+### 18.4594 PORT M1049: DQFORCE 部分生效但 st 仍为 1，需找 [p+0xBC] 的真正清除者
+
+1) m1104：
+```
+[DQFORCE] #1 clear busy a8=816A0AC0 q0=812264B5
+[WAITLOOP] #1..#60 st=1 p=84D8D368 disq60=1 a8=00000000 q=812264B5/0 dispq=0 present=0 end=0 cb=1
+[LOGO] #2 state=3（无 state=4）
+[TMX] 上传 ret=1（全 3 个）  [ABIBEGIN] 1  [ABIEND] 0  [PRESENT] 1
+[BADMEM] guest va=0x0 unmapped block=0x811C3FD4 stub=812B1BA0   ← DQFORCE 副作用
+```
+2) DQPROC2 结构 dump（0x816A0AC0）：
+```
+r0=816A0AC0 cbp=8127BB29 cbarg=8153FDB0
+w0=8127BAAF w4=0 w8=8127BB21 wC=8153FDB0
+```
+3) 分析：
+- busy 清 0 后正常路径会执行队列回调 0x812264B5，但 st 仍 1
+- busy 回调 0x8127BB29 每帧被调用（m1103）也不清 st
+- 真正清除者可能是未调度的 guest 显示线程，或依赖 HLE GXM 显示完成事件
+NEXT：
+```
+① 反编译 0x812264B5 / 0x8127BB29 / 0x8127BAAF / 0x8127BB21 → 找 [p+0xBC] 写者
+② dump p=84D8D368（0xC0~0xE0）+ 写监视 [p+0xBC]
+③ 查 stub 0x812B1BA0（BADMEM 路径）
+④ guest 显示线程未调度 → pump
+⑤ 备选：P5D_WAITFORCE 强制 st 非 1，先验证 title 绘制
+```
+验证：`out80m_m1104dqforce.txt`、`err80m_m1104dqforce.txt`、`dq_busy.txt`。
+
+ANTI-FORGETTING ENTRY. Keywords: M1049 m1104 DQFORCE: busy pointer DAT_8153FDA8 cleared (a8=0 at title), q0=812264B5 still queued, but st=[p+0xBC] stays 1; late BADMEM va=0 at block=0x811C3FD4 stub=0x812B1BA0 (DQFORCE side effect) -> display queue system more complex; must find who sets/clears [p+0xBC], what 0x812264B5 does, how app display callback 0x8127BB29 relates to HLE GXM display completion. m1104: [DQFORCE] #1 clear busy a8=816A0AC0 q0=812264B5; [WAITLOOP] 60 identical st=1 p=84D8D368 disq60=1 a8=0 q=812264B5/0 dispq=0 present=0 end=0 cb=1; [LOGO] #2 state=3; [TMX] all ret=1; [ABIBEGIN] 1; [ABIEND] 0; [PRESENT] 1; [BADMEM] va=0 block=0x811C3FD4 stub=812B1BA0. DQPROC2 struct dump 0x816A0AC0: r0=816A0AC0 cbp(0x10)=8127BB29 cbarg(0x14)=8153FDB0 w0=8127BAAF w4=0 w8=8127BB21 wC=8153FDB0 (three fn/arg pairs 0x8127BAAF, 0x8127BB21, 0x8127BB29). Analysis: [p+0xBC] setter unknown (p=84D8D368 app display manager); queue callback 0x812264B5 does not clear st; busy callback 0x8127BB29 called every frame does not clear st; real clearer likely an unscheduled guest display thread or HLE GXM display-completion event. NEXT: decompile 0x812264B5 and 0x8127BB29/0x8127BAAF/0x8127BB21 to find [p+0xBC] writers; dump p=84D8D368 0xC0~0xE0 and write-watch [p+0xBC]; identify stub 0x812B1BA0; pump the guest display thread if unscheduled; alternative P5D_WAITFORCE (force st non-1) to validate title drawing chain first.
+
+LOOKUP: M1049, m1104 DQFORCE, a8=0 but st=1, q0=812264B5 not executed, [WAITLOOP] p=84D8D368 st=1, DQPROC2 struct 0x816A0AC0 cbp=8127BB29 cbarg=8153FDB0 w0=8127BAAF w8=8127BB21, BADMEM va=0 block=0x811C3FD4 stub=812B1BA0, [LOGO] state=3, exe 57,063,965B, out80m_m1104dqforce.txt -> §18.4593 [relevant: DQFORCE], §18.4592 [relevant: wait loop probes]
