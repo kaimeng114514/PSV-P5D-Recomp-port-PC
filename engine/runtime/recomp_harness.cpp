@@ -285,6 +285,8 @@ static int g_trc_n = 0;
 static int g_pumpst_n = 0;
 // moved-globals-4177
 static uint32_t g_watch_addr = 0;
+static uint32_t g_scwatch = 0;
+extern "C" void harness_scwatch(uint32_t a) { g_scwatch = a; }
 static uint32_t g_watch_val = 0;
 static int g_layout_n = 0;
 static int g_store_n = 0;
@@ -5137,6 +5139,7 @@ extern "C" void wr16_watch(uint32_t a, uint32_t v) {
       if (g_w16_n++ < 240) { printf("[W16] a=%08X off=%02X v=%04X blk=%08X fib=%08X thr=%08X\n", a, a - g_watch_task, v, g_cur_block, g_cur_fiber, g_cur_thr); fflush(stdout); } } }
 }
 extern "C" void wr32_watch(uint32_t a, uint32_t v) {
+  { if (g_scwatch && a >= g_scwatch && a < g_scwatch + 0x50u) { static int _scw=0; if (_scw++ < 240) { std::fprintf(stderr,"[SCW] a=%08X off=%02X v=%08X blk=%08X fib=%08X thr=%08X\n", a, a-g_scwatch, v, g_cur_block, g_cur_fiber, g_cur_thr); std::fflush(stderr); } } }
   { static int _ow=0; if (g_ea552_obj && (a == g_ea552_obj || a == g_ea552_obj + 4u || a == 0x816CC66Cu) && _ow++ < 40) { printf("[OBJWR] a=%08X v=%08X off=%X blk=%08X fib=%08X pc=%08X\n", a, v, a-g_ea552_obj, g_blkcnt_total, g_cur_fiber, g_cur_block); fflush(stdout); } }
   { static int _gw=0; if ((a == 0x816CC66Cu || a == 0x816CC700u || a == 0x816CC66Cu+0x10u) && _gw++ < 40) { printf("[GW] a=%08X v=%08X blk=%08X fib=%08X thr=%08X\n", a, v, g_cur_block, g_cur_fiber, g_cur_thr); fflush(stdout); } }
   if (a == 0x815554C4u || a == 0x815554C8u || a == 0x815554C0u) { static int _pw=0; if (_pw++ < 200) { printf("[PROCWR] a=%08X v=%08X blk=%08X fib=%08X thr=%08X sp=%08X\n", a, v, g_cur_block, g_cur_fiber, g_cur_thr, g_snap_r[13]); fflush(stdout); } }

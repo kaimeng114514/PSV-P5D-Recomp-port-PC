@@ -1086,6 +1086,61 @@
 | M1068 | §18.4613: ★★★★★★★★★★★★ **M1068 线程泵修复成功：`P5D_PUMPMAIN=1` 让 guest 线程真正执行！2.5M+ 次线程执行、worker 进入 trampoline、帧计数器 ctr 从 0→221（引擎帧循环活了）、无 BADMEM、运行速度提升约 3 倍；但 title 阶段仍无 per-frame GXM 绘制调用——下一层：worker 是否执行 gfd 作业描述符。**
 | M1069 | §18.4614: ★★★★★★★★★★ **worker 线程确认执行了 gfd 帧提交描述符（[GSUBMIT] tid=40016000 r1=811F3495；[GPUPREP2] tid=40016000 进入 FUN_811EBB90），并反汇编解码了 FUN_811F3494 的两道提交门控——门控显示 array2（DAT_816CC6CC）绘制列表为空，因为 2D sprite 批处理渲染器 FUN_811ADAFE 从未运行。**
 | M1070 | §18.4615: ★★★★★★★★★★ **m1116 把门控原因再推进一层：gfd 帧提交入口实测 `frame=0 a2=850FD960 g730=0x03000000`，array2 bucket0/1 链表头全 0（b0op/b0tr/b1op/b1tr=0）——两道门控都跳过；而 2D 场景调度器 `FUN_811C2964` 确实每帧被主线程调用（120 次，r0=859BF220/859BF940 两个场景对象），但它没有到达 FUN_811B6B12/FUN_811ADAFE——场景条目列表（param_1[0xF]）为空或条目全被禁用。**
+| M1071 | §18.4616: ★★★★★★★★★★ **m1117 铁证：两个场景对象（859BF220/859BF940）每帧被检查，`st=1, head0F=0, head19=0`——2D 条目链完全为空；且在 arm 后没有任何对 scene+0x3C 的写入（[SCW]=0）。同时反编译出场景帧驱动与场景/视图注册器。**
+m1117（P5D_PUMPMAIN=1，n=64.3M，exit 0）：
+```
+[SCENE] #1 tid=00000000 p=859BF220 st=00000001 head0F=00000000 head19=00000000 cnt=0
+[SCENE] #2 tid=00000000 p=859BF940 st=00000001 head0F=00000000 head19=00000000 cnt=0
+…（120 次，两个场景交替，条目链始终 0）
+[SCW] 0          ← ★ 场景条目链指针位置没有任何写入（不是被写后清空，而是从未注册）
+[C2964] 120：tid=0 p=859BF220/859BF940 lr=81199FF6
+[B6B12]=0 [ADA]=0 [GSUBX] frame=0 a2=850FD960 g730=03000000 b0op=b0tr=b1op=b1tr=0
+[LOGO]=202（两个 logo 任务状态机 3/4/5 循环推进）  [BADMEM]=0
+```
+**场景帧驱动 FUN_81199FDA（pre-GFD 回调 0x81199FDB，`scene_cb.txt`）**：
+```c
+undefined4 FUN_81199fda(void) {
+  puVar1 = &DAT_816cc630; uVar2 = 0;
+  do { if (puVar1[0xD] != 0) FUN_811c2964((undefined4*)puVar1[0xD]);   // ★ 对两个场景各调用一次调度
+       uVar2++; puVar1++; } while (uVar2 < 2);
+  DAT_816cd950 = 0;
+  if (DAT_816cd8d0 != 0) { FUN_811f0820(10); FUN_811f0850(0x4F,DAT_816cd8d0); }
+  FUN_812072dc(&DAT_816CC730 + DAT_816CC700*4, 0x3000000);   // ★ 写帧标志 = 0x03000000
+  return 0; }
+```
+⇒ **解释了 [GSUBX] 的 g730=0x03000000**（每帧由 pre-GFD 回调写成 0x03000000，bit0=0 → 门控 2 跳过 GPU 提交）。
+**场景/视图注册器 FUN_811C2A4C（998B，`scenerange.txt`）**：
+```c
+void FUN_811c2a4c(undefined4 param_1) {
+  piVar1 = FUN_811da534(0x100); FUN_811e6a40(piVar1,0xCC);   // 分配场景结构 0x100
+  …初始化…
+  local_38 = FUN_811ded54(param_1);                          // 场景标志
+  if ((local_38 & 1) != 0) { iVar2 = FUN_811bcb2e(local_40); … }   // 3D/相机部分
+  local_3c = FUN_811ded54(local_40);                          // ★ 视图数量
+  if (local_3c != 0) {
+    do {
+      piVar3 = FUN_811da55c(0x50); FUN_811e6a40(piVar3,0x50);   // 分配视图节点 0x50
+      piVar3[0x13] = -0x80000000;        // ★ 初始 bit31=1（禁用），由渲染流程清位
+      piVar3[0xB]  = 0xF00001;           // 对象 id
+      for 3: *(char*)(piVar3+0xC+i) = i; // 材质槽
+      …绑定 GPU 资源 (FUN_811bd60a/FUN_811b595a/…)、FUN_811bd66a(puVar7)…
+      piVar3[0xF] = 0; iVar2 = local_34[0xB];        // 插入场景链表
+      if (iVar2 == 0) { local_34[0xC] = piVar3; piVar3[0x10] = 0; }
+      else { piVar3[0x10] = iVar2; *(int**)(iVar2+0x3C) = piVar3; }
+      local_34[0xB] = piVar3;
+    } while (++local_30 < local_3c); } }
+```
+⇒ **场景对象是 FUN_811C2A4C 创建的（0x100 结构 + 0x50 视图节点）；注册由 FUN_811DED54 返回的"视图数量"驱动。若它为 0 → 一个条目都不建（与 [SCENE] 空链吻合）。** FUN_811C2A4C 没有直接 xref（通过函数表/间接调用进入）。
+NEXT：
+```
+① 探针：FUN_811C2A4C 入口（[SCREATE]）+ FUN_811DED54 返回值（视图数量）→ 是否被调用/返回 0
+② 找场景创建调用方：0x859BF220/0x859BF940 的分配点（[SCW] 已证明注册从未发生）
+③ 若 FUN_811DED54 返回 0 → 查它依赖什么（可能是显示/渲染初始化状态，我们 HLE 的某个返回值）
+④ 找到并打通"场景创建 + 视图注册"（appGx/gfd 初始化路径）→ head0F 非空
+⑤ 之后 FUN_811C2964 → FUN_811B6B12 → FUN_811ADAFE → array2 → FUN_811C0654=0 → FUN_811EC172 → SceGxm_* → 画面
+```
+验证：`out80m_m1117scene.txt`、`scene_cb.txt`、`scenerange.txt`、`c2964.txt`、`gate654.txt`。 |
+| §18.4616 | m1117 hard evidence: the two scene objects (859BF220/859BF940) are checked every frame with st=1, head0F=0, head19=0 - the 2D entry lists are completely empty; and after arming, nothing ever writes scene+0x3C ([SCW]=0), so entries were never registered. The scene frame driver FUN_81199FDA (pre-GFD callback 0x81199FDB) decompiled (scene_cb.txt): puVar1=&DAT_816cc630; uVar2=0; do { if (puVar1[0xD]!=0) FUN_811c2964((undefined4*)puVar1[0xD]); uVar2++; puVar1++; } while (uVar2<2); DAT_816cd950=0; if (DAT_816cd8d0!=0) { FUN_811f0820(10); FUN_811f0850(0x4F,DAT_816cd8d0); } FUN_812072dc(&DAT_816CC730 + DAT_816CC700*4, 0x3000000); return 0; - this explains [GSUBX] g730=0x03000000 (each frame the pre-GFD callback writes 0x03000000, bit0=0 so gate 2 skips GPU submit). The scene/view registration function FUN_811C2A4C (998B, scenerange.txt) decompiled: piVar1=FUN_811da534(0x100); FUN_811e6a40(piVar1,0xCC) (allocate 0x100 scene struct); local_38=FUN_811ded54(param_1) (scene flags); if ((local_38&1)!=0){ iVar2=FUN_811bcb2e(local_40); ... } (3D/camera part); local_3c=FUN_811ded54(local_40) (view count); if (local_3c!=0) { do { piVar3=FUN_811da55c(0x50); FUN_811e6a40(piVar3,0x50) (0x50 view node); piVar3[0x13]=-0x80000000 (bit31 initially set/disabled, cleared by the render flow); piVar3[0xB]=0xF00001 (object id); for 3: *(char*)(piVar3+0xC+i)=i (material slots); ... bind GPU resource (FUN_811bd60a/FUN_811b595a/...), FUN_811bd66a(puVar7); piVar3[0xF]=0; iVar2=local_34[0xB]; if (iVar2==0) { local_34[0xC]=piVar3; piVar3[0x10]=0; } else { piVar3[0x10]=iVar2; *(int**)(iVar2+0x3C)=piVar3; } local_34[0xB]=piVar3; } while (++local_30 < local_3c); } }. So the scene object is created by FUN_811C2A4C (0x100 struct + 0x50 view nodes) and registration is driven by the 'view count' returned by FUN_811DED54; if it is 0 no entries are built (matches the empty lists in [SCENE]). FUN_811C2A4C has no direct xref (entered via a function table/indirect call). NEXT: (1) probe FUN_811C2A4C entry ([SCREATE]) and the FUN_811DED54 return value (view count) - is it called, does it return 0; (2) find the scene creation call site (where 0x859BF220/0x859BF940 are allocated; [SCW] proved registration never happens); (3) if FUN_811DED54 returns 0 find its dependencies (likely display/render init state or one of our HLE return values); (4) make 'scene creation + view registration' happen (appGx/gfd init path) -> head0F non-empty; (5) then FUN_811C2964 -> FUN_811B6B12 -> FUN_811ADAFE -> array2 -> FUN_811C0654=0 -> FUN_811EC172 -> SceGxm_* -> picture. |
 m1116（P5D_PUMPMAIN=1，n=64.3M，exit 0）：
 ```
 [GSUBX] #1 tid=40016000 desc=847F4264 frame=0 a2=850FD960 g730=03000000
@@ -497642,3 +497697,38 @@ NEXT：
 验证：`out80m_m1116ada.txt`、`c2964.txt`、`gate654.txt`。
 
 ANTI-FORGETTING ENTRY. Keywords: M1070 m1116: gfd submit entry actual state frame=0 a2=850FD960 g730=0x03000000 array2 bucket0/1 heads all 0 (b0op/b0tr/b1op/b1tr=0) so both submit gates skip; 2D scene dispatcher FUN_811C2964 IS called every frame by main thread (120 times, r0=859BF220/859BF940 two scene objects, r1=81199FDB/0, r2=0x1398, lr=81199FF6) but never reaches FUN_811B6B12/FUN_811ADAFE -> scene entry list param_1[0xF] empty or entries disabled. FUN_811C2964 decompiled: if ((param_1[1] & 0x18)==0) { DAT_816cd950=*param_1; for (piVar5=(int*)param_1[0xF]; piVar5; piVar5=(int*)piVar5[0x10]) { if ((piVar5[0x13]&0x80000000U)==0) { if (piVar5[0xE]!=0) for 3 times FUN_811b29e6(piVar5[0xE],i,material); *(uint*)(*piVar5+0x10)|=0x80000; FUN_811b6b12(piVar5[0xB]); } } FUN_811e64f4(); second chain param_1[0x19] -> FUN_811cd376; callback param_1[0x2D] }. FUN_811B6B12 head: param_1=entry id, param_2=obj; gates *(param_2+0x10)&0x400 -> LAB_811b6ec0; &0x200000 triple-buffer copy; &0x20; (uVar4&0xD)==8 and *(param_2+0x1C) valid -> FUN_811b67c2 -> fills array2 via FUN_811ADAFE. So the scene object has no 2D entries (layers/views). NEXT: extend [C2964] probe (param_1[1], param_1[0xF], entries, [0x13]); find the scene-entry registration function (appGx scene/view API writing [0xF]); check scene [1] bit 0x18; fix gating HLE if registration blocked; once entries registered FUN_811B6B12 -> FUN_811ADAFE -> array2 non-empty -> FUN_811C0654=0 -> FUN_811EC172 -> SceGxm_* -> picture. |
+### 18.4616 PORT M1071: 场景条目链为空（从未注册）；场景帧驱动与场景/视图注册器反编译
+
+1) m1117：
+```
+[SCENE] #1 tid=0 p=859BF220 st=1 head0F=0 head19=0 cnt=0
+[SCENE] #2 tid=0 p=859BF940 st=1 head0F=0 head19=0 cnt=0   （120 次交替）
+[SCW] 0   ← 场景条目链指针从未被写
+[C2964]=120  [B6B12]=0 [ADA]=0
+[GSUBX] frame=0 a2=850FD960 g730=03000000 b0op=b0tr=b1op=b1tr=0
+```
+2) FUN_81199FDA（pre-GFD 回调 0x81199FDB）：
+```c
+do { if (puVar1[0xD] != 0) FUN_811c2964((undefined4*)puVar1[0xD]); ... } while (uVar2 < 2);
+FUN_812072dc(&DAT_816CC730 + DAT_816CC700*4, 0x3000000);   // 解释 g730=0x03000000
+```
+3) FUN_811C2A4C（场景/视图注册器，998B）：
+```
+分配 0x100 场景；local_3c = FUN_811ded54(param) = 视图数量；
+if (local_3c != 0) 循环：分配 0x50 视图节点，[0x13]=0x80000000（初始禁用），[0xB]=0xF00001，
+   材质槽 [0xC..]，绑定 GPU 资源，插入场景链表（next=+0x10，prev=+0x3C）
+```
+⇒ 视图数量为 0 → 一个条目都不建（与 [SCENE] 空链一致）；FUN_811C2A4C 无直接 xref（函数表/间接调用）
+NEXT：
+```
+① [SCREATE] 探针：FUN_811C2A4C 是否被调用 + FUN_811DED54 返回值
+② 找场景创建点（0x859BF220 分配处）
+③ FUN_811DED54 返回 0 的原因（依赖状态/HLE 返回值）
+④ 打通场景创建+视图注册 → head0F 非空
+⑤ → FUN_811C2964 → FUN_811B6B12 → FUN_811ADAFE → array2 → GXM → 画面
+```
+验证：`out80m_m1117scene.txt`、`scene_cb.txt`、`scenerange.txt`。
+
+ANTI-FORGETTING ENTRY. Keywords: M1071 m1117: scene objects 859BF220/859BF940 checked every frame with st=1 head0F=0 head19=0 (2D entry lists empty); [SCW]=0 means nothing ever writes scene+0x3C after arming (never registered). Scene frame driver FUN_81199FDA (pre-GFD callback 0x81199FDB): puVar1=&DAT_816cc630; do { if (puVar1[0xD]!=0) FUN_811c2964((undefined4*)puVar1[0xD]); ++; ++; } while (<2); DAT_816cd950=0; ...; FUN_812072dc(&DAT_816CC730 + DAT_816CC700*4, 0x3000000) -> explains g730=0x03000000 (bit0=0 so gate2 skips GPU submit). Scene/view registration FUN_811C2A4C (998B): piVar1=FUN_811da534(0x100); FUN_811e6a40(piVar1,0xCC); local_38=FUN_811ded54(param_1); if((local_38&1)!=0){ iVar2=FUN_811bcb2e(local_40); ...} local_3c=FUN_811ded54(local_40) (view count); if(local_3c!=0){ do { piVar3=FUN_811da55c(0x50); FUN_811e6a40(piVar3,0x50); piVar3[0x13]=-0x80000000 (bit31 initial disabled); piVar3[0xB]=0xF00001; for 3: *(char*)(piVar3+0xC+i)=i; ...bind GPU resource FUN_811bd60a/FUN_811b595a..., FUN_811bd66a(puVar7); piVar3[0xF]=0; iVar2=local_34[0xB]; if(iVar2==0){local_34[0xC]=piVar3; piVar3[0x10]=0;} else {piVar3[0x10]=iVar2; *(int**)(iVar2+0x3C)=piVar3;} local_34[0xB]=piVar3; } while(++local_30<local_3c); }. FUN_811C2A4C has no direct xref (indirect/function table). So scene created by FUN_811C2A4C (0x100 + 0x50 nodes), registration driven by FUN_811DED54 view count; zero -> no entries (matches [SCENE]). NEXT: probe FUN_811C2A4C ([SCREATE]) and FUN_811DED54 return (view count); find scene creation site (0x859BF220 allocation); why FUN_811DED54 returns 0 (state/HLE value); make scene creation+view registration happen -> head0F non-empty; then FUN_811C2964 -> FUN_811B6B12 -> FUN_811ADAFE -> array2 -> FUN_811C0654=0 -> FUN_811EC172 -> SceGxm_* -> picture.
+
+LOOKUP: M1071, [SCENE] p=859BF220/859BF940 st=1 head0F=0 head19=0 cnt=0, [SCW]=0 never writes scene+0x3C, scene frame driver FUN_81199FDA pre-GFD callback 0x81199FDB loops DAT_816CC630[0xD]/[0xE] calls FUN_811C2964, FUN_812072dc(&DAT_816CC730[frame],0x3000000) explains g730=0x03000000, FUN_811C2A4C scene/view registration 998B, FUN_811da534(0x100), FUN_811ded54 view count, 0x50 view nodes with [0x13]=0x80000000 [0xB]=0xF00001 material slots [0xC..], list next +0x10 prev +0x3C, FUN_811bd60a/FUN_811b595a GPU resource bind, FUN_811C2A4C no xref indirect table, out80m_m1117scene.txt, scene_cb.txt, scenerange.txt -> §18.4615 [relevant: scene entries empty], §18.4614 [relevant: submit gates], §18.4608 [relevant: walkers]
