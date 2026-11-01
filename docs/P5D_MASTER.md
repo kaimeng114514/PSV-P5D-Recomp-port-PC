@@ -1062,6 +1062,31 @@
 | M1044 | §18.4589: **m1100 关键证据：S0_LOGO 状态机已从 state=0 推进到 state=3（logo.bin 成功解析、3 个 logoTMX 任务创建），logoTMX worker 真实运行 6 次，FUN_81174DBC（TMX 容器解析）以我们的 logo.bin 缓冲（99C67790）为输入处理 3 个 TGA 名称——但卡在 state=3：等 3 个 TGA 任务完成（FUN_8116f8d2 + task state==3），而纹理上传（[TEXUPLOAD] 0）尚未发生。M1044 为上传链（FUN_81174DBC→FUN_8116332A→FUN_81163FA4→FUN_811CA9F0/FUN_811CA6B6）加一排探针定位。** m1100 证据：
 | M1045 | §18.4590: **m1101 证据：TMX 上传链全部走通——FUN_81174DBC 在 logo.bin 中找到全部 3 个 TGA（arch->entry=99C677B8/99D67F40/99DE8384）、纹理对象创建（texobj=85B8771C/85C07C3C/85C07D1C）、GXM 纹理创建（FUN_811CA6B6）、上传调用（FUN_811CA9F0）全部执行；但 guest 的"上传完成"判定依赖纹理对象 +0x28 的 bit31（FUN_811CA9F0: `return ([tex+0x28] & 0x80000000) == 0`），我们的 HLE 从不清除该位 → worker 永远停在 state=2 → S0_LOGO 卡在 state=3。M1045 在 FUN_811CA9F0 处强制"上传完成"（清 bit31 并返回 1）**。m1101：
 | M1046 | §18.4591: **m1102 结果：强制上传完成生效（3 个 TGA 的 upload ret=1），但 [LOGO] 仍停在 state=3——不是单帧逻辑问题，而是主循环进入 app 显示管理器等待循环：`FUN_8128EA20` 每 1ms 休眠一次，等待 `[param+0xBC] != 1`（显示队列完成状态）；该状态由显示队列回调处理器 `FUN_8127B7C8`（队列 `DAT_8153FD64`，`DAT_8153FDA8` 控制）清除。即：title 代码在等"显示队列回调"完成，而我们的 HLE DisplayQueue 捕获路径可能绕过了 app 自己的队列登记，导致状态永不清除 → 主循环空转、S0_LOGO 不再被调度**。m1102 证据（`out80m_m1102tmxdone.txt`/err）：
+| M1047 | §18.4592: **为定位"显示队列等待"卡点加 [WAITLOOP]/[DQPROC] 探针：在 FUN_8128EA20 等待循环打印 `[+0xBC]` 状态、`DAT_8153FD60/FDA8`、`DAT_8153FD64` 队列槽、以及 HLE 侧 `dispq/present/endscene/displaycb` 计数；在显示队列回调处理器 FUN_8127B7C8 / 忙分支 FUN_8127B36A 打印队列状态**。m1102 关键补充：title 启动后 **只有 1 次 [ABIBEGIN]（n=59.585M），没有 EndScene/DisplayQueueAddEntry** ⇒ 主循环在等待一个"显示队列完成"状态，但显示提交路径未再被触发。实现：
+**harness 新钩子**（供 AOT 探针读取 HLE 状态）：
+```cpp
+extern "C" int h_q_dispq(void)   { return g_disp_pending ? 1 : 0; }
+extern "C" int h_q_present(void) { return g_gxm_present_n; }
+extern "C" int h_q_endscene(void){ return g_gxm_end_n; }
+extern "C" int h_q_dispcb(void)  { return g_display_cb ? 1 : 0; }
+```
+**batch_022.cpp 探针**（0x8128EA20/FUN_8127B7C8/FUN_8127B36A 所在 batch）：
+```cpp
+blk_8128EA36  → [WAITLOOP] st=[param+0xBC] disq60 DAT_8153FD60 a8 DAT_8153FDA8 q=q0/q1 dispq/present/end/cb
+blk_8127B7C8  → [DQPROC] d60/a8/q0/q1（回调处理器入口）
+blk_8127B36A  → [DQPROC2] busy 分支
+```
+编译：harness/batch_022 exit 0；exe 重链 exit 0（57,062,836B，18:25:04）。
+验证运行：`out80m_m1103waitloop.txt`（FORCETITLE + FIOSFILL + 等待循环探针）已启动。
+NEXT：
+```
+① [WAITLOOP]：st 是否恒为 1、param_1 是哪个对象、disq60/a8 与队列槽内容
+② [DQPROC]/[DQPROC2]：app 回调队列是否为空/忙（判断回调是否登记）
+③ 对比 HLE 侧 dispq/present 计数（是否还有未执行的 display callback）
+④ 结论后实施：HLE displayQueue stub 登记 app 队列 / 或直接调用 FUN_8127B7C8 / 或实验性清 [+0xBC]
+```
+验证：`out80m_m1102tmxdone.txt`、`out80m_m1103waitloop.txt`（生成中）。 |
+| §18.4592 | Added [WAITLOOP]/[DQPROC] probes to locate the display-queue wait: in the FUN_8128EA20 wait loop print [+0xBC] state, DAT_8153FD60/FDA8, DAT_8153FD64 queue slots, and the HLE-side dispq/present/endscene/displaycb counters; in the display-queue callback processor FUN_8127B7C8 / busy branch FUN_8127B36A print the queue state. m1102 supplementary key fact: after title start there is only one [ABIBEGIN] (n=59.585M) and no EndScene/DisplayQueueAddEntry => the main loop waits for a 'display queue done' state but the display submit path is no longer triggered. Implementation: harness new hooks for AOT probes: extern "C" int h_q_dispq(void) { return g_disp_pending ? 1 : 0; } extern "C" int h_q_present(void) { return g_gxm_present_n; } extern "C" int h_q_endscene(void){ return g_gxm_end_n; } extern "C" int h_q_dispcb(void) { return g_display_cb ? 1 : 0; } batch_022.cpp probes: blk_8128EA36 -> [WAITLOOP] st=[param+0xBC] disq60 DAT_8153FD60 a8 DAT_8153FDA8 q=q0/q1 dispq/present/end/cb; blk_8127B7C8 -> [DQPROC] d60/a8/q0/q1; blk_8127B36A -> [DQPROC2] busy branch. harness/batch_022 compile exit 0; exe relink exit 0 (57,062,836B 18:25:04). Verification run out80m_m1103waitloop.txt (FORCETITLE + FIOSFILL + wait-loop probes) started. NEXT: whether [WAITLOOP] st is always 1, what param_1 is, disq60/a8 and queue slots; [DQPROC]/[DQPROC2] whether the app callback queue is empty/busy (callback registered or not); compare HLE dispq/present counters; then implement: register the callback into the app queue in the HLE displayQueue stub, or call FUN_8127B7C8 directly, or experimentally clear [+0xBC]. |
 ```
 [TMX] arch->entry=99C677B8/99D67F40/99DE8384   [TMX] texobj=85B8771C/85C07C3C/85C07D1C
 [TMX] upload begin tex=85B87730/85C07C50/85C07D30
@@ -496013,3 +496038,33 @@ NEXT：
 ANTI-FORGETTING ENTRY. Keywords: M1046 m1102 forced upload-done worked (3 TGA uploads return 1) but [LOGO] stays at state=3 because the main loop enters the app display-manager wait loop FUN_8128EA20, which sleeps 1 ms per iteration waiting for [param+0xBC] != 1 (display-queue completion state); that state is cleared by the display-queue callback processor FUN_8127B7C8 (queue DAT_8153FD64 controlled by DAT_8153FDA8). So the title code waits for a display-queue callback while our HLE DisplayQueue capture path may bypass the app's own queue registration -> state never clears -> main loop spins and the S0_LOGO job is not scheduled. m1102: [TMX] arch->entry=99C677B8/99D67F40/99DE8384; texobj=85B8771C/85C07C3C/85C07D1C; upload-done forced tex=85B87730/85C07C50; upload ret=00000001; [LOGO] #1 state=0 -> case0/1 open logo.bin -> [LOGO] #2 state=3; WD pcring 8127B85C 8127B36A 8127B370 8127BB28 8127BE36 8127BE4E 812B2AE0 8127BE56 8127BB2E 8127B374 8127B860 81283C8A 8128EA78 8127C0E8 8127C0F4 812B2A80; hle_ring 812B28A0@8120735C 812B2880@811732C2 812B2830@81207350. Spin decompiled: FUN_8128EA20 while(1){ st=(param_1==0)?call(0x81279176,"E2008071730",-2):*(int*)(param_1+0xBC); if((st==2||st==3)&&*(char*)(param_1+0xD9)) st=0; *out=st; if(st!=1) break; FUN_81283C84(); FUN_8127C0E8(1);} FUN_81283C84 -> FUN_8127B7C8: if(DAT_8153FD60!=0){ if(DAT_8153FDA8==0){ lock(DAT_816A0B64); process 8 callback slots of DAT_8153FD64; unlock; run callbacks; } else FUN_8127B36A(); } FUN_8127C0E8(n) -> 812B2A80(1000*n)=sceKernelDelayThread(us); FUN_81207344 -> 812B2830=sceKernelLockLwMutex; FUN_811732AE -> 812B2880=SceLibKernel_83C0E2AF(r0,1,2,0,0). NEXT: probe spin loop blocks (0x8128EA6E/0x8128EA78) printing [+0xBC], DAT_8153FD60/FDA8, DAT_8153FD64 queue, param_1; compare HLE DisplayQueue capture vs app queue; experimental force [+0xBC]=0; fix by registering the callback into the app queue in the HLE displayQueue stub or calling FUN_8127B7C8 directly.
 
 LOOKUP: M1046, forced upload works ret=1, [LOGO] state=3, main loop spin FUN_8128EA20, [param+0xBC] state, FUN_8127B7C8 display queue processor, DAT_8153FD64 queue, DAT_8153FD60, DAT_8153FDA8, FUN_81283C84, FUN_8127C0E8 -> sceKernelDelayThread, 812B2A80, FUN_81207344 sceKernelLockLwMutex, 812B2830, 812B2880 SceLibKernel_83C0E2AF, 812B28A0, WD pcring 8127B85C/81283C8A/8128EA78, out80m_m1102tmxdone.txt, spin_ident.txt, gxm_wait.txt -> §18.4590 [relevant: upload force], §18.4589 [relevant: upload chain]
+### 18.4592 PORT M1047: 显示队列等待循环探针（[WAITLOOP]/[DQPROC]）
+
+1) m1102 补充：title 后只有 1 次 [ABIBEGIN]（n=59.585M），无 EndScene/DisplayQueueAddEntry
+2) harness 钩子：
+```cpp
+extern "C" int h_q_dispq(void)   { return g_disp_pending ? 1 : 0; }
+extern "C" int h_q_present(void) { return g_gxm_present_n; }
+extern "C" int h_q_endscene(void){ return g_gxm_end_n; }
+extern "C" int h_q_dispcb(void)  { return g_display_cb ? 1 : 0; }
+```
+3) batch_022 探针：
+```cpp
+blk_8128EA36 → [WAITLOOP] st=[param+0xBC] disq60 a8 q=q0/q1 dispq/present/end/cb
+blk_8127B7C8 → [DQPROC]  d60/a8/q0/q1
+blk_8127B36A → [DQPROC2] busy 分支
+```
+4) 编译：harness/batch_022 exit 0；exe 57,062,836B（18:25:04）
+5) 验证运行 `out80m_m1103waitloop.txt` 已启动
+NEXT：
+```
+① [WAITLOOP] st 是否恒为 1、param_1 对象、disq60/a8/队列槽
+② [DQPROC]/[DQPROC2] app 队列空/忙
+③ HLE dispq/present 计数对比
+④ 实施修复（登记 app 队列 / 直接调 FUN_8127B7C8 / 清 [+0xBC]）
+```
+验证：`out80m_m1102tmxdone.txt`、`out80m_m1103waitloop.txt`（生成中）。
+
+ANTI-FORGETTING ENTRY. Keywords: M1047 added [WAITLOOP]/[DQPROC] probes to locate the display-queue wait: FUN_8128EA20 wait loop prints [+0xBC] state, DAT_8153FD60/FDA8, DAT_8153FD64 queue slots and HLE counters; FUN_8127B7C8 callback processor / FUN_8127B36A busy branch print queue state. m1102: after title start only one [ABIBEGIN] (n=59.585M), no EndScene/DisplayQueueAddEntry => main loop waits for 'display queue done' but the display submit path is no longer triggered. Harness hooks: h_q_dispq (g_disp_pending), h_q_present (g_gxm_present_n), h_q_endscene (g_gxm_end_n), h_q_dispcb (g_display_cb). batch_022 probes: blk_8128EA36 [WAITLOOP], blk_8127B7C8 [DQPROC], blk_8127B36A [DQPROC2]. harness/batch_022 compile exit 0; exe relink exit 0 (57,062,836B 18:25:04). Verification run out80m_m1103waitloop.txt started. NEXT: st always 1? param_1? disq60/a8/queue slots?; whether the app callback queue is empty/busy; HLE dispq/present counters; then register the callback into the app queue in the HLE displayQueue stub, or call FUN_8127B7C8 directly, or experimentally clear [+0xBC].
+
+LOOKUP: M1047, [WAITLOOP] probe blk_8128EA36, [DQPROC] blk_8127B7C8, [DQPROC2] blk_8127B36A, param+0xBC state, DAT_8153FD60, DAT_8153FDA8, DAT_8153FD64 queue, h_q_dispq/h_q_present/h_q_endscene/h_q_dispcb, batch_022, FUN_8128EA20 wait loop, HLE displayQueue stub, g_disp_pending, g_gxm_present_n, [ABIBEGIN] only one, out80m_m1103waitloop.txt, exe 57,062,836B -> §18.4591 [relevant: spin identified], §18.4590 [relevant: upload force]

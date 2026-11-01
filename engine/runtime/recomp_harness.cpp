@@ -444,6 +444,10 @@ extern "C" void p5d_hle_set_display_cb(uint32_t cb, uint32_t cbds) {
   g_display_cb = cb; g_display_cbds = cbds;
   static int _n = 0; if (_n++ < 6) { printf("[GXMCB] registered displayQueueCallback=%08X dataSize=%u\n", cb, cbds); fflush(stdout); }
 }
+extern "C" int h_q_dispq(void) { return (int)(g_disp_pending ? 1u : 0u); }
+extern "C" int h_q_present(void) { return g_gxm_present_n; }
+extern "C" int h_q_endscene(void) { return g_gxm_end_n; }
+extern "C" int h_q_dispcb(void) { return (int)(g_display_cb ? 1u : 0u); }
 extern "C" void p5d_hle_display_queue(uint32_t cb, uint32_t data) {
   { static int _dq=0; if (_dq++ < 12) { printf("[DISPQ] cb=%08X data=%08X\n", cb, data); fflush(stdout); } }
   if (!cb) return;
