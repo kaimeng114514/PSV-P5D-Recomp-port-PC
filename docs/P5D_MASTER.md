@@ -1041,6 +1041,34 @@
 | M1023 | §18.4568: **关键发现：init 链的 sound 等 worker 根本没被调度（JOBNORM 28 条里没有 wf=811848B7），因为 M998 强制 page1 update=0 让 init 状态机在 initDataRead 处就提前结束。新方案：移除 page1 提前结束强制 + 取消全部 worker 强制，让真实 init 链跑完（STEPFORCE 只让各 worker 的完成检查通过）**。`out80m_m1086soundrun.txt`（放行 sound worker 后）与 m1085 完全一致：
 | M1024 | §18.4569: ★★★★★★★★ **真实 init 链启动成功！M1023 移除 page1 提前结束强制后，trophy/sound/initDataRead worker 全部真实被调度（WFDBG #49 `node=85B8861C wf=811848B7` = init-sound worker 首次调度！），运行突破 n=60.1M 且无 BADMEM**。`out80m_m1087realinit.txt` / err：
 | M1025 | §18.4570: **真实 init 链卡在 step0 trophy：反编译发现每个 init worker 都是「state 0→1 调初始化函数 + 每次调完成检查函数，检查非 0 → return -1」；STEPFORCE 缺 trophy 的检查 block（0x8118482C `cmp r0,#0` 后 beq pending），已补强制 r0=1**。反编译证据（`initsteps2.txt`）：
+| M1026 | §18.4571: **发现 STEPFORCE 对 init worker 无效的原因：init worker 经 nested runner 执行，不经过 job_probes → 把 18 个 init 完成检查 block 的强制从 harness 探针移到 batch_012 的 AOT block 内**。证据（m1088，trophy 检查已加 STEPFORCE）：
+```
+[WFDBG] #18 ctx=84618110 node=85B86A1C wf=81184809   ← trophy worker 被调度（1 次）
+[WFDBG] #49 ctx=846181F0 node=85B8861C wf=811848B7   ← sound worker 被调度（1 次）
+[WFDBG] 其余 51 条为周期 job；init worker 不再重复出现
+[JOBCOMP] 1（trophy/sound 均未完成）  [SEQREQ] 8（无 page=6）  [BADMEM] 0
+```
+⇒ **job_probes 的 STEPFORCE 对 nested runner 执行的 init worker 不生效**（与 M1018 发现的 TTPROBE 盲区同源）；worker 内部检查 block 未被强制 → 永远返回 0（pending）→ 完成链不推进。
+**M1026 修复（batch 级强制，batch_012.cpp）**：对 18 个检查 block 在 block 入口直接强制 r0：
+```
+8118482C=1（trophy FUN_8102d544）
+811848DA=1（sound FUN_8115487a）
+811849A4/AC/B4/BC/C4/CC/D4/E0=1（gamedata 7 检查）
+81184AA8=1（msgwindow FUN_81031904）
+81184B6C=0（mainmenu FUN_810e865c）、81184B74/7C/88/90/98=1
+81184D1A=1（step5 FUN_81049a76）
+```
+编译：batch_012 exit 0；exe 重链 exit 0（57,049,241B，12:57:25）。
+验证运行：`out80m_m1089batchstepforce.txt` 已启动。
+NEXT：
+```
+① [JOBCOMP] 应逐个增加：trophy→sound→gamedata→msgwindow→mainmenu→step5→initDataRead
+② [SEQREQ] 出现 page=6（initDataRead 完成回调 → setSequence(6,0,0,0)）
+③ page6 start → title worker → 声音对象已创建 → title case0/1 通过
+④ title 状态机推进 → title 对象 → 引擎自绘标题
+```
+验证：`out80m_m1088trophyfix.txt`、`err80m_m1088trophyfix.txt`（WFDBG #18/#49）、`recomp_harness.exe`（57,049,241B 12:57:25）、`out80m_m1089batchstepforce.txt`（生成中）。 |
+| §18.4571 | Found why STEPFORCE had no effect on init workers: they run through the nested runner and do not pass through job_probes -> moved the forcing of 18 init completion-check blocks from the harness probe into the AOT blocks in batch_012. Evidence (m1088, trophy check already added to STEPFORCE): [WFDBG] #18 ctx=84618110 node=85B86A1C wf=81184809 (trophy worker scheduled once); #49 ctx=846181F0 node=85B8861C wf=811848B7 (sound worker scheduled once); the other 51 lines are periodic jobs; init workers never repeat; [JOBCOMP] 1 (neither trophy nor sound completed); [SEQREQ] 8 (no page=6); [BADMEM] 0. So the job_probes STEPFORCE has no effect on init workers executed by the nested runner (same blind spot as the M1018 TTPROBE discovery); their internal check blocks were not forced => they always return 0 (pending) => completion chain does not advance. M1026 fix (batch level, batch_012.cpp): force r0 at the entry of 18 check blocks: 8118482C=1 (trophy FUN_8102d544); 811848DA=1 (sound FUN_8115487a); 811849A4/AC/B4/BC/C4/CC/D4/E0=1 (gamedata 7 checks); 81184AA8=1 (msgwindow FUN_81031904); 81184B6C=0 (mainmenu FUN_810e865c), 81184B74/7C/88/90/98=1; 81184D1A=1 (step5 FUN_81049a76). batch_012 compile exit 0; exe relink exit 0 (57,049,241B 12:57:25). Verification run out80m_m1089batchstepforce.txt started. NEXT: [JOBCOMP] should grow one by one (trophy->sound->gamedata->msgwindow->mainmenu->step5->initDataRead); [SEQREQ] page=6 appears (initDataRead completion callback -> setSequence(6,0,0,0)); page6 start -> title worker -> sound objects exist -> title case0/1 passes; title state machine advances -> title object -> engine-drawn title. |
 ```c
 // trophy worker FUN_81184808（node 0x81184809）
 iVar2 = FUN_8102d544();           // 检查：trophy 初始化完成？
@@ -494602,3 +494630,37 @@ NEXT：
 ANTI-FORGETTING ENTRY. Keywords: M1025 real init chain stuck at step0 trophy. Decompiled initsteps2.txt: every init worker follows 'state 0->1 call init function + call completion-check each time, check non-zero -> return -1'. Trophy worker FUN_81184808 (node 0x81184809): iVar2=FUN_8102d544(); if(iVar2==0) return 0; return 0xffffffff; assembly 81184828 bl 0x8102d544; 8118482c cmp r0,#0; 8118482e beq pending => must force r0=1 at block 0x8118482C. Other workers' check blocks: sound 0x811848D6/0x811848DA; gamedata 0x811849A4..E0; msgwindow 0x81184AA8; mainmenu 0x81184B6C; step5 0x81184D1A (all already forced). STEPFORCE was missing the trophy case, so the init chain waited at step0 (JOBCOMP stayed 1, no SEQREQ page=6). M1025 fix in recomp_harness.cpp job_probes STEPFORCE: case 0x8118482Cu: s->r[0]=1u; break; // init trophy check FUN_8102d544 != 0 (done). harness compile exit 0; exe relink exit 0 (57,049,241B 12:24:57). Verification run out80m_m1088trophyfix.txt started. NEXT: [JOBCOMP] grows one by one (trophy->sound->gamedata->msgwindow->mainmenu->step5->initDataRead); [SEQREQ] page=6 appears; page6 start -> title worker -> sound objects exist -> title case0/1 passes; title state machine advances -> title object -> engine-drawn title.
 
 LOOKUP: M1025, init chain stuck step0 trophy, initsteps2.txt, FUN_81184808, FUN_8102d544, check block 0x8118482C, STEPFORCE case 0x8118482C, sound 0x811848DA, gamedata 0x811849A4, msgwindow 0x81184AA8, mainmenu 0x81184B6C, step5 0x81184D1A, out80m_m1087realinit.txt stuck JOBCOMP 1, out80m_m1088trophyfix.txt, exe 57,049,241B -> §18.4569 [relevant: real init chain started], §18.4568 [relevant: M1023]
+### 18.4571 PORT M1026: batch 级 init 检查强制（修复 STEPFORCE 对 nested runner 无效）
+
+1) m1088 证据（trophy 检查已加 STEPFORCE，但无效）：
+```
+[WFDBG] #18 ctx=84618110 node=85B86A1C wf=81184809   ← trophy worker 被调度
+[WFDBG] #49 ctx=846181F0 node=85B8861C wf=811848B7   ← sound worker 被调度
+[WFDBG] 其余 51 条 = 周期 job
+[JOBCOMP] 1（trophy/sound 均未完成）  [SEQREQ] 8（无 page=6）  [BADMEM] 0
+```
+⇒ init worker 经 **nested runner** 执行 → 不经过 job_probes → STEPFORCE 不生效（与 M1018 TTPROBE 盲区同源）
+2) M1026 修复（batch_012.cpp，18 个 block 入口强制 r0）：
+```
+8118482C=1   trophy FUN_8102d544
+811848DA=1   sound  FUN_8115487a
+811849A4/AC/B4/BC/C4/CC/D4/E0=1   gamedata 7 检查
+81184AA8=1   msgwindow FUN_81031904
+81184B6C=0   mainmenu FUN_810e865c
+81184B74/7C/88/90/98=1            mainmenu 其余检查
+81184D1A=1   step5 FUN_81049a76
+```
+3) 编译：batch_012 exit 0；exe 重链 exit 0（57,049,241B 12:57:25）。
+4) 验证运行 `out80m_m1089batchstepforce.txt` 已启动。
+NEXT：
+```
+① [JOBCOMP] 逐个增加（trophy→sound→gamedata→msgwindow→mainmenu→step5→initDataRead）
+② [SEQREQ] page=6
+③ page6 start → title worker → 声音对象存在 → title case0/1 通过
+④ title 状态机推进 → title 对象 → 引擎自绘标题
+```
+验证：`out80m_m1088trophyfix.txt`、`out80m_m1089batchstepforce.txt`（生成中）。
+
+ANTI-FORGETTING ENTRY. Keywords: M1026 found why STEPFORCE had no effect on init workers - they run through the nested runner and do not pass through job_probes (same blind spot as the M1018 TTPROBE discovery), so the forcing of 18 init completion-check blocks was moved from the harness probe into the AOT blocks in batch_012. Evidence m1088: [WFDBG] #18 ctx=84618110 node=85B86A1C wf=81184809 (trophy worker scheduled); #49 ctx=846181F0 node=85B8861C wf=811848B7 (sound worker scheduled); [JOBCOMP] 1; [SEQREQ] 8 (no page=6); [BADMEM] 0. M1026 batch-level forces in batch_012.cpp: 8118482C=1 (trophy FUN_8102d544); 811848DA=1 (sound FUN_8115487a); 811849A4/AC/B4/BC/C4/CC/D4/E0=1 (gamedata 7 checks); 81184AA8=1 (msgwindow FUN_81031904); 81184B6C=0 (mainmenu FUN_810e865c), 81184B74/7C/88/90/98=1; 81184D1A=1 (step5 FUN_81049a76). batch_012 compile exit 0; exe relink exit 0 (57,049,241B 12:57:25). Verification run out80m_m1089batchstepforce.txt started. NEXT: [JOBCOMP] should grow (trophy->sound->gamedata->msgwindow->mainmenu->step5->initDataRead); [SEQREQ] page=6; page6 start -> title worker -> sound objects exist -> title case0/1 passes; title state machine advances -> title object -> engine-drawn title.
+
+LOOKUP: M1026, STEPFORCE ineffective for init workers, nested runner, job_probes blind spot, batch-level forces batch_012, 8118482C trophy, 811848DA sound, 811849A4 gamedata, 81184AA8 msgwindow, 81184B6C mainmenu, 81184D1A step5, WFDBG #18 85B86A1C, WFDBG #49 85B8861C, [JOBCOMP] 1, out80m_m1089batchstepforce.txt, exe 57,049,241B -> §18.4570 [relevant: trophy check], §18.4569 [relevant: init chain started], §18.4563 [relevant: nested runner blind spot]
