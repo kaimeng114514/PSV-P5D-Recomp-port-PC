@@ -1057,6 +1057,41 @@
 | M1039 | §18.4584: **参考项目 Project Nativ（`TheLostPantheon/nativ`）：通用 PS Vita 游戏静态重编译框架（Killzone/Uncharted/Unit 13/Shovel Knight 可玩）——与本项目同类但更完整的架构参照。已 git clone 到 `C:\dev\refs\nativ`（注意：**GPLv2 许可，只能作只读参考，不可复制代码**）。核心对照与可采纳项如下**。
 | M1040 | §18.4585: **实现"FIOS 同步完成"探针（P5D_FIOSFILL=1）：在应用层文件包装函数 `FUN_8115FBE6/FC0E/FC28/FC20` 入口直接由 HLE 从 CPK 提供文件数据，绕开未被调度的 guest 请求队列消费者——目标：让 S0_LOGO 加载 `title/logo.bin` + 3 个 TGA 并进入绘制**。实现：
 | M1041 | §18.4586: **m1098 证据表明 FIOSFILL 已生效（第一笔：`app_system/font/c_font_p5.fnt` size=1,167,652 成功直填！），但 fake handle 是小整数导致 guest 直接把它当指针解引用 → BADMEM va=5 @0x81181CBE。M1041 改为返回完整 guest 请求对象（对象内含 [obj+4]=0xC/[obj+0xA0]=0/[obj+0x88]=size/[obj+0x94]=buf/[obj+0]=0），让 guest 自己的完成/取数据函数可以正常读取**。m1098：
+| M1042 | §18.4587: ★★★★★★★★★★ **重大突破：FIOSFILL 完整请求对象生效——`title/logo.bin`（2,101,012 字节）成功提供给 S0_LOGO 加载器，3 个 `logoTMX` 任务全部注册，且 logoTMX worker（wf=0x811933F1）真实执行；引擎开始渲染 960x544 场景（BSIMG doClear=1）且无任何 BADMEM**。m1099 证据：
+```
+[FIOSFILL] OPEN 'app_system/font/c_font_p5.fnt' size=1167652 -> obj=85B1E6D0
+[FIOSFILL] OPEN 'app_system/font/font_staff.fnt' size=28176  -> obj=85B312D0
+[FIOSFILL] OPEN 'app_system/font/font.ctbl' size=22024      -> obj=85B426D0
+[FIOSFILL] OPEN 'title/logo.bin' size=2101012                -> obj=85B875D0   ← ★ S0 logo 容器加载成功
+[PROCREG] #13 name='logoDrawProc'  cb0=85B8754C
+[PROCREG] #14 name='logoTMX'  cb0=99C677B8  cb1=85B876EC
+[PROCREG] #15 name='logoTMX'  cb0=99D67F40  cb1=85C07C0C
+[PROCREG] #16 name='logoTMX'  cb0=99DE8384  cb1=85C07CEC      ← ★ 3 个 TGA 加载任务注册（FUN_8119343A）
+[WFDBG] #43 ctx=84618260 node=85B8759C wf=81193705   ← logo 序列 worker 真跑
+[WFDBG] #44 ctx=846182D0 node=85B8777C wf=811933F1   ← ★ logoTMX worker 真跑
+[WFDBG] #45 ctx=84618420 node=85C88B2C wf=811848B7   ← sound step job
+[TRRET] #15 job=84618420 ret=FFFFFFFF node=85C88B2C wf=811848B7   ← sound step 完成（通道 A）
+[TEXBIND] #0 real=1 alias=0 dummy=15 u0=tex256x512
+[BSIMG] cd=8D300000 960x544 doClear=1 img=... view=...      ← ★ 引擎渲染 960x544（PS Vita 原生分辨率）
+[ABIRT] disp=1 rc=0   [PRESENT] #1 VK_SUCCESS
+[BADMEM] 0                                                   ← ★ 无崩溃
+[DRIVIN] #4 task=85B8474C state=1 step=1   [DRVA6] r0=8118484F r1=811848FD step=1
+运行继续到 n≈60.2M+（进程仍在运行，CPU 941s）
+```
+⇒ **从"文件请求无人消费"到"logo.bin 真实加载 + 3 TGA 任务建立 + worker 执行 + 引擎开帧"全链路已打通！**
+当前待确认：
+```
+① logoTMX worker（0x811933F1）内部 FUN_81174DBC（TMX 容器解析）是否返回成功、TGA 数据是否被上传（[TEXUPLOAD] 仍 0）
+② FUN_81193704 case3 是否等到 3 个任务完成（需 [LOGO] 状态探针）→ case4 淡入 → logoDrawProc 绘制
+③ 引擎已开始 960x544 渲染，但可能仍在自旋等待（无 TEXUPLOAD）
+```
+NEXT：
+1) 给 `batch_013.cpp` 的 FUN_81193704 状态机加 [LOGO] 探针（case/nm/counter/3 句柄）
+2) 给 `batch_011/013` 的 logoTMX worker（0x811933F1）与 FUN_81174DBC 加 [TMX] 探针（返回值/纹理句柄）
+3) 检查 logoTMX 任务是否完成（FUN_8116f8d2 + task state==3）
+4) 若 TMX 解析/纹理上传失败 → 补 GXM 纹理 HLE 或让 FUN_8119343A 走简化路径
+验证：`out80m_m1099fiosobj.txt`、`err80m_m1099fiosobj.txt`。 |
+| §18.4587 | MAJOR BREAKTHROUGH: the full-request-object FIOSFILL works - title/logo.bin (2,101,012 bytes) was served to the S0_LOGO loader, all 3 logoTMX tasks were registered, and the logoTMX worker (wf=0x811933F1) really executed; the engine began rendering a 960x544 scene (BSIMG doClear=1) with zero BADMEM. m1099 evidence: [FIOSFILL] OPEN 'app_system/font/c_font_p5.fnt' size=1167652 -> obj=85B1E6D0; 'app_system/font/font_staff.fnt' size=28176 -> obj=85B312D0; 'app_system/font/font.ctbl' size=22024 -> obj=85B426D0; 'title/logo.bin' size=2101012 -> obj=85B875D0 (S0 logo container loaded!); [PROCREG] #13 name='logoDrawProc' cb0=85B8754C; #14 logoTMX cb0=99C677B8 cb1=85B876EC; #15 logoTMX cb0=99D67F40 cb1=85C07C0C; #16 logoTMX cb0=99DE8384 cb1=85C07CEC (three TGA load tasks registered via FUN_8119343A); [WFDBG] #43 ctx=84618260 node=85B8759C wf=81193705 (logo sequence worker really runs); #44 ctx=846182D0 node=85B8777C wf=811933F1 (logoTMX worker really runs!); #45 ctx=84618420 node=85C88B2C wf=811848B7 (sound step job); [TRRET] #15 job=84618420 ret=FFFFFFFF node=85C88B2C wf=811848B7 (sound step completes, channel A); [TEXBIND] #0 real=1 alias=0 dummy=15 u0=tex256x512; [BSIMG] cd=8D300000 960x544 doClear=1 img=... view=... (engine renders 960x544, the PS Vita native resolution); [ABIRT] disp=1 rc=0; [PRESENT] #1 VK_SUCCESS; [BADMEM] 0 (no crash); [DRIVIN] #4 task=85B8474C state=1 step=1; [DRVA6] r0=8118484F r1=811848FD step=1; run continues to n≈60.2M+ (process still alive, CPU 941s). So the whole chain from 'file request has no consumer' to 'logo.bin really loaded + 3 TGA tasks created + worker executes + engine opens a frame' is connected! To confirm next: (1) whether the logoTMX worker (0x811933F1) internally FUN_81174DBC (TMX container parse) succeeds and the TGA data is uploaded ([TEXUPLOAD] still 0); (2) whether FUN_81193704 case3 sees the 3 tasks complete (need a [LOGO] state probe) -> case4 fade-in -> logoDrawProc drawing; (3) the engine already renders 960x544 but may still spin waiting (no TEXUPLOAD). NEXT: (1) add [LOGO] probes to the FUN_81193704 state machine in batch_013.cpp (case/nm/counter/3 handles); (2) add [TMX] probes to the logoTMX worker 0x811933F1 and FUN_81174DBC (return value/texture handle) in batch_011/013; (3) check whether the logoTMX tasks complete (FUN_8116f8d2 + task state==3); (4) if TMX parse/texture upload fails implement the GXM texture HLE or let FUN_8119343A take a simplified path. |
 ```
 [FIOSFILL] OPEN 'app_system/font/c_font_p5.fnt' size=1167652 -> h=1 buf=98C9C870   ← ★ FIOSFILL 工作正常
 [BADMEM] guest va=0x00000005 unmapped block=0x81181CBE                              ← 小整数 handle 被当指针解引用
@@ -495715,3 +495750,33 @@ NEXT：
 ANTI-FORGETTING ENTRY. Keywords: M1041 m1098 proved FIOSFILL works (first hit app_system/font/c_font_p5.fnt size=1,167,652 served directly) but a small-integer fake handle crashed when the guest dereferenced it -> BADMEM va=5 at 0x81181CBE. M1041 returns a full guest request object instead: hle_malloc(0x100), memset 0, [obj+0x04]=0xC, [obj+0x88]=size, [obj+0x94]=data ptr, byte [obj+0xA0]=0, map g_fakefile[obj]={buf,size}, return obj. m1098 details: [FIOSFILL] OPEN 'app_system/font/c_font_p5.fnt' size=1167652 -> h=1 buf=98C9C870; [BADMEM] guest va=0x00000005 unmapped block=0x81181CBE; [PROCREG] 7 (app_main_start/.../appFontSystem); [FORCETITLE] 0. Rationale: the guest's own FUN_81181CA0(obj) checks [obj+4]==0xC && [obj+0xA0]==0 -> 1 (done), FUN_81181CE4(obj,0,out) reads data [obj+0x94] and size [obj+0x88] - fully compatible; FC0E/FC28 intercepts retained but redundant. harness exit 0; exe relink exit 0 (57,058,809B 16:53:30). Verification run out80m_m1099fiosobj.txt (P5D_FORCETITLE=1 P5D_FIOSFILL=1) started. NEXT: [FIOSFILL] OPEN 'title/logo.bin' then atluslogo.tga etc; [LOGO] FUN_81193704 case2->3 (TGA task creation) -> case4+ (fade in) -> 69-frame switching; logoDrawProc draws ATLUS/CRI/P-STUDIO logos; fonts/logos served; if TGAs go through FUN_81174DBC container path check parsing (whole logo.bin provided).
 
 LOOKUP: M1041, FIOSFILL full request object, hle_malloc 0x100 obj, obj+0x04=0xC, obj+0x88=size, obj+0x94=data, obj+0xA0=0, BADMEM va=5 81181CBE, m1098 font c_font_p5.fnt size=1167652 h=1 buf=98C9C870, harness_fios_open returns obj, FUN_81181CA0,[obj+4]==0xC, FUN_81181CE4 req+0x94/+0x88, exe 57,058,809B, out80m_m1099fiosobj.txt -> §18.4585 [relevant: FIOSFILL first implementation], §18.4583 [relevant: FIOS consumer blocker]
+### 18.4587 PORT M1042: FIOSFILL 打通 S0_LOGO 加载链（logo.bin + 3 logoTMX 任务）
+
+1) m1099 决定性证据：
+```
+[FIOSFILL] OPEN 'app_system/font/c_font_p5.fnt' size=1167652 -> obj=85B1E6D0
+[FIOSFILL] OPEN 'app_system/font/font_staff.fnt' size=28176  -> obj=85B312D0
+[FIOSFILL] OPEN 'app_system/font/font.ctbl' size=22024      -> obj=85B426D0
+[FIOSFILL] OPEN 'title/logo.bin' size=2101012                -> obj=85B875D0   ← ★
+[PROCREG] #13 logoDrawProc  #14/#15/#16 logoTMX（3 个 TGA 加载任务）
+[WFDBG] #43 wf=81193705（logo 序列 worker）  #44 wf=811933F1（logoTMX worker 真跑）
+[TRRET] #15 ret=FFFFFFFF wf=811848B7（sound step 完成）
+[TEXBIND] #0 real=1 alias=0 dummy=15 u0=tex256x512
+[BSIMG] cd=8D300000 960x544 doClear=1          ← 引擎开始 960x544 渲染
+[ABIRT] disp=1 rc=0   [PRESENT] #1 VK_SUCCESS   [BADMEM] 0
+运行到 n≈60.2M+（仍在运行）
+```
+2) 结论：文件加载 → logo.bin → 3 TGA 任务 → logoTMX worker 执行 → 引擎开帧，全链路打通
+3) 待确认：logoTMX 内部 FUN_81174DBC 解析/TGA 纹理上传（[TEXUPLOAD] 仍 0）、FUN_81193704 case3→4（需 [LOGO] 探针）
+NEXT：
+```
+① batch_013 FUN_81193704 状态机 [LOGO] 探针（case/nm/counter/3 句柄）
+② logoTMX worker 0x811933F1 + FUN_81174DBC [TMX] 探针
+③ 检查 3 任务完成（FUN_8116f8d2 + task state==3）
+④ 失败则补 GXM 纹理 HLE 或简化 FUN_8119343A 路径
+```
+验证：`out80m_m1099fiosobj.txt`、`err80m_m1099fiosobj.txt`。
+
+ANTI-FORGETTING ENTRY. Keywords: M1042 MAJOR BREAKTHROUGH - full-request-object FIOSFILL works: title/logo.bin (2,101,012 bytes) served to the S0_LOGO loader, 3 logoTMX tasks registered, logoTMX worker (wf=0x811933F1) really executed, engine began rendering a 960x544 scene (BSIMG doClear=1), zero BADMEM. m1099: [FIOSFILL] OPEN 'app_system/font/c_font_p5.fnt' size=1167652 -> obj=85B1E6D0; font_staff.fnt 28176 -> 85B312D0; font.ctbl 22024 -> 85B426D0; 'title/logo.bin' size=2101012 -> obj=85B875D0; [PROCREG] #13 logoDrawProc cb0=85B8754C; #14 logoTMX cb0=99C677B8 cb1=85B876EC; #15 logoTMX cb0=99D67F40 cb1=85C07C0C; #16 logoTMX cb0=99DE8384 cb1=85C07CEC; [WFDBG] #43 ctx=84618260 node=85B8759C wf=81193705; #44 ctx=846182D0 node=85B8777C wf=811933F1; #45 ctx=84618420 node=85C88B2C wf=811848B7; [TRRET] #15 job=84618420 ret=-1 node=85C88B2C wf=811848B7; [TEXBIND] #0 real=1 alias=0 dummy=15 u0=tex256x512; [BSIMG] cd=8D300000 960x544 doClear=1; [ABIRT] disp=1 rc=0; [PRESENT] #1 VK_SUCCESS; [BADMEM] 0; [DRIVIN] #4 task=85B8474C state=1 step=1; [DRVA6] r0=8118484F r1=811848FD step=1; run continues past n≈60.2M. Chain connected: file request -> logo.bin -> 3 TGA tasks -> logoTMX worker -> engine frame start. To confirm: logoTMX worker internals FUN_81174DBC (TMX container parse) success, TGA texture upload ([TEXUPLOAD] still 0), FUN_81193704 case3->4 (needs [LOGO] probe), and the 3 tasks completing (FUN_8116f8d2 + task state==3). NEXT: add [LOGO] probes to the FUN_81193704 state machine in batch_013; add [TMX] probes to worker 0x811933F1 and FUN_81174DBC; check task completion; if TMX parse/upload fails implement the GXM texture HLE or simplify FUN_8119343A.
+
+LOOKUP: M1042, FIOSFILL full request object works, title/logo.bin 2101012 obj=85B875D0, font c_font_p5.fnt 1167652 font_staff.fnt 28176 font.ctbl 22024, PROCREG #13 logoDrawProc #14-16 logoTMX cb0=99C677B8/99D67F40/99DE8384 cb1=85B876EC/85C07C0C/85C07CEC, WFDBG #43 wf=81193705 #44 wf=811933F1 #45 wf=811848B7, TEXBIND real=1 u0=tex256x512, BSIMG 960x544 doClear=1, TRRET #15 ret=-1, BADMEM 0, DRIVIN #4 state=1 step=1, out80m_m1099fiosobj.txt -> §18.4586 [relevant: FIOSFILL object fix], §18.4585 [relevant: FIOSFILL], §18.4582 [relevant: S0 logo job]
