@@ -1091,6 +1091,37 @@
 | M1073 | §18.4618: ★★★★★★★★★★ **m1119 拿到场景注册的真实调用点：FUN_811BF900 在 title 初始化时被调用 2 次（index=0/scene=859BF220，index=1/scene=859BF940，调用者 0x8115A0E0/0x8115A314）；FUN_811C3438 只是互斥锁初始化；每帧 FUN_811C241E（[SCBUILD]）是场景相机矩阵计算（非视图构建）；P5D_PTRSCAN 扫描 939MB guest 镜像找 0x811C2A4C/0x811C2964 等指针 → 0 命中（说明该函数没有静态函数表入口，或镜像代码段非原始布局）。**
 | M1074 | §18.4619: ★★★★★★★★★★ **找到"添加 2D 视图"API：`FUN_811C30D4(scene, geometry, name)`——分配 0x50 视图节点、按类型挂入场景的每类型链表（type 2 的链表头就是 scene+0x3C，即 FUN_811C2964 遍历的 2D 视图链）；调用者是游戏代码 FUN_81015E1A/FUN_81015E36/FUN_81015E84 与 FUN_810418AA。** 反编译（`viewapi.txt`）：
 | M1075 | §18.4620: ★★★★★★★★★★ **m1121 铁证：整个运行期（boot→title→n=64M）"添加 2D 视图"相关探针全部为 0——游戏从未调用 FUN_811C30D4/FUN_811C1FE0，也从未进入 FUN_81015E1A/FUN_81015E36/FUN_81015E84/FUN_810418AA。场景对象存在、每帧相机/调度都在跑、logo 状态机也在走，但 2D 绘制上下文从未创建 → 视图注册永远不会发生。**
+| M1076 | §18.4621: ★★★★★★★★★★ **找到"2D 上下文从未创建"的真正原因：不是门控，而是【跑得还不够远】——当前 64.3M blocks 只推进了 221 帧（ctr=221），logo 状态机停留在 state 5/8（未到 done 0xD），title 页内容资源（title_p5.bin/title.spr4 等）尚未被加载，所以 2D 绘制上下文/视图自然还没创建。M1076 改为 250M blocks 长跑验证。**
+m1122 证据（P5D_PUMPMAIN=1，n=64.3M）：
+```
+[CTX7FB0]=0 [CTX7FF8]=0 [CTX8060]=0 [CTX3E95]=0   ← 2D 上下文创建函数从未调用
+[VIEWADD]=0 [VIEWDEL]=0 [G15E1A/36/84]=0 [G418AA]=0
+[SCENE] 120：p=859BF220/859BF940 st=1 head0F=0 head19=0
+[LOGO] 200 条，state 序列：0,3,4,5,5,5,0,5,3,5,4,5,5…（138×5）… 6,5,8,5,8…（54×8）→ 停在 8（fade-out 阶段）
+FRAMEDUMP ctr：n=5k…57.8M 全是 ctr=0，只有标题阶段 n=64.25M 时 ctr=221
+[FIOSFILL] 仅打开 5 个文件：
+   app_system/font/c_font_p5.fnt (1,167,652B)
+   app_system/font/font_staff.fnt (28,176B)
+   app_system/font/font.ctbl (22,024B)
+   title/logo.bin ×2 (2,101,012B)
+   [FIOSFILL-MISS]=0
+[BADMEM]=0
+```
+**分析**：
+1. **帧数不足**：整段运行只渲染 221 帧（约 3.7 秒游戏时间）。logo 序列每个 69 帧 × 3 个 logo + 淡入淡出 ≈ 400+ 帧，还远未完成；state 8（fade-out）是倒数第二段，之后才 state 0xD（done）→ 标题页内容加载。
+2. **title 资源尚未加载**：FIOSFILL 只看到字体与 logo.bin；`title/title_p5.bin`、`title/title.spr4`、`title/p3/*.tga` 等 title 资源还没被请求——与"logo 序列未结束"一致。
+3. **⇒ 不是 HLE 门控问题，而是长流程还没走到**。帧推进速度约 64.3M blocks / 221 帧 ≈ 290k blocks/帧（大量 vblank/等待循环），所以需要 250M+ blocks 才能到 logo 完成/title 内容。
+**M1076 实验 m1123**：`recomp_harness.exe 0x81198464 250000000`（max_blocks=250M ≈ 800+ 帧），env 同 m1122（FORCETITLE+FIOSFILL+WAITFORCE+SCNFORCE+THRPUMP+PUMPMAIN），输出 `out80m_m1123long.txt`。已启动后台运行（预计 40–70 分钟）。
+NEXT：
+```
+① 监控 m1123：logo 状态是否到 0xD、是否出现 title 资源 FIOSFILL OPEN（title_p5.bin/title.spr4/p3/*.tga）
+② 若到达 title 内容 → [CTX7FB0]/[VIEWADD] 是否开始出现 → [SCENE] head0F 是否非空
+③ 若 head0F 非空 → [B6B12]/[ADA] → array2 → FUN_811C0654=0 → FUN_811EC172 → SceGxm_* → 画面
+④ 若 250M 仍不足 → 继续加长（400M/600M）或用 P5D_VTIME/帧步进加速
+⑤ 记录每阶段帧数与 blocks 比例，评估完整流程所需 blocks 总量
+```
+验证：`out80m_m1122ctx.txt`、`out80m_m1123long.txt`（生成中）、`FIOSFILL` 日志。 |
+| §18.4621 | The real reason the 2D context is never created is found: it is not a gate - we simply have not run far enough. At 64.3M blocks only 221 frames have elapsed (ctr=221), the logo state machine sits at state 5/8 (not at done 0xD), and the title-page content assets (title_p5.bin/title.spr4 etc.) have not been requested yet, so the 2D drawing context/views naturally do not exist yet. M1076 switches to a 250M-block long run to verify. m1122 evidence (P5D_PUMPMAIN=1, n=64.3M): [CTX7FB0]=0 [CTX7FF8]=0 [CTX8060]=0 [CTX3E95]=0 (2D context creation never called); [VIEWADD]=0 [VIEWDEL]=0 [G15E1A/36/84]=0 [G418AA]=0; [SCENE] 120 p=859BF220/859BF940 st=1 head0F=0 head19=0; [LOGO] 200 lines with state sequence 0,3,4,5,5,5,0,5,3,5,4,5,5... (138x state5) ... 6,5,8,5,8... (54x state8) - stopped at state 8 (fade-out stage); FRAMEDUMP ctr: all 0 from n=5k to 57.8M, only ctr=221 at n=64.25M in the title phase; [FIOSFILL] only 5 files opened: app_system/font/c_font_p5.fnt (1,167,652B), app_system/font/font_staff.fnt (28,176B), app_system/font/font.ctbl (22,024B), title/logo.bin x2 (2,101,012B); [FIOSFILL-MISS]=0; [BADMEM]=0. Analysis: (1) not enough frames - the whole run rendered only 221 frames (~3.7 s of game time); the logo sequence needs 69 frames x 3 logos + fades ~ 400+ frames, and state 8 is the second-to-last fade-out stage, after which state 0xD (done) -> title page content load; (2) title assets not loaded yet - FIOSFILL only shows fonts and logo.bin, no title_p5.bin/title.spr4/p3/*.tga - consistent with the logo sequence not finishing; (3) so it is not an HLE gate but simply the long flow not reached; frame advance rate is about 64.3M/221 ~ 290k blocks/frame (heavy vblank/wait loops), so 250M+ blocks are needed to reach logo completion/title content. M1076 experiment m1123: recomp_harness.exe 0x81198464 250000000 (max_blocks=250M ~ 800+ frames), same env as m1122 (FORCETITLE+FIOSFILL+WAITFORCE+SCNFORCE+THRPUMP+PUMPMAIN), output out80m_m1123long.txt, started in the background (est. 40-70 min). NEXT: (1) monitor m1123: does the logo state reach 0xD, do title-asset FIOSFILL OPENs appear (title_p5.bin/title.spr4/p3/*.tga); (2) if title content is reached, do [CTX7FB0]/[VIEWADD] start appearing and does [SCENE] head0F become non-empty; (3) if head0F non-empty -> [B6B12]/[ADA] -> array2 -> FUN_811C0654=0 -> FUN_811EC172 -> SceGxm_* -> picture; (4) if 250M is still not enough, extend further (400M/600M) or accelerate via P5D_VTIME/frame stepping; (5) record frames/blocks ratio per stage to estimate the blocks needed for the full flow. |
 m1121（P5D_PUMPMAIN=1，n=64.3M，exit 0）：
 ```
 [VIEWADD]=0 [VIEWDEL]=0          ← add/remove view API 从未被调用
@@ -498017,3 +498048,33 @@ NEXT：
 ANTI-FORGETTING ENTRY. Keywords: M1075 m1121: whole run (boot->title->n=64M) all add-view probes are zero - [VIEWADD]=0 [VIEWDEL]=0 [G15E1A]=0 [G15E36]=0 [G15E84]=0 [G418AA]=0, so the game never creates the 2D drawing context and view registration never happens, though scenes exist ([SCENE] p=859BF220/859BF940 st=1 head0F=0 head19=0), per-frame camera/dispatch runs ([C2964]=120) and logo state machine advances ([LOGO]=202). Decompiled game callers (gamecallers.txt): FUN_81015E1A(scene,unused,geomPtr) { if(unused!=0) FUN_811bc14c(*(u32*)(scene+0x24)); uVar1=FUN_811c30d4(scene,*geom,0); geom[1]=uVar1; }; FUN_81015E36 uses FUN_811b5be2 then FUN_811c30d4; FUN_81015E84 uses FUN_811cc3f0 then FUN_811c30d4; FUN_810418AA(ctx,scene) lazy init: if(*(int*)(ctx+0x20)==0){ if(scene==0) scene=FUN_811bf928(0) (global scene 0); *(int*)(ctx+0x20)=scene; ...FUN_811b527c/FUN_811cc0a4/FUN_811bc14c...; if(*(int*)(ctx+0x18)!=0) *(int*)(ctx+0x24)=FUN_811c30d4(scene,*(int*)(ctx+0x18),0); if(*(int*)(ctx+0x14)!=0) *(int*)(ctx+0x24)=FUN_811c30d4(scene,*(int*)(ctx+0x14),0); return 1; } return 0; }. Caller chain: FUN_810418AA <- FUN_8103E956; FUN_81015E1A <- FUN_81007FB0; FUN_81015E36 <- FUN_81007FF8 / FUN_81007FB0; FUN_81015E84 <- FUN_81008060. Missing piece = the 2D drawing-context creation path FUN_81007FB0/FUN_81007FF8/FUN_81008060/FUN_8103E956 never runs. NEXT: probe [CTX7FB0]/[CTX7FF8]/[CTX8060]/[CTX3E95]; if none called decompile their callers and walk up to the context-creation entry used when drawing title/logo; check whether it is gated by an HLE return value (font/texture/sprite handle 0); once context creation works FUN_811C30D4 -> scene+0x3C non-empty -> FUN_811C2964 -> FUN_811B6B12 -> FUN_811ADAFE -> array2 -> GXM -> picture.
 
 LOOKUP: M1075, m1121 view add probes all zero, [VIEWADD] FUN_811C30D4, [VIEWDEL] FUN_811C1FE0, [G15E1A]/[G15E36]/[G15E84]/[G418AA]=0, FUN_81015E1A scene geom FUN_811c30d4, FUN_81015E36 FUN_811b5be2, FUN_81015E84 FUN_811cc3f0, FUN_810418AA ctx+0x20 scene FUN_811bf928(0) lazy init views ctx+0x18/ctx+0x14, callers FUN_8103E956 / FUN_81007FB0 / FUN_81007FF8 / FUN_81008060, next [CTX7FB0] [CTX7FF8] [CTX8060] [CTX3E95], out80m_m1121viewadd.txt, gamecallers.txt, gamecallers_refs.txt, viewapi.txt -> §18.4619 [relevant: add-view API found], §18.4618 [relevant: view registration missing], §18.4617 [relevant: scene registration API]
+### 18.4621 PORT M1076: 2D 上下文未创建的真因 = 跑得不够远（只推进 221 帧，logo 未完成）
+
+1) m1122（n=64.3M）：
+```
+[CTX7FB0]=[CTX7FF8]=[CTX8060]=[CTX3E95]=0
+[VIEWADD]=[VIEWDEL]=[G15E1A/36/84]=[G418AA]=0
+[SCENE] p=859BF220/859BF940 st=1 head0F=0 head19=0
+[LOGO] state 序列：0,3,4,5…（138×5）…6,5,8,5,8…（54×8）→ 停在 8（fade-out）
+FRAMEDUMP ctr：n≤57.8M 全 0；n=64.25M 时 ctr=221
+[FIOSFILL] 打开 5 个文件：字体×3、title/logo.bin×2（无 title_p5.bin/title.spr4/p3/*.tga）
+[FIOSFILL-MISS]=0  [BADMEM]=0
+```
+2) 分析：
+- 只渲染 221 帧（≈3.7s 游戏时间）；logo 每个 69 帧×3 + 淡入淡出 ≈400+ 帧
+- state 8 是倒数第二阶段，之后 state 0xD（done）→ title 内容加载
+- 帧推进 ≈ 290k blocks/帧 → 需 250M+ blocks
+3) M1076 实验 m1123：`recomp_harness.exe 0x81198464 250000000`（≈800+ 帧），已后台启动
+NEXT：
+```
+① 监控 m1123：logo 状态 0xD、title 资源 FIOSFILL OPEN
+② title 内容到达 → [CTX7FB0]/[VIEWADD] 出现 → [SCENE] head0F 非空
+③ head0F 非空 → [B6B12]/[ADA] → array2 → GXM → 画面
+④ 250M 不足 → 400M/600M 或加速
+⑤ 记录帧/块比例，估算完整流程所需 blocks
+```
+验证：`out80m_m1122ctx.txt`、`out80m_m1123long.txt`（生成中）。
+
+ANTI-FORGETTING ENTRY. Keywords: M1076 real reason 2D context never created = not enough progress, not a gate. m1122: [CTX7FB0]=[CTX7FF8]=[CTX8060]=[CTX3E95]=0, [VIEWADD]=[VIEWDEL]=[G15E1A/36/84]=[G418AA]=0, [SCENE] p=859BF220/859BF940 st=1 head0F=0 head19=0, [LOGO] state sequence 0,3,4,5(x138),6,8(x54) stops at state 8 (fade-out), FRAMEDUMP ctr=0 until n=57.8M then ctr=221 at n=64.25M (~221 frames only ≈3.7s), [FIOSFILL] only 5 files: app_system/font/c_font_p5.fnt (1,167,652B), font_staff.fnt (28,176B), font.ctbl (22,024B), title/logo.bin x2 (2,101,012B), no title_p5.bin/title.spr4/p3/*.tga yet, FIOSFILL-MISS=0, BADMEM=0. So the logo sequence (~400+ frames needed: 69 frames x3 logos + fades; state 8 is second-to-last, then 0xD) has not finished; frame rate ~290k blocks/frame so 250M+ blocks needed. M1076 experiment m1123: recomp_harness.exe 0x81198464 250000000 (max_blocks=250M ~800+ frames), same env (FORCETITLE+FIOSFILL+WAITFORCE+SCNFORCE+THRPUMP+PUMPMAIN), out80m_m1123long.txt, background (40-70 min). NEXT: monitor m1123 for logo state 0xD and title-asset FIOSFILL opens; if title content reached check [CTX7FB0]/[VIEWADD]/[SCENE] head0F; head0F non-empty -> [B6B12]/[ADA] -> array2 -> GXM -> picture; if 250M insufficient extend to 400M/600M or accelerate via P5D_VTIME; record frames/blocks ratio per stage.
+
+LOOKUP: M1076, 2D context never created because only 221 frames elapsed, [LOGO] state sequence stops at state 8, logo needs 400+ frames, ctr=221 at n=64.25M, FRAMEDUMP ctr 0 until title, [FIOSFILL] opens fonts + logo.bin only (no title_p5.bin/title.spr4/p3/*.tga), FIOSFILL-MISS=0, 290k blocks/frame, m1123 recomp_harness.exe 0x81198464 250000000, [CTX7FB0]/[CTX7FF8]/[CTX8060]/[CTX3E95]=0, [VIEWADD]/[VIEWDEL]/[G15E1A/36/84]/[G418AA]=0, [SCENE] head0F=0, out80m_m1122ctx.txt, out80m_m1123long.txt -> §18.4620 [relevant: add-view probes zero], §18.4619 [relevant: add-view API], §18.4613 [relevant: pump/ctr 221]
