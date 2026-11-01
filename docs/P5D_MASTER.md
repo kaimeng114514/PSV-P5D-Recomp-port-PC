@@ -1079,6 +1079,46 @@
 | M1061 | §18.4606: **m1060 定位到"命令在 array3 的 +0xC 不透明链、flush 只扫 +0x14 透明链"后，M1061 实施 FLUSHWIRE 交叉接线实验：在 FUN_8119934A 入口把 array3 各 bucket 的 +0xC 链表头复制到 +0x14（仅当 +0x14 为空），让 gfd flush 的三个绘制列表构建器（FUN_811F3452 等）真正消费我们的 type=0xB 命令，验证"命令一旦被 flush 消费是否能一路走到 GXM 绘制"**。实现（`batch_013.cpp` blk_8119934A 入口，env `P5D_FLUSHWIRE=1`）：
 | M1062 | §18.4607: ★★★★★★★★★★ **m1111（FLUSHWIRE）结果：交叉接线成功、flush 真的消费了命令，但 builder 崩溃——证明"不透明链+0xC 的命令不是给透明链 builder 用的"。证据链完整：[WIRE] #1（bucket11 op=8F142000 → tr）→ [BLD3] #1（bucket=851CC8D0，flush 开始消费）→ [SUBMIT] #1（type=1，提交路径触发）→ **BADMEM guest va=0x00000004 @block=0x811F371A stub=0x812B28A0**（builder 内某处 0+4 解引用空指针崩溃）。说明：**+0xC 不透明链需要它自己的消费者/命令布局**（命令对象 +0x1C 标志区分不透明/透明，builder FUN_811F3452 只理解透明链布局）；同时 m1111 再次确认 [FLUSHX] bucket11 op=8F142000 tr=8F142000（WIRE 已接线）**。m1111：
 | M1063 | §18.4608: ★★★★★★★★★★ **架构级突破：gfd 绘制"builder"其实是"延迟作业描述符"，而真正的链→GPU 提交函数是 FUN_811F3572/FUN_811F361C！** 反编译三个 builder（`builders.txt`）：它们只做三件事——`param_1[1]=bucket`、`*param_1 = <walker code ptr>`、`*bucket |= 0x80000000`（标记忙碌），然后 `FUN_811E649A(type,builder)` **同步执行该描述符的 walker**（我们 m1111 的崩溃就发生在 walker 内部，证明是同步执行）。walker（`walkers.txt`）逻辑：
+| M1064 | §18.4609: ★★★★★★★★★★★★ **第 1030 轮里程碑级突破：黑屏的最终根因找到了——不是图形 API、不是命令链，而是【guest 工作线程从未被调度执行】！gfd 的 GPU 提交是"投递到 worker 队列 + 异步线程执行"模型，而我们的 guest 线程调度器没有真正运行 ready 线程，导致所有 GPU 作业永不执行、GXM HLE 调用为零。** 三条决定性证据：
+**(1) FUN_811E649A = 向 worker 队列投递 0x20 字节作业（异步）**（`e649a.txt`）：
+```c
+void FUN_811e649a(int type,int *msg) {          // type=0/1/2 → 三个 worker 通道
+  if (*msg != 0) {
+    puVar1 = (u32*)(&DAT_8169E080)[type];        // 通道结构
+    FUN_81207344(puVar1+3);                      // 加锁
+    iVar2 = puVar1[8];                           // 写索引
+    puVar1[0xb]++;
+    FUN_811e6a4c(puVar1[5] + iVar2*0x20, msg, 0x20);   // ★ 0x20 字节作业拷入环形队列
+    puVar1[8] = iVar2+1; if (==puVar1[6]) wrap;
+    FUN_81207352(puVar1+3);                      // 解锁
+    SceThreadmgr_E6B761D1(*puVar1, 1);           // ★ 唤醒 worker 线程！
+  } }
+```
+**(2) FUN_811E6330 = 投递"屏障"作业并等待 worker 完成**：
+```c
+local_40 = 0x811E6967;                            // 屏障描述符
+... 同样拷入队列 + 唤醒 ...
+SceLibKernel_83C0E2AF(puVar1[2],1,2,0,0);         // ★ 等待 worker 处理完毕（事件标志/信号量）
+```
+**FUN_811E6498 = 纯 return（无害 no-op）**。
+**(3) worker 线程在启动时创建：6 个 tid=40011000..40016000，entry=0x811E68C9**（THR 日志）：
+```
+[THR] create tid=40011000 entry=811E68C9 lr=811E613C   （×6，每个配 sema 50011000/50013000/50015000）
+[TDUMP] tid=40011000 entry=811E68C9 wait=1 obj=50011000 bits=1
+[TDUMP] tid=4001A000 entry=8127C1D3（5 个显示线程，wait eflag 60016000/…）
+```
+**⇒ 完整因果链**：gfd 每帧把 draw 作业投递给 worker 队列 → **worker 线程（entry 0x811E68C9）应当从队列取出作业并执行 → 作业内部执行命令链/调用 GXM HLE → 真正绘制**。但我们的调度器只让主线程跑，ready/waiting 的 guest 线程从未被真正切换执行 → 作业堆积、GXM 调用为零、画面全黑。**这与外部审计的判断完全一致："最大的风险是运行时语义与线程调度"**。
+NEXT（最高优先级，一次性解决全部线程问题）：
+```
+① 让 guest 线程真正运行：检查 HThread 调度逻辑（ready 队列切换、sema/eflag 唤醒），
+   或启用 P5D_HOSTTHREADS（真实 host 线程）
+② 探针：blk_811E68C9（worker trampoline 入口）打印从队列取出的作业（type/描述符/执行到的代码）
+③ 探针：SceThreadmgr_E6B761D1 / SceLibKernel_83C0E2AF（唤醒与等待）确认信号与唤醒配对
+④ 一旦 worker 执行作业：应出现 per-frame GXM HLE 调用（BeginScene/Draw/EndScene）
+⑤ 然后：FLUSHWIRE 类问题自然消失（命令链被正确消费）→ 画面出现
+```
+验证：`e649a.txt`、`gfd_gpu.txt`、`submit_fn.txt`、`out80m_m1109flush.txt`（HLEDUMP）、m1103/m1104 TDUMP。 |
+| §18.4609 | ROUND-1030 MILESTONE: the ultimate root cause of the black screen is found - it is not the graphics API or the command chain but the guest worker threads never being scheduled/executed! gfd's GPU submission is a post-to-worker-queue + async-thread-execution model, and our guest-thread scheduler never actually runs ready threads, so all GPU jobs never execute and GXM HLE calls stay at zero. Three decisive pieces of evidence: (1) FUN_811E649A = posts a 0x20-byte job to a worker queue (async): void FUN_811e649a(int type,int *msg) { if (*msg != 0) { puVar1=(u32*)(&DAT_8169E080)[type]; FUN_81207344(puVar1+3) (lock); iVar2=puVar1[8]; puVar1[0xb]++; FUN_811e6a4c(puVar1[5]+iVar2*0x20, msg, 0x20) (copy 0x20-byte job into ring); puVar1[8]=iVar2+1; if(==puVar1[6]) wrap; FUN_81207352(puVar1+3) (unlock); SceThreadmgr_E6B761D1(*puVar1,1) (wake worker thread!); } } (2) FUN_811E6330 posts a barrier job (descriptor 0x811E6967) the same way and then waits for the worker via SceLibKernel_83C0E2AF(puVar1[2],1,2,0,0). FUN_811E6498 is a plain return (harmless no-op). (3) worker threads are created at startup: 6 threads tid=40011000..40016000 with entry=0x811E68C9 (THR log), each waiting on semaphores 50011000/50013000/50015000 (TDUMP: wait=1), while 5 display threads (entry 0x8127C1D3) wait on event flags 60016000/..., and some threads were ready=1 but never run. So the full causal chain: gfd posts draw jobs to worker queues every frame -> worker threads (entry 0x811E68C9) should dequeue and execute them -> the job executes the command chain / calls the GXM HLE -> real drawing. But our scheduler only runs the main thread; ready/waiting guest threads are never actually switched in -> jobs pile up, GXM calls are zero, the screen is black. This matches the external audit's judgment exactly: 'the biggest risk is runtime semantics and thread scheduling'. NEXT (highest priority, solves all thread problems at once): (1) make guest threads really run: inspect the HThread scheduling logic (ready-queue switching, sema/eflag wakeups) or enable P5D_HOSTTHREADS real host threads; (2) probe blk_811E68C9 (worker trampoline entry) printing dequeued jobs (type/descriptor/code); (3) probe SceThreadmgr_E6B761D1 / SceLibKernel_83C0E2AF (wake/wait) to confirm signal/wake pairing; (4) once workers execute jobs, per-frame GXM HLE calls (BeginScene/Draw/EndScene) should appear; (5) then the FLUSHWIRE-class problems disappear naturally (chains get consumed) -> picture appears. |
 ```c
 // FUN_811F36C6（BLD3=FUN_811F3452 用于 array3 +0x14 链）:
 uVar2 = puVar4[5];                    // bucket +0x14 链表头
@@ -497116,3 +497156,46 @@ NEXT：
 ANTI-FORGETTING ENTRY. Keywords: M1063 gfd builders are deferred job descriptors: FUN_811F3452/3468/347E set {*param_1 = walker code ptr (0x811F36C7/0x811F3751/0x811F37AD), param_1[1]=bucket, *bucket |= 0x80000000} and FUN_811E649A synchronously runs the walker (m1111 crash inside walker proves synchronous). Walkers: FUN_811F36C6 (array3 +0x14 chain): head=[bucket+0x14], next=[cmd+0x18], checks [[cmd+0x1C]+4]==0, then if *bucket bit1==0 and bit2 set calls FUN_811F361C(head) else if bit1 set calls FUN_811F3572(head), finally *bucket &= 0x7fffffff. FUN_811F37AC (array1 +0xC chain): head=[bucket+0xC], next=[cmd+0x14], checks [cmd+0x1C]!=0 && [[cmd+0x1C]+4]==0 && [[cmd+0x1C]+8]==0. FUN_811F3750 (array2 +0x14): next=[cmd+0x18], checks [[cmd+0x1C]+8]==0. m1111 crash cause: FLUSHWIRE moved array3 +0xC opaque commands (+0x1C==0) into the +0x14 transparent chain -> walker treats [cmd+0x1C] as pointer -> [0+4] BADMEM va=0x4 at 0x811F371A. So +0x1C semantics: 0 = opaque chain command; non-zero = completion-state pointer (flags +4/+8/+0xC) for transparent chains. Opaque chains cleaned by FUN_811C0464 after GPU completion (wait *bucket & 0x80000000 clear then clear chain) so submission happens before via FUN_811F3572/FUN_811F361C. NEXT: decompile FUN_811F3572/FUN_811F361C (real chain->GPU submit entry); confirm how they walk chains/call command first-word executors/submit GXM; find array3 +0xC opaque submit call site (walker 0x811F37AC handles array1; array3 +0xC submission may be another function or also FUN_811F3572); if the submit function is not called find the gate (bit0/bit2 setters FUN_811C05A6); once connected -> command executor -> GXM draw -> logo on screen.
 
 LOOKUP: M1063, builders deferred descriptors, FUN_811F3452 walker 0x811F36C7, FUN_811F3468 walker 0x811F3751, FUN_811F347E walker 0x811F37AD, FUN_811E649A synchronous walker execution, walker FUN_811F36C6 head [bucket+0x14] next [cmd+0x18] checks [[cmd+0x1C]+4], bucket flags bit1/bit2, FUN_811F361C FUN_811F3572 submit functions, FUN_811F37AC head [bucket+0xC] next [cmd+0x14], FUN_811F3750, m1111 crash 0x811F371A BADMEM va=4, +0x1C semantics opaque 0 vs transparent state pointer, FUN_811C0464 cleanup after GPU, FUN_811C05A6 bit0/bit2 setter, builders.txt, walkers.txt -> §18.4607 [relevant: FLUSHWIRE crash], §18.4606 [relevant: FLUSHWIRE], §18.4602 [relevant: gfd flush]
+### 18.4609 PORT M1064（第 1030 轮里程碑）: 黑屏根因 = guest 工作线程从未被调度执行
+
+1) FUN_811E649A（`e649a.txt`）——向 worker 队列异步投递 0x20 字节作业：
+```c
+void FUN_811e649a(int type,int *msg) {
+  if (*msg != 0) {
+    puVar1 = (u32*)(&DAT_8169E080)[type];              // 3 个 worker 通道
+    FUN_81207344(puVar1+3);                             // lock
+    iVar2 = puVar1[8];
+    puVar1[0xb]++;
+    FUN_811e6a4c(puVar1[5] + iVar2*0x20, msg, 0x20);    // ★ 作业拷入环形队列
+    puVar1[8] = iVar2+1; if (== puVar1[6]) wrap;
+    FUN_81207352(puVar1+3);                             // unlock
+    SceThreadmgr_E6B761D1(*puVar1, 1);                  // ★ 唤醒 worker
+  } }
+```
+2) FUN_811E6330——投递屏障作业（0x811E6967）并等待 worker：
+```c
+local_40 = 0x811E6967;  ... 同上投递 + 唤醒 ...
+SceLibKernel_83C0E2AF(puVar1[2],1,2,0,0);               // ★ 等 worker 完成
+// FUN_811E6498 = 纯 return（no-op）
+```
+3) worker 线程（启动时创建）：
+```
+[THR] create tid=40011000..40016000 entry=811E68C9 lr=811E613C（×6）
+[TDUMP] tid=40011000 entry=811E68C9 wait=1 obj=50011000 bits=1
+[TDUMP] tid=4001A000 entry=8127C1D3 wait eflag 60016000（5 个显示线程）
+```
+4) 因果链：gfd 每帧投递 draw 作业 → worker（entry 0x811E68C9）应取出执行 → 作业执行命令链/调 GXM HLE → 绘制。**我们的调度器只跑主线程，ready/waiting 线程从不被切换 → 作业堆积、GXM 调用为零、黑屏**
+5) 与外部审计一致：**"最大风险是运行时语义与线程调度"**
+NEXT：
+```
+① 让 guest 线程真正运行（ready 队列切换 / sema-eflag 唤醒 / P5D_HOSTTHREADS）
+② blk_811E68C9 探针：worker 取出的作业（type/描述符/执行代码）
+③ SceThreadmgr_E6B761D1 / SceLibKernel_83C0E2AF 探针：信号/等待配对
+④ worker 执行后应出现 per-frame GXM HLE 调用（BeginScene/Draw/EndScene）
+⑤ 命令链被正确消费 → 画面出现
+```
+验证：`e649a.txt`、`gfd_gpu.txt`、`submit_fn.txt`、`out80m_m1109flush.txt`、m1103/m1104 TDUMP。
+
+ANTI-FORGETTING ENTRY. Keywords: M1064 ROUND-1030 root cause of black screen = guest worker threads never scheduled/executed. FUN_811E649A posts 0x20-byte job to worker queue DAT_8169E080[type] (lock FUN_81207344, copy FUN_811e6a4c, unlock FUN_81207352, wake SceThreadmgr_E6B761D1(*puVar1,1)); FUN_811E6330 posts barrier job 0x811E6967 then waits SceLibKernel_83C0E2AF(puVar1[2],1,2,0,0); FUN_811E6498 is a no-op return. Worker threads created at startup: 6 threads tid=40011000..40016000 entry=0x811E68C9 (THR log) waiting on semas 50011000/50013000/50015000 (TDUMP wait=1); 5 display threads entry=0x8127C1D3 wait on eflags 60016000/...; some threads ready=1 but never run. So gfd posts draw jobs every frame, worker threads should dequeue+execute them (the job runs the command chain / calls GXM HLE), but our scheduler only runs the main thread so jobs pile up, GXM HLE calls are zero and the screen stays black. This matches the external audit: the biggest risk is runtime semantics/thread scheduling. NEXT: make guest threads really run (HThread ready-queue switching / sema-eflag wakeups / P5D_HOSTTHREADS); probe blk_811E68C9 worker trampoline for dequeued jobs (type/descriptor/code); probe SceThreadmgr_E6B761D1 and SceLibKernel_83C0E2AF for signal/wait pairing; once workers execute, per-frame GXM HLE calls (BeginScene/Draw/EndScene) should appear; then command chains get consumed and the picture appears.
+
+LOOKUP: M1064 round 1030 black screen root cause worker threads never scheduled, FUN_811E649A posts 0x20-byte job to DAT_8169E080[type] worker queue, FUN_81207344 lock FUN_811e6a4c copy FUN_81207352 unlock SceThreadmgr_E6B761D1 wake, FUN_811E6330 barrier 0x811E6967 wait SceLibKernel_83C0E2AF, FUN_811E6498 no-op, worker threads 6x entry 0x811E68C9 tid 40011000..40016000 semas 50011000/50013000/50015000, display threads 5x entry 0x8127C1D3 eflags 60016000, TDUMP ready=1 threads never run, external audit runtime semantics thread scheduling, HLEDUMP no GXM calls, e649a.txt, gfd_gpu.txt, submit_fn.txt, out80m_m1109flush.txt -> §18.4608 [relevant: builders/walkers], §18.4607 [relevant: FLUSHWIRE crash], §18.4605 [relevant: opaque chain mismatch], §18.4595 [relevant: display threads]
