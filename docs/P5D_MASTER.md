@@ -1067,6 +1067,47 @@
 | M1049 | §18.4594: **m1104（DQFORCE）结果：busy 指针 `DAT_8153FDA8` 被成功清 0（早期一次），title 阶段 [WAITLOOP] 显示 `a8=00000000`、q0=812264B5 仍在队列中，但 `st=[p+0xBC]` 仍恒为 1——说明"清 busy → 处理队列回调"不是清除状态的关键；且运行后期出现新 BADMEM（va=0 @block=0x811C3FD4，stub=0x812B1BA0），说明 DQFORCE 破坏了某条路径。结论：显示队列的系统比预想复杂——需要先搞清 `[p+0xBC]` 状态由谁设置/清除、回调 0x812264B5 做什么、以及 app 注册的显示回调 0x8127BB29 与 HLE GXM 显示完成的关系**。m1104 证据：
 | M1050 | §18.4595: ★★★★★★★★★ **重大发现：显示队列由 5 个 guest 线程（entry=0x8127C1D3，"CriThread"）服务——FUN_8127BE58 用 sceKernelCreateThread(entry=0x8127C1D3)+sceKernelStartThread 创建它们（tid 4001A000/4001E000/4001F000/40020000/40021000）；PDUMP 显示它们等待各自的事件标志（obj=60016000/60018000/6001A000/6001C000，bits=1）——**这些事件标志应由显示队列回调/提交路径设置，但主线程卡在等待状态，形成互等死锁**。M1050 实施 WAITFORCE 实验：在等待循环把 `[p+0xBC]` 强制置 0（st!=1）让主循环继续，验证下游 title 绘制链路**。m1103/m1104 证据：
 | M1051 | §18.4596: ★★★★★★★★★★ **WAITFORCE 成功解锁：S0_LOGO 状态机开始真实运行！logo 序列从 state=0→3→4→5（69 帧计数×138 次）→6→8（54 次），并创建了**第二个 logo 任务**（task=85D0B78C）；[TMX] 增加到 96 条（更多 logo 容器/TGA 加载）；事件标志 obj=60016000 bits=1 被 guest 反复设置 200+ 次，5 个显示线程全部被唤醒（TDUMP ready=1）；无 BADMEM**。但**仍无绘制调用**（[ABIEND]/draw 计数不变）——S0 logo 的绘制回调（注册在 FUN_81193704 尾部的 0x8119351D）尚未被调用。M1051 加 [LOGODRAW]/[VFW2] 探针定位绘制回调。m1105 证据：
+| M1052 | §18.4597: ★★★★★★★★★★ **m1106 里程碑：logo 绘制回调真的被调用了！[LOGODRAW] 80 条（两个 logo 任务 85B8759C/85D0B7DC 交替绘制，回调参数 r2=0x8119351D 与注册值一致），[LOGO] 状态机继续推进 127 条，无 BADMEM。但绘制函数内部被"场景就绪门控"挡住：FUN_8119351C→FUN_81160B7E/FUN_811610A4 都先调用 `FUN_81160814()` 检查，返回 0 时跳过 `FUN_81163ABC(...)` 提交——所以仍无 GXM 绘制调用（[ABIBEGIN] 1/[ABIEND] 0）**。m1106 证据：
+```
+[LOGODRAW] #1 arg=85A8FF14 r1=85B8759C r2=8119351D r3=0
+[LOGODRAW] #7 arg=85A8FF30 r1=85D0B7DC r2=8119351D r3=1   ← 两个 logo 任务交替绘制
+[LOGODRAW] 80 条（cap）
+[LOGO] 127 条（state 0→3→4→5→…→8）
+[WAITFORCE] 3  [BADMEM] 0
+[ABIBEGIN] 1  [ABIEND] 0  [PRESENT] 1  [TEXBIND] 1  [ABIVTX] 1
+运行到 n=60,990,000+
+```
+**FUN_8119351C（logo 绘制回调，468B）反编译要点**：
+```c
+task = FUN_8116f8a8(param_2);          // param_2 = 绘制对象（r1）
+uVar6 = FUN_81003EEC() → float; uVar2 = FUN_81003F10() → float;   // 屏幕宽高（转 float）
+switch (*task) {
+case 4: case 5: case 6:  tex = task[5] 的纹理：piVar3=FUN_8116f8a8(handle); iVar4=FUN_8116f8d2(handle);
+                         if (iVar4 && *piVar3==3) tex=piVar3[1];   // ← 纹理句柄（logoTMX 任务的 texobj）
+                         FUN_81160B7E(0,0xFF,&rect,1);             // 画底色/清区域
+                         FUN_811610A4(0,0,0,1.0,1.0,0,0,0,-1,&uv,tex,1);  // 画纹理
+case 7/8/9:  tex = task[7]  (altuslogo?)   同上
+case 10/0xb/0xc: tex = task[6] (p-studio?) 同上
+}
+```
+**FUN_81160B7E / FUN_811610A4（appGx 2D sprite 绘制）**：
+```c
+void FUN_81160B7E(x,y,rect,flag) { if(flag) FUN_811605FC(); ...构造 6 个顶点...
+  if (FUN_81160814() != 0) { FUN_8115FF12(); FUN_81163ABC(0,&verts,4,&indices,6,0); } }  // ← 门控
+void FUN_811610A4(...纹理...) { if (w>=eps && h>=eps && alpha!=0) { if(flag) FUN_811605FC();
+  ...FUN_8116318A/81163198(tex)=宽高; ...构造 4×6 顶点...; FUN_81160516(0,tex);
+  if (FUN_81160814() != 0) { FUN_8115FF12(); FUN_81163ABC(0,&verts,4,&indices); } } }    // ← 同一门控
+```
+⇒ **只要 FUN_81160814() 返回 0，logo 绘制就被跳过**；FUN_81163ABC 是最终提交（会调 GXM HLE）。
+NEXT：
+```
+① 反编译 FUN_81160814（场景/批次就绪检查）与 FUN_81163ABC（提交路径）→ 找出返回 0 的条件
+② 给 blk_81160814 / blk_81163ABC 加探针（[SCNREADY]/[DRAWSUB]）看实际返回值与参数
+③ 若门控依赖 BeginScene/EndScene：找 title 页面的 BeginScene 调用者（可能在我们跳过的显示管理器路径里）
+④ 修正门控状态（HLE GXM 场景状态或 guest 全局变量）→ FUN_81163ABC 提交 → GXM 绘制 → 截帧出现 logo
+```
+验证：`out80m_m1106drawprobe.txt`、`err80m_m1106drawprobe.txt`、`logodraw.txt`、`logodraw2.txt`。 |
+| §18.4597 | m1106 milestone: the logo draw callback IS being called! [LOGODRAW] 80 lines (two logo tasks 85B8759C/85D0B7DC drawing alternately, callback argument r2=0x8119351D matching the registered value); [LOGO] state machine continues (127 lines); no BADMEM. But the draw functions are blocked by a 'scene ready' gate: FUN_8119351C -> FUN_81160B7E/FUN_811610A4 both first call FUN_81160814() and skip FUN_81163ABC(...) submission when it returns 0 - so there are still no GXM draw calls ([ABIBEGIN] 1/[ABIEND] 0). m1106 evidence: [LOGODRAW] #1 arg=85A8FF14 r1=85B8759C r2=8119351D r3=0; [LOGODRAW] #7 arg=85A8FF30 r1=85D0B7DC r2=8119351D r3=1; [LOGODRAW] 80 (cap); [LOGO] 127 lines; [WAITFORCE] 3; [BADMEM] 0; [ABIBEGIN] 1; [ABIEND] 0; [PRESENT] 1; [TEXBIND] 1; [ABIVTX] 1; run reaches n=60,990,000+. FUN_8119351C (logo draw callback, 468B) decompiled: task = FUN_8116f8a8(param_2) (param_2 = draw object r1); uVar6 = FUN_81003EEC() -> float; uVar2 = FUN_81003F10() -> float (screen width/height as float); switch(*task) { case 4/5/6: tex = task[5]: piVar3=FUN_8116f8a8(handle); iVar4=FUN_8116f8d2(handle); if (iVar4 && *piVar3==3) tex=piVar3[1] (logoTMX task texobj); FUN_81160B7E(0,0xFF,&rect,1); FUN_811610A4(0,0,0,1.0,1.0,0,0,0,-1,&uv,tex,1); case 7/8/9: tex = task[7] (altuslogo); case 10/0xb/0xc: tex = task[6] (p-studio). } FUN_81160B7E(x,y,rect,flag) { if(flag) FUN_811605FC(); ...build 6 vertices...; if (FUN_81160814() != 0) { FUN_8115FF12(); FUN_81163ABC(0,&verts,4,&indices,6,0); } } FUN_811610A4(...texture...) { if (w>=eps && h>=eps && alpha!=0) { if(flag) FUN_811605FC(); ...FUN_8116318A/81163198(tex)=width/height; ...build 4x6 vertices...; FUN_81160516(0,tex); if (FUN_81160814() != 0) { FUN_8115FF12(); FUN_81163ABC(0,&verts,4,&indices); } } } So as long as FUN_81160814() returns 0 the logo drawing is skipped; FUN_81163ABC is the final submit (it would call the GXM HLE). NEXT: (1) decompile FUN_81160814 (scene/batch ready check) and FUN_81163ABC (submit path) to find the return-0 condition; (2) add [SCNREADY]/[DRAWSUB] probes to blk_81160814/blk_81163ABC; (3) if the gate depends on BeginScene/EndScene find the title page's BeginScene caller (possibly in the display-manager path we skip); (4) fix the gate state (HLE GXM scene state or guest global) -> FUN_81163ABC submits -> GXM draw -> frames show the logo. |
 ```
 [WAITFORCE] #1 p=84D8D368 st=1 -> 0
 [WAITFORCE] #2 p=84D8D5C0 st=1 -> 0
@@ -496342,3 +496383,41 @@ NEXT：
 ANTI-FORGETTING ENTRY. Keywords: M1051 WAITFORCE unlocked the S0_LOGO state machine: logo sequence state=0->3->4->5 (69-frame counter x138)->6->8 (x54), second logo task 85D0B78C created; [TMX] 96 lines; event flag obj=60016000 bits=1 set 200+ times; 5 display threads awake (TDUMP ready=1); no BADMEM; but no drawing calls ([ABIEND] 0) - the S0 logo draw callback (0x8119351D, registered at the tail of FUN_81193704 as *(u32*)(iVar5+8)=0x8119351D) is never called. m1105: [WAITFORCE] #1 p=84D8D368 st=1->0; #2 p=84D8D5C0; #3 p=84D8D818; [LOGO] #7 state=0 task=85D0B78C; LOGO state counts {'0':2,'3':2,'4':2,'5':138,'6':2,'8':54}; [SETEF57] obj=60016000 bits=1 x200+; [TDUMP] tid=4001A000 entry=8127C1D3 ready=1; [ABIBEGIN] 1; [ABIEND] 0; [PRESENT] 1; run reaches n=62,274,780 then spins (hle_ring 812B2830/812B2880 mutex+wait). Analysis: WAITFORCE lets the main loop pass the display-manager wait -> title update resumes -> S0_LOGO fully advances (69-frame counter, fades, second logo); drawing is driven by the appMain draw phase (mainDraw/mainDrawOt procs) while the main loop still spins in another mutex wait. M1051 probes: batch_013 blk_8119351C [LOGODRAW]; batch_012 blk_81182742 [VFW2]. batch_012/batch_013 compile exit 0; exe relink exit 0 (57,065,196B 19:28:10). Verification run out80m_m1106drawprobe.txt started. NEXT: [LOGODRAW] appears?; [VFW2] frequency/args; if never called find mainDraw/mainDrawOt scheduling entry (appMain draw phase) and probe it; if called but no GXM calls inspect its state gating; continue WAITFORCE on the hle_ring mutex wait 812B2880@811732C2.
 
 LOOKUP: M1051, WAITFORCE unlock, S0_LOGO state 0->3->4->5->6->8, state5 x138, second logo task 85D0B78C, [LOGO] 202 lines, [TMX] 96, [SETEF57] 60016000 bits=1, TDUMP ready=1 display threads, no ABIEND/draw, draw callback 0x8119351D registered at FUN_81193704 tail *(u32*)(iVar5+8)=0x8119351D, [LOGODRAW] probe blk_8119351C batch_013, [VFW2] probe blk_81182742 batch_012, [VFW] at=81182742, spin n=62,274,780 hle_ring 812B2830/812B2880, exe 57,065,196B, out80m_m1105waitforce.txt, out80m_m1106drawprobe.txt -> §18.4595 [relevant: WAITFORCE], §18.4594 [relevant: display queue], §18.4592 [relevant: wait loop]
+### 18.4597 PORT M1052: logo 绘制回调已运行，但被 FUN_81160814 "场景就绪"门控挡住
+
+1) m1106 证据：
+```
+[LOGODRAW] #1 arg=85A8FF14 r1=85B8759C r2=8119351D r3=0
+[LOGODRAW] #7 arg=85A8FF30 r1=85D0B7DC r2=8119351D r3=1   ← 两个 logo 任务交替绘制
+[LOGODRAW] 80 条  [LOGO] 127 条  [WAITFORCE] 3  [BADMEM] 0
+[ABIBEGIN] 1  [ABIEND] 0  [PRESENT] 1  [TEXBIND] 1  [ABIVTX] 1
+运行到 n=60,990,000+
+```
+2) FUN_8119351C（绘制回调）要点：
+```c
+switch (*task) {
+case 4/5/6: tex = task[5]  (logoTMX texobj：piVar3[1] 当 *piVar3==3)
+case 7/8/9: tex = task[7]  (altuslogo)
+case 10/b/c: tex = task[6] (p-studio)
+}
+FUN_81160B7E(0,0xFF,&rect,1); // 画区域
+FUN_811610A4(...,&uv,tex,1);  // 画纹理
+```
+3) FUN_81160B7E / FUN_811610A4：
+```c
+...构造顶点...; FUN_81160516(0,tex);
+if (FUN_81160814() != 0) { FUN_8115FF12(); FUN_81163ABC(0,&verts,4,&indices,...); }   // ← 门控
+```
+⇒ FUN_81160814()==0 时跳过提交 FUN_81163ABC（最终 GXM 绘制）
+NEXT：
+```
+① 反编译 FUN_81160814 / FUN_81163ABC 找返回 0 条件
+② 探针 [SCNREADY]/[DRAWSUB]
+③ 门控依赖 BeginScene → 找 title 页 BeginScene 调用者
+④ 修正门控 → 提交 → GXM 绘制 → 截帧出现 logo
+```
+验证：`out80m_m1106drawprobe.txt`、`logodraw.txt`、`logodraw2.txt`。
+
+ANTI-FORGETTING ENTRY. Keywords: M1052 the logo draw callback IS being called: [LOGODRAW] 80 lines (two logo tasks 85B8759C/85D0B7DC alternating, r2=0x8119351D matching registration); [LOGO] 127 lines; no BADMEM; but the draw functions are blocked by a 'scene ready' gate: FUN_8119351C -> FUN_81160B7E/FUN_811610A4 call FUN_81160814() first and skip FUN_81163ABC submission when it returns 0 -> still no GXM draw calls ([ABIBEGIN] 1/[ABIEND] 0). m1106: [LOGODRAW] #1 arg=85A8FF14 r1=85B8759C r2=8119351D r3=0; #7 arg=85A8FF30 r1=85D0B7DC r2=8119351D r3=1; [WAITFORCE] 3; [ABIBEGIN] 1; [ABIEND] 0; [PRESENT] 1; run reaches n=60,990,000+. FUN_8119351C decompiled: task=FUN_8116f8a8(param_2) (param_2 draw object r1); width/height from FUN_81003EEC/FUN_81003F10; switch(*task) case 4/5/6: tex=task[5] (logoTMX texobj piVar3[1] when *piVar3==3); case 7/8/9: tex=task[7] (altuslogo); case 10/0xb/0xc: tex=task[6] (p-studio); calls FUN_81160B7E(0,0xFF,&rect,1) + FUN_811610A4(...,&uv,tex,1). FUN_81160B7E/FUN_811610A4 build sprite vertices and only submit when FUN_81160814() != 0: if (FUN_81160814() != 0) { FUN_8115FF12(); FUN_81163ABC(0,&verts,4,&indices,...); } -> the gate. NEXT: decompile FUN_81160814 (scene/batch ready) and FUN_81163ABC (submit, would call GXM HLE), find the return-0 condition; add [SCNREADY]/[DRAWSUB] probes; if the gate depends on BeginScene/EndScene find the title page BeginScene caller; fix the gate state -> submit -> GXM draw -> frames show the logo.
+
+LOOKUP: M1052, draw callback called, [LOGODRAW] 80 lines, two logo tasks 85B8759C/85D0B7DC, r2=8119351D, [LOGO] 127, scene ready gate FUN_81160814, FUN_81163ABC submit, FUN_81160B7E, FUN_811610A4, FUN_811605FC, FUN_8115FF12, FUN_81160516, screen w/h FUN_81003EEC/FUN_81003F10, tex switch *task case 4/5/6 task[5], 7/8/9 task[7], 10/b/c task[6], no ABIEND, exe 57,065,196B, out80m_m1106drawprobe.txt, logodraw.txt, logodraw2.txt -> §18.4596 [relevant: WAITFORCE unlock], §18.4595 [relevant: display threads], §18.4587 [relevant: S0 logo]
