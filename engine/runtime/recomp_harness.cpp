@@ -1122,7 +1122,20 @@ namespace p5d { namespace vulkan { void update_uniform_buffer_raw(const void* da
 namespace p5d { namespace vulkan { int32_t upload_gxm_control_resolved(unsigned int unit, const void* control16); } }   // 18.4510 M965
 namespace p5d { namespace vulkan { int32_t upload_gxm_control_to_unit(unsigned int unit, const void* control16, const unsigned char* hostPixels, unsigned int bytes); } }   // 18.4521 M976
 namespace p5d { namespace vulkan { int upload_vertex_stream(const void* data, unsigned int bytes, unsigned int vertex_count); } }   // 18.4498 M953
+static uint32_t call_guest_cb4(RecState* s, uint32_t entry, uint32_t a0, uint32_t a1, uint32_t a2, uint32_t a3, int maxblocks);  // M1034 fwd
 static void job_probes(uint32_t pcv, RecState* s) {
+  // 18.4579 M1034: P5D_FORCETITLE - call guest FUN_81185616(6,0,0,0) once after page1 has started,
+  // to start the TITLE page directly (bypassing the stuck init-chain driver).
+  { static int _ft = -1; static int _done = 0;
+    if (_ft < 0) { const char* _e = getenv("P5D_FORCETITLE"); _ft = (_e && atoi(_e)) ? 1 : 0; }
+    if (_ft && !_done && g_main_n > 59620000u && g_disp_depth == 0 && !g_cur_thr) {
+      _done = 1;
+      printf("[FORCETITLE] invoke setSequence(6,0,0,0) n=%u\n", g_main_n); fflush(stdout);
+      ++g_disp_depth;
+      uint32_t _r = call_guest_cb4(s, 0x81185616u, 6u, 0u, 0u, 0u, 1200000);
+      --g_disp_depth;
+      printf("[FORCETITLE] returned r0=%08X n=%u\n", _r, g_main_n); fflush(stdout); }
+  }
   // 18.4562 M1017: P5D_TTPROBE - track the title-sequence task pointer and who frees it.
   { static int _tt = -1; static uint32_t _task = 0; static int _nf = 0;
     if (_tt < 0) { const char* _e = getenv("P5D_TTPROBE"); _tt = (_e && atoi(_e)) ? 1 : 0; }
@@ -4742,6 +4755,30 @@ static uint32_t call_guest_cb2(RecState* s, uint32_t entry, uint32_t a0, uint32_
   std::memcpy(s->r, save, sizeof(save)); s->apsr = savea;
   return _ret;
 }
+
+// M1034: 4-argument guest call helper (for FUN_81185616 setSequence(page,data,size,delay))
+static uint32_t call_guest_cb4(RecState* s, uint32_t entry, uint32_t a0, uint32_t a1, uint32_t a2, uint32_t a3, int maxblocks) {
+  if (!entry) return 0;
+  uint32_t save[16]; std::memcpy(save, s->r, sizeof(save)); uint32_t savea = s->apsr;
+  s->r[0] = a0; s->r[1] = a1; s->r[2] = a2; s->r[3] = a3;
+  s->r[14] = 0xFFFFFFFEu; s->r[15] = entry & ~1u;
+  uint32_t pc = s->r[15]; int n = 0;
+  while (n++ < maxblocks) {
+    hw_check(pc);
+    if (pc == 0u || pc == 0xFFFFFFFEu) break;
+    BlockFn fn = gbn(pc);
+    if (!fn) { printf("[CB4-NOBLK] pc=%08X lr=%08X\n", pc, s->r[14]); fflush(stdout); break; }
+    g_cur_block = pc;
+    uint32_t nx = fn(s);
+    if (nx == 0u || nx == 0xFFFFFFF0u || nx == 0xFFFFFFFEu || nx == 0xFFFFFFFDu) break;
+    pc = nx;
+  }
+  uint32_t _ret = s->r[0];
+  std::memcpy(s->r, save, sizeof(save)); s->apsr = savea;
+  printf("[CB4] entry=%08X a0=%u a1=%u a2=%u a3=%u blocks=%d ret=%08X\n", entry, a0, a1, a2, a3, n, _ret); fflush(stdout);
+  return _ret;
+}
+
 static void guest_thread_run(uint32_t tid) {
   tl_ht_tid = tid;
   HThread* t = nullptr;

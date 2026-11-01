@@ -1049,6 +1049,41 @@
 | M1031 | §18.4576: ★★★★★★★★ **SSTEP/DRV 探针决定性结果：sound worker 完整返回 -1；driver 已从 step0 推进到 step1（trophy→sound），但调用 sound 创建者后 driver 不再被调用 → 链冻结在 step1。同步 README 到 M1030（外部审计建议项）**。`out80m_m1091drvprobe.txt` / err：
 | M1032 | §18.4577: **第 1000 轮里程碑：实验"强制 driver step 推进"（不等 step job 完成），期望一帧走一步、8 帧走完 8 步 → driver 返回 -1 → 完成回调 setSequence(6,0,0,5) → page6 TITLE；同时加 driver 入口 DRIVIN 探针（打印 task 的 state/step）**。m1091 关键补充证据：
 | M1033 | §18.4578: **m1092 决定性结果：driver 只被调用 4 次（state 0→1→2→1 step0→1），即使在强制推进下，创建 step1（sound）后 driver 仍不再被调用 ⇒ 这不是"等待条件"问题，而是 initDataRead driver job 在调用 step 创建者后被移出调度。改用"DRIVDONE"捷径：driver 创建完 trophy+sound 两步后直接返回 -1 → 完成回调 setSequence(6,0,0,5) → page6 TITLE**。`out80m_m1092drvadvance.txt` / err：
+| M1034 | §18.4579: **m1093 证实 DRIVDONE 无法触发（driver 只在 step=1 后被移出调度，永远到不了 step=2）；改用更高层捷径：HLE 侧用 `call_guest_cb4` 直接调用 guest `FUN_81185616(6,0,0,0)`（= setSequence(page=6)）直达 TITLE 页，绕开卡死的 init 链**。`out80m_m1093drivdone.txt`：
+```
+[JOBCOMP] 1   [SEQREQ] 8（无 page=6）  [DRIVDONE] 0 条
+[DRIVIN] 4 条（state 0→1→2→1 step0→1，与 m1092 完全相同）
+```
+⇒ driver 在调用 step1 创建者后彻底消失（永远到不了 step=2），DRIVDONE 分支不可能触发
+⇒ **driver 消失 = 创建子进程后自身被移出调度（进程/调度语义 bug，正是外部审计指出的最高风险区）**
+**M1034 捷径（harness 侧 HLE 直接调用 guest 函数）**：
+1) 新增 4 参 guest 调用助手 `call_guest_cb4(s, entry, a0..a3, maxblocks)`（保存/恢复寄存器，循环执行 AOT block 直到返回）：
+```cpp
+static uint32_t call_guest_cb4(RecState* s, uint32_t entry, uint32_t a0, uint32_t a1, uint32_t a2, uint32_t a3, int maxblocks) {
+  if (!entry) return 0;
+  uint32_t save[16]; std::memcpy(save, s->r, sizeof(save)); uint32_t savea = s->apsr;
+  s->r[0]=a0; s->r[1]=a1; s->r[2]=a2; s->r[3]=a3; s->r[14]=0xFFFFFFFEu; s->r[15]=entry & ~1u;
+  ... while (gbn(pc)) 执行 ...
+  std::memcpy(s->r, save, sizeof(save)); s->apsr = savea; return _ret; }
+```
+2) job_probes 新增 `P5D_FORCETITLE=1` 探针：`g_main_n > 59620000`（page1 已启动）时调用一次
+```cpp
+uint32_t _r = call_guest_cb4(s, 0x81185616u, 6u, 0u, 0u, 0u, 1200000);
+printf("[FORCETITLE] invoke setSequence(6,0,0,0) n=%u → ret=%08X\n",...);
+```
+编译：harness exit 0；exe 重链 exit 0（57,054,059B，15:18:00）。
+验证运行：`out80m_m1094forcetitle.txt`（P5D_FORCETITLE=1 + 常规 env）已启动。
+NEXT：
+```
+① [FORCETITLE] invoke → ret（setSequence 是否成功）
+② [SEQREQ] #N page=6 → page6 start（FUN_8119807C）
+③ title worker 真跑（WFDBG wf=81198173）→ appFade OK（M1022）→ 声音对象（trophy/sound step creators 已调用，sound worker 已真跑创建对象）
+④ title case0/1 通过 → title 状态机 → title 对象 → 引擎自绘标题画面
+⑤ 若 title 仍崩 → 用现有探针套件（TTC/TTF8/TTO/SSTEP/DRIVIN）继续定位
+```
+**价值**：即使 init 链调度 bug 未修，也能验证"page6→title 状态机→引擎自绘"整条下游链路是否可达；同时保留 init 链自然完成作为正式修复目标。
+验证：`out80m_m1093drivdone.txt`、`recomp_harness.exe`（57,054,059B）、`out80m_m1094forcetitle.txt`（生成中）。 |
+| §18.4579 | m1093 confirmed DRIVDONE cannot trigger (the driver is removed from scheduling after step=1 and never reaches step=2); switched to a higher-level shortcut: from HLE call call_guest_cb4 to invoke guest FUN_81185616(6,0,0,0) (= setSequence(page=6)) directly, jumping to the TITLE page and bypassing the stuck init chain. out80m_m1093drivdone.txt: [JOBCOMP] 1; [SEQREQ] 8 (no page=6); [DRIVDONE] 0 lines; [DRIVIN] 4 lines (state 0->1->2->1 step0->1, identical to m1092). So the driver vanishes after calling the step1 creator (never reaches step=2) and the DRIVDONE branch can never fire => driver disappearance = the process being removed from scheduling after creating a child process (a process/scheduling semantics bug, exactly the highest-risk area the external audit called out). M1034 shortcut (harness-side HLE direct guest call): (1) new 4-arg guest call helper call_guest_cb4(s, entry, a0..a3, maxblocks) (saves/restores registers, executes AOT blocks until return): uint32_t call_guest_cb4(...) { if(!entry) return 0; save r/apsr; s->r[0]=a0; s->r[1]=a1; s->r[2]=a2; s->r[3]=a3; s->r[14]=0xFFFFFFFE; s->r[15]=entry&~1; while(gbn(pc)) ... restore; return _ret; } (2) job_probes adds P5D_FORCETITLE=1 probe: when g_main_n>59620000 (page1 started) call once uint32_t _r = call_guest_cb4(s, 0x81185616u, 6u, 0u, 0u, 0u, 1200000); printf('[FORCETITLE] invoke setSequence(6,0,0,0) n=%u ret=%08X'). harness exit 0; exe relink exit 0 (57,054,059B 15:18:00). Verification run out80m_m1094forcetitle.txt (P5D_FORCETITLE=1 + regular env) started. NEXT: [FORCETITLE] invoke -> ret (whether setSequence succeeded); [SEQREQ] #N page=6 -> page6 start (FUN_8119807C); title worker really runs (WFDBG wf=81198173) -> appFade OK (M1022) -> sound objects (trophy/sound step creators were called, sound worker really ran creating objects) -> title case0/1 passes -> title state machine -> title object -> engine-drawn title screen; if the title still crashes use the existing probe suite. Value: even with the init-chain scheduling bug unfixed, this validates whether the downstream chain page6->title state machine->engine drawing is reachable; the natural init-chain completion remains the formal fix target. |
 ```
 [DRIVIN] #1 task=85B846BC state=0 step=0    ← 第1次（初始化 task）
 [DRIVIN] #2 task=85B846BC state=1 step=0    ← 创建 step0（trophy）
@@ -495124,3 +495159,33 @@ NEXT：
 ANTI-FORGETTING ENTRY. Keywords: M1033 m1092 decisive: the driver invoked only 4 times (state 0->1->2->1, step0->1) and even forced advancement cannot make it be invoked after creating step1 (sound) => not a wait condition but the initDataRead driver job removed from scheduling after calling a step creator. Switched to DRIVDONE shortcut: after creating trophy+sound steps return -1 -> completion callback setSequence(6,0,0,0) -> page6 TITLE. out80m_m1092drvadvance.txt: [DRIVIN] #1 task=85B846BC state=0 step=0; #2 state=1 step=0; #3 state=2 step=0; #4 state=1 step=1; no #5. [DRVB2] r0=85B846BC r1=2 step=0; [DRVBC] r0=0 r1=84618110 step=0; [JOBCOMP] 1; [SEQREQ] 8; [BADMEM] 0. The driver is no longer scheduled after calling FUN_811848FC (init sound creator); suspect FUN_8116F7CA modifies the driver's own appProcess chain/scheduling state (param_1 = driver's appProcess node passed into child job creation). M1033 shortcut in batch_012.cpp blk_81184FFE entry: _t=s->r[0]?rd32(s,s->r[0]+8):0; _sp=_t?rd32(s,_t+4):0xFFFFFFFF; if(_t && _sp>=2u && _sp<0x100u){ fprintf(stderr,'[DRIVDONE] step=%u -> return -1'); s->r[0]=0xFFFFFFFF; return s->r[14]; } => at step=2 returns -1 -> executor completion -> callback 0x811850DA -> setSequence(6,0,0,0) -> page6 start -> title worker. batch_012 compile exit 0; exe relink exit 0 (57,052,925B 15:00:02). Verification run out80m_m1093drivdone.txt started. NEXT: [DRIVDONE] triggers -> [JOBCOMP] grows -> [SEQREQ] page=6 -> page6 start; title worker (WFDBG wf=81198173) -> appFade OK -> sound objects -> title case0/1 passes; title state machine -> title object -> engine-drawn title; if the title still crashes use the existing probe suite (TTC/TTF8/TTO/SSTEP/DRIVIN).
 
 LOOKUP: M1033, driver invoked only 4 times, DRIVIN #1-#4, state 0->1->2->1 step0->1, driver not scheduled after FUN_811848FC, DRIVDONE shortcut, blk_81184FFE step>=2 return -1, completion 0x811850DA, setSequence(6,0,0,0), page6 TITLE, out80m_m1092drvadvance.txt, out80m_m1093drivdone.txt, exe 57,052,925B -> §18.4577 [relevant: forced step advance], §18.4576 [relevant: SSTEP/DRV], §18.4574 [relevant: driver table]
+### 18.4579 PORT M1034: DRIVDONE 不可达 → HLE 直接调用 setSequence(6)（FORCETITLE）
+
+1) `out80m_m1093drivdone.txt`：
+```
+[JOBCOMP] 1   [SEQREQ] 8（无 page=6）   [DRIVDONE] 0 条
+[DRIVIN] 4 条（state 0→1→2→1 step0→1，与 m1092 完全相同）
+```
+⇒ driver 在 step1 创建后被彻底移出调度，永远到不了 step=2
+2) M1034 捷径：
+```cpp
+// 4 参 guest 调用助手
+static uint32_t call_guest_cb4(RecState* s, uint32_t entry, uint32_t a0,uint32_t a1,uint32_t a2,uint32_t a3, int maxblocks);
+// P5D_FORCETITLE=1 探针（page1 启动后调用一次）
+uint32_t _r = call_guest_cb4(s, 0x81185616u, 6u, 0u, 0u, 0u, 1200000);
+printf("[FORCETITLE] invoke setSequence(6,0,0,0) n=%u ret=%08X\n", ...);
+```
+3) 编译：harness exit 0；exe 57,054,059B（15:18:00）
+4) 验证运行 `out80m_m1094forcetitle.txt` 已启动
+NEXT：
+```
+① [FORCETITLE] invoke → ret
+② [SEQREQ] page=6 → page6 start
+③ title worker → appFade OK → 声音对象 → case0/1 通过
+④ title 状态机 → title 对象 → 引擎自绘标题
+```
+验证：`out80m_m1093drivdone.txt`、`out80m_m1094forcetitle.txt`（生成中）。
+
+ANTI-FORGETTING ENTRY. Keywords: M1034 m1093 confirmed DRIVDONE cannot trigger - the driver is removed from scheduling after step=1 and never reaches step=2 (out80m_m1093drivdone.txt: [JOBCOMP] 1; [SEQREQ] 8; [DRIVDONE] 0; [DRIVIN] 4 lines state 0->1->2->1 step0->1 identical to m1092). Switched to higher-level shortcut: HLE call_guest_cb4 invokes guest FUN_81185616(6,0,0,0) (= setSequence(page=6)) directly to jump to the TITLE page bypassing the stuck init chain. New 4-arg guest call helper call_guest_cb4(s, entry, a0..a3, maxblocks) (saves/restores registers, executes AOT blocks until return). job_probes adds P5D_FORCETITLE=1 probe: when g_main_n>59620000 call once call_guest_cb4(s, 0x81185616u, 6u, 0u, 0u, 0u, 1200000); printf('[FORCETITLE] invoke setSequence(6,0,0,0) n=%u ret=%08X'). harness exit 0; exe relink exit 0 (57,054,059B 15:18:00). Verification run out80m_m1094forcetitle.txt (P5D_FORCETITLE=1 + regular env) started. NEXT: [FORCETITLE] invoke -> ret; [SEQREQ] page=6 -> page6 start (FUN_8119807C); title worker really runs (WFDBG wf=81198173) -> appFade OK -> sound objects -> title case0/1 passes -> title state machine -> title object -> engine-drawn title screen; if crash use the probe suite. Value: validates the downstream chain page6->title state machine->engine drawing is reachable even with the init-chain scheduling bug unfixed; natural init-chain completion remains the formal fix target.
+
+LOOKUP: M1034, DRIVDONE not reachable, driver removed from scheduling after step1, out80m_m1093drivdone.txt, call_guest_cb4, FUN_81185616 setSequence(6,0,0,0), P5D_FORCETITLE, job_probes, g_main_n>59620000, [FORCETITLE], page6 start FUN_8119807C, title worker 0x81198173, appFade, out80m_m1094forcetitle.txt, exe 57,054,059B -> §18.4578 [relevant: DRIVDONE], §18.4577 [relevant: forced step advance], §18.4576 [relevant: driver freeze]
