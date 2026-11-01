@@ -1072,6 +1072,43 @@
 | M1054 | §18.4599: ★★★★★★★★★★ **m1107 里程碑：appGx 绘制提交真的在执行！[DRAWSUB] 60 条（FUN_81163ABC 被反复调用，参数 p2/p4 指向栈上顶点/索引数组，p3=4 顶点、p5=6 索引——游戏正在为 logo 提交真实绘制图元）；[LOGODRAW] 80、[LOGO] 111、[SCNFORCE] 40（该字节本来就是 00，门控不是本运行的阻塞点）；但仍无 BeginScene/EndScene/GXM 提交，且末段显示线程在 `sceDisplayWaitVblankStartMultiCB(0x812B1810)` + `SetEventFlag(0x812B2AE0)` 循环——appGx 批次没有被 flush 到 GXM**。m1107 证据：
 | M1055 | §18.4600: **appGx 绘制架构解析完成：绘制分两步——(1) `FUN_8115FF12` 把期望 GXM 状态刷到硬件（FUN_811634F6/540/552/5B8/5CA/604/61C/6C8/6DA/794/D0 = GXM 状态设置器）；(2) `FUN_811E3960`/`FUN_811E3B54` 分配 draw command 对象（0x34 字节，vtable=&LAB_811E44AE_1），`FUN_811C041C` 按 bucket 入队：`(&DAT_816CC6D8)[DAT_816CC700] + param_1*0x20`，两条链表 +0x0C/+0x10（不透明）与 +0x14/+0x18（透明），由 param_2+0x1C 选择。→ command 对象需由**命令执行器（flush 阶段）**遍历执行才会提交 GXM；目前该 flush 未发生**。M1055 加 [ENQ] 探针 + HLEDUMP 运行（title 阶段 HLE 调用画像，确认 GXM draw API 是否被调用、被谁调用）。反编译证据（`gxflush.txt`）：
 | M1056 | §18.4601: **m1108 关键证据：(1) [ENQ] 确认游戏真的在建绘制命令链——type=0x0B 命令连续入队（bucket base=851CC770，链表头从 8F142000→8F142170 递增，command 对象按 0x30 间隔分配 8F142000/2030/2060…），随后 type=0x4B；(2) HLEDUMP 未触发（默认阈值 n=62M，本次运行只到 n≈61.03M）——需 P5D_HLEDUMP_AT=60000000。队列管理函数反编译完成（FUN_811C07C6 分配队列缓冲/FUN_811C0464/FUN_811C04B6 重置/FUN_811C0828 释放/FUN_811C067C 写计数），它们是 GXM 命令缓冲管理，不是执行器**。m1108：
+| M1057 | §18.4602: ★★★★★★★★★ **找到 appGx 的帧提交函数 `FUN_8119934A`（gfd flush/submit）！反编译：它遍历命令链 → 调用绘制列表构建器（FUN_811F347E/FUN_811F3468/FUN_811F3452）→ `FUN_811E649A(type, builder)` 提交 → `FUN_811E6498()` 刷新命令缓冲 → 推进三缓冲帧索引 `DAT_816CC700`（mod 3）→ `FUN_811EA460()`。M1057 加 [FLUSH]/[SUBMIT]/[CMDFLUSH]/[BLD1..3] 探针，并修正 HLEDUMP 阈值（P5D_HLEDUMP_AT=60000000）以拿到 title 阶段 HLE 调用画像**。反编译（`gfd_flush.txt`）：
+```c
+void FUN_8119934A(void) {   // gfd 每帧 flush
+  ...FUN_811edd2c(); ...
+  if (DAT_816cda78 != 0) FUN_811bd786(1);
+  FUN_811e6330(1);
+  iVar1 = FUN_811C077C(DAT_816CC700);                       // 取当前帧 bucket
+  if (*(int*)(iVar1+0xC) != 0) { FUN_811F347E(builder,iVar1); FUN_811E649A(1,builder); }  // 不透明列表
+  for (u=0;u<2;u++) { iVar1=FUN_811C063A(u|0xF000000,DAT_816CC700);
+                      if (*(int*)(iVar1+0x14)!=0) { FUN_811F3468(builder,iVar1); FUN_811E649A(1,builder); } }
+  if (DAT_816CC6F4 != 0) for (u=0;u<DAT_816CC6F4;u++) { iVar1=FUN_811C0544(u,DAT_816CC700);
+                      if (*(int*)(iVar1+0x14)!=0) { FUN_811F3452(builder,iVar1); FUN_811E649A(1,builder); } }
+  FUN_811F3434(builder); FUN_811E6330(2); FUN_811E6498();    // 刷新命令缓冲
+  FUN_811eb930((DAT_816CC700+2)%3); FUN_811E649A(2,builder);
+  DAT_816CC700 = (DAT_816CC700+1) % 3;                       // 三缓冲帧索引推进
+  FUN_811ea460(); ... }
+```
+**M1057 探针（batch_013/016/017）**：
+```
+blk_8119934A → [FLUSH] #n frame=DAT_816CC700
+blk_811E649A → [SUBMIT] #n type=r0 builder=r1
+blk_811E6498 → [CMDFLUSH] #n
+blk_811F347E/811F3468/811F3452 → [BLD1]/[BLD2]/[BLD3] #n bucket=r1
+```
+编译：batch_013/016/017 exit 0；exe 重链 exit 0（57,068,267B，21:23:17）。
+验证运行：`out80m_m1109flush.txt`（FORCETITLE+FIOSFILL+WAITFORCE+SCNFORCE+`P5D_HLEDUMP=1 P5D_HLEDUMP_AT=60000000`）已启动。
+NEXT：
+```
+① [FLUSH] 在 title 阶段是否每帧调用（frame 索引推进）
+② [BLD1/2/3] 是否被调用（命令链表非空 → 有 draw 列表）
+③ [SUBMIT]/[CMDFLUSH] 是否执行（提交到 GXM 前的最后一步）
+④ HLEDUMP：title 阶段 top-48 HLE 调用（GXM draw/state API 是否出现）
+⑤ 若 flush 不运行 → 找它的调用者（gfd 每帧流程），可能是被我们跳过的显示管理路径
+⑥ 若 flush 运行但 GXM 调用缺失 → 检查 FUN_811E649A/6498 内部（命令执行器 vtable 0x811E44AE）
+```
+验证：`gfd_flush.txt`、`out80m_m1109flush.txt`（生成中）、`cmdq_flush.txt`。 |
+| §18.4602 | FOUND the appGx frame submit function FUN_8119934A (gfd flush/submit)! Decompiled: it walks the command chains -> calls draw-list builders (FUN_811F347E/FUN_811F3468/FUN_811F3452) -> FUN_811E649A(type, builder) submit -> FUN_811E6498() command buffer flush -> advances the triple-buffered frame index DAT_816CC700 (mod 3) -> FUN_811EA460(). M1057 adds [FLUSH]/[SUBMIT]/[CMDFLUSH]/[BLD1..3] probes and fixes the HLEDUMP threshold (P5D_HLEDUMP_AT=60000000) to get the title-phase HLE call profile. Decompiled (gfd_flush.txt): void FUN_8119934A(void) { ... FUN_811edd2c(); ... if (DAT_816cda78 != 0) FUN_811bd786(1); FUN_811e6330(1); iVar1 = FUN_811C077C(DAT_816CC700); if (*(int*)(iVar1+0xC) != 0) { FUN_811F347E(builder,iVar1); FUN_811E649A(1,builder); } for (u=0;u<2;u++) { iVar1=FUN_811C063A(u|0xF000000,DAT_816CC700); if (*(int*)(iVar1+0x14)!=0) { FUN_811F3468(builder,iVar1); FUN_811E649A(1,builder); } } if (DAT_816CC6F4 != 0) for (u=0;u<DAT_816CC6F4;u++) { iVar1=FUN_811C0544(u,DAT_816CC700); if (*(int*)(iVar1+0x14)!=0) { FUN_811F3452(builder,iVar1); FUN_811E649A(1,builder); } } FUN_811F3434(builder); FUN_811E6330(2); FUN_811E6498(); FUN_811eb930((DAT_816CC700+2)%3); FUN_811E649A(2,builder); DAT_816CC700 = (DAT_816CC700+1) % 3; FUN_811ea460(); ... } M1057 probes (batch_013/016/017): blk_8119934A [FLUSH] #n frame=DAT_816CC700; blk_811E649A [SUBMIT] #n type=r0 builder=r1; blk_811E6498 [CMDFLUSH] #n; blk_811F347E/811F3468/811F3452 [BLD1]/[BLD2]/[BLD3] #n bucket=r1. batch_013/016/017 compile exit 0; exe relink exit 0 (57,068,267B 21:23:17). Verification run out80m_m1109flush.txt (FORCETITLE+FIOSFILL+WAITFORCE+SCNFORCE+P5D_HLEDUMP=1 P5D_HLEDUMP_AT=60000000) started. NEXT: whether [FLUSH] runs per frame during title (frame index advancing); whether [BLD1/2/3] are called (non-empty draw lists); whether [SUBMIT]/[CMDFLUSH] execute (last step before GXM); HLEDUMP title-phase top-48 (GXM draw/state APIs appear?); if flush does not run find its caller (gfd per-frame flow, possibly the display-manager path we skip); if flush runs but GXM calls are missing inspect FUN_811E649A/6498 internals (command executor vtable 0x811E44AE). |
 ```
 [ENQ] #1 type=0000000B idx=0 base=851CC770 ptr=851CC8D0 A=00000000/00000000 B=0/0 cmd=8F142000
 [ENQ] #2 type=0000000B ... A=8F142000/8F142000 ... cmd=8F142030
@@ -496684,3 +496721,43 @@ undefined4 FUN_811C07C6(int p1) { 分配 3×(p1*0x20/0x40/0x20) 清零; DAT_816C
 ANTI-FORGETTING ENTRY. Keywords: M1056 m1108: [ENQ] confirms real draw-command chains (type=0x0B x9, bucket base=851CC770, list head 8F142000->8F142170, command objects 0x30 apart 8F142000/2030/2060..., then type=0x4B); HLEDUMP didn't fire (default threshold 62M, run ended n≈61.03M) -> use P5D_HLEDUMP_AT=60000000. Queue managers decompiled: FUN_811C0828 frees 3 buckets (+0x2a/+0x27/+0x2d via FUN_811DA554) and clears DAT_816CC6F4; FUN_811C0464/FUN_811C04B6 reset command slots; FUN_811C067C writes counts into DAT_816CC6CC/D0/D4 + (p1&0xf0ffffff)*0x20 + 4; FUN_811C07C6 allocates 3x(p1*0x20/0x40/0x20) buffers, DAT_816CC6F4=p1. The flush loop walking the chains and calling command vtable 0x811E44AE is still not located. m1108 also: [DRAWSUB] 60; [LOGODRAW] 80; [LOGO] 131; [SCNFORCE] 40 byte 8155545C=00; [WAITFORCE] 3; [ABIBEGIN] 1; [ABIEND] 0; [PRESENT] 1. NEXT: rerun with P5D_HLEDUMP_AT=60000000; decompile FUN_811F380C and FUN_811C05xx/FUN_811C055A to find the flush loop; add [GXFLUSH] probes; check BeginScene/EndScene inside flush; once works command vtable executes -> GXM draw -> logo on screen.
 
 LOOKUP: M1056, [ENQ] type=0x0B bucket 851CC770 list 8F142000->8F142170 cmd 8F142000/2030/2060, type=0x4B, HLEDUMP threshold P5D_HLEDUMP_AT=60000000, FUN_811C0828 free buckets FUN_811DA554 DAT_816CC6F4, FUN_811C0464/FUN_811C04B6 reset slots bit31, FUN_811C067C counts DAT_816CC6CC/D0/D4, FUN_811C07C6 alloc 3 buffers, FUN_811F380C, command vtable 0x811E44AE, [GXFLUSH], out80m_m1108enq.txt, cmdq_refs.txt, cmdq_flush.txt -> §18.4600 [relevant: enqueue architecture], §18.4599 [relevant: DRAWSUB], §18.4597 [relevant: draw callback]
+### 18.4602 PORT M1057: gfd 帧提交函数 FUN_8119934A 定位 + flush/submit 探针
+
+1) 反编译（`gfd_flush.txt`）：
+```c
+void FUN_8119934A(void) {   // gfd 每帧 flush
+  ...
+  FUN_811e6330(1);
+  iVar1 = FUN_811C077C(DAT_816CC700);
+  if (*(int*)(iVar1+0xC)!=0) { FUN_811F347E(builder,iVar1); FUN_811E649A(1,builder); }   // 不透明
+  for (u=0;u<2;u++){ iVar1=FUN_811C063A(u|0xF000000,DAT_816CC700);
+                     if (*(int*)(iVar1+0x14)!=0){ FUN_811F3468(builder,iVar1); FUN_811E649A(1,builder); } }
+  if (DAT_816CC6F4!=0) for (u=0;u<DAT_816CC6F4;u++){ iVar1=FUN_811C0544(u,DAT_816CC700);
+                     if (*(int*)(iVar1+0x14)!=0){ FUN_811F3452(builder,iVar1); FUN_811E649A(1,builder); } }
+  FUN_811F3434(builder); FUN_811E6330(2); FUN_811E6498();     // 命令缓冲 flush
+  FUN_811eb930((DAT_816CC700+2)%3); FUN_811E649A(2,builder);
+  DAT_816CC700 = (DAT_816CC700+1)%3;  FUN_811ea460(); ... }
+```
+2) M1057 探针：
+```
+blk_8119934A → [FLUSH] #n frame=DAT_816CC700
+blk_811E649A → [SUBMIT] #n type=r0 builder=r1
+blk_811E6498 → [CMDFLUSH] #n
+blk_811F347E/3468/3452 → [BLD1]/[BLD2]/[BLD3] bucket=r1
+```
+3) 编译：batch_013/016/017 exit 0；exe 57,068,267B（21:23:17）
+4) 验证运行 `out80m_m1109flush.txt`（+ HLEDUMP_AT=60000000）已启动
+NEXT：
+```
+① [FLUSH] 是否每帧（frame 推进）
+② [BLD1/2/3] 是否被调用（链表非空）
+③ [SUBMIT]/[CMDFLUSH] 是否执行
+④ HLEDUMP：title 阶段 top-48 HLE 调用（GXM draw/state 是否出现）
+⑤ flush 不运行 → 找调用者（gfd 每帧流程，可能在跳过的显示管理路径）
+⑥ flush 运行但无 GXM → 检查 FUN_811E649A/6498（命令执行器 vtable 0x811E44AE）
+```
+验证：`gfd_flush.txt`、`out80m_m1109flush.txt`（生成中）。
+
+ANTI-FORGETTING ENTRY. Keywords: M1057 found the appGx frame submit function FUN_8119934A (gfd flush/submit): walks command chains -> FUN_811F347E/FUN_811F3468/FUN_811F3452 builders -> FUN_811E649A(type,builder) submit -> FUN_811E6498() command buffer flush -> advances triple-buffered DAT_816CC700 (mod 3) -> FUN_811EA460(). Probes: blk_8119934A [FLUSH] frame; blk_811E649A [SUBMIT] type/builder; blk_811E6498 [CMDFLUSH]; blk_811F347E/3468/3452 [BLD1..3] bucket=r1. batch_013/016/017 compile exit 0; exe relink exit 0 (57,068,267B 21:23:17). Verification run out80m_m1109flush.txt (FORCETITLE+FIOSFILL+WAITFORCE+SCNFORCE+P5D_HLEDUMP=1 P5D_HLEDUMP_AT=60000000) started. NEXT: [FLUSH] per-frame? frame index advance; [BLD1/2/3] called (non-empty lists); [SUBMIT]/[CMDFLUSH] execute; HLEDUMP title top-48 (GXM draw/state?); if flush not running find its caller (gfd per-frame flow, possibly the skipped display-manager path); if flush runs but no GXM inspect FUN_811E649A/6498 (executor vtable 0x811E44AE).
+
+LOOKUP: M1057, gfd flush FUN_8119934A, FUN_811C077C bucket, FUN_811C063A, FUN_811C0544, FUN_811F347E/811F3468/811F3452 builders, FUN_811E649A submit, FUN_811E6498 cmdbuf flush, DAT_816CC700 triple buffer mod 3, FUN_811EA460, FUN_811eb930, [FLUSH] [SUBMIT] [CMDFLUSH] [BLD1..3] probes, batch_013 batch_016 batch_017, P5D_HLEDUMP_AT=60000000, gfd_flush.txt, out80m_m1109flush.txt, exe 57,068,267B -> §18.4601 [relevant: enqueue], §18.4600 [relevant: draw architecture], §18.4599 [relevant: DRAWSUB]
