@@ -1084,6 +1084,63 @@
 | M1066 | §18.4611: ★★★★★★★★★★ **gfd 作业队列全链路确认 + 精确卡点：job 已投递、信号量计数在涨、worker 线程却始终 waiting（从未被唤醒/被泵）**。m1112（THRPUMP=1）证据：
 | M1067 | §18.4612: ★★★★★★★★★★ **m1113（THRPUMP+THREADDUMP 短跑）铁证：13 个 guest 线程中 **7 个 ready=1、wait=0、却从不执行**；同时 6 个 gfd worker 在 gfdJobCountSema 上等待。信号量语义（SignalSema 唤醒/WaitSema 消费）已逐行核对正确——问题 100% 在"ready 线程不被调度执行"。**
 | M1068 | §18.4613: ★★★★★★★★★★★★ **M1068 线程泵修复成功：`P5D_PUMPMAIN=1` 让 guest 线程真正执行！2.5M+ 次线程执行、worker 进入 trampoline、帧计数器 ctr 从 0→221（引擎帧循环活了）、无 BADMEM、运行速度提升约 3 倍；但 title 阶段仍无 per-frame GXM 绘制调用——下一层：worker 是否执行 gfd 作业描述符。**
+| M1069 | §18.4614: ★★★★★★★★★★ **worker 线程确认执行了 gfd 帧提交描述符（[GSUBMIT] tid=40016000 r1=811F3495；[GPUPREP2] tid=40016000 进入 FUN_811EBB90），并反汇编解码了 FUN_811F3494 的两道提交门控——门控显示 array2（DAT_816CC6CC）绘制列表为空，因为 2D sprite 批处理渲染器 FUN_811ADAFE 从未运行。**
+m1115（P5D_PUMPMAIN=1，title 阶段 n=61.4M）：
+```
+[GSUBMIT] #1 tid=40016000 r0=847F4264 r1=811F3495 lr=811E6936 sp=847F4258   ← worker 执行提交描述符
+[GPUPREP2] #1 tid=40016000 r0=00000000 r1=00000000 lr=811F3548              ← 进入 FUN_811EBB90(GPU 提交)
+[GWALK1/2/3] 0  [GCHAIN1/2] 0  [GPUVIEW] 0
+[FLUSHX] a1=850FD9A0 a2=850FD960 a3=850FCF20，a3 bucket11 op=8F142000（命令仍在 array3）
+[ENQ] #1..#9 type=0000000B cmd=8F142000…、#10 type=0000004B     ← array3 入队正常
+[ADA] 0  [ENQ2] 0                                                ← ★ FUN_811ADAFE 从未运行
+[SUBMIT] 93（type=0/2 消息投递）  [LOGODRAW] 80  [LOGO] 167  [BADMEM] 0
+[ABIBEGIN] 1（仅启动） [ABIEND] 0 [PRESENT] 1
+```
+**FUN_811F3494 反汇编（`submit_dis.txt`）— 两道门控**：
+```asm
+811f3494  push {r4,r5,r6,lr}
+811f3496  ldr r4,[r0,#0x0]       ; r4 = *descriptor = 帧索引（0..2）
+811f3498  ldr r5,[r0,#0x4]       ; r5 = flags
+811f349a  adds r0,r4,#0
+811f349c  bl 0x811ec280
+811f34a0  cmp r0,#0        ; FUN_811EC280 恒返回 1 → 继续
+811f34b0  adds r0,r4,#0
+811f34b2  bl 0x811c0654    ; ★ 门控 1：FUN_811C0654(frame)
+811f34b6  cmp r0,#0
+811f34b8  bne 0x811f3512   ;   若 != 0 → 跳过 GXM 视图绘制块（FUN_811EC172→SceGxm_*）
+...
+811f3512  movw r0,#0xc630; movt r0,#0x816c
+811f351a  add r0,r0,r4,lsl #2
+811f351e  ldr r0,[r0,#0x100]     ; r0 = DAT_816CC730[frame]
+811f3522  ands r0,r0,#1
+811f3526  beq 0x811f3564          ; ★ 门控 2：bit0==0 → 跳过 FUN_811EBB90，仅 FUN_811C0464 清理
+811f3542  adds r0,r4
+811f3544  bl 0x811ebb90           ; GPU 提交（我们见到 1 次，帧 0）
+```
+**FUN_811C0654 反编译（`gate654.txt`）**——判断 array2 是否有待绘制内容：
+```c
+undefined4 FUN_811c0654(int param_1) {          // param_1 = frame
+  int iVar2 = (&DAT_816CC6CC)[param_1];          // ★ array2 基址
+  uint uVar1 = 0;
+  while (1) {
+    if (*(int*)(iVar2+0xC)  != 0) return 0;      // bucket0 不透明链非空 → 要绘制
+    if (*(int*)(iVar2+0x14) != 0) break;         // bucket0 透明链非空 → 要绘制
+    uVar1++; iVar2 += 0x20;
+    if (1 < uVar1) return 1;                     // bucket0/1 都空 → 返回 1（跳过绘制）
+  }
+  return 0; }
+```
+**⇒ 门控原因：array2（`(&DAT_816CC6CC)[frame]`）的 bucket0/1 绘制链为空 → FUN_811C0654 返回 1 → 跳过 per-view GXM 绘制；DAT_816CC730[frame] bit0=0 → 跳过 GPU 提交 FUN_811EBB90。array2 的唯一写入者 `FUN_811C05EC` 只被 `FUN_811ADAFE`（2D sprite 批处理渲染器）调用，而 [ADA]/[ENQ2] 计数 0 → FUN_811ADAFE 从未运行。**FUN_811ADAFE 的调用者 = **FUN_811B6B12**（4 处调用），FUN_811B6B12 的调用者 = FUN_811C2964 / FUN_81219E02 / 0x81216066/8121607C/8121749C/81218260（后半段为未识别函数内调用）。
+NEXT：
+```
+① 探针：array2（a2）bucket0/1 的 +0xC/+0x14 链表头（在 FUN_811F3494 入口打印）与 DAT_816CC730[frame]
+② 探针：FUN_811ADAFE（已有 [ADA] 但未触发）、FUN_811B6B12（加 [B6B12]）、FUN_811C2964（加 [C2964]）
+③ 反编译 FUN_811B6B12 / FUN_811C2964：谁应该在帧提交前跑 2D sprite 渲染、需要什么状态
+④ 找到 2D 渲染调度入口（可能由 app 的 frame 流程/显示线程调用）→ 触发 FUN_811ADAFE
+⑤ 一旦 array2 有内容 → FUN_811C0654 返回 0 → FUN_811EC172 → SceGxm_* HLE → per-frame GXM 绘制 → 画面
+```
+验证：`out80m_m1115gwalk.txt`、`submit_dis.txt`、`gate654.txt`、`ada_refs.txt`、`b6b12_refs.txt`。 |
+| §18.4614 | Worker thread confirmed executing the gfd frame-submit descriptor ([GSUBMIT] tid=40016000 r1=811F3495; [GPUPREP2] tid=40016000 entering FUN_811EBB90), and the FUN_811F3494 disassembly decoded its two submit gates - the gates show array2 (DAT_816CC6CC) draw lists are empty because the 2D sprite batch renderer FUN_811ADAFE never runs. m1115 (P5D_PUMPMAIN=1, title phase n=61.4M): [GSUBMIT] #1 tid=40016000 r0=847F4264 r1=811F3495 lr=811E6936 (worker executed the submit descriptor); [GPUPREP2] #1 tid=40016000 r0=0 r1=0 lr=811F3548 (entered FUN_811EBB90 GPU submit); [GWALK1/2/3] 0; [GCHAIN1/2] 0; [GPUVIEW] 0; [FLUSHX] a1=850FD9A0 a2=850FD960 a3=850FCF20, a3 bucket11 op=8F142000 (commands still in array3); [ENQ] #1..#9 type=0x0B cmd=8F142000.. plus #10 type=0x4B (array3 enqueue fine); [ADA] 0 [ENQ2] 0 (FUN_811ADAFE never ran); [SUBMIT] 93 (type=0/2 messages posted); [LOGODRAW] 80; [LOGO] 167; [BADMEM] 0; [ABIBEGIN] 1 (boot only); [ABIEND] 0; [PRESENT] 1. FUN_811F3494 disassembly (submit_dis.txt) two gates: 811f3496 ldr r4,[r0] (r4=*descriptor=frame idx); 811f3498 ldr r5,[r0,#4] (flags); 811f349c bl 0x811ec280 (always returns 1 so continue); 811f34b2 bl 0x811c0654; 811f34b8 bne 0x811f3512 (gate 1: if nonzero skip the GXM view-draw block FUN_811EC172->SceGxm_*); 811f351e ldr r0,[r0,#0x100] = DAT_816CC730[frame]; 811f3522 ands r0,#1; 811f3526 beq 0x811f3564 (gate 2: bit0==0 skips FUN_811EBB90 and only does FUN_811C0464 cleanup); 811f3544 bl 0x811ebb90 (GPU submit, seen once for frame 0). FUN_811C0654 decompiled (gate654.txt): iVar2=(&DAT_816CC6CC)[frame] (array2 base); loop: if [iVar2+0xC]!=0 return 0; if [iVar2+0x14]!=0 break; uVar1++; iVar2+=0x20; if (1<uVar1) return 1; return 0. So gate cause: array2 buckets 0/1 draw chains empty -> FUN_811C0654 returns 1 -> per-view GXM draw skipped; DAT_816CC730[frame] bit0=0 -> GPU submit FUN_811EBB90 skipped. The only writer of array2, FUN_811C05EC, is called only by FUN_811ADAFE (2D sprite batch renderer), and [ADA]/[ENQ2] counts are 0 -> FUN_811ADAFE never runs. FUN_811ADAFE callers = FUN_811B6B12 (4 call sites); FUN_811B6B12 callers = FUN_811C2964 / FUN_81219E02 / inside 0x81216066/8121607C/8121749C/81218260. NEXT: (1) probes on array2 (a2) bucket0/1 +0xC/+0x14 heads (printed at FUN_811F3494 entry) and DAT_816CC730[frame]; (2) probes on FUN_811ADAFE ([ADA] exists but untriggered), FUN_811B6B12 ([B6B12]), FUN_811C2964 ([C2964]); (3) decompile FUN_811B6B12/FUN_811C2964 to learn who should run the 2D sprite renderer before frame submit and what state it needs; (4) find the 2D render dispatch entry (possibly called from the app frame flow/display thread) -> trigger FUN_811ADAFE; (5) once array2 has content -> FUN_811C0654 returns 0 -> FUN_811EC172 -> SceGxm_* HLE -> per-frame GXM draw -> picture. |
 **实现（`recomp_harness.cpp`，M1068）**：
 1. 新增 `g_pumpmain_env`（env `P5D_PUMPMAIN`）+ `[PUMP]` 诊断（调用数/门控拒绝/泵线程 tid/pc/块号）
 2. `hle_thr_pump` 门控处加计数：`if (g_in_fiber_exec && !g_thrpump_env && !g_thrpump3 && !g_pump_force) { ++g_pgate; return; }`
@@ -497469,3 +497526,42 @@ NEXT：
 ANTI-FORGETTING ENTRY. Keywords: M1068 thread-pump fix SUCCEEDED with P5D_PUMPMAIN=1. Implementation in recomp_harness.cpp: g_pumpmain_env from env P5D_PUMPMAIN; [PUMP] diagnostics (calls/gate/pumped/tid/pc); hle_thr_pump gate now counts g_pgate; forced pump every 0x400 blocks in the fiber_exec loop (g_pump_force=1; hle_thr_pump(s,300); g_pump_force=0); main-loop pump forced via g_pump_force; [GSIG] for SignalSema on 5001xxxx; [WK] probe at batch_016 blk_811E68C8 (worker trampoline). m1114 (out80m_m1114pumpmain.txt, exit 0): [PUMP] 12025 lines, pumped 2,521,600+ executions; gfd workers 40011000..40016000 first pumped at pc=811E68C8 then run; threads 40017000 pc=81207612, 40019000 pc=8101611A/811731D8, 4001B000, 4001E000 pc=812B0BB6 all execute; [WK] x6 all 6 workers enter trampoline r0=8; [BADMEM] 0; FRAMEDUMP tail n=64,275,000 ctr=221 (frame counter 0->221, previously 0); run ends done blocks=64,278,346 pc=8116F748; [CNT] 81198BEA=749 811E5CDA=749 811E5928=11 FSLOT=749; [CNT2] mgr=749; [CONSUME] FHRead=0 FIOS-opens=12288; [LOGO] 202 [LOGODRAW] 80 [DRAWSUB] 60 [FLUSH] 120 [SUBMIT] 121; still [ABIBEGIN]=1 [ABIEND]=0 [GXM-BEGIN]=0 [PRESENT]=1 [TEXBIND]=1 [ABIVTX]=1. So thread scheduling root cause fixed; engine frame loop/logo state machine advance; remaining: gfd worker-executed jobs do not reach GXM. NEXT: add [GWALK]/[GSUBMIT] probes on descriptor walkers 0x811F36C7/0x811F3751/0x811F37AD and submit 0x811F3495 printing tid; check [BLD1/2/3]/[SUBMIT] in worker context; check gfdJobCountSema consumption; print FUN_811F3494 internal gates (FUN_811ec280/ec0a4/ec172); goal worker gfd submit -> per-frame GXM (BeginScene/Draw/EndScene) -> picture.
 
 LOOKUP: M1068 P5D_PUMPMAIN success, g_pumpmain_env, [PUMP] diagnostics g_pcalls g_pgate g_ppumped, forced pump fiber_exec loop every 0x400 g_pump_force, hle_thr_pump(s,300), main loop forced pump, [GSIG] 5001xxxx, [WK] blk_811E68C8 worker trampoline, m1114 out80m_m1114pumpmain.txt, pumped 2,521,600, tid 40011000..40016000 pc=811E68C8, 40017000 pc=81207612, 40019000 pc=8101611A/811731D8, FRAMEDUMP ctr=221, [CNT] 81198BEA=749 FSLOT=749 mgr=749, [ABIBEGIN]=1 still, next [GWALK] 0x811F36C7/0x811F3751/0x811F37AD, [GSUBMIT] 0x811F3495, FUN_811F3494 gates FUN_811ec280/ec0a4/ec172 -> §18.4612 [relevant: ready threads], §18.4611 [relevant: gfd job queue], §18.4609 [relevant: worker root cause]
+### 18.4614 PORT M1069: worker 执行 gfd 提交 + FUN_811F3494 两道门控解码
+
+1) m1115（P5D_PUMPMAIN=1，n=61.4M）：
+```
+[GSUBMIT] #1 tid=40016000 r0=847F4264 r1=811F3495 lr=811E6936 sp=847F4258
+[GPUPREP2] #1 tid=40016000 r0=00000000 r1=00000000 lr=811F3548
+[GWALK1/2/3]=0 [GCHAIN1/2]=0 [GPUVIEW]=0
+[FLUSHX] a1=850FD9A0 a2=850FD960 a3=850FCF20，a3 bucket11 op=8F142000
+[ENQ] #1..#9 type=0000000B cmd=8F142000… #10 type=0000004B
+[ADA]=0 [ENQ2]=0   ← FUN_811ADAFE 从未运行
+[SUBMIT]=93 [LOGODRAW]=80 [LOGO]=167 [BADMEM]=0
+[ABIBEGIN]=1 [ABIEND]=0 [PRESENT]=1
+```
+2) FUN_811F3494 两道门控（submit_dis.txt）：
+```asm
+811f3496  ldr r4,[r0]         ; r4 = 帧索引
+811f3498  ldr r5,[r0,#4]      ; flags
+811f34b2  bl 0x811c0654       ; 门控1
+811f34b8  bne 0x811f3512      ; 非0 → 跳过 GXM 视图绘制（FUN_811EC172）
+811f351e  ldr r0,[r0,#0x100]  ; DAT_816CC730[frame]
+811f3522  ands r0,#1
+811f3526  beq 0x811f3564      ; 门控2：bit0==0 → 跳过 FUN_811EBB90（仅清理）
+811f3544  bl 0x811ebb90       ; GPU 提交（仅帧0 执行1次）
+```
+3) FUN_811C0654（gate654.txt）：array2=(&DAT_816CC6CC)[frame]，bucket0/1 的 +0xC/+0x14 全空 → 返回 1（跳过绘制）
+4) array2 唯一写者 FUN_811C05EC 只被 FUN_811ADAFE 调用；FUN_811ADAFE ← FUN_811B6B12 ← FUN_811C2964/FUN_81219E02/0x81216xxx
+NEXT：
+```
+① 打印 array2 bucket0/1 链与 DAT_816CC730[frame]
+② [ADA]/[B6B12]/[C2964] 探针
+③ 反编译 FUN_811B6B12/FUN_811C2964（2D 渲染调度）
+④ 找到并触发 2D 渲染调度入口
+⑤ array2 非空 → FUN_811EC172 → SceGxm_* → 画面
+```
+验证：`out80m_m1115gwalk.txt`、`submit_dis.txt`、`gate654.txt`、`ada_refs.txt`、`b6b12_refs.txt`。
+
+ANTI-FORGETTING ENTRY. Keywords: M1069 m1115 worker 40016000 executed gfd submit descriptor ([GSUBMIT] r0=847F4264 r1=811F3495 lr=811E6936) and entered FUN_811EBB90 once ([GPUPREP2] r0=0 lr=811F3548); FUN_811F3494 disassembly: r4=*descriptor=frame idx, r5=flags; gate1: bl 0x811c0654, bne 0x811f3512 (if nonzero skip GXM view draw FUN_811EC172->SceGxm_*); gate2: DAT_816CC730[frame] bit0 (ldr [r0,#0x100] after add r0=0x816cc630+r4*4), beq 0x811f3564 skips FUN_811EBB90 (GPU submit) and only does FUN_811C0464 cleanup; bl 0x811ebb90 seen once for frame 0. FUN_811C0654(array2=(&DAT_816CC6CC)[frame]): returns 0 if bucket0/1 +0xC or +0x14 non-empty, else returns 1 -> array2 empty => skip. array2's only writer FUN_811C05EC is called only by FUN_811ADAFE (2D sprite batch renderer), and [ADA]/[ENQ2]=0 -> FUN_811ADAFE never runs; FUN_811ADAFE callers = FUN_811B6B12 (4 sites), FUN_811B6B12 callers = FUN_811C2964/FUN_81219E02/0x81216xxx. m1115 also: [FLUSHX] a1=850FD9A0 a2=850FD960 a3=850FCF20 a3 bucket11 op=8F142000; [ENQ] type=0x0B x9 + 0x4B; [SUBMIT] 93; [LOGODRAW] 80; [LOGO] 167; [BADMEM] 0; [ABIBEGIN] 1. NEXT: print array2 bucket0/1 heads + DAT_816CC730[frame] at FUN_811F3494 entry; add [ADA]/[B6B12]/[C2964] probes; decompile FUN_811B6B12/FUN_811C2964; find and trigger the 2D render dispatch entry; once array2 non-empty -> FUN_811EC172 -> SceGxm_* HLE -> per-frame GXM -> picture.
+
+LOOKUP: M1069, [GSUBMIT] tid=40016000 r0=847F4264 r1=811F3495 lr=811E6936, [GPUPREP2] FUN_811EBB90 r0=0 lr=811F3548, FUN_811F3494 gates FUN_811C0654 gate654.txt, DAT_816CC730[frame] bit0 at [r0+0x100] from 0x816cc630, FUN_811C0654 array2 816CC6CC bucket0/1 +0xC/+0x14 returns 1 when empty, FUN_811ADAFE 2D sprite batch renderer never runs [ADA]=0 [ENQ2]=0, FUN_811C05EC only caller FUN_811ADAFE, FUN_811B6B12, FUN_811C2964, FUN_81219E02, FUN_811EC172 SceGxm calls, FUN_811EBB90 GPU submit, out80m_m1115gwalk.txt, submit_dis.txt, gate654.txt, ada_refs.txt, b6b12_refs.txt -> §18.4613 [relevant: thread pump works], §18.4608 [relevant: walkers], §18.4605 [relevant: opaque chain]

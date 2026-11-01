@@ -355,6 +355,7 @@ static std::map<uint32_t, FCtx> g_fctx;
 struct HThread { uint32_t entry, arg, stack; FCtx ctx; int alive, ready, waiting; uint32_t wait_obj, wait_bits, wait_mode; RecState gctx; std::thread* hth; int exit_flag; };
 static std::map<uint32_t, HThread> g_thr;
 static uint32_t g_cur_thr = 0;
+extern "C" uint32_t harness_cur_thr(void) { return g_cur_thr; }
 static int g_thr_blocked = 0;
 static std::map<uint32_t, uint32_t> g_sema;
 static std::map<uint32_t, uint32_t> g_eflag;
