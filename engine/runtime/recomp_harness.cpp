@@ -5492,6 +5492,17 @@ int main(int argc, char** argv) {
   { uint32_t _lh=0; std::memcpy(&_lh, g_img.data()+ (0x816CDAC8u-IMG_VA_BASE) + 0xC4u, 4);
     printf("[REGINIT] head=%08X\n", _lh);
     uint32_t _e=_lh; for (int _i=0;_i<6 && _e;_i++){ uint32_t _w[8]={0}; for(int _k=0;_k<8;++_k){ uint32_t _off=_e-IMG_VA_BASE+_k*4u; if(_off+4<=IMG_SIZE) std::memcpy(&_w[_k], g_img.data()+_off,4);} printf("[REGINIT] e%d=%08X w: %08X %08X %08X %08X %08X %08X %08X %08X\n", _i, _e, _w[0],_w[1],_w[2],_w[3],_w[4],_w[5],_w[6],_w[7]); _e=_w[0]; } fflush(stdout); }
+  if (getenv("P5D_PTRSCAN")) {
+    const uint32_t _pats[6] = {0x811C2A4Cu,0x811C2A4Du,0x811C2964u,0x811C2965u,0x811C27D8u,0x811C27D9u};
+    int _cnt = 0; size_t _n = g_img.size();
+    printf("[PTRSCAN] scanning %u bytes (base %08X)\n", (unsigned)_n, (unsigned)IMG_VA_BASE);
+    for (size_t _o = 0; _o + 4 <= _n; _o += 4) { uint32_t _v; std::memcpy(&_v, g_img.data() + _o, 4);
+      for (int _k = 0; _k < 6; ++_k) if (_v == _pats[_k]) {
+        printf("[PTRSCAN] hit pat=%08X VA=%08X off=%X\n", _pats[_k], (unsigned)(IMG_VA_BASE + _o), (unsigned)_o);
+        std::fflush(stdout); if (++_cnt >= 60) goto _ptrscan_done; } }
+   _ptrscan_done:
+    printf("[PTRSCAN] total=%d\n", _cnt); std::fflush(stdout);
+  }
   build_all_blocks();
   init_manual_blocks();
   if (!g_wd_started) { g_wd_started = 1; std::thread(wd_loop).detach(); }   // 18.4179: stall watchdog

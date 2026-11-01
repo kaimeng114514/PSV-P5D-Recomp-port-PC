@@ -1088,6 +1088,35 @@
 | M1070 | §18.4615: ★★★★★★★★★★ **m1116 把门控原因再推进一层：gfd 帧提交入口实测 `frame=0 a2=850FD960 g730=0x03000000`，array2 bucket0/1 链表头全 0（b0op/b0tr/b1op/b1tr=0）——两道门控都跳过；而 2D 场景调度器 `FUN_811C2964` 确实每帧被主线程调用（120 次，r0=859BF220/859BF940 两个场景对象），但它没有到达 FUN_811B6B12/FUN_811ADAFE——场景条目列表（param_1[0xF]）为空或条目全被禁用。**
 | M1071 | §18.4616: ★★★★★★★★★★ **m1117 铁证：两个场景对象（859BF220/859BF940）每帧被检查，`st=1, head0F=0, head19=0`——2D 条目链完全为空；且在 arm 后没有任何对 scene+0x3C 的写入（[SCW]=0）。同时反编译出场景帧驱动与场景/视图注册器。**
 | M1072 | §18.4617: ★★★★★★★★★★ **m1118 定位到"场景已注册、但 2D 视图从未注册"：`FUN_811C2A4C`（场景/视图注册器）**从未被调用**（[SCREATE]# = 0）；场景对象 859BF220/859BF940 是由场景注册 API `FUN_811BF900(index, scene)` 写入 `(&DAT_816CC664)[index]` 的（该 API 还调用 FUN_811C3438(scene) 初始化、*scene=index；替换旧场景时调用 FUN_811C222E）。**
+| M1073 | §18.4618: ★★★★★★★★★★ **m1119 拿到场景注册的真实调用点：FUN_811BF900 在 title 初始化时被调用 2 次（index=0/scene=859BF220，index=1/scene=859BF940，调用者 0x8115A0E0/0x8115A314）；FUN_811C3438 只是互斥锁初始化；每帧 FUN_811C241E（[SCBUILD]）是场景相机矩阵计算（非视图构建）；P5D_PTRSCAN 扫描 939MB guest 镜像找 0x811C2A4C/0x811C2964 等指针 → 0 命中（说明该函数没有静态函数表入口，或镜像代码段非原始布局）。**
+m1119（P5D_PUMPMAIN=1，n=61.7M）：
+```
+[SREG] #1 tid=0 r0=00000000 r1=859BF220 r2=00000001 lr=8115A0E0   ← 场景 index=0 注册
+[SREG] #2 tid=0 r0=00000001 r1=859BF940 r2=00000001 lr=8115A314   ← 场景 index=1 注册
+[SINIT] #1 r0=859BF220 lr=811BF924   [SINIT] #2 r0=859BF940 lr=811BF924   ← 仅 FUN_81207290(scene+200) mutex 初始化
+[SUNREG] 0
+[SCBUILD] 100（cap）：r0=859BF220 r1=0 r2=0x1444 lr=811993C0 / r0=859BF940 r1=812B4150 r2=859BF2A8 lr=811993C0
+        ← 每帧从 gfd flush 调用 FUN_811C241E（场景相机矩阵/状态）
+[SCENE] 120：p=859BF220/859BF940 st=1 head0F=0 head19=0 cnt=0
+[C2964] 120  [B6B12]=0 [ADA]=0 [SCW]=0  [BADMEM]=0
+```
+**P5D_PTRSCAN（新工具，`recomp_harness.cpp`）**：启动后在 guest 镜像（939,524,096B，base 0x80600000）扫描 6 个目标指针（0x811C2A4C/4D、0x811C2964/65、0x811C27D8/D9）→ **total=0**：
+```
+[PTRSCAN] scanning 939524096 bytes (base 80600000)
+[PTRSCAN] total=0
+```
+⇒ FUN_811C2A4C 既无直接 xref 也无静态指针引用——它可能是死代码，或通过运行时计算的函数表调用（表项在堆上动态构造），需要**运行时晚扫描**（boot 后在 guest 内存扫描 appGx 区 0x811BF000-0x811C6000 的函数指针值）。
+**FUN_811C241E 反编译确认**：1348B 超大函数，NEON 矩阵运算（视图/投影矩阵、param_1[3] 相机矩阵读写、param_1[0x31] 变换、回调 param_1[0x2B]/[0x2F]）——**每帧场景相机更新，不是视图条目构建**。
+NEXT：
+```
+① 运行时晚扫描：P5D_PTRSCAN_LATE（boot 后 n≈2M 时扫描 guest 内存中 0x811BF000-0x811C6000 范围函数指针 → 找 appGx 场景/视图 API 表，定位"添加视图"函数）
+② 反编译 appGx 场景 API 范围 0x811C3000-0x811C3A00（FUN_811C3438 邻域）与 0x811C1E00-0x811C2400，找分配 0x50 节点并挂 scene+0x3C 的函数
+③ 检查 0x813E15AC 回调表（FUN_811C2A4C 内部按索引调用的表）内容 → 映射到 appGx API
+④ 找到"添加视图"API 后：查游戏是否调用（探针）→ 若无调用，查其门控（可能依赖 HLE 返回值）
+⑤ 视图注册 → FUN_811C2964 → FUN_811B6B12 → FUN_811ADAFE → array2 → GXM → 画面
+```
+验证：`out80m_m1119sreg.txt`、`c241e.txt`、`out_m1120ptrscan.txt`、`scenereg_api.txt`。 |
+| §18.4618 | m1119 obtained the real scene registration call sites: FUN_811BF900 is called twice during title init (index=0/scene=859BF220, index=1/scene=859BF940, callers 0x8115A0E0/0x8115A314); FUN_811C3438 is only a mutex init; the per-frame FUN_811C241E ([SCBUILD], called from the gfd flush at lr=811993C0) is the scene camera-matrix computation, not view-list building; P5D_PTRSCAN scanned the 939MB guest image for 0x811C2A4C/0x811C2964 etc. and got 0 hits (so that function has no static function-table entry, or the image code section does not have the original layout). m1119 (P5D_PUMPMAIN=1, n=61.7M): [SREG] #1 tid=0 r0=0 r1=859BF220 r2=1 lr=8115A0E0 (scene index 0); [SREG] #2 r0=1 r1=859BF940 r2=1 lr=8115A314 (scene index 1); [SINIT] #1/#2 r0=859BF220/859BF940 lr=811BF924 (only FUN_81207290(scene+200) mutex init); [SUNREG] 0; [SCBUILD] 100 (cap): r0=859BF220 r1=0 r2=0x1444 lr=811993C0 / r0=859BF940 r1=812B4150 r2=859BF2A8 lr=811993C0; [SCENE] 120 p=859BF220/859BF940 st=1 head0F=0 head19=0 cnt=0; [C2964] 120; [B6B12]=0 [ADA]=0 [SCW]=0; [BADMEM]=0. P5D_PTRSCAN (new tool in recomp_harness.cpp): after startup scan the guest image (939,524,096B base 0x80600000) for 6 target pointers (0x811C2A4C/4D, 0x811C2964/65, 0x811C27D8/D9) -> total=0. So FUN_811C2A4C has neither a direct xref nor a static pointer reference - it may be dead code or called through a runtime-computed function table (table entries built on the heap), which needs a late runtime scan (after boot, scan guest memory for function pointers in the appGx range 0x811BF000-0x811C6000). FUN_811C241E decompiled: a 1348-byte NEON matrix function (view/projection matrices, param_1[3] camera matrix, param_1[0x31] transform, callbacks param_1[0x2B]/[0x2F]) - per-frame scene camera update, not view building. NEXT: (1) P5D_PTRSCAN_LATE (scan guest memory at n≈2M for function pointers in 0x811BF000-0x811C6000 -> find the appGx scene/view API table, locate the add-view function); (2) decompile the appGx scene API ranges 0x811C3000-0x811C3A00 (around FUN_811C3438) and 0x811C1E00-0x811C2400 to find the function that allocates 0x50 nodes and links them into scene+0x3C; (3) inspect the 0x813E15AC callback table (indexed calls inside FUN_811C2A4C) and map it to the appGx API; (4) once the add-view API is found probe whether the game calls it (if not, find its gate which may depend on an HLE return value); (5) views registered -> FUN_811C2964 -> FUN_811B6B12 -> FUN_811ADAFE -> array2 -> GXM -> picture. |
 m1118（P5D_PUMPMAIN=1，n=64.3M，exit 0）：
 ```
 [SCREATE] #0    ← ★ FUN_811C2A4C（视图注册器）从未被调用
@@ -497801,3 +497830,30 @@ NEXT：
 ANTI-FORGETTING ENTRY. Keywords: M1072 m1118: scenes registered but 2D views never registered. FUN_811C2A4C never called ([SCREATE]#=0). Scene registration API FUN_811BF900(index, scene): if ((&DAT_816CC664)[index]!=0) FUN_811c222e(); (&DAT_816CC664)[index]=scene; if (scene!=0){ FUN_811c3438(scene); *scene=index; } plus getters FUN_811bf928(index)=(&DAT_816CC664)[index], FUN_811bf938/954 via FUN_811c340e/FUN_811c3412. Writers of 0x816CC664/0x816CC668 = FUN_811BF900/928/938/954; readers FUN_81199FDA/FUN_8119934A/FUN_81199F7A. Scene objects 859BF220/859BF940 exist (st=1) but head0F=0/head19=0 and [SCW]=0 (scene+0x3C never written). [VCNT] FUN_811DED54 called from FUN_811C6C54 region with r0=84B54460, r9=3/2/1/0 (not scene registration). m1118 also [C2964]=120, [B6B12]=0 [ADA]=0, [GSUBX] frame=0 a2=850FD960 g730=03000000 b0op=b0tr=b1op=b1tr=0, [BADMEM]=0. NEXT: probe FUN_811BF900 ([SREG]) index/scene/lr; decompile FUN_811C3438 (scene init) and FUN_811C222E (unregister); find the add-view API writing scene+0x3C/scene+0x64 (callers of FUN_811C2A4C; no xref so indirect/function table - inspect 0x813E15AC and appGx scene API table); check whether appGx 2D sprite draw path upstream of FUN_81163ABC/FUN_811ADAFE should create views; once views registered head0F non-empty -> FUN_811C2964 -> FUN_811B6B12 -> FUN_811ADAFE -> array2 -> GXM -> picture.
 
 LOOKUP: M1072, [SCREATE]#=0 FUN_811C2A4C never called, scene registration FUN_811BF900 index scene (&DAT_816CC664)[index], FUN_811C3438 scene init, *scene=index, FUN_811C222E unregister, getters FUN_811BF928/938/954 FUN_811C340E/FUN_811C3412, globals 0x816CC664/0x816CC668, [VCNT] FUN_811DED54 from FUN_811C6C54 region r0=84B54460 r9=3/2/1/0, [SCENE] p=859BF220/859BF940 st=1 head0F=0 head19=0, [SCW]=0, [GSUBX] g730=03000000, out80m_m1118screate.txt, scenereg_api.txt, scenep_refs.txt -> §18.4616 [relevant: scene lists empty], §18.4615 [relevant: 2D dispatcher], §18.4614 [relevant: submit gates]
+### 18.4618 PORT M1073: 场景注册调用点确认 + FUN_811C241E=相机矩阵 + 静态指针扫描 0 命中
+
+1) m1119（n=61.7M）：
+```
+[SREG] #1 tid=0 r0=0 r1=859BF220 r2=1 lr=8115A0E0   ← index=0
+[SREG] #2 tid=0 r0=1 r1=859BF940 r2=1 lr=8115A314   ← index=1
+[SINIT] #1/#2 r0=859BF220/859BF940 lr=811BF924      ← 仅 mutex 初始化
+[SUNREG] 0
+[SCBUILD] 100（cap）：r0=859BF220 r1=0 r2=0x1444 lr=811993C0 / r0=859BF940 r1=812B4150 r2=859BF2A8
+[SCENE] 120 p=859BF220/859BF940 st=1 head0F=0 head19=0
+[C2964]=120 [B6B12]=0 [ADA]=0 [SCW]=0
+```
+2) P5D_PTRSCAN（新工具）：扫描 guest 镜像 939,524,096B（base 0x80600000）找 0x811C2A4C/4D、0x811C2964/65、0x811C27D8/D9 → **total=0**
+3) FUN_811C241E（1348B）= 每帧场景相机/矩阵计算（NEON），非视图构建
+NEXT：
+```
+① P5D_PTRSCAN_LATE：boot 后扫 guest 内存 appGx 区函数指针 → 找 API 表
+② 反编译 0x811C3000-0x811C3A00 / 0x811C1E00-0x811C2400 找 0x50 节点分配+挂链函数
+③ 检查 0x813E15AC 回调表
+④ 找"添加视图"API 的游戏调用点与门控
+⑤ 视图注册 → FUN_811C2964 → FUN_811B6B12 → FUN_811ADAFE → array2 → GXM → 画面
+```
+验证：`out80m_m1119sreg.txt`、`c241e.txt`、`out_m1120ptrscan.txt`。
+
+ANTI-FORGETTING ENTRY. Keywords: M1073 m1119: scene registration real call sites - FUN_811BF900 called twice at title init ([SREG] #1 tid=0 r0=0 r1=859BF220 r2=1 lr=8115A0E0; #2 r0=1 r1=859BF940 r2=1 lr=8115A314); FUN_811C3438 ([SINIT] lr=811BF924) only does FUN_81207290(scene+200) mutex init; [SUNREG]=0; [SCBUILD]=100 (cap) FUN_811C241E called per frame from gfd flush lr=811993C0 with r0=859BF220 r1=0 r2=0x1444 / r0=859BF940 r1=812B4150 r2=859BF2A8 - decompiled as 1348-byte NEON camera/matrix function (param_1[3] camera matrix, param_1[0x31] transform, callbacks param_1[0x2B]/[0x2F]), not view builder. P5D_PTRSCAN (new harness env): scans guest image 939,524,096B base 0x80600000 for pointers 0x811C2A4C/4D, 0x811C2964/65, 0x811C27D8/D9 -> total=0 (no static pointer references). So FUN_811C2A4C has no direct xref nor static pointer; may be dead code or called via runtime-computed table on the heap -> need late runtime scan. NEXT: P5D_PTRSCAN_LATE scanning guest memory around n≈2M for function pointers in 0x811BF000-0x811C6000 to find the appGx scene/view API table; decompile appGx scene API ranges 0x811C3000-0x811C3A00 and 0x811C1E00-0x811C2400 for the function allocating 0x50 nodes and linking into scene+0x3C; inspect 0x813E15AC callback table; probe whether the game calls the add-view API and find its gate; views registered -> FUN_811C2964 -> FUN_811B6B12 -> FUN_811ADAFE -> array2 -> GXM -> picture.
+
+LOOKUP: M1073, [SREG] FUN_811BF900 index 0/1 scene 859BF220/859BF940 lr 8115A0E0/8115A314, [SINIT] FUN_811C3438 FUN_81207290(scene+200), [SUNREG] 0, [SCBUILD] FUN_811C241E camera matrix per frame lr=811993C0 r2=0x1444/859BF2A8, P5D_PTRSCAN 939524096 bytes base 80600000 total=0, P5D_PTRSCAN_LATE plan, appGx API range 0x811C3000-0x811C3A00 / 0x811C1E00-0x811C2400, 0x813E15AC callback table, 0x50 view node scene+0x3C, out80m_m1119sreg.txt, c241e.txt, out_m1120ptrscan.txt -> §18.4617 [relevant: scene registration API], §18.4616 [relevant: scene lists empty], §18.4615 [relevant: 2D dispatcher]
