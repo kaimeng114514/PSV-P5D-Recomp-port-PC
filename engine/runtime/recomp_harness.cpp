@@ -101,7 +101,7 @@ static int g_sem2_n = 0, g_sig2_n = 0, g_evt2_n = 0;
 static int g_thrst_n = 0;
 static int g_thrtrace = 0;   // 18.4232 trace off by default (P5D_THRTRACE=1 enables)
 static int g_thrtr_n = 0;
-static int g_thrpump_env = 0; static int g_pumpmain_env = -1; static int g_pcalls=0, g_pgate=0, g_ppumped=0, g_pblocked=0;
+static int g_thrpump_env = 0; static int g_postmain_on = -1; static int g_pumpmain_env = -1; static int g_pcalls=0, g_pgate=0, g_ppumped=0, g_pblocked=0;
 static int g_thrpump3 = 0;   // M817: pump guest threads only at main-fiber idle points
 static int g_pump_force = 0; // M819: allow thread pump inside fiber exec during main-thread blocking waits
 static int g_timer_n = 0;    // M822: SceKernelTimer debug
@@ -7034,6 +7034,31 @@ if (0) { uint32_t _fc = 0; uint8_t* _fq = GP(0x816CC63Cu); if (_fq) std::memcpy(
     if (n <= 120) printf("  after blk %d: pc=%08X r0=%08X r9=%08X sp=%08X\n", n, pc, s.r[0], s.r[9], s.r[13]);
     prev_blk = g_cur_block;
     pc = nxt;
+  }
+  if (g_postmain_on < 0) { const char* _e = getenv("P5D_POSTMAIN"); g_postmain_on = (_e && atoi(_e)) ? 1 : 0; }
+  if (g_postmain_on > 0 && (uint64_t)n < (uint64_t)maxb) {
+    printf("[POSTMAIN] main thread returned at blocks=%d; continuing guest threads (maxb=%d)\n", n, maxb);
+    std::fflush(stdout);
+    long long _its = 0; long long _cap = 4000000;
+    while ((uint64_t)n < (uint64_t)maxb && _its < _cap && !g_shutdown) {
+      ++_its;
+      g_pump_force = 1; hle_thr_pump(&s, 800); g_pump_force = 0;
+      g_vtime_extra += 16666ull;      // ~1 frame of virtual time
+      ++g_vblank_n;
+      hle_pump_win_messages();
+      n = (int)g_blkcnt_total;
+      if ((_its % 500) == 0) {
+        size_t _alive = 0; size_t _ready = 0;
+        for (auto& _kv : g_thr) { if (_kv.second.alive) { ++_alive; if (_kv.second.ready) ++_ready; } }
+        printf("[POSTMAIN] it=%lld blocks=%llu vblank=%u thr=%zu alive=%zu ready=%zu\n",
+               _its, (unsigned long long)g_blkcnt_total, g_vblank_n, g_thr.size(), _alive, _ready);
+        std::fflush(stdout);
+      }
+      bool _any = false; for (auto& _kv : g_thr) if (_kv.second.alive) { _any = true; break; }
+      if (!_any && _its > 100) break;
+    }
+    printf("[POSTMAIN] end it=%lld blocks=%llu vblank=%u\n", _its, (unsigned long long)g_blkcnt_total, g_vblank_n);
+    std::fflush(stdout);
   }
   { printf("[THRDUMP] count=%zu\n", (size_t)g_thr.size());
     for (auto& kv : g_thr) { auto& t = kv.second;

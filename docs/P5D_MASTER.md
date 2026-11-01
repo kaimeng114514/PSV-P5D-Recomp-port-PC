@@ -1092,6 +1092,46 @@
 | M1074 | §18.4619: ★★★★★★★★★★ **找到"添加 2D 视图"API：`FUN_811C30D4(scene, geometry, name)`——分配 0x50 视图节点、按类型挂入场景的每类型链表（type 2 的链表头就是 scene+0x3C，即 FUN_811C2964 遍历的 2D 视图链）；调用者是游戏代码 FUN_81015E1A/FUN_81015E36/FUN_81015E84 与 FUN_810418AA。** 反编译（`viewapi.txt`）：
 | M1075 | §18.4620: ★★★★★★★★★★ **m1121 铁证：整个运行期（boot→title→n=64M）"添加 2D 视图"相关探针全部为 0——游戏从未调用 FUN_811C30D4/FUN_811C1FE0，也从未进入 FUN_81015E1A/FUN_81015E36/FUN_81015E84/FUN_810418AA。场景对象存在、每帧相机/调度都在跑、logo 状态机也在走，但 2D 绘制上下文从未创建 → 视图注册永远不会发生。**
 | M1076 | §18.4621: ★★★★★★★★★★ **找到"2D 上下文从未创建"的真正原因：不是门控，而是【跑得还不够远】——当前 64.3M blocks 只推进了 221 帧（ctr=221），logo 状态机停留在 state 5/8（未到 done 0xD），title 页内容资源（title_p5.bin/title.spr4 等）尚未被加载，所以 2D 绘制上下文/视图自然还没创建。M1076 改为 250M blocks 长跑验证。**
+| M1077 | §18.4622: ★★★★★★★★★★★ **发现 250M 长跑提前结束的原因：guest 主线程在 **64,278,346 blocks 处返回**（`done: blocks=64278346 pc=8116F748`），harness 随即退出——max_blocks 根本不是限制。真实 Vita 上主线程返回后其他线程（显示/worker）继续驱动游戏世界，而我们的 harness 直接结束。M1077 实现 `P5D_POSTMAIN=1`：主线程返回后进入"后续线程泵"阶段（虚拟时间每轮 +16666us ≈1 帧、vblank 递增、持续 `hle_thr_pump`），让 guest 线程继续推进。**
+m1123（maxb=250M）证据：
+```
+done: blocks=64278346 pc=8116F748 last_block=0x8116F748 r0=85CF304C r9=00000000
+（与之前每次运行完全相同的返回点；max_blocks=250M 未使用）
+[COUNT] present=2 begin_pass=1 draw=0
+[PUMP] ...（结尾仍有数百万次线程泵，说明 worker 在跑）
+[FIOSFILL] 仍只有字体×3 + title/logo.bin×2
+[SCENE] head0F=0  [LOGO] 状态仍在 5/8（未完成）
+```
+**实现（`recomp_harness.cpp`，M1077）**：主循环退出后：
+```cpp
+if (P5D_POSTMAIN) {
+  printf("[POSTMAIN] main thread returned at blocks=%d; continuing guest threads (maxb=%d)\n", n, maxb);
+  long long _its = 0, _cap = 4000000;
+  while (n < maxb && _its < _cap && !g_shutdown) {
+    ++_its;
+    g_pump_force = 1; hle_thr_pump(&s, 800); g_pump_force = 0;   // 继续跑 guest 线程
+    g_vtime_extra += 16666ull;      // ≈1 帧虚拟时间
+    ++g_vblank_n;                   // vblank 推进
+    hle_pump_win_messages();
+    n = (int)g_blkcnt_total;
+    if ((_its % 500) == 0) printf("[POSTMAIN] it=... blocks=... vblank=... thr=... alive=... ready=...\n");
+    if (所有 guest 线程都已退出) break;
+  }
+  printf("[POSTMAIN] end it=... blocks=... vblank=...\n");
+}
+```
+编译：recomp_harness exit 0；exe 重链 exit 0（57,087,154B，03:29:25）。
+验证运行：`out80m_m1124postmain.txt`（maxb=300M，env：FORCETITLE+FIOSFILL+WAITFORCE+SCNFORCE+THRPUMP+PUMPMAIN+**POSTMAIN**）已启动。
+NEXT：
+```
+① 检查 [POSTMAIN]：主线程返回后 guest 线程是否继续推进（blocks/vblank 增长、alive/ready 线程）
+② 观察 logo 状态是否继续（5→6→8→0xD）、title 资源是否开始 FIOSFILL OPEN
+③ 若后续线程泵能推进游戏世界 → 2D 上下文创建 → 视图注册 → array2 → GXM 绘制 → 画面
+④ 若后续线程泵下游戏世界不推进（例如所有线程都等待 main 的某个对象）→ 检查线程等待对象/事件标志
+⑤ 若 POSTMAIN 有效但帧推进太慢 → 提高每轮泵量子/虚拟时间步长
+```
+验证：`out80m_m1123long.txt`、`out80m_m1124postmain.txt`（生成中）、`recomp_harness.cpp`（postmain）。 |
+| §18.4622 | Found why the 250M long run ended early: the guest main thread RETURNS at 64,278,346 blocks (done: blocks=64278346 pc=8116F748) and the harness exits right there - max_blocks was never the limit. On a real Vita, other threads (display/workers) keep driving the game world after the main thread returns, but our harness just ends. M1077 implements P5D_POSTMAIN=1: after the main thread returns enter a post-main thread-pump phase (virtual time += 16666us ~1 frame per iteration, vblank increment, continuous hle_thr_pump) so the guest threads keep advancing. m1123 (maxb=250M) evidence: done: blocks=64278346 pc=8116F748 last_block=0x8116F748 r0=85CF304C r9=0 (exactly the same return point as every earlier run; max_blocks=250M unused); [COUNT] present=2 begin_pass=1 draw=0; [PUMP] millions of thread pumps near the end (workers running); [FIOSFILL] still only fonts x3 + title/logo.bin x2; [SCENE] head0F=0; [LOGO] state still 5/8 (not finished). Implementation (recomp_harness.cpp, M1077): after the main loop exits, if P5D_POSTMAIN: print '[POSTMAIN] main thread returned at blocks=%d; continuing guest threads (maxb=%d)'; loop while (n<maxb && _its<4000000 && !g_shutdown) { ++_its; g_pump_force=1; hle_thr_pump(&s,800); g_pump_force=0; g_vtime_extra += 16666ull (~1 frame); ++g_vblank_n; hle_pump_win_messages(); n=(int)g_blkcnt_total; every 500 iterations print [POSTMAIN] it/blocks/vblank/thr/alive/ready; if no alive guest threads break; } then print '[POSTMAIN] end it=... blocks=... vblank=...'. recomp_harness compile exit 0; exe relink exit 0 (57,087,154B 03:29:25). Verification run out80m_m1124postmain.txt (maxb=300M, env FORCETITLE+FIOSFILL+WAITFORCE+SCNFORCE+THRPUMP+PUMPMAIN+POSTMAIN) started. NEXT: (1) check [POSTMAIN]: do guest threads keep advancing after main returns (blocks/vblank grow, alive/ready threads); (2) watch whether the logo state continues (5->6->8->0xD) and title assets start to FIOSFILL OPEN; (3) if the post-main pump advances the game world -> 2D context creation -> view registration -> array2 -> GXM draw -> picture; (4) if the game world does not advance (all threads waiting on some main-thread object) inspect the thread wait objects/event flags; (5) if POSTMAIN works but frames advance too slowly increase the per-iteration pump quantum/virtual time step. |
 m1122 证据（P5D_PUMPMAIN=1，n=64.3M）：
 ```
 [CTX7FB0]=0 [CTX7FF8]=0 [CTX8060]=0 [CTX3E95]=0   ← 2D 上下文创建函数从未调用
@@ -498078,3 +498118,43 @@ NEXT：
 ANTI-FORGETTING ENTRY. Keywords: M1076 real reason 2D context never created = not enough progress, not a gate. m1122: [CTX7FB0]=[CTX7FF8]=[CTX8060]=[CTX3E95]=0, [VIEWADD]=[VIEWDEL]=[G15E1A/36/84]=[G418AA]=0, [SCENE] p=859BF220/859BF940 st=1 head0F=0 head19=0, [LOGO] state sequence 0,3,4,5(x138),6,8(x54) stops at state 8 (fade-out), FRAMEDUMP ctr=0 until n=57.8M then ctr=221 at n=64.25M (~221 frames only ≈3.7s), [FIOSFILL] only 5 files: app_system/font/c_font_p5.fnt (1,167,652B), font_staff.fnt (28,176B), font.ctbl (22,024B), title/logo.bin x2 (2,101,012B), no title_p5.bin/title.spr4/p3/*.tga yet, FIOSFILL-MISS=0, BADMEM=0. So the logo sequence (~400+ frames needed: 69 frames x3 logos + fades; state 8 is second-to-last, then 0xD) has not finished; frame rate ~290k blocks/frame so 250M+ blocks needed. M1076 experiment m1123: recomp_harness.exe 0x81198464 250000000 (max_blocks=250M ~800+ frames), same env (FORCETITLE+FIOSFILL+WAITFORCE+SCNFORCE+THRPUMP+PUMPMAIN), out80m_m1123long.txt, background (40-70 min). NEXT: monitor m1123 for logo state 0xD and title-asset FIOSFILL opens; if title content reached check [CTX7FB0]/[VIEWADD]/[SCENE] head0F; head0F non-empty -> [B6B12]/[ADA] -> array2 -> GXM -> picture; if 250M insufficient extend to 400M/600M or accelerate via P5D_VTIME; record frames/blocks ratio per stage.
 
 LOOKUP: M1076, 2D context never created because only 221 frames elapsed, [LOGO] state sequence stops at state 8, logo needs 400+ frames, ctr=221 at n=64.25M, FRAMEDUMP ctr 0 until title, [FIOSFILL] opens fonts + logo.bin only (no title_p5.bin/title.spr4/p3/*.tga), FIOSFILL-MISS=0, 290k blocks/frame, m1123 recomp_harness.exe 0x81198464 250000000, [CTX7FB0]/[CTX7FF8]/[CTX8060]/[CTX3E95]=0, [VIEWADD]/[VIEWDEL]/[G15E1A/36/84]/[G418AA]=0, [SCENE] head0F=0, out80m_m1122ctx.txt, out80m_m1123long.txt -> §18.4620 [relevant: add-view probes zero], §18.4619 [relevant: add-view API], §18.4613 [relevant: pump/ctr 221]
+### 18.4622 PORT M1077: 主线程在 64,278,346 blocks 返回导致运行提前结束 → P5D_POSTMAIN 后续线程泵
+
+1) m1123（maxb=250M）：
+```
+done: blocks=64278346 pc=8116F748 last_block=0x8116F748 r0=85CF304C r9=00000000
+[COUNT] present=2 begin_pass=1 draw=0
+[FIOSFILL] 字体×3 + title/logo.bin×2（无 title 内容资源）
+[SCENE] head0F=0  [LOGO] 5/8 未完成
+```
+2) 实现（recomp_harness.cpp M1077）：
+```cpp
+if (P5D_POSTMAIN) {
+  printf("[POSTMAIN] main thread returned at blocks=%d; continuing guest threads (maxb=%d)\n", n, maxb);
+  long long _its = 0, _cap = 4000000;
+  while (n < maxb && _its < _cap && !g_shutdown) {
+    ++_its;
+    g_pump_force = 1; hle_thr_pump(&s, 800); g_pump_force = 0;
+    g_vtime_extra += 16666ull; ++g_vblank_n; hle_pump_win_messages();
+    n = (int)g_blkcnt_total;
+    if ((_its % 500) == 0) printf("[POSTMAIN] it=... blocks=... vblank=... thr=... alive=... ready=...\n");
+    if (无 alive 线程) break;
+  }
+  printf("[POSTMAIN] end it=... blocks=... vblank=...\n");
+}
+```
+3) 编译：recomp_harness exit 0；exe 57,087,154B（03:29:25）
+4) 验证运行 `out80m_m1124postmain.txt`（maxb=300M + POSTMAIN）已启动
+NEXT：
+```
+① [POSTMAIN] 线程是否继续推进
+② logo 是否继续到 0xD、title 资源是否 OPEN
+③ 游戏世界推进 → 上下文 → 视图 → array2 → GXM → 画面
+④ 若不推进 → 查线程等待对象/事件标志
+⑤ 太慢 → 提高泵量子/虚拟时间步长
+```
+验证：`out80m_m1123long.txt`、`out80m_m1124postmain.txt`（生成中）。
+
+ANTI-FORGETTING ENTRY. Keywords: M1077 the run ends early because the guest main thread RETURNS at 64,278,346 blocks (done: blocks=64278346 pc=8116F748 last_block=0x8116F748 r0=85CF304C r9=0), not because of max_blocks (m1123 maxb=250M unused); on a real Vita other threads keep driving the game world after main returns. Implemented P5D_POSTMAIN=1 in recomp_harness.cpp: after the main loop exits, if P5D_POSTMAIN then print '[POSTMAIN] main thread returned at blocks=%d; continuing guest threads (maxb=%d)' and loop while (n<maxb && _its<4000000 && !g_shutdown) { ++_its; g_pump_force=1; hle_thr_pump(&s,800); g_pump_force=0; g_vtime_extra += 16666ull (~1 frame); ++g_vblank_n; hle_pump_win_messages(); n=(int)g_blkcnt_total; every 500 iterations print [POSTMAIN] it/blocks/vblank/thr/alive/ready; if no alive guest threads break; } then print '[POSTMAIN] end it=... blocks=... vblank=...'. recomp_harness compile exit 0; exe relink exit 0 (57,087,154B 03:29:25). Verification run out80m_m1124postmain.txt (maxb=300M, env FORCETITLE+FIOSFILL+WAITFORCE+SCNFORCE+THRPUMP+PUMPMAIN+POSTMAIN) started. m1123 evidence: [COUNT] present=2 begin_pass=1 draw=0; [PUMP] millions of thread pumps; [FIOSFILL] fonts x3 + title/logo.bin x2 only; [SCENE] head0F=0; [LOGO] state 5/8 not finished. NEXT: check [POSTMAIN] thread progression (blocks/vblank grow, alive/ready); watch logo state 5->6->8->0xD and title-asset FIOSFILL opens; if the post-main pump advances the game world -> 2D context creation -> view registration -> array2 -> GXM draw -> picture; if the world does not advance inspect thread wait objects/event flags; if too slow increase pump quantum/virtual time step.
+
+LOOKUP: M1077, guest main thread returns at 64278346 blocks pc=8116F748 last_block 0x8116F748 r0=85CF304C, max_blocks unused, P5D_POSTMAIN post-main thread pump, g_pump_force hle_thr_pump(&s,800), g_vtime_extra += 16666, g_vblank_n, hle_pump_win_messages, [POSTMAIN] logs, m1123 maxb=250M done blocks, [COUNT] present=2 begin_pass=1 draw=0, [FIOSFILL] fonts + logo.bin only, [SCENE] head0F=0, [LOGO] state 5/8, out80m_m1123long.txt, out80m_m1124postmain.txt -> §18.4621 [relevant: not enough frames], §18.4613 [relevant: pump/ctr], §18.4609 [relevant: worker threads]
