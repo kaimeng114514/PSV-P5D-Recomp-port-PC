@@ -1096,6 +1096,52 @@
 | M1078 | §18.4623: ★★★★★★★★★★★ **找到运行在 64,278,346 blocks 终止的真正原因：`[INDIRECT-MISS] reg1=8115849F target=8115849E block=8116F748`——app-job trampoline 通过函数指针调用 **0x8115849E 处的真实 Thumb 函数**，而该函数**不在 function_bounds.json（12,921 个函数）中**、也**不在我们的 AOT 批次（12,532 函数）里**。反汇编确认它是完整函数：`push {r4,r5,r6,r7,lr}; vpush {s16,s17}; sub sp,#0x104; …`。⇒ AOT 覆盖存在系统性缺口（12,921 − 12,532 = **389 个函数从未生成**），这是流程中断的根因，而非运行时门控。**
 | M1079 | §18.4624: ★★★★★★★★★★★ **补上缺失函数：用现有 gap 生成器（`_gen_split_gap2.py` 语义 + capstone）为 Ghidra 漏识别的函数 **0x8115849E 生成 82 个 AOT block**，组装成 `batch_034.cpp` 并接入 harness（FB(034)/ALL_FINDERS[35]/build_all_blocks 扩展）——这是让运行越过 64,278,346 blocks 死亡点的关键补丁。**
 | M1080 | §18.4625: ★★★★★★★★★★★ **历史性突破：运行首次越过 64,278,346 blocks 死亡点！batch_034 补块生效——新函数 0x8115849E 正常执行（PC ring：8115849E→8116F8A8→811584B8/BC0/C6），流程推进到**movie play/标题电影阶段**（[MOVIEPLAY] FUN_8115922C、[MOVIEFIN] 假完成、[PROCREG] 'movie play'）。随后出现新崩溃：BADMEM va=0 @ block 0x811DAC9C（FUN_811DAB8C 内）——节点分配器 FUN_811D9F4A(DAT_816CDA48) 返回 0（r6=0），属新一层的运行时缺口。**
+| M1081 | §18.4626: ★★★★★★★★ **池层已正常（FUN_811DA584 池初始化在 n=0 由 FUN_81198E2E 调用，池结构合法：pool=846001E0/84617AE0，w4=16 w8=512 wC=128 w10=16 w18=84600230；DAT_816CDA48 在 27 次 appProcessCreate 中始终为合法 0x84617AE0）——所以之前的"池未初始化"假设被排除。崩溃仍有：BADMEM va=0 @ 0x811DAC9C，WDRING 显示路径 81178F10→81178F14→81178F36→811DACFC→811DAD4A→811DAC9C（0x811DAD4A: `movs r4,#2; b 0x811DAC9C`；0x811DAC9C 把 r4 写入 [r6+0]），此时 r6=0。r6 在 FUN_811DAB8C 内只在 0x811DABC2 由 `adds r6,r0`（池分配返回值）赋值，函数其余部分不写 r6 → 说明**节点分配器**返回值或寄存器上下文在 0x811DABC2 之后变 0。M1081 加 [R6-ALLOC]/[R6-ACFC]/[R6-AD4A]/[R6-AC9C] 探针追踪 r6 在四个关键块的取值（运行 m1127）。**
+m1126（`out80m_m1126pool.txt`）证据：
+```
+[POOLINIT] #1 tid=00000000 lr=81198EFE n=0            ← 池初始化确实执行
+[POOLALLOC] #1 pool=846001E0 w4=16 w8=512 wC=128 w10=16 w18=84600230 lr=811DA56C
+[PROCCREATE] #1..#27 poolmgr=84617AE0 lr=8116FA26     ← DAT_816CDA48 合法
+[MOVIEPLAY] FUN_8115922C PLAY MOVIE seen (blk=81184722)
+[MOVIEFIN] invoke FUN_81159276(state=1, movie=85A744EC)
+[SNAP] blk=811DAC9C r0=0 r1=812B4150 r2=812B4150 r4=2 r5=85CF304C r7=812B414C r13=84856298 r14=81159298
+[BADMEM] guest va=0x00000000 unmapped block=0x811DAC9C tid=0 stub=812B2200
+FRAMEDUMP 最后 n=64275000 ctr=221
+```
+**关键反汇编（`0x811DAB8C` FUN_811DAB8C 内）**：
+```
+811DABB8: str r1,[sp,#0x14]
+811DABBA: ldr r0,[r4]            ; r4=0x816CDA48 → pool 指针
+811DABBE: bl 0x811D9F4A          ; 池分配
+811DABC2: adds r6, r0, #0        ; ★ r6 = 分配结果（唯一赋值处）
+811DABC4: movs r0, #0
+811DABC6: str r0, [r6, #0x10]    ; 若 r6=0 → BADMEM va=0x10
+...
+811DAC9C: movs r1,#0; str r4,[r6,#0]; adds r0,r6,#0; str r1,[r6,#4]; b 0x811DAD86
+811DAD4A: movs r4,#2; b 0x811DAC9C
+811DAD86: add sp,#0x1c; pop.w {r4,r5,r6,r7,r8,sb,sl,fp,pc}
+```
+**矛盾点**：若 0x811DABBE 的分配返回 0，则 0x811DABC6 处应先访问 va=0x10 崩溃（stderr 应先打印 BADMEM va=0x10），但实际是 0x811DAC9C 处 va=0 —— 说明**r6 在 0x811DABC2 时可能非 0，之后在 0x811DACFC/0x811DAD4A 附近被某个 HLE 调用/线程切换/寄存器保存恢复路径清零**（0x811DACFC 之前的 0x811DACF8 `bl 0x81207352`、0x811DAD46 `bl 0x81207352` 都是 HLE 互斥锁 stub）。
+**M1081 探针（batch_016）**：
+```
+[R6-ALLOC] @0x811DABC2  r6 r4 r5 r7 sp lr
+[R6-ACFC]  @0x811DACFC  r6 r4 r5 r7 sp lr
+[R6-AD4A]  @0x811DAD4A  r6 r4 r5 r7 sp lr
+[R6-AC9C]  @0x811DAC9C  r6 r4 r5 r7 sp lr
+```
+编译：batch_016 exit 0；recomp_harness exit 0；exe 57,114,188B（04:43:21）。验证运行 `out80m_m1127r6.txt` 已启动。
+NEXT：
+```
+① 读 m1127 探针：r6 在 0x811DABC2 是否为 0（分配失败）还是非 0（随后被清零）
+② 若分配返回 0 → 检查 FUN_811D9F4A 返回 0 的具体分支（位图满 + FUN_811DA534 malloc 失败）
+   → 查 HLE malloc 失败原因/扩容
+③ 若非 0 后变 0 → 重点查 0x811DACFC~0x811DAD4A 之间的 HLE 调用（0x81207344/0x81207352 锁）
+   与 fiber/线程寄存器保存恢复是否破坏 r6（fiber_save/fiber_resume）
+④ 修复后继续 movie play → 标题内容 → 2D 上下文 → array2 → GXM → 画面
+⑤ 记入 doc 后再跑更长验证
+```
+验证：`out80m_m1126pool.txt`、`movie_null.txt`、`pool.txt`、`poolinit.txt`、`out80m_m1127r6.txt`（生成中）。 |
+| §18.4626 | The pool layer is actually fine: FUN_811DA584 pool init runs at n=0 called from FUN_81198E2E, pool structs are valid (pool=846001E0/84617AE0, w4=16 w8=512 wC=128 w10=16 w18=84600230) and DAT_816CDA48 is a valid 0x84617AE0 across all 27 appProcessCreate calls - so the earlier 'pool uninitialized' hypothesis is ruled out. But the crash remains: BADMEM va=0 at 0x811DAC9C with WDRING path 81178F10->81178F14->81178F36->811DACFC->811DAD4A->811DAC9C (0x811DAD4A: movs r4,#2; b 0x811DAC9C; 0x811DAC9C stores r4 into [r6+0]) and r6=0. r6 is assigned only once in FUN_811DAB8C at 0x811DABC2 (adds r6,r0 = pool alloc return) and never written elsewhere -> either the allocator returned 0 or the register context got zeroed after 0x811DABC2. M1081 adds [R6-ALLOC]/[R6-ACFC]/[R6-AD4A]/[R6-AC9C] probes tracing r6 at four key blocks (run m1127). m1126 evidence: [POOLINIT] #1 tid=0 lr=81198EFE n=0; [POOLALLOC] #1 pool=846001E0 w4=16 w8=512 wC=128 w10=16 w18=84600230 lr=811DA56C; [PROCCREATE] #1..#27 poolmgr=84617AE0 lr=8116FA26; [MOVIEPLAY] FUN_8115922C blk=81184722; [MOVIEFIN] FUN_81159276(state=1, movie=85A744EC); [SNAP] blk=811DAC9C r0=0 r1=812B4150 r2=812B4150 r4=2 r5=85CF304C r7=812B414C r13=84856298 r14=81159298; [BADMEM] guest va=0 unmapped block=0x811DAC9C tid=0 stub=812B2200; FRAMEDUMP last n=64275000 ctr=221. Key disassembly: 811DABBA ldr r0,[r4] (r4=0x816CDA48 pool ptr); 811DABBE bl 0x811D9F4A; 811DABC2 adds r6,r0 (only r6 assignment); 811DABC4 movs r0,#0; 811DABC6 str r0,[r6,#0x10] (if r6=0 BADMEM va=0x10); 811DAC9C movs r1,#0; str r4,[r6,#0]; adds r0,r6,#0; str r1,[r6,#4]; b 0x811DAD86; 811DAD4A movs r4,#2; b 0x811DAC9C; 811DAD86 add sp,#0x1c; pop.w {r4,r5,r6,r7,r8,sb,sl,fp,pc}. Contradiction: if the alloc at 0x811DABBE returned 0, the store at 0x811DABC6 would fault at va=0x10 first, but the actual fault is va=0 at 0x811DAC9C -> r6 may have been non-zero at 0x811DABC2 and got zeroed later near 0x811DACFC/0x811DAD4A by some HLE call/thread switch/register save-restore path (0x811DACF8 bl 0x81207352 and 0x811DAD46 bl 0x81207352 are HLE mutex stubs). M1081 probes (batch_016): [R6-ALLOC] @0x811DABC2, [R6-ACFC] @0x811DACFC, [R6-AD4A] @0x811DAD4A, [R6-AC9C] @0x811DAC9C print r6/r4/r5/r7/sp/lr. Build: batch_016 exit 0; recomp_harness exit 0; exe 57,114,188B 04:43:21. Verification run out80m_m1127r6.txt started. NEXT: (1) read m1127 probes: is r6 zero at 0x811DABC2 (alloc failure) or non-zero (zeroed later); (2) if alloc returns 0 check the FUN_811D9F4A return-0 branch (bitmap full + FUN_811DA534 malloc failure) and HLE malloc failure/expansion; (3) if non-zero then zeroed, focus on the HLE calls between 0x811DACFC and 0x811DAD4A (0x81207344/0x81207352 mutex stubs) and on fiber/thread register save-restore corrupting r6 (fiber_save/fiber_resume); (4) after the fix continue movie play -> title content -> 2D context -> array2 -> GXM -> picture; (5) document then run a longer verification. |
 m1125（`out80m_m1125batch34.txt`）关键证据：
 ```
 [TABLE] blocks=230251   （原 230243，+8 唯一新 VA；batch_034 的 82 块大部分与既有块 VA 重合/被去重）
@@ -498385,3 +498431,39 @@ NEXT：
 ANTI-FORGETTING ENTRY. Keywords: M1080 FIRST TIME crossing 64,278,346 blocks - batch_034 fill works, new function 0x8115849E executes (PC ring 8115849E->8116F8A8->811584B8/BC0/C6) and the flow reaches the movie-play/title-movie stage ([MOVIEPLAY] FUN_8115922C, [MOVIEFIN] FUN_81159276(state=1, movie=85A744EC), [PROCREG] #23 'movie play'). [TABLE] blocks=230251 (was 230243; +8 unique VAs, most of batch_034's 82 blocks deduped). WD loop=2 n=64278383 blk=811DAC9C (crossed); WDRING 81159298 8115929E 811592AA 811592B4 811592B6 811592BE 81178F10 81178F14 81178F36 811DACFC 811DAD4A 811DAC9C. New crash: [BADMEM] guest va=0 unmapped block=0x811DAC9C tid=0 stub=812B2200; [SNAP] blk=811DAC9C r0=0 r1=812B4150 r2=812B4150 r4=2 r5=85CF304C r7=812B414C r13=84856298 r14=81159298. 0x811DAC9C generated code: s->r[1]=0; wr32(s, s->r[6]+0, s->r[4]); wr32(s, s->r[6]+4, ...) -> r6=0; r6 = FUN_811D9F4A(DAT_816CDA48) return from FUN_811DAB8C start (puVar2=FUN_811d9f4a(DAT_816cda48); puVar2[4]=0). FUN_811D9F4A (pool.txt 330B) is a bitmap pool allocator: pool struct +0x1C lock, +4 bitmap word count, +0x18 block chain, +0xC/+8/+0x10 sizes; scans bitmap for free bit else FUN_811da534(total size) allocates a new block; returns 0 when malloc fails. DAT_816CDA48 writer = FUN_811DA584 (0x811DA5C6/0x811DA5D8 write DAT_816CDA40/48) pool init. Causes: HLE malloc failure, pool struct not properly initialized (boot hack once set DAT_816CDA48=0xA0028000), or pool exhaustion. NEXT: check HLE malloc failure logs and runtime DAT_816CDA48; decompile FUN_811DA584 pool init; fix boot hack or run init; expand HLE heap if malloc fails; then movie play continues -> title movie/content -> 2D context -> array2 -> GXM -> picture; continue filling further indirect misses.
 
 LOOKUP: M1080 first crossing 64,278,346, batch_034 works, 0x8115849E executed, movie play stage FUN_8115922C MOVIEPLAY MOVIEFIN PROCREG #23, BADMEM va=0 block 0x811DAC9C, FUN_811DAB8C node FUN_811D9F4A DAT_816CDA48 returned 0, bitmap pool allocator pool.txt, FUN_811da534 malloc, DAT_816CDA48 writer FUN_811DA584, [TABLE] blocks=230251, WD n=64278383, out80m_m1125batch34.txt -> §18.4624 [relevant: batch_034], §18.4623 [relevant: indirect miss], §18.4622 [relevant: POSTMAIN]
+### 18.4626 PORT M1081: 池层正常（初始化/分配都合法），崩溃焦点转到 r6 与 HLE 锁调用之间的寄存器上下文
+
+1) m1126 证据：
+```
+[POOLINIT] #1 lr=81198EFE n=0                     ← 池初始化执行
+[POOLALLOC] pool=846001E0 w4=16 w8=512 wC=128 w10=16 w18=84600230
+[PROCCREATE] #1..#27 poolmgr=84617AE0             ← DAT_816CDA48 合法
+[MOVIEPLAY] [MOVIEFIN] 正常
+[SNAP] blk=811DAC9C r0=0 r4=2 r5=85CF304C r7=812B414C sp=84856298 lr=81159298
+[BADMEM] guest va=0 @0x811DAC9C
+```
+2) FUN_811DAB8C 关键反汇编：
+```
+811DABBA: ldr r0,[r4]           ; r4=0x816CDA48
+811DABBE: bl 0x811D9F4A         ; 池分配
+811DABC2: adds r6, r0, #0       ; ★ 唯一 r6 赋值
+811DABC6: str r0, [r6, #0x10]   ; r6=0 应先崩 va=0x10
+...
+811DAC9C: str r4,[r6,#0]; str r1,[r6,#4]; b 0x811DAD86
+811DAD4A: movs r4,#2; b 0x811DAC9C
+```
+3) 矛盾：实际崩溃 va=0 @0x811DAC9C（非 va=0x10）→ r6 可能先非 0、后在 HLE 锁 stub（0x81207344/0x81207352，位于 0x811DACFC/0x811DAD44 附近）或 fiber 保存恢复过程中被清零
+4) M1081 探针：[R6-ALLOC]/[R6-ACFC]/[R6-AD4A]/[R6-AC9C]（batch_016），exe 57,114,188B（04:43:21）
+5) 验证运行 `out80m_m1127r6.txt` 已启动
+NEXT：
+```
+① r6 在 0x811DABC2 是否为 0
+② 分配失败 → 查 FUN_811D9F4A 返回 0 分支 / HLE malloc
+③ 非 0 后变 0 → 查 0x811DACFC~0x811DAD4A 的 HLE 锁调用与 fiber 寄存器恢复
+④ 修复后继续 movie play → 标题内容 → 2D 上下文 → array2 → GXM → 画面
+```
+验证：`out80m_m1126pool.txt`、`movie_null.txt`、`pool.txt`、`poolinit.txt`、`out80m_m1127r6.txt`（生成中）。
+
+ANTI-FORGETTING ENTRY. Keywords: M1081 pool layer is fine - FUN_811DA584 pool init runs at n=0 from FUN_81198E2E; [POOLALLOC] pool=846001E0 w4=16 w8=512 wC=128 w10=16 w18=84600230; [PROCCREATE] #1..#27 poolmgr=84617AE0 (DAT_816CDA48 valid across all 27 appProcessCreate calls) - so the pool-uninitialized hypothesis is ruled out. Crash remains: BADMEM va=0 at 0x811DAC9C, WDRING 81178F10 81178F14 81178F36 811DACFC 811DAD4A 811DAC9C (0x811DAD4A movs r4,#2; b 0x811DAC9C; 0x811DAC9C str r4,[r6,#0]) with r6=0. r6 is assigned only once in FUN_811DAB8C at 0x811DABC2 adds r6,r0 (pool alloc return) and never written elsewhere -> either allocator returned 0 or the register context got zeroed after 0x811DABC2. [SNAP] blk=811DAC9C r0=0 r1=812B4150 r2=812B4150 r4=2 r5=85CF304C r7=812B414C r13=84856298 r14=81159298. Disassembly: 811DABBA ldr r0,[r4] (r4=0x816CDA48); 811DABBE bl 0x811D9F4A; 811DABC2 adds r6,r0; 811DABC4 movs r0,#0; 811DABC6 str r0,[r6,#0x10] (would fault va=0x10 first if r6=0); 811DAC9C movs r1,#0; str r4,[r6,#0]; adds r0,r6,#0; str r1,[r6,#4]; b 0x811DAD86; 811DAD4A movs r4,#2; b 0x811DAC9C; 811DAD86 add sp,#0x1c; pop.w {r4,r5,r6,r7,r8,sb,sl,fp,pc}. Contradiction: actual fault va=0 at 0x811DAC9C (not va=0x10) -> r6 may have been non-zero at 0x811DABC2 and got zeroed later near 0x811DACFC/0x811DAD4A by HLE mutex stub calls (0x811DACF8 bl 0x81207352, 0x811DAD46 bl 0x81207352) or by fiber/thread register save-restore. M1081 probes in batch_016: [R6-ALLOC] @0x811DABC2, [R6-ACFC] @0x811DACFC, [R6-AD4A] @0x811DAD4A, [R6-AC9C] @0x811DAC9C print r6/r4/r5/r7/sp/lr; exe 57,114,188B 04:43:21; run out80m_m1127r6.txt started. NEXT: read m1127 probes to see if r6 is zero at 0x811DABC2 (alloc failure) or non-zero then zeroed; if alloc returns 0 check FUN_811D9F4A return-0 branch (bitmap full + FUN_811DA534 malloc failure) and HLE malloc; if zeroed later focus on HLE calls 0x81207344/0x81207352 between 0x811DACFC and 0x811DAD4A and fiber_save/fiber_resume register corruption; then continue movie play -> title content -> 2D context -> array2 -> GXM -> picture.
+
+LOOKUP: M1081 pool fine, [POOLINIT] lr=81198EFE, [POOLALLOC] pool=846001E0 w4=16 w8=512 wC=128 w10=16, [PROCCREATE] poolmgr=84617AE0, DAT_816CDA48 valid 27 calls, BADMEM va=0 0x811DAC9C, r6 only assigned 0x811DABC2 adds r6,r0, 0x811DABC6 str r0,[r6,#0x10] would fault va=0x10, contradiction, WDRING 811DACFC 811DAD4A 811DAC9C, 0x811DAD4A movs r4,#2, HLE mutex stubs 0x81207344 0x81207352, fiber register restore, M1081 probes [R6-ALLOC] [R6-ACFC] [R6-AD4A] [R6-AC9C], exe 57,114,188B, m1127 out80m_m1127r6.txt, movie play stage -> §18.4625 [relevant: crossing death point + new crash], §18.4624 [relevant: batch_034], §18.4623 [relevant: indirect miss]
