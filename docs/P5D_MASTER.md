@@ -1023,6 +1023,37 @@
 | M1005 | §18.4550: ★★★★★★★★★★ **INDIRECT-MISS 清零！11 个 job 全部完成、`setSequence(6,0,0,5)` 执行 → 标题序列 page=6 启动，引擎进入真实逐帧渲染循环（8 次 Present 成功、10,816 次 pass、40 次 draw，运行推进到 n=68.2M）**。证据（`out80m_m1073titlecall.txt`）：
 | M1006 | §18.4551: ★★★★★★★★ **序列页表完整解析：page6 = "TITLE" 标题页（start=0x81185974 / update=0x81185986 / end=0x81185998）+ 新增 `P5D_NOMOVIE` 开关隔离宿主 movie 层**。从 `eboot_true.elf` 直接读取表 `0x813B01B4`（每项 0x50 字节，+0x44 start/+0x48 update/+0x4c end）：
 | M1007 | §18.4552: ★★★★★★★★★ **NOMOVIE 隔离实验证伪（可见画面全来自宿主 movie 层）+ 选择性 job 强制（只强制 init 系列 worker，放行 title/movie job 真正执行）**。`out80m_m1074nomovie.txt`（P5D_NOMOVIE=1）：
+| M1008 | §18.4553: **选择性 job 强制失败（回退全强制）+ 改为「强制 TITLE 页 update=1」让 page6 常驻**。M1007 的选择性强制运行（`out80m_m1075selectforce.txt`）结果：
+```
+[JOBCOMP] 1（只剩 initDataRead）  [JOBDONE2] 1   [INITEXEC] 0
+[SEQREQ] 16（page=6 仍请求）  [ABIVTX] 1  [PRESENT] 1
+运行在 n≈59.74M 提前结束
+```
+⇒ 选择性强制破坏了 init 完成链（init worker 不再经由 FUN_8116f748 探针路径执行/完成），只有 1 个 job 完成 ⇒ **回退到 M1000 全强制**（它才能稳定推进 11 个 job）。
+**M1008 新策略**：保持全强制（所有 worker trampoline → -1），但**直接强制 TITLE 页（page6）的 update 返回 1**，让标题页常驻、不依赖 "title sequence" 对象是否创建：
+```c
+// page6 update 0x81185986: 81185988 bl 0x811980FC; 8118598C cmp r0,#0; 若 !=0 返回 1（页保持）
+// patch: 在 block 0x8118598C 开头强制 s->r[0]=1
+t = t.replace("uint32_t blk_8118598C(RecState* s) { g_cur_block = 0x8118598Cu;",
+              "... ; s->r[0] = 1u; /*TITLE page update -> page stays alive*/")
+```
+同时恢复 batch_011 的 blk_8116FA5C 全强制版本：
+```cpp
+uint32_t blk_8116FA5C(RecState* s) { g_cur_block = 0x8116FA5Cu;
+    s->r[0] = 0xFFFFFFFFu; /* every job worker trampoline reports -1 */
+    return s->r[14]; }
+```
+编译：`batch_011.o`（1,379,088B）、`batch_012.o`（1,851,826B）均 exit 0；`recomp_harness.exe` 重链 exit 0（7:55:08）。
+验证运行：`P5D_NOMOVIE=1 P5D_OTFORCE=1 P5D_STEPFORCE=1` + VDEC → `out80m_m1076titlekeep.txt`
+NEXT：
+```
+① [SEQREQ] page=6 后 title 页保持（不再 5 帧内结束）
+② [ABITX]/[ABIBEGIN]/[PRESENT] 持续增长（title 页逐帧渲染）
+③ draw 从 vc=3 fullscreen 是否出现 UI/文字 draw（vc 变化/RT 非黑）
+④ NOMOVIE 下 swap/RT 出现引擎自绘内容
+```
+这样标题页不再依赖被强制跳过的 title worker，能持续跑 title 页的 start/update/end 循环。 |
+| §18.4553 | Selective job forcing failed (revert to all-force) + switch to forcing the TITLE page update=1 so page6 stays alive. M1007 selective-force run (out80m_m1075selectforce.txt): [JOBCOMP] 1 (only initDataRead), [JOBDONE2] 1, [INITEXEC] 0, [SEQREQ] 16 (page=6 still requested), [ABIVTX] 1, [PRESENT] 1, run ended early at n≈59.74M => selective forcing broke the init completion chain (init workers no longer executed/completed through the FUN_8116f748 probe path), only 1 job completed => revert to the M1000 all-force (the only variant that reliably advances 11 jobs). M1008 new strategy: keep all-force (every worker trampoline -> -1) but DIRECTLY force the TITLE page (page6) update to return 1, so the title page stays resident regardless of whether the 'title sequence' object is created: page6 update 0x81185986: 81185988 bl 0x811980FC; 8118598C cmp r0,#0; if !=0 returns 1 (page stays); patch inserts s->r[0]=1u at the start of block 0x8118598C. Also restored batch_011 blk_8116FA5C to the all-force version: uint32_t blk_8116FA5C(RecState* s) { g_cur_block = 0x8116FA5Cu; s->r[0] = 0xFFFFFFFFu; return s->r[14]; }. batch_011.o (1,379,088B) and batch_012.o (1,851,826B) compile exit 0; recomp_harness.exe relinked exit 0 (7:55:08). Verification run P5D_NOMOVIE=1 P5D_OTFORCE=1 P5D_STEPFORCE=1 + VDEC -> out80m_m1076titlekeep.txt. NEXT: after [SEQREQ] page=6 the title page stays (no longer ends within 5 frames); [ABITX]/[ABIBEGIN]/[PRESENT] keep growing (title page per-frame rendering); whether draws change from vc=3 fullscreen to UI/text (vc changes / RT non-black); NOMOVIE swap/RT shows engine-drawn content. The title page no longer depends on the force-skipped title worker and can keep running its start/update/end loop. |
 ```
 [JOBCOMP] 11 / [JOBDONE2] 11（不变）
 [SEQREQ] 16（含 page=6）
@@ -493392,3 +493423,40 @@ NEXT：
 ANTI-FORGETTING ENTRY. Keywords: M1007 P5D_NOMOVIE=1 isolation run proved the visible P5D logo/title artwork all came from the HOST movie layer - all captured frames black (p5d_frame_1..4, p5d_swap_0..7, p5d_disp_7 mean=0.00) while [JOBCOMP] 11 / [SEQREQ] 16 / [ABIVTX] 40 / [PRESENT] 8 / [ABIBEGIN] 10816 unchanged. FUN_8119807C (TITLE page start) decompiled: iVar3=FUN_8115d3ce(...titleSequence.c...); *(u32*)(iVar3+4)=param_1; FUN_8116f7ca(0,'title sequence',200,0,0, worker=0x81198173, completion=0x811982a9, iVar3) => the 'title sequence' object is created by the title job; the M1000 all-worker force skipped it so the object never appeared and the title page ended within 5 frames. M1007 fix in batch_011.cpp blk_8116FA5C: selective force - _node=s->r[0]?rd32(s,s->r[0]+0x34):0; _wf=_node?rd32(s,_node):0; if(_wf==0x81184809||0x811848B7||0x81184965||0x81184A89||0x81184B39||0x81184FFF){ s->r[0]=0xFFFFFFFF; return s->r[14]; } else run the original trampoline body (push regs, r0=node, return FUN_8116F748). batch_011.o exit 0, exe exit 0. Verification run P5D_NOMOVIE=1 P5D_OTFORCE=1 P5D_STEPFORCE=1 + VDEC -> out80m_m1075selectforce.txt. NEXT: title worker 0x81198173 executes; 'title sequence' object created -> page6 update 1 -> title page stays; engine draws change from vc=3 fullscreen to UI/text (ABIVTX vc changes, ABIRT non-black); NOMOVIE swap/RT shows engine-drawn content.
 
 LOOKUP: M1007, P5D_NOMOVIE, out80m_m1074nomovie.txt black frames, FUN_8119807C, 'title sequence' job, worker 0x81198173, completion 0x811982a9, titleSequence.c, selective force, blk_8116FA5C, init workers 0x81184809 0x811848B7 0x81184965 0x81184A89 0x81184B39 0x81184FFF, batch_011.cpp, out80m_m1075selectforce.txt, title_obj.txt -> §18.4551 [relevant: page6 TITLE], §18.4550 [relevant: title page started], §18.4545 [relevant: worker trampoline]
+### 18.4553 PORT M1008: 回退全强制 + 强制 TITLE 页 update=1
+
+1) M1007 选择性强制运行（`out80m_m1075selectforce.txt`）：
+```
+[JOBCOMP] 1（仅 initDataRead）  [JOBDONE2] 1  [INITEXEC] 0
+[SEQREQ] 16（page=6）  [ABIVTX] 1  [PRESENT] 1
+运行 n≈59.74M 提前结束
+```
+⇒ 选择性强制破坏 init 完成链 ⇒ **回退 M1000 全强制**（唯一能稳定推进 11 job 的版本）。
+2) M1008 新策略：**强制 TITLE 页 update 返回 1**（page6 常驻），不依赖 title worker：
+```
+page6 update 0x81185986:
+  81185988  bl 0x811980FC        ; FUN_8116f900("title sequence")
+  8118598C  cmp r0,#0
+  8118598E  beq return 0
+  81185990  movs r0,#1            ; !=0 -> 返回 1（页保持）
+patch: blk_8118598C 开头插入  s->r[0] = 1u;
+```
+3) 恢复 blk_8116FA5C 全强制：
+```cpp
+uint32_t blk_8116FA5C(RecState* s) { g_cur_block = 0x8116FA5Cu;
+    s->r[0] = 0xFFFFFFFFu; return s->r[14]; }
+```
+4) 编译：batch_011.o（1,379,088B）/batch_012.o（1,851,826B）exit 0；exe 重链 exit 0。
+5) 验证运行：`P5D_NOMOVIE=1 P5D_OTFORCE=1 P5D_STEPFORCE=1` + VDEC → `out80m_m1076titlekeep.txt`
+NEXT：
+```
+① page=6 后 title 页保持（不再 5 帧结束）
+② [ABITX]/[ABIBEGIN]/[PRESENT] 持续增长
+③ draw 是否出现 UI/文字（vc 变化/RT 非黑）
+④ NOMOVIE 下 swap/RT 出现引擎自绘内容
+```
+验证：`out80m_m1075selectforce.txt`、`out80m_m1076titlekeep.txt`（生成中）。
+
+ANTI-FORGETTING ENTRY. Keywords: M1008 selective job forcing failed (revert to all-force) + force the TITLE page update=1 so page6 stays alive. out80m_m1075selectforce.txt: [JOBCOMP] 1 (only initDataRead), [JOBDONE2] 1, [INITEXEC] 0, [SEQREQ] 16 (page=6), [ABIVTX] 1, [PRESENT] 1, run ended early at n≈59.74M => selective forcing broke the init completion chain, only 1 job completed => revert to M1000 all-force. M1008: force page6 update 0x81185986: 81185988 bl 0x811980FC; 8118598C cmp r0,#0; if !=0 returns 1 => patch inserts s->r[0]=1u at the start of block 0x8118598C so the TITLE page stays resident regardless of the 'title sequence' object. Restored batch_011 blk_8116FA5C all-force: { g_cur_block=0x8116FA5Cu; s->r[0]=0xFFFFFFFFu; return s->r[14]; }. batch_011.o 1,379,088B and batch_012.o 1,851,826B compile exit 0; exe relinked exit 0. Verification run P5D_NOMOVIE=1 P5D_OTFORCE=1 P5D_STEPFORCE=1 + VDEC -> out80m_m1076titlekeep.txt. NEXT: page=6 title page stays (no longer ends within 5 frames); [ABITX]/[ABIBEGIN]/[PRESENT] keep growing; draws change from vc=3 fullscreen to UI/text (vc changes / RT non-black); NOMOVIE swap/RT shows engine-drawn content.
+
+LOOKUP: M1008, selective force failed, out80m_m1075selectforce.txt, [JOBCOMP] 1, page6 update 0x81185986, blk_8118598C, s->r[0]=1u, TITLE page stays, blk_8116FA5C all-force restored, batch_011.o, batch_012.o, out80m_m1076titlekeep.txt -> §18.4552 [relevant: selective force attempt], §18.4551 [relevant: page6 TITLE], §18.4545 [relevant: worker trampoline]
