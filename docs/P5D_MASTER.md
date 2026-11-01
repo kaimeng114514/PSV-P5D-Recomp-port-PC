@@ -1052,6 +1052,55 @@
 | M1034 | §18.4579: **m1093 证实 DRIVDONE 无法触发（driver 只在 step=1 后被移出调度，永远到不了 step=2）；改用更高层捷径：HLE 侧用 `call_guest_cb4` 直接调用 guest `FUN_81185616(6,0,0,0)`（= setSequence(page=6)）直达 TITLE 页，绕开卡死的 init 链**。`out80m_m1093drivdone.txt`：
 | M1035 | §18.4580: ★★★★★★★★★★ **重大进展：FORCETITLE 生效！HLE 直接调用 setSequence(6,0,0,0) 成功启动 TITLE 页（title task 创建、appFade 正常），崩溃仅剩 sound 对象 null；同时子代理完成"进程/Job 子系统静态 dossier"，用写集证明"创建子 job 不可能把父 job 摘出 ready 链"，并给出 A/B/C 三种候选与单断点判别法**。
 | M1036 | §18.4581: **m1095 结果：FORCETITLE 再次成功启动 TITLE 页（title task=85B8743C、appFade OK ×2、fade 对象取到），但我们的 M1035 null-sound 跳过方式有错误（跳 epilogue 会写 [r5+0x58]，r5=0 时 BADMEM va=0x58 @0x811723BA）→ M1036 改为手动退栈返回；同时 TRRET 探针给出第一批 job 调度数据：trophy step 以 -1 完成（通道 A，符合预期），未出现 TRSET（通道 B 未触发）**。`out80m_m1095titlepath.txt` / err：
+| M1037 | §18.4582: ★★★★★★★★★★ **重大发现：FORCETITLE 后 title 子系统创建了新的 logo 序列任务（job node=85B8750C worker=0x81193704），反编译确认这是 S0_LOGO 引擎自绘路径：加载 `title/logo.bin` + `atluslogo.tga`/`crilogo.tga`/`p-studio.tga`，按 69 帧间隔做淡入淡出序列！** m1096 证据：
+```
+[FORCETITLE] invoke setSequence(6,0,0,0) n=59620001 → returned r0=85B8746C
+[TTC] task=85B8743C   [TTF8] 85A9E42C ×3   [TTO] fadeobj=85A9E46C   [BADMEM] 0（无崩溃！）
+[JOBEXEC] #32 node=85B8746C worker=81198173 completion=811982A9 n=59624766   ← title sequence job
+[JOBEXEC] #33 node=85B8750C worker=81193705 completion=81193929 n=59625416   ← ★ S0 logo 序列 job（title 代码创建）
+[TRRET] #15 job=846182D0 ret=FFFFFFFF wf=811848B7 node=85B87F2C   ← sound step job 以 -1 完成（通道 A）
+[TRRET] #2/#5/#10/#14 job=846180A0 ret=0 tramp=8116FA5D node=85B846EC wf=81184FFF  ← driver job 仍在被调度
+[WFDBG] #43 ctx=846182D0 node=85B87F2C wf=811848B7（sound step job 真跑）
+运行到 n≈60,732,825 后进入自旋（[WD] stall=486, pcring 8127B85C…8127C0F4 / 811731E6）
+```
+**FUN_81193704 反编译（`titlejob2.txt`，worker 0x81193705）**：
+```c
+switch (*puVar1) {   // task state
+case 0: case 1:  state=2;
+    uVar4 = FUN_8115fbe6("title/logo.bin");        // 打开 logo 容器
+    puVar1[4] = uVar4;
+case 2: if (FUN_8115fc0e(handle) != 0) {            // 加载完成？
+    data = FUN_8115fc28(handle, 0);
+    state = 3;
+    puVar1[5] = FUN_8119343a("atluslogo.tga", data, 0);   // 三个 TGA 加载任务
+    puVar1[6] = FUN_8119343a("crilogo.tga",   data, 0);
+    puVar1[7] = FUN_8119343a("p-studio.tga",  data, 0); }
+case 3: // 等待三个 TGA 任务完成（FUN_8116f8d2 != 0 且 task state==3）
+    → 关闭容器 FUN_8115fc20；state=4
+case 4: state=5; counter=0;
+    fade = FUN_81178ce2(0); FUN_81178e84(fade,0,10);   // 淡入
+    iVar5 = FUN_81175290(0xe); if (0) iVar5=0xc9;
+    FUN_810932a0(iVar5,1); FUN_810932aa(iVar5,...);    // 播放 SE/音乐
+case 5: case 8: case 0xb: counter++; if (0x45 < counter) { state++; fade out; }   // 69 帧间隔
+case 6/9/0xc: 等 fade 完成 → 下个 logo
+case 7/0xa: 淡入下一个 logo
+case 0xd: 全部完成 → puVar1[1] = 1
+}
+uVar4 = FUN_8115fa3e(0x1c); iVar5 = FUN_8116e49e();
+*(u32*)(iVar5+0x10) = param_1; *(u32*)(iVar5+8) = 0x8119351D; FUN_8116e522(uVar4);
+```
+⇒ **这是 ATLUS logo → CRI logo → P-STUDIO logo 的引擎自绘开场序列（S0_LOGO）**，每 69 帧（~2.3s @30fps）切换，带淡入淡出；完成后 puVar1[1]=1 进入后续（title 画面）。
+**当前卡点**：title/logo.bin 打开/加载 + 3 个 TGA 加载任务完成（FUN_8115fbe6/FUN_8115fc0e/FUN_8119343a 依赖文件 HLE/CRI FS）→ 运行在 n≈60.73M 进入自旋等待（[WD] pcring 8127B85C/8127C0F4 = CRI FS 轮询 + 811731E6）。
+NEXT：
+```
+① 检查 title/logo.bin 与 3 个 TGA 是否存在于 data.cpk / 文件 HLE 是否能打开（加 [FOPEN] 探针到 FUN_8115fbe6/FUN_8115fc0e）
+② 给 blk_81193704 加状态探针：[LOGO] state/container/3 TGA 任务句柄 → 看卡在 case2 还是 case3
+③ 若文件 HLE 缺资源 → 从 C:\dev\p5d_rom 的 data.cpk 解出对应文件到虚拟 FS
+④ 若 TGA 加载任务依赖 CRI/图像解码 HLE → 补实现（或先让 FUN_8119343a 走假路径返回完成任务）
+⑤ 完成后引擎将自绘 ATLUS/CRI/P-STUDIO logo → 首个"引擎自绘 S0_LOGO"可见里程碑
+```
+验证：`out80m_m1096title2.txt`、`titlejob2.txt`、`jobproc_dossier.md`。 |
+| §18.4582 | MAJOR FINDING: after FORCETITLE the title subsystem created a new logo-sequence task (job node=85B8750C worker=0x81193704); decompilation confirms this is the S0_LOGO engine-drawn path: it loads title/logo.bin + atluslogo.tga/crilogo.tga/p-studio.tga and runs a 69-frame-interval fade sequence. m1096 evidence: [FORCETITLE] invoke setSequence(6,0,0,0) n=59620001 -> returned r0=85B8746C; [TTC] task=85B8743C; [TTF8] 85A9E42C x3; [TTO] fadeobj=85A9E46C; [BADMEM] 0 (no crash!); [JOBEXEC] #32 node=85B8746C worker=81198173 completion=811982A9 n=59624766 (title sequence job); [JOBEXEC] #33 node=85B8750C worker=81193705 completion=81193929 n=59625416 (S0 logo sequence job created by title code); [TRRET] #15 job=846182D0 ret=FFFFFFFF wf=811848B7 node=85B87F2C (sound step job completed via -1, channel A); [TRRET] #2/#5/#10/#14 job=846180A0 ret=0 tramp=8116FA5D node=85B846EC wf=81184FFF (driver job still scheduled); [WFDBG] #43 ctx=846182D0 node=85B87F2C wf=811848B7; the run reaches n≈60,732,825 then spins ([WD] stall=486, pcring 8127B85C...8127C0F4 / 811731E6). FUN_81193704 decompiled (titlejob2.txt, worker 0x81193705): switch(*puVar1) state: case0/1 state=2, uVar4=FUN_8115fbe6('title/logo.bin') store puVar1[4]; case2 if FUN_8115fc0e(handle)!=0 { data=FUN_8115fc28(handle,0); state=3; puVar1[5]=FUN_8119343a('atluslogo.tga',data,0); puVar1[6]=FUN_8119343a('crilogo.tga',data,0); puVar1[7]=FUN_8119343a('p-studio.tga',data,0); } case3 wait all three TGA tasks done (FUN_8116f8d2 != 0 && task state==3) -> close container FUN_8115fc20; state=4; case4 state=5 counter=0; fade=FUN_81178ce2(0); FUN_81178e84(fade,0,10); iVar5=FUN_81175290(0xe); if(0) iVar5=0xc9; FUN_810932a0(iVar5,1); FUN_810932aa(...) (play SE/music); case5/8/0xb counter++; if(0x45<counter){ state++; fade out; } (69-frame interval); case6/9/0xc wait fade done -> next logo; case7/0xa fade in next logo; case0xd all done -> puVar1[1]=1; then uVar4=FUN_8115fa3e(0x1c); iVar5=FUN_8116e49e(); *(u32*)(iVar5+0x10)=param_1; *(u32*)(iVar5+8)=0x8119351D; FUN_8116e522(uVar4). So this is the ATLUS logo -> CRI logo -> P-STUDIO logo engine-drawn intro sequence (S0_LOGO), 69 frames (~2.3s @30fps) each with fades; after completion puVar1[1]=1 moves on (title screen). Current blocker: title/logo.bin open/load + 3 TGA load tasks complete (FUN_8115fbe6/FUN_8115fc0e/FUN_8119343a depend on file HLE/CRI FS) => the run spins at n≈60.73M waiting ([WD] pcring 8127B85C/8127C0F4 = CRI FS polling + 811731E6). NEXT: (1) check whether title/logo.bin and the 3 TGAs exist in data.cpk / file HLE can open (add [FOPEN] probes to FUN_8115fbe6/FUN_8115fc0e); (2) add state probe to blk_81193704: [LOGO] state/container/3 TGA handles to see whether stuck in case2 or case3; (3) if file HLE lacks resources extract from data.cpk to the virtual FS; (4) if TGA load tasks depend on CRI/image decode HLE implement it (or fake-complete FUN_8119343a first); (5) after that the engine will draw ATLUS/CRI/P-STUDIO logos => first visible engine-drawn S0_LOGO milestone. |
 ```
 [FORCETITLE] invoke setSequence(6,0,0,0) n=59620001 → returned r0=85B8746C
 [TTC] task=85B8743C        [TTF8] g8a8ret=85A9E42C ×2        [TTO] fadeobj=85A9E46C
@@ -495337,3 +495386,46 @@ NEXT：
 ANTI-FORGETTING ENTRY. Keywords: M1036 m1095 result: FORCETITLE again started the TITLE page (title task=85B8743C, appFade OK x2, fade object retrieved) but M1035 null-sound skip was wrong (jumping to the epilogue writes [r5+0x58]; r5=0 => BADMEM va=0x58 at 0x811723BA) -> M1036 manual stack unwind. TRRET first data: trophy step completed via -1 (channel A, expected), no TRSET (channel B not triggered). out80m_m1095titlepath.txt: [FORCETITLE] invoke n=59620001 -> returned r0=85B8746C; [TTC] task=85B8743C; [TTF8] 85A9E42C x2; [TTO] fadeobj=85A9E46C; [BADMEM] va=0x58 at 0x811723BA; [TRRET] #4 job=84618110 ret=FFFFFFFF tramp=8116FA5D node=85B86A1C; [TRRET] #7 job=84618180 ret=0 tramp=8105A261 node=85B86A50; [TRSET] 0. M1036: batch_011 blk_81172386 if(s->r[0]==0u){ pop r4/r5/r6/pc manually via rd32/wr32; return _pc; } (no epilogue); batch_016 blk_811DB24E TRRET condition adds wf==0x81184FFF and prints wf (cap 160) to monitor the driver job's trampoline return/slot. batch_011/batch_016 exit 0; exe 57,055,185B 15:53:38. Verification run out80m_m1096title2.txt started. NEXT: title worker passes sound -> title state machine case0/1/2; [TRRET] wf=81184FFF driver job last invocation/return/slot; title object -> engine-drawn title (screenshots); check NOMOVIE frames for engine content.
 
 LOOKUP: M1036, null-sound skip fix manual unwind, blk_81172386, BADMEM va=0x58 811723BA, TRRET data, #4 job=84618110 ret=-1 tramp=8116FA5D node=85B86A1C trophy channel A, #7 job=84618180 tramp=8105A261, TRSET 0, TRRET extended wf==0x81184FFF, blk_811DB24E, out80m_m1096title2.txt, exe 57,055,185B -> §18.4580 [relevant: FORCETITLE + dossier], §18.4576 [relevant: driver disappear], §18.4574 [relevant: init chain driver]
+### 18.4582 PORT M1037: FORCETITLE 后 title 子系统创建 S0_LOGO 序列任务（引擎自绘路径！）
+
+1) m1096 证据：
+```
+[FORCETITLE] invoke setSequence(6,0,0,0) n=59620001 → returned r0=85B8746C
+[TTC] task=85B8743C  [TTF8] 85A9E42C ×3  [TTO] fadeobj=85A9E46C  [BADMEM] 0（无崩溃）
+[JOBEXEC] #32 node=85B8746C worker=81198173 completion=811982A9 n=59624766   ← title sequence job
+[JOBEXEC] #33 node=85B8750C worker=81193705 completion=81193929 n=59625416   ← ★ S0 logo 序列 job
+[TRRET] #15 job=846182D0 ret=FFFFFFFF wf=811848B7 node=85B87F2C               ← sound step job 完成
+[TRRET] #2/#5/#10/#14 job=846180A0 ret=0 tramp=8116FA5D node=85B846EC wf=81184FFF  ← driver job 仍调度
+[WFDBG] #43 ctx=846182D0 node=85B87F2C wf=811848B7
+运行到 n≈60,732,825 后自旋（[WD] stall=486，pcring 8127B85C…8127C0F4 / 811731E6）
+```
+2) FUN_81193704（worker 0x81193705）反编译要点：
+```c
+case 0/1: state=2; puVar1[4]=FUN_8115fbe6("title/logo.bin");        // 打开 logo 容器
+case 2: if (FUN_8115fc0e(handle)!=0) { data=FUN_8115fc28(handle,0); state=3;
+          puVar1[5]=FUN_8119343a("atluslogo.tga",data,0);
+          puVar1[6]=FUN_8119343a("crilogo.tga",data,0);
+          puVar1[7]=FUN_8119343a("p-studio.tga",data,0); }
+case 3: // 等三个 TGA 任务完成（FUN_8116f8d2 != 0 且 task state==3）→ 关闭容器 → state=4
+case 4: state=5; counter=0; fade=FUN_81178ce2(0); FUN_81178e84(fade,0,10);   // 淡入
+        iVar5=FUN_81175290(0xe); if(0) iVar5=0xc9; FUN_810932a0(iVar5,1);    // SE/音乐
+case 5/8/0xb: counter++; if(0x45<counter){ state++; fade out; }             // 69 帧间隔
+case 6/9/0xc: 等 fade 完成 → 下个 logo
+case 7/0xa: 淡入下一个 logo
+case 0xd: 完成 → puVar1[1]=1；然后 FUN_8115fa3e(0x1c)/FUN_8116e49e/…（进入后续）
+```
+⇒ **这是 ATLUS logo → CRI logo → P-STUDIO logo 的引擎自绘开场序列（S0_LOGO）**
+3) 当前卡点：title/logo.bin + 3 个 TGA 加载任务完成（文件 HLE/CRI FS 依赖）→ n≈60.73M 自旋
+NEXT：
+```
+① 检查 title/logo.bin 与 TGA 是否可打开（[FOPEN] 探针）
+② blk_81193704 加 [LOGO] 状态探针（state/container/3 句柄）
+③ 缺资源 → 从 data.cpk 解出到虚拟 FS
+④ TGA 加载依赖 CRI/图像解码 → 补 HLE 或先假完成
+⑤ 引擎自绘 ATLUS/CRI/P-STUDIO logo → 首个可见 S0_LOGO 里程碑
+```
+验证：`out80m_m1096title2.txt`、`titlejob2.txt`、`jobproc_dossier.md`。
+
+ANTI-FORGETTING ENTRY. Keywords: M1037 MAJOR FINDING - after FORCETITLE the title subsystem created a logo-sequence task (job node=85B8750C worker=0x81193704) and decompilation confirms it is the S0_LOGO engine-drawn path: loads title/logo.bin + atluslogo.tga/crilogo.tga/p-studio.tga with 69-frame fade intervals. m1096: [FORCETITLE] invoke n=59620001 -> returned r0=85B8746C; [TTC] task=85B8743C; [TTF8] 85A9E42C x3; [TTO] fadeobj=85A9E46C; [BADMEM] 0; [JOBEXEC] #32 node=85B8746C worker=81198173 (title sequence job); #33 node=85B8750C worker=81193705 (S0 logo sequence job); [TRRET] #15 job=846182D0 ret=-1 wf=811848B7 node=85B87F2C (sound step job completed); [TRRET] driver job 846180A0 ret=0 tramp=8116FA5D node=85B846EC wf=81184FFF still scheduled; run spins at n≈60,732,825 ([WD] stall=486, pcring 8127B85C/8127C0F4/811731E6). FUN_81193704 (titlejob2.txt): case0/1 state=2 open title/logo.bin via FUN_8115fbe6; case2 if FUN_8115fc0e(handle)!=0 { data=FUN_8115fc28(handle,0); state=3; puVar1[5]=FUN_8119343a('atluslogo.tga',data,0); [6]='crilogo.tga'; [7]='p-studio.tga'; } case3 wait three TGA tasks done (FUN_8116f8d2 != 0 && task state==3) -> close FUN_8115fc20 -> state=4; case4 state=5 counter=0 fade=FUN_81178ce2(0) FUN_81178e84(fade,0,10) iVar5=FUN_81175290(0xe); if(0) 0xc9; FUN_810932a0(iVar5,1); case5/8/0xb counter++ if(0x45<counter){state++; fade out;} (69-frame interval); case6/9/0xc wait fade -> next logo; case7/0xa fade in next; case0xd done -> puVar1[1]=1 then FUN_8115fa3e(0x1c)/FUN_8116e49e/(iVar5+0x10=param_1, +8=0x8119351D)/FUN_8116e522. So this is the ATLUS->CRI->P-STUDIO logo engine-drawn intro (S0_LOGO), 69 frames ~2.3s @30fps with fades. Current blocker: title/logo.bin + 3 TGA load tasks (file HLE/CRI FS) -> spins at n≈60.73M. NEXT: check title/logo.bin and TGAs open ([FOPEN] probes to FUN_8115fbe6/FUN_8115fc0e); add [LOGO] state probe to blk_81193704 (state/container/3 handles) to see stuck case2 or case3; extract missing resources from data.cpk to virtual FS; implement CRI/image decode HLE or fake-complete FUN_8119343a; then engine draws ATLUS/CRI/P-STUDIO logos => first visible engine-drawn S0_LOGO milestone.
+
+LOOKUP: M1037, FORCETITLE title subsystem logo job, node=85B8750C worker=81193704, S0_LOGO sequence, title/logo.bin, FUN_8115fbe6, FUN_8115fc0e, FUN_8115fc28, FUN_8119343a, atluslogo.tga, crilogo.tga, p-studio.tga, 69-frame interval 0x45, FUN_81178ce2 fade, FUN_81178e84, FUN_81175290 0xe, FUN_810932a0, case 0-0xd state machine, spin n=60,732,825, [WD] pcring 8127B85C/8127C0F4, titlejob2.txt, [JOBEXEC] #33, [TRRET] #15 sound -1, out80m_m1096title2.txt -> §18.4581 [relevant: TRRET + title2], §18.4580 [relevant: FORCETITLE], §18.4574 [relevant: init chain]
