@@ -1513,7 +1513,7 @@ static void job_probes(uint32_t pcv, RecState* s) {
       int _late = (g_main_n > 10000000u && !_lj_late); if (_late) _lj_late = 1;
       if (_lj_n <= 6 || (_lj_n % 1000) == 0 || _late) { printf("[LOADJ] #%d at=%08X n=%u late=%d r0=%08X r1=%08X r4=%08X fib=%08X\n", _lj_n, _a0, g_main_n, _late, s->r[0], s->r[1], s->r[4], g_cur_fiber); fflush(stdout); } } }
   { uint32_t _a0 = pcv & ~1u;
-    if (_a0 == 0x811820B6u || _a0 == 0x81286EC4u || _a0 == 0x81287BBAu || _a0 == 0x81286B7Eu) { static int _fx_n = 0; static int _fx_late = 0; ++_fx_n;
+    if (_a0 == 0x811820B6u || _a0 == 0x81286EC4u || _a0 == 0x81287BBAu || _a0 == 0x81286B7Eu || _a0 == 0x8128399Eu || _a0 == 0x81235F30u || _a0 == 0x81224638u) { static int _fx_n = 0; static int _fx_late = 0; ++_fx_n;
       int _late = (g_main_n > 10000000u && !_fx_late); if (_late) _fx_late = 1;
       if (_fx_n <= 6 || (_fx_n % 2000) == 0 || _late) { printf("[FIOSX] #%d at=%08X n=%u late=%d r0=%08X r1=%08X r2=%08X r3=%08X fib=%08X\n", _fx_n, _a0, g_main_n, _late, s->r[0], s->r[1], s->r[2], s->r[3], g_cur_fiber); fflush(stdout); } } }
   { uint32_t _a0 = pcv & ~1u;

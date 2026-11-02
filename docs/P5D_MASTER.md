@@ -1113,6 +1113,52 @@
 | M1095 | §18.4640: ★★★★★★★★★★★★ **criFs 初始化修复验证成功，运行进入全新稳态：首次稳定越过全部旧崩溃点（n=69.2M，旧崩溃 64.28M），帧计数 ctr=446（此前最高 221），**标题页场景对象首次创建（[SCENE] p=85A8EA70 / 85A8F190，不再是 logo 的 859BF220/859BF940）**，CRI loader 活跃（[FIOSW] 带 loader 句柄 84D8EA68/84D8ECC0），真实 movie 文件成功打开（[IO] OPEN 'movie/c_p5d000.usm' size=54,432,288）。下一层：CRI 资源读取（ACB 音频等）与场景视图/GXM 绘制。**
 | M1096 | §18.4641: ★★★★★★★ **找到 CRI 资源读取失败的时序根因，并发现两个新线索：(1) CPK 挂载函数 `FUN_811820B6` 在 **n=1717** 就被调用（挂载 vita.cpk + data.cpk：FUN_81286EC4=criFsBinder 挂载、FUN_81287BBA 等待、FUN_8128853E 绑定），但我们的 HLE 强制 criFs_Initialize 在 **n=5000** 才执行——挂载早于库初始化，必然失败，导致后续 sound/*.acb、sound/common.acf 全部打不开；(2) 把初始化提前到 n=1000（m1139）又太早：游戏自己的 CRI allocator 设置流程还没走完，出现 `E2009072402:Can not change allocator. Allocated memory is still active.`（×多次），随后 BADMEM va=0x38 @0x8127B37A 崩溃（n=15524）。⇒ 需要精确的初始化时机，或者**让游戏自己的初始化流程完成**（boot 流程经过多轮修复后可能已能自然走到 CRI 初始化）。**
 | M1097 | §18.4642: ★★★★★★★ **关键实验 m1140：完全不设 P5D_CRIFSHLE（去掉 HLE 强制初始化），让游戏自己的 boot 流程完成 criFs 初始化与 CPK 挂载。基于 M1096 的新线索（allocator 错误信息证明游戏自身 CRI 初始化在 n=1717 附近运行；且经过 M1068~M1095 修复后 boot 流程已大幅健康化）。**
+| M1098 | §18.4643: ★★★★★★★ **m1140（不设 P5D_CRIFSHLE）早期结果：游戏自己的 boot 在 n=1717 调用 CPK 挂载（[FIOSX] at=811820B6 / 81286EC4）并**自己调用 criFs_Initialize**，但初始化失败：`E2009072703:Insufficient buffer size.`（说明游戏传入的工作缓冲大小 < criFs 计算所需 local_68）→ CPK 挂载失败 → `E2010052671:Can not open ACF file (sound/common.acf)`、`E2013081521:"BusSet_xrd722v2" is invalid DSP Bus Setting`。⇒ 游戏自身初始化路径存在但**参数不足**：需要查明游戏传给 criFs_Initialize 的 (config, work, size) 从哪来、为何 size 不够。M1098 扩展 [FIOSX] 探针到 0x8128399E（criFs_Initialize 入口）与 0x81235F30/0x81224638（两个调用点），打印 r0-r3 参数。**
+m1140（`out80m_m1140noforced.txt`，无强制初始化）证据：
+```
+[FIOSX] #1 at=811820B6 n=1717 …   ← CPK 挂载被调用
+[FIOSX] #4 at=81286EC4 n=1717 …   ← criFsBinder 挂载
+[CRILOG] n=1717 msg=E2009072703:Insufficient buffer size.       ← ★ 游戏自己的 criFs_Initialize 失败
+[CRILOG] n=1717 msg=E2011102800:Reference counter has been already 0.
+[CRILOG] n=1717 msg=E10062220 / E10062222
+[CRIFMT] n=1717 fmt=E2010052671:Can not open ACF file. (path = %s) arg2=sound/common.acf
+[CRIFMT] n=1717 fmt=E2013081521:"%s" is invalid DSP Bus Setting. arg2=BusSet_xrd722v2
+[FIOS] mounted data.cpk files=10555 / vita.cpk files=531（主机侧仅）
+[BADMEM]=0 [SNAP]=0
+```
+**分析**：
+1. 无强制初始化时：游戏**确实自己调用 criFs_Initialize**（"Insufficient buffer size" 只可能来自 FUN_8128399E 的 `param_3 < local_68` 分支），但传入的 work buffer 尺寸不足 → 失败 → finalize → 后续 CPK 挂载失败 → ACB/ACF 打不开
+2. 强制初始化 n=5000：太晚（挂载已失败）
+3. 强制初始化 n=1000：太早（与游戏自身 criFs_SetAllocator 冲突，E2009072402/2404）
+4. ⇒ 正解可能是：**让游戏自己的 criFs_Initialize 用足够的缓冲成功**——查明它的 config/work buffer 来源；若是从被我们跳过的初始化步骤/配置读取获得，就补齐那一步
+**M1098 探针（recomp_harness.cpp）**：把 [FIOSX] 的地址过滤列表扩展为：
+```cpp
+if (_a0 == 0x811820B6u || _a0 == 0x81286EC4u || _a0 == 0x81287BBAu ||
+    _a0 == 0x81286B7Eu || _a0 == 0x8128399Eu || _a0 == 0x81235F30u || _a0 == 0x81224638u) {
+  ... printf("[FIOSX] #%d at=%08X n=%u late=%d r0=%08X r1=%08X r2=%08X r3=%08X fib=%08X\n", ...);
+}
+```
+编译：harness exit 0；exe 重链 exit 0（57,119,944B，08:50:24）。验证运行 `out80m_m1141criinit.txt` 已启动（同样不设 CRIFSHLE）。
+NEXT：
+```
+① 读 m1141 [FIOSX] at=8128399E / 81235F30 / 81224638：
+   • criFs_Initialize 入口的 r0(config)、r1、r2(work buffer size) 实际值
+   • 调用点 r0-r3 参数（config 指针、work 指针、size）
+② 从 config 指针读出字段（+0 类型、+4 numLoaders、+8 等）计算 local_68 需求，对比传入 size
+③ 找 work buffer 分配来源：若为 HLE malloc，检查我们返回的块大小是否符合请求
+   （可能我们分配了但 size 记录错误 → 传入 size 偏小）
+④ 修复：正确提供 work buffer（如 HLE 拦截分配或直接加大），让游戏自身初始化成功
+⑤ 之后 CPK 挂载成功 → ACB/ACF/title 素材读取 → [SCENE] 视图 → GXM 绘制
+备选：在游戏调用 criFs_Initialize 前（n<1717）HLE 先初始化一次（用默认 config，已验证可成功），
+      但要避免与游戏自身 SetAllocator 冲突——需先弄清冲突原因（E2009072402）
+```
+验证：`out80m_m1140noforced.txt`、`out80m_m1141criinit.txt`（生成中）、m1138/m1139 日志、`m1094` 的 criFs 调用参数修复。 |
+| §18.4643 | m1140 (no forced init) early result: the game's own boot at n=1717 calls the CPK mount ([FIOSX] at=811820B6 / 81286EC4) and also calls criFs_Initialize itself, but that init FAILS with 'E2009072703:Insufficient buffer size.' (meaning the work-buffer size the game passes is smaller than the required local_68) -> CPK mount fails -> 'E2010052671:Can not open ACF file (sound/common.acf)' and 'E2013081521:\"BusSet_xrd722v2\" is invalid DSP Bus Setting'. So the game's own init path exists but has insufficient parameters; we need to find where the (config, work, size) come from and why the size is insufficient. M1098 extends the [FIOSX] probe to 0x8128399E (criFs_Initialize entry) and 0x81235F30/0x81224638 (the two call sites), printing r0-r3. '
+       'm1140 evidence: [FIOSX] #1 at=811820B6 n=1717 (CPK mount called); [FIOSX] #4 at=81286EC4 n=1717 (criFsBinder mount); [CRILOG] n=1717 E2009072703:Insufficient buffer size. (the game's own criFs_Initialize failed); [CRILOG] n=1717 E2011102800:Reference counter has been already 0.; [CRILOG] n=1717 E10062220 / E10062222; [CRIFMT] n=1717 E2010052671:Can not open ACF file (path = sound/common.acf); [CRIFMT] n=1717 E2013081521:\"%s\" is invalid DSP Bus Setting (BusSet_xrd722v2); [FIOS] mounted data.cpk files=10555 / vita.cpk files=531 (host-side only); [BADMEM]=0 [SNAP]=0. '
+       'Analysis: (1) with no forced init the game DOES call criFs_Initialize itself (the Insufficient buffer size message can only come from FUN_8128399E\'s param_3 < local_68 branch) but the work buffer size is insufficient -> fail -> finalize -> subsequent CPK mount fails -> ACB/ACF unreadable; (2) forced init n=5000 too late (mount already failed); (3) forced init n=1000 too early (conflicts with the game\'s own criFs_SetAllocator: E2009072402/2404); (4) so the correct fix may be to make the game\'s own criFs_Initialize succeed with a sufficient buffer - find where its config/work buffer come from; if they come from an init step we skipped, complete that step. '
+       'M1098 probe (recomp_harness.cpp): extend the [FIOSX] address filter to: if (_a0 == 0x811820B6u || _a0 == 0x81286EC4u || _a0 == 0x81287BBAu || _a0 == 0x81286B7Eu || _a0 == 0x8128399Eu || _a0 == 0x81235F30u || _a0 == 0x81224638u) { ... printf(\"[FIOSX] #%d at=%08X n=%u late=%d r0=%08X r1=%08X r2=%08X r3=%08X fib=%08X\\n\", ...); }. Build: harness exit 0; exe relink exit 0 (57,119,944B 08:50:24). Verification run out80m_m1141criinit.txt started (also with no CRIFSHLE). '
+       'NEXT: (1) read m1141 [FIOSX] at=8128399E / 81235F30 / 81224638: the criFs_Initialize entry r0(config), r1, r2(work buffer size) actual values, and the call-site r0-r3; (2) read the config fields (+0 type, +4 numLoaders, +8 etc.) to compute the local_68 requirement and compare with the passed size; (3) find the work buffer allocation source: if it is HLE malloc, check whether the block size we return matches the request (maybe we allocate but record a wrong size -> passed size too small); (4) fix by providing a correct work buffer so the game\'s own init succeeds; (5) then CPK mount succeeds -> ACB/ACF/title assets read -> [SCENE] views -> GXM draws. Fallback: init once via HLE before the game calls it (n<1717, default config verified to work) but avoid the conflict with the game\'s SetAllocator (E2009072402) - first understand that conflict. '
+       'Verification: out80m_m1140noforced.txt, out80m_m1141criinit.txt (running), m1138/m1139 logs, M1094 criFs call-arg fix. |
 **M1096 已确认的时序问题回顾**：
 - CPK 挂载函数 `FUN_811820B6` 在 **n=1717** 执行（挂载 vita.cpk + data.cpk，经 FUN_81286EC4=criFsBinder 挂载、FUN_81287BBA 等待、FUN_8128853E 绑定；两个 CPK 名字表在 0x813AFF70="vita.cpk"、0x813B0074="data.cpk"）
 - 强制初始化 n=5000 → **太晚**（挂载已失败 → sound/*.acb、sound/common.acf 全部打不开）
@@ -499699,3 +499745,41 @@ P5D_THRPUMP=1 P5D_PUMPMAIN=1 P5D_POSTMAIN=1
 ANTI-FORGETTING ENTRY. Keywords: M1097 key experiment m1140 - completely unset P5D_CRIFSHLE (remove the HLE-forced init) and let the game's own boot flow complete the criFs initialization and CPK mount. Context from M1096: CPK mount FUN_811820B6 runs at n=1717 (mounts vita.cpk + data.cpk via FUN_81286EC4=criFsBinder mount, FUN_81287BBA wait, FUN_8128853E bind; CPK name tables at 0x813AFF70='vita.cpk' and 0x813B0074='data.cpk'); forced init at n=5000 is too late (mount already failed -> all sound/*.acb and sound/common.acf fail to open with E2010052670/E2010052671); forced init at n=1000 is too early (conflicts with the game's own CRI allocator setup: E2009072402/E2009072404:Can not change allocator. Allocated memory is still active. -> BADMEM va=0x38 at 0x8127B37A, n=15524); the allocator errors at n=1717 prove the game's own CRI init flow is running. m1140 env: P5D_NESTED_UNTIL=1500000 P5D_GXMABI=1 P5D_NOSCHEDRUN=1 P5D_GETSELFFIX=1 P5D_FASTSLEEP=1 P5D_THRYIELD=1 P5D_PERIODPUMP=1 P5D_VTIME=1 P5D_P1TICK=1 P5D_RINIT=1 P5D_OTFORCE=1 P5D_STEPFORCE=1 P5D_NOMOVIE=1 P5D_FORCETITLE=1 P5D_FIOSFILL=1 P5D_WAITFORCE=1 P5D_SCNFORCE=1 P5D_THRPUMP=1 P5D_PUMPMAIN=1 P5D_POSTMAIN=1, NO P5D_CRIFSHLE/P5D_CRIFSHLE_AT/P5D_CRIFSHLE2_AT; recomp_harness.exe 0x81198464 300000000 > out80m_m1140noforced.txt. Watch: (1) whether the game itself executes criFs init ([CRILOG] criFs_Initialize messages or [FIOSX] at=8128399E); (2) CPK mount result around n=1717 ([FIOSX] at=811820B6 / 81286EC4, guest criFs success); (3) whether ACB/ACF failures disappear (E2010052670/E2010052671); (4) title asset reads -> [SCENE] view registrations (head0F non-empty) -> GXM draws; (5) if the game's own init is incomplete locate missing steps. Fallbacks: force init between n=1200-1600; or HLE-intercept criFs_SetAllocator (E2009072402 source) so the game's own allocator setup succeeds. Verification: out80m_m1140noforced.txt (running), cpkmount.txt, cpk_refs.txt, m1138/m1139 logs.
 
 LOOKUP: M1097 experiment m1140 no forced criFs init, unset P5D_CRIFSHLE, let game's own boot flow init criFs and mount CPK, CPK mount FUN_811820B6 n=1717, forced init n=5000 too late vs n=1000 too early allocator conflict E2009072402 E2009072404 BADMEM va=0x38 0x8127B37A, watch [CRILOG] criFs_Initialize [FIOSX] at=8128399E at=811820B6 at=81286EC4, ACB/ACF failures E2010052670 E2010052671, fallback n=1200-1600 or intercept criFs_SetAllocator, out80m_m1140noforced.txt -> §18.4641 [relevant: timing root cause], §18.4640 [relevant: criFs fix verified], §18.4639 [relevant: criFs init fix]
+### 18.4643 PORT M1098: 游戏自身 criFs_Initialize 失败原因——工作缓冲不足（Insufficient buffer size）；探针调用参数
+
+1) m1140（无强制初始化）证据：
+```
+[FIOSX] #1 at=811820B6 n=1717 …   ← CPK 挂载
+[FIOSX] #4 at=81286EC4 n=1717 …   ← criFsBinder 挂载
+[CRILOG] n=1717 msg=E2009072703:Insufficient buffer size.   ← ★ 游戏自己的 criFs_Initialize 失败
+[CRILOG] n=1717 msg=E2011102800:Reference counter has been already 0.
+[CRIFMT] n=1717 fmt=E2010052671:Can not open ACF file. (path = sound/common.acf)
+[CRIFMT] n=1717 fmt=E2013081521:"%s" is invalid DSP Bus Setting. (BusSet_xrd722v2)
+[FIOS] mounted data.cpk files=10555 / vita.cpk files=531（主机侧）
+```
+2) 分析：
+- 无强制初始化时游戏**自己调用 criFs_Initialize**，但 work buffer 尺寸不足（param_3 < local_68）→ 失败 → CPK 挂载失败 → ACB/ACF 打不开
+- 强制 n=5000 太晚、强制 n=1000 太早（allocator 冲突）
+- ⇒ 正解方向：让游戏自己的 criFs_Initialize 获得足够缓冲（查明 config/work 来源）
+3) M1098 探针（[FIOSX] 扩展地址）：
+```cpp
+if (_a0 == 0x811820B6u || _a0 == 0x81286EC4u || _a0 == 0x81287BBAu ||
+    _a0 == 0x81286B7Eu || _a0 == 0x8128399Eu || _a0 == 0x81235F30u || _a0 == 0x81224638u) {
+  printf("[FIOSX] #%d at=%08X n=%u late=%d r0=%08X r1=%08X r2=%08X r3=%08X fib=%08X\n", ...); }
+```
+4) 编译：harness exit 0；exe 57,119,944B（08:50:24）
+5) 验证运行 `out80m_m1141criinit.txt` 已启动（不设 CRIFSHLE）
+NEXT：
+```
+① [FIOSX] 读取 criFs_Initialize 入口/调用点参数（config、work、size）
+② 读 config 字段计算 local_68 需求，对比传入 size
+③ 查 work buffer 分配来源（HLE malloc 大小记录是否正确）
+④ 修复缓冲提供 → 游戏自身初始化成功 → CPK 挂载成功
+⑤ ACB/ACF/title 素材 → [SCENE] 视图 → GXM 绘制
+备选：n<1717 HLE 先初始化，但需理解 E2009072402 冲突
+```
+验证：`out80m_m1140noforced.txt`、`out80m_m1141criinit.txt`（生成中）、m1138/m1139 日志。
+
+ANTI-FORGETTING ENTRY. Keywords: M1098 m1140 no forced init early result - the game's own boot at n=1717 calls the CPK mount ([FIOSX] at=811820B6 / 81286EC4) and also calls criFs_Initialize itself, but that init FAILS with E2009072703:Insufficient buffer size. (the work-buffer size the game passes is smaller than the required local_68) -> CPK mount fails -> E2010052671:Can not open ACF file (sound/common.acf) and E2013081521:\"BusSet_xrd722v2\" is invalid DSP Bus Setting; [CRILOG] n=1717 E2011102800:Reference counter has been already 0. and E10062220/E10062222; [FIOS] mounted data.cpk files=10555 / vita.cpk files=531 (host-side only); [BADMEM]=0. Analysis: the game's own init path exists but has insufficient parameters; forced init n=5000 is too late (mount already failed), forced init n=1000 is too early (conflicts with the game's own criFs_SetAllocator: E2009072402/2404); the correct fix may be to make the game's own criFs_Initialize succeed with a sufficient buffer - find where its config/work buffer come from and if they come from an init step we skipped, complete that step. M1098 probe extended the [FIOSX] address filter to: if (_a0 == 0x811820B6u || _a0 == 0x81286EC4u || _a0 == 0x81287BBAu || _a0 == 0x81286B7Eu || _a0 == 0x8128399Eu || _a0 == 0x81235F30u || _a0 == 0x81224638u) { printf(\"[FIOSX] #%d at=%08X n=%u late=%d r0=%08X r1=%08X r2=%08X r3=%08X fib=%08X\\n\", ...); }. Build: harness exit 0; exe 57,119,944B 08:50:24; run out80m_m1141criinit.txt started (no CRIFSHLE). NEXT: read m1141 [FIOSX] at=8128399E / 81235F30 / 81224638 (criFs_Initialize entry r0 config, r1, r2 work size; call-site r0-r3); read the config fields (+0 type, +4 numLoaders, +8 etc.) to compute the local_68 requirement and compare with the passed size; find the work buffer allocation source (if HLE malloc, check whether the returned block size matches the request - maybe we allocate but record a wrong size so the passed size is too small); fix by providing a correct work buffer so the game's own init succeeds; then CPK mount succeeds -> ACB/ACF/title assets -> [SCENE] views -> GXM draws. Fallback: HLE init before the game calls it (n<1717, default config works) but first understand the SetAllocator conflict (E2009072402).
+
+LOOKUP: M1098 game's own criFs_Initialize fails Insufficient buffer size at n=1717, m1140 no forced init, [FIOSX] at=811820B6 81286EC4, E2009072703, E2010052671 Can not open ACF file sound/common.acf, E2013081521 BusSet_xrd722v2 invalid DSP Bus Setting, forced init n=5000 too late n=1000 too early allocator conflict E2009072402, extended FIOSX probe to 0x8128399E 0x81235F30 0x81224638, exe 57,119,944B 08:50:24, out80m_m1141criinit.txt, next read config/work size and provide sufficient buffer -> §18.4642 [relevant: m1140 experiment], §18.4641 [relevant: timing root cause], §18.4639 [relevant: criFs init fix]
