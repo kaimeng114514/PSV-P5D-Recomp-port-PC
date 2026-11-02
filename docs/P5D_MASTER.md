@@ -1158,6 +1158,8 @@
 | M1140 | §18.4685: ★★★★★★★ **m1233 长跑最终状态：S0_LOGO 状态机推进到 state=B(11)（LOGODRAW 80、FLUSH frame=2、场景构建 120 但 [SCENE] 仍空 cnt=0），随后在 blk≈66,494,954 发生全系统死锁**：g_blkcnt_total 冻结、[WD] stall=1（main fiber 848463A0 在 DelayThread 812B2A50@81207612 重试循环中）、线程泵空转（pumped=5,076,000，blocks=0，全部线程阻塞）、hle_ring 反复 `812B2A50@81207612`（DelayThread），pcring 显示 Fios/loader 轮询环：`81207344 → 812B2830@81207350(LockLwMutex) → 811E6374/811E6A4C/812B2270/811E6A52 → 811E638C/811E639A → 81207352 → 812B28A0@8120735C(UnlockLwMutex) → 811E63A0 → 812B2AD0(SignalSema) → 811E63A8 → 812B2880(WaitEventFlag)`，最后 curpc=812B2AE0(SetEventFlag)。IO 仍=6、[FHOPEN]=0 → **loader 等待的异步任务/IO 从未完成**（无新文件读取，游戏在 LOGO 状态 B 后等待加载/任务完成），HLE 作业队列/线程调度未完成该任务 → 死锁
 | M1141 | §18.4686: ★★★★★★★★ **首次把帧真正写到 Vulkan 交换链并存成 BMP（960×544：p5d_swap_0.bmp / p5d_swap_1.bmp / p5d_disp_1.bmp / p5d_rt_first.bmp），但像素全黑（RGB extrema 全 0，[SHOTSTAT] max=0 mean=0.00）**；同时确认 ABI 桥接管线细节：首次 sceGxmDraw 选中真实 SPIR-V 管线（`gxp_vert_0001.gxp.spv` + `gxp_frag_0165.gxp.spv`，rc=0）、上传测试三角形（stride128/3 verts）、设置 identity uniform、初始化 960×544 stride=1024 的颜色表面 ×3（8CF00000/8D300000/8D700000）与 224×68/960×544 小表面，[SUBMIT]×121 提交命令缓冲、[ENQ]×100、[PROC]×141 作业系统活跃、[TMX]×81 纹理创建。LOGO 状态 B(11) 时游戏 worker 线程（tid=40020000 entry=8120767D）在 811830F4 轮询作业状态（DelayThread 0x7530），GFD 帧/作业链等待完成；[GXM-PRESENT]=0（sceGxmDisplayQueueAddEntry 未被调用）、场景 cnt=0（空）。结论：呈现/截图链路已打通，**黑屏原因=游戏 LOGO 绘制走 precomputed draw（顶点/流/USSE 数据未翻译成 vkCmdDraw，实际没有可见光栅化）**，下一步实现 precomputed draw→Vulkan 翻译并验证像素非黑
 | M1142 | §18.4687: ★★★★★★★★ **首次让真实的 vkCmdDraw 被发出（`[DRAWST] #1 vc=3 inst=1 pipe=… vbuf=… rp=…`），并定位黑屏的直接原因之一=viewport 退化**：`[DRAWST] vp=-0.0,0.0,0.0,0.0`（GXM viewport 原始参数全 0）→ 没有任何像素落入视口；历史运行（m1047–m1071 的电影路径）曾出现 `vp=0.0,0.0,960.0,544.0` 的正常 viewport，证明后端/管线本身可以光栅化。修复/改动：① 在 sceGxmDraw 钩子中**真正调用 `p5d::vulkan::gxm_draw_arrays(3)`**（此前只 upload_vertex_stream、从未发 draw → 永远黑屏）；② 修正 `sceGxmSetViewport` 参数解码：GXM 签名是 (context, xOff, xScale, yOff, yScale, zOff, zScale)，其中 **yScale/zOffset/zScale 是栈参数**，旧代码只读寄存器导致视图参数错误；③ 测试绘制前强制 `set_gxm_viewport(0,960,0,544,0,1)` + `set_gxm_viewport_enable(1)`。但 m1237 中 `[DRAWST]` 仍显示 vp=-0,0,0,0 → 强制设置未进入 DRAWST 使用的状态（顺序/状态对象问题待查）。当前帧仍全黑（BMP extrema 0），但**绘制链路已从"不发 draw"推进到"draw 已发、viewport 未生效"**，这是出画面的最后一段
+| M1144 | §18.4688 维护：**C 盘被运行日志写满（0 字节可用）→ 完成 C:\dev 大规模清理（C:\dev 从 ~104GB 降到 19.0GB，磁盘可用从 0 → 97.9GB）**；根因=harness 探针 `[GBACK]` 的 `static int _gb_n; if (_gb_n++ < 400)` 在 2^31 次间接跳转解析后**整数溢出变负**，条件恒真 → 无限打印，m1238 单次运行日志达 **14.5GB** 并写满磁盘。修复：改为饱和计数 `if (_gb_n < 400 && ++_gb_n <= 400)`（recomp_harness.cpp gbn_back，M1144）。清理项（全部可再生，未动游戏本体 CPK/源码/工具链/spv_all）：运行日志 48.8GB+20.5GB、p5ds_build 旧实验输出 361 dirs 8.7GB、spv 重复目录 14 dirs 0.9GB、解包游戏数据 data_extracted/vita_extracted 5.8GB（可用 cpkext 从 `C:\dev\p5d_rom` CPK 重新解）、旧构建输出 `C:\dev\out` 4.7GB、p5d_movies NV12 原始帧 2.9GB、旧 Ghidra 工程 0.7GB、安装包/SDK 压缩包 0.7GB、旧 master 备份 0.5GB、旧 tools_backup 大文件 0.3GB、旧日志 4.3GB 等。保留：`C:\dev\p5d_rom`（vita.cpk 2.07GB + data.cpk 1.83GB）、`C:\dev\p5d_build\spv_all`、`C:\dev\tmp\recomp_split`（230291 blocks 的 batch_*.cpp/.o + harness）、`C:\dev\p5dsrc`（docs/kb/tools）、mingw64/ghidra/jdk、P5D-PC 仓库。运行规范：以后跑长任务必须给日志设上限/监控（>2GB 即杀），避免再次写满磁盘。 |
+| §18.4688 | Maintenance: the C: drive was filled to 0 bytes free by runtime logs -> mass cleanup of C:\dev (from ~104GB to 19.0GB; free space 0 -> 97.9GB). Root cause: the harness probe [GBACK] used `static int _gb_n; if (_gb_n++ < 400)`; after 2^31 indirect-branch resolutions the int overflowed negative, the condition stayed true forever, and the m1238 run wrote a 14.5GB log that filled the disk. Fix: saturating counter `if (_gb_n < 400 && ++_gb_n <= 400)` in recomp_harness.cpp (M1144). Deleted (all regenerable; game CPKs/sources/toolchain/spv_all untouched): runtime logs 48.8GB+20.5GB, 361 old p5d_build experiment dirs 8.7GB, 14 duplicate spv dirs 0.9GB, extracted game data data_extracted/vita_extracted 5.8GB (re-extractable with cpkext from C:\dev\p5d_rom CPKs), old build output C:\dev\out 4.7GB, p5d_movies NV12 raw frames 2.9GB, old Ghidra projects 0.7GB, installers/SDK archives 0.7GB, old master-doc backups 0.5GB, old tools_backup big files 0.3GB, old logs 4.3GB. Kept: C:\dev\p5d_rom (vita.cpk 2.07GB + data.cpk 1.83GB), C:\dev\p5d_build\spv_all, C:\dev\tmp\recomp_split (230291 blocks batch_*.cpp/.o + harness), C:\dev\p5dsrc (docs/kb/tools), mingw64/ghidra/jdk, the P5D-PC repo. Operational rule: long runs must cap/monitor their log size (kill when >2GB) so the disk cannot be filled again. |
 m1235/m1236/m1237 证据（`m1235_drawtest_key.txt`、`m1236_vptest_key.txt`、`m1237_vp2_key.txt`）：
 ```
 # 未发 draw 时（m1234 及之前）：无 [DRAWST]，帧全黑
@@ -503708,3 +503710,50 @@ LOOKUP: M1141 first frames Vulkan swapchain BMP 960x544 black RGB extrema 0 SHOT
 ANTI-FORGETTING ENTRY. Keywords: M1142 first real vkCmdDraw issued and black-screen cause narrowed to degenerate viewport. [DRAWST] #3 vc=3 inst=1 first=0 pipe=000002c2725ea8d0 inrp=1 vtxcnt=3 vbuf=000002c2721681d0 vp=-0.0,0.0,0.0,-0.0 sc=0,0,960,544 rp=000002c272166e50; [BEGRP2] cd=8D300000 960x544 cmd=... doClear=1 rp=...; [BSIMG] cd=8D300000 960x544 doClear=1 img=... fb=... view=...; [ABIDRAWTEST] gxm_draw_arrays(3) issued n=2399; [ABISWAP] p5d_swap_0/1 rc=0; [SHOTSTAT] frame=0/1 max=0 mean=0.00 (still black). Historical proper viewport from old movie path m1047-m1071: [DRAWST] #1 vc=3 inst=1 pipe=... vbuf=... vp=0.0,0.0,960.0,544.0 sc=0,0,960,544 rp=... (so the backend CAN rasterize). Changes this round: (1) the sceGxmDraw hook now actually calls p5d::vulkan::gxm_draw_arrays(3) (before only upload_vertex_stream, no draw ever -> always black); (2) fixed sceGxmSetViewport argument decoding: signature (context,xOff,xScale,yOff,yScale,zOff,zScale) with yScale/zOffset/zScale as STACK args; old code read registers only; (3) forced set_gxm_viewport(0,960,0,544,0,1)+set_gxm_viewport_enable(1) before the test draw. But m1236/m1237 still [DRAWST] vp=-0.0,0.0,0.0,0.0 -> forced viewport does not reach the state used by DRAWST (ordering/state-object issue); [ABIVPE] mode=0 and [ABIVP] all zero (the game really sets viewport 0 at this point); frames still black (BMP extrema 0). Analysis: backend draw path complete (sceGxmDraw -> real SPIR-V pipeline gxp_vert_0001/gxp_frag_0165 -> vertex buffer/rp bound -> vkCmdDraw called); the only direct blocker is the all-zero viewport which clips everything; the old movie path once set vp=0,0,960,544 and rasterized so pipeline/shaders/backend are fundamentally fine. NEXT: set fullscreen viewport+enable in the sceGxmBeginScene hook and again before every sceGxmDraw; disassemble gxm_vk.o set_gxm_viewport / DRAWST read sites to find which global/struct vp comes from and why our set is overwritten; enable env P5D_DBG_PXVIEWPORT / P5D_DBG_GREENCLEAR; acceptance BMP extrema>0 (first visible frame) -> S0_LOGO fade -> S1_TITLE. Verification: m1235_drawtest_key.txt, m1236_vptest_key.txt, m1237_vp2_key.txt, p5d_swap_*.bmp, [TABLE] blocks=230291.
 
 LOOKUP: M1142 first real vkCmdDraw issued DRAWST vc=3 pipe vbuf rp vp degenerate -0,0,0,0 sc 0,0,960,544, BEGRP2 cd 8D300000 doClear 1, BSIMG, ABIDRAWTEST gxm_draw_arrays 3 issued, ABISWAP swap 0/1 rc 0, SHOTSTAT max 0 mean 0, historical proper viewport m1047-m1071 vp 0,0,960,544, fixes gxm_draw_arrays call and sceGxmSetViewport stack args yScale zOffset zScale and forced set_gxm_viewport 0,960,0,544 enable 1, still vp zero forced viewport not reaching DRAWST state, ABIVPE mode 0 ABIVP all zero, next set viewport in sceGxmBeginScene and before every draw, disassemble set_gxm_viewport DRAWST read site, P5D_DBG_PXVIEWPORT P5D_DBG_GREENCLEAR, acceptance BMP extrema>0 first visible frame S0_LOGO S1_TITLE -> 18.4686 [relevant: first BMP frames black], 18.4684 [relevant: S0_LOGO], 18.4683 [relevant: GetSelf fix]
+### 18.4688 M1144 维护：磁盘写满事件与 C:\dev 大规模清理（>85GB 释放）
+
+1) 事故：C: 可用空间降到 **0 字节**。根因：
+```
+harness 探针 [GBACK]（recomp_harness.cpp, gbn_back()）:
+    static int _gb_n = 0;
+    if (_gb_n++ < 400) { printf("[GBACK] ..."); }
+→ 2^31 次间接跳转解析后 int 溢出变负 → 条件恒真 → 无限打印
+→ m1238 单次运行日志 14.5GB，写满 C 盘
+```
+2) 修复（M1144）：
+```
+if (_gb_n < 400 && ++_gb_n <= 400) { ... }   // 饱和计数，永不溢出
+```
+3) 清理结果（全部为可再生数据；未动 CPK/源码/工具链/spv_all/batch）：
+```
+运行日志 out*/err*/log：        48.8 GB + 20.5 GB
+p5d_build 旧实验输出 361 dirs：  8.7 GB
+spv 重复目录 14 dirs：           0.9 GB（保留 spv_all）
+解包游戏数据 data/vita_extracted：5.8 GB（cpkext 可从 p5d_rom CPK 重解）
+旧构建输出 C:\dev\out：          4.7 GB
+p5d_movies NV12 raw：            2.9 GB（离线解码器可重生）
+旧 Ghidra 工程 ×2：              0.7 GB
+安装包/SDK 压缩包：              0.7 GB
+旧 master 备份 / tools_backup：  0.8 GB
+其它旧日志：                     4.3 GB
+结果：C:\dev  ~104 GB → 19.0 GB；C: 可用 0 → 97.9 GB
+```
+4) 保留清单（运行/开发必需）：
+```
+C:\dev\p5d_rom                  vita.cpk 2.07GB + data.cpk 1.83GB（原版游戏数据，运行必需）
+C:\dev\p5d_build\spv_all        80MB（GXM→Vulkan 着色器 SPIR-V）
+C:\dev\tmp\recomp_split         230291 blocks 的 batch_*.cpp/.o + recomp_harness.cpp/exe
+C:\dev\p5dsrc                   docs（P5D_MASTER.md 35MB）/tools/kb_audit
+C:\dev\mingw64, ghidra, jdk-21, C:\dev\vulkan
+C:\dev\P5D-PC                   发布仓库
+```
+5) 运行规范（防复发）：
+```
+长任务日志必须设上限/监控：>2GB 即终止并截断；优先只打关键探针；
+m1238 之后所有实验统一使用"日志大小看门狗"（PowerShell job 轮询文件大小）。
+```
+验证：`recomp_harness.cpp`（M1144 饱和计数修复）、磁盘测量（C:\dev 19.0GB，C: 可用 97.9GB）、清理前后目录清单。
+
+ANTI-FORGETTING ENTRY. Keywords: M1144 disk-full incident and C:\dev mass cleanup. C: free space hit 0 bytes because the harness [GBACK] probe in gbn_back() used `static int _gb_n; if (_gb_n++ < 400)`: after 2^31 indirect-branch resolutions the int overflowed negative and the condition stayed true forever -> infinite printing; the m1238 run produced a 14.5GB log (out80m_m1238vp3.txt) and filled the disk. Fix M1144: saturating counter `if (_gb_n < 400 && ++_gb_n <= 400)` in recomp_harness.cpp. Cleanup freed >85GB (C:\dev ~104GB -> 19.0GB; C: free 0 -> 97.9GB), deleting only regenerable data: runtime logs out*/err*/log 48.8GB+20.5GB, 361 old p5d_build experiment dirs 8.7GB, 14 duplicate spv dirs 0.9GB (spv_all kept), extracted game data data_extracted/vita_extracted 5.8GB (re-extractable from C:\dev\p5d_rom CPKs with cpkext), old build output C:\dev\out 4.7GB, p5d_movies NV12 raw 2.9GB, old Ghidra projects 0.7GB, installers/SDK archives 0.7GB, old master-doc backups 0.5GB, old tools_backup big files 0.3GB, other old logs 4.3GB. Kept: C:\dev\p5d_rom (vita.cpk 2.07GB + data.cpk 1.83GB, required to run the game), C:\dev\p5d_build\spv_all (80MB GXM->Vulkan SPIR-V), C:\dev\tmp\recomp_split (230291 blocks batch_*.cpp/.o + recomp_harness.cpp/exe), C:\dev\p5dsrc (docs P5D_MASTER.md 35MB / tools / kb_audit), mingw64/ghidra/jdk-21/vulkan, C:\dev\P5D-PC repo. Operational rule: long runs must cap/monitor their log size (kill when >2GB) to avoid filling the disk again. Verification: recomp_harness.cpp M1144 saturating counter fix; disk measurements C:\dev 19.0GB and C: free 97.9GB; before/after directory listings.
+
+LOOKUP: M1144 disk full C drive 0 bytes, GBACK probe integer overflow `_gb_n++ < 400` after 2^31 indirect branch resolutions, m1238 log 14.5GB filled disk, fix saturating counter `_gb_n < 400 && ++_gb_n <= 400` recomp_harness.cpp gbn_back M1144, cleanup freed >85GB C:\dev 104GB to 19GB C: free 0 to 97.9GB, deleted runtime logs out err log 48.8GB plus 20.5GB, 361 p5d_build experiment dirs 8.7GB, 14 duplicate spv dirs 0.9GB keep spv_all, extracted game data data_extracted vita_extracted 5.8GB re-extractable cpkext p5d_rom CPK, old build out 4.7GB, p5d_movies NV12 raw 2.9GB, old ghidra projects 0.7GB, installers SDK archives 0.7GB, old master backups 0.5GB tools_backup 0.3GB, kept p5d_rom vita.cpk 2.07GB data.cpk 1.83GB spv_all recomp_split batches p5dsrc docs tools kb mingw ghidra jdk P5D-PC, operational rule long runs cap log size kill >2GB -> 18.4687 [relevant: pipeline draw], 18.4686 [relevant: first BMP frames], 18.4685 [relevant: deadlock analysis]

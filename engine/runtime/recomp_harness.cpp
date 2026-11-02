@@ -2238,8 +2238,13 @@ extern "C" uint32_t hle_call(uint32_t stub_va, RecState* s) {
               _csurf = _c; _cw = _w0; _ch = _w4; _cd = _w8; }   // alternate layout: w,h,data
           } }
         printf("[ABIBEGIN] surf=%08X data=%08X %ux%u n=%u\n", _csurf, _cd, _cw, _ch, g_main_n); fflush(stdout);
+        // M1143: the backend applies gxm viewport state at scene-pass begin; setting it at draw time was too
+        // late (DRAWST still saw vp=0). Force a fullscreen viewport+enable BEFORE the pass begins.
+        p5d::vulkan::set_gxm_viewport(0.0f, 960.0f, 0.0f, 544.0f, 0.0f, 1.0f);
+        p5d::vulkan::set_gxm_viewport_enable(1);
         if (_cd && _cw && _ch) p5d::vulkan::begin_scene_pass(_cd, _cw, _ch);
         else p5d::vulkan::begin_frame();
+        printf("[ABIVP2] forced fullscreen viewport before scene pass n=%u\n", g_main_n); fflush(stdout);
         s->r[0] = 0; return s->r[14];
       }
       // 18.4548 M1003: sceGxmSetViewport / SetViewportEnable -> backend GXM viewport state machine
@@ -5255,7 +5260,9 @@ static uint32_t gbn_back(uint32_t t, int* pback) {
       if (pback) *pback = b;
       // M1089: log unsafe-start re-execution (target inside a block -> execute block start)
       static int _gb_n = 0;
-      if (_gb_n++ < 400) {
+      // M1144: SATURATING cap. A plain `_gb_n++ < 400` overflowed to negative after 2^31 indirect
+      // resolutions and then printed [GBACK] forever (the m1238 run grew a 14.5 GB log and filled C:).
+      if (_gb_n < 400 && ++_gb_n <= 400) {
         uint32_t _b0 = 0, _b1 = 0;
         uint8_t* _q0 = GP(q); if (_q0) std::memcpy(&_b0, _q0, 4);
         uint8_t* _q1 = GP(q + 4u); if (_q1) std::memcpy(&_b1, _q1, 4);
