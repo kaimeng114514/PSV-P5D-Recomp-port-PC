@@ -1141,6 +1141,38 @@
 | M1123 | §18.4668: ★★★★★★★★★★ **ACF 注册成功！音频初始化错误全部清零（`[CRILOG]=0`）**。实现 **ACF_FILL**：在 `FUN_812309A4`（ACF 文件加载）入口用 FIOSFILL 从 vita.cpk 直服 `sound/common.acf`（5152B）。关键坑：第 5–8 个参数是**指向调用者局部变量的指针**（out-param），必须写穿指针而不是写栈槽（首版写栈槽导致 `E2015042302`/`E2010012613`/`E2010030613` 连锁报错）。修复后 `[ACFREG2] p1=84B967B0 p2=0x1420 p3=84B97BD0 p4=0x3E8` → `[CRILOG] 0`，声音线程 "thSeqSndAdx2" 开始运行（pc=81242D24），boot 链越过 init sound**
 | M1124 | §18.4669: ★★★★★★★★★★ **ACF 修复后 boot 链真实前进：进入 GFD_PSP2 主循环（fiber B = FUN_81198C0A），执行 app 初始化回调链，随后卡在 GFD 初始化/内存分配器（8115D0A8/8115D36A appAllocatorHandler）未能进入帧循环**。反编译明确 GFD 主循环结构（8 个回调槽 + 帧计数器 + fiber 让出）；确认 init 链驱动器 FUN_81184FFE（9 步表）在本流程**未被调用**——GFD 主循环才是真实驱动**
 | M1125 | §18.4670: ★★★★★★★★★ **GFD 初始化继续推进（BOOT 高上限跟踪）：经过 appSystem 初始化 FUN_81172EFC（2MB 堆/内存缓冲对象）后，执行流进入 CRI Atom 声音代码（81236D9C→8126A09C→81242xxx），随后 fiber B（848463A0 = GFD 主循环）被切入 pc=81242D24（CRI Atom 声音线程代码）且不再返回；[WD] 确认光纤 A 在 811E5CDA 空转、hle_ring 显示 A↔B 切换，GFD 帧循环仍未被到达**。新增 BOOT 跟踪上限 400→400000 用于精确定位卡点 pc
+| M1126 | §18.4671: ★★★★★★★★★ **找到声音线程霸占 GFD fiber 的机制证据：HLE 线程栈分配地址（sp=848560F8 → 栈区 ≈[84817000,848560F8)）与 guest 光纤对象地址（84836300 / 848463A0）重叠；线程栈运行写入会覆盖光纤对象字段 [fiber+0x84]=entry / [fiber+0x88]=arg，随后 fiber_load 读到被覆盖的"入口"（81242D24 等线程代码地址）→ GFD 主循环 fiber 被劫持**。本轮两处实验（① fiber_save 线程期禁止写 fiber；② HLE arena 从 0x84600000 上移到 0x85800000）均未修复：①不足（劫持不经过 fiber_save），②直接回归（fiber 对象/host 堆随 HLE arena 迁移，挂载破坏、[IO] 仅 2 条）；已回退到已知良好构建
+m1208/m1209 证据（`m1208_fibguard_key.txt`、`m1209_heapa_key.txt`、`m1208_thrstack_key.txt`）：
+```
+[FINIT] fiber=84836300 name=8130CC28 entry=81206BDD arg=84836300 [f84]=81198BE9 [f88]=00000000
+[FINIT] fiber=848463A0 name=8130CC28 entry=81206BDD arg=848463A0 [f84]=81198C0B [f88]=82EFFF28
+[FIBMETA] fiber=84836300 entry=81206BDC sp=84846390
+[FIBMETA] fiber=848463A0 entry=81206BDC sp=84856430
+[THR] create tid=40011000 entry=811E68C9 → [THR] start … sp=84664080
+[THR2] create/start tid=40017000..4001E000 … sp=8499A690…（HLE 线程栈分布 8466..84A9）
+[EXECSTART] #6 fib=848463A0 pc=81242D24 sp=848560F8 r0=848463A0 lr=848D9504 fexecthread=0   ← 劫持后的 fiber
+[FIBSW] #83 fb=848463A0 fpc=81242D24 flr=848D9504 blk=108315
+```
+**分析**：
+- 光纤对象 84836300/848463A0 由 guest FUN_81206700 分配（FUN_811DA534，来自 guest 堆 0x84600000 窗口）；
+- HLE 线程栈由 `hle_malloc(0x40000)` 分配（g_heapA 从 0x84600000 递增），声纹线程栈顶 sp=848560F8 → 栈区覆盖 848463A0；
+- 线程栈上保存的返回地址/数据（如 81242D24、848D9504）落在光纤对象 +0x84/+0x88 字段上 → `fiber_load` 恢复 Fiber 时把线程代码地址当作 fiber 入口 → [EXECSTART] fib=848463A0 pc=81242D24。
+- 实验①（fiber_save 内 `if (g_cur_thr) return;`）无效：劫持发生在 fiber_load 读取被覆盖的 guest 光纤对象时，不经过 fiber_save。
+- 实验②（g_heapA_ptr 0x84600000→0x85800000）：fiber 对象地址变 85A3xxxx、挂载回归（[IO] 仅 2 条、无 ACF、无 [CRILOG]）——guest 堆块本身由 HLE 分配，移动 arena 改变了全链路地址假设 → 已回退。
+**NEXT（已明确）**：
+```
+① 线程栈改用**独立栈 arena**（与 guest 堆窗口/光纤对象区不重叠），例如 0x8C600000+（g_big 区）或新增专用栈区，
+   并在 hle_malloc 分配栈时校验区间不与已记录 fiber 对象/guest 堆块重叠（重叠则打印并换区）
+② 或将 hle_malloc 的通用 arena 划分出 guest 堆未用子区（先 print guest 堆块范围：sceKernelAllocMemBlock HLE 返回值）
+③ 修复后 fiber B 应保持 entry=81198C0B：GFD 帧循环启动 → [FRAMECB]/[UPD]/[POST] 计数、[COUNT] present 递增
+④ 随后标题资源请求（[FHOPEN]/[RQMGR]→PREAD）
+```
+验证：`m1208_fibguard_key.txt`、`m1209_heapa_key.txt`、`m1208_thrstack_key.txt`、`m1207_bootpc_key.txt`、`apploop.txt`、`jobmgrloop.txt`。 |
+| §18.4671 | Found the mechanism evidence for the sound thread hijacking the GFD fiber: the HLE thread stack allocation address (sp=848560F8 -> stack range ~[84817000,848560F8)) overlaps the guest fiber object addresses (84836300 / 848463A0); thread-stack writes overwrite the fiber object fields [fiber+0x84]=entry / [fiber+0x88]=arg, and a later fiber_load reads the overwritten "entry" (81242D24 etc. thread-code addresses), hijacking the GFD main-loop fiber. Two experiments this round (1: no fiber_save during threads; 2: move the HLE arena 0x84600000 -> 0x85800000) did not fix it: (1) insufficient because the hijack goes through fiber_load of the clobbered guest fiber object, not fiber_save; (2) caused a regression (fiber objects/host heap moved with the HLE arena, mount broke, only 2 [IO] lines); both were reverted to the known-good build. '
+       'm1208/m1209 evidence: [FINIT] fiber=84836300 [f84]=81198BE9 and fiber=848463A0 [f84]=81198C0B; [FIBMETA] fiber=84836300 entry=81206BDC sp=84846390, fiber=848463A0 entry=81206BDC sp=84856430; [THR] create tid=40011000 entry=811E68C9 -> [THR] start sp=84664080; [THR2] create/start tid=40017000..4001E000 sp=8499A690... (HLE thread stacks spread 8466..84A9); [EXECSTART] #6 fib=848463A0 pc=81242D24 sp=848560F8 r0=848463A0 lr=848D9504 fexecthread=0 (hijacked fiber); [FIBSW] #83 fb=848463A0 fpc=81242D24 flr=848D9504 blk=108315. '
+       'Analysis: the fiber objects 84836300/848463A0 are allocated by guest FUN_81206700 (FUN_811DA534) from the guest heap in the 0x84600000 window; HLE thread stacks come from hle_malloc(0x40000) in g_heapA which starts at 0x84600000, and the sound thread stack top sp=848560F8 means its stack range covers 848463A0; thread-stack return addresses/data (81242D24, 848D9504) land on the fiber object +0x84/+0x88 fields, so fiber_load treats a thread-code address as the fiber entry -> [EXECSTART] fib=848463A0 pc=81242D24. Experiment 1 (fiber_save: if (g_cur_thr) return;) was ineffective because the hijack happens in fiber_load when reading the clobbered guest fiber object, not in fiber_save. Experiment 2 (g_heapA_ptr 0x84600000 -> 0x85800000) moved the fiber objects to 85A3xxxx and caused a mount regression (only 2 [IO] lines, no ACF, no [CRILOG]); the guest heap block itself is HLE-allocated, so moving the arena changes the whole address assumption chain -> reverted. '
+       'NEXT: (1) allocate thread stacks from a DEDICATED stack arena that does not overlap the guest heap window / fiber object region (e.g. 0x8C600000+ g_big area or a new stack arena) and validate in hle_malloc that the stack range does not overlap recorded fiber objects/guest heap blocks (print and switch regions on overlap); (2) alternatively partition the hle_malloc general arena into a sub-region unused by the guest heap (first print the guest heap block range: sceKernelAllocMemBlock HLE return values); (3) after the fix fiber B should keep entry=81198C0B: the GFD frame loop starts -> [FRAMECB]/[UPD]/[POST] counters, [COUNT] present increments; (4) then title asset requests ([FHOPEN]/[RQMGR] -> PREAD). '
+       'Verification: m1208_fibguard_key.txt, m1209_heapa_key.txt, m1208_thrstack_key.txt, m1207_bootpc_key.txt, apploop.txt, jobmgrloop.txt. |
 m1206/m1207 证据（`m1207_bootpc_key.txt`）：
 ```
 [ACFFILL] sound/common.acf size=5152（ACF 正常）
@@ -502362,3 +502394,41 @@ FUN_8115A336(+0x78 回调) → FUN_811C02DA → FUN_811845C8 → FUN_81172EFC(ap
 ANTI-FORGETTING ENTRY. Keywords: M1125 GFD init continues after ACF fix - BOOT trace chain goes through appSystem init FUN_81172EFC (SceLibc_6DC1F0D8 clear 0xC14, FUN_8115D7D0, FUN_8115D620(0,0,0x1F), FUN_8115D5E2, 2MB heap via FUN_8115D36A(...0x200000,4,"...appSystem.c",0x3E,0), DAT_81555EA0=FUN_8115D0A8(&local_6C,2,0x100000,0), then FUN_8115D036/FUN_8116FB2A/FUN_81170C1E/FUN_8116E63C/FUN_8117339C/FUN_81007D54/FUN_8117B72C/FUN_8115FB64/FUN_81171CC2/FUN_8102AD40) and then enters CRI Atom sound code (BOOT last pcs 81236D9C 8126A09C 8126A1C0 8126AE60 8126BFB6 8126C04C 81232A54 8123271E 81247C00 81247BBC 81242F44 81242E60 81241F46 81242C2E 812420C0 8124217E). Then fiber B 848463A0 (GFD main loop) is switched into pc=81242D24 CRI Atom sound thread (FIBSW #83 fpc=81242D24 flr=848D9504 fr0=7FFFFFFF) and never returns; [WD] fib=84836300 stall=99 hle_ring A<->B, curpc=811E5CDA, [THRD] threads=16 cur=84836300 flags=2, [FRAMECB]/[UPD]/[POST]=0, [COUNT] absent => GFD frame loop not reached. Allocator chain FUN_8115D36A (size class) -> FUN_8115D8E0 (lock FUN_8115F7C2, FUN_8115F6E6, FUN_8115F6F0 real alloc, unlock FUN_8115F7CE), FUN_8115D0A8 appMemoryBuffer constructor, allocation loop works ([LKTR] ALLOC_DONE/INSERT). BOOT trace cap raised 400->400000. NEXT: inspect harness thread/fiber HLE - whether creating sound thread "thSeqSndAdx2" (SceLibKernel_C5C11EE7) + starting it (F08DE149) hijacks the current fiber (fiber B); give threads their own execution context or yield the sound thread periodically (P5D_THRYIELD/P5D_THRPUMP); then GFD frame loop -> frame render callback param+0x80 -> GXM BeginScene/Present -> [COUNT] present increments -> title asset requests. Verification: m1207_bootpc_key.txt, m1206_long150_key.txt, gfdinit.txt, allocator.txt, allocimpl.txt, heapalloc.txt.
 
 LOOKUP: M1125 GFD init continues appSystem FUN_81172EFC 2MB heap FUN_8115D36A FUN_8115D8E0 FUN_8115F6F0 allocator appMemoryBuffer FUN_8115D0A8, CRI Atom sound code BOOT tail 81242xxx 8126Axxx, fiber B 848463A0 hijacked by sound thread pc=81242D24 lr=848D9504 FIBSW #83, [WD] stall 99 fiber A 811E5CDA, [FRAMECB]/[UPD]/[POST]=0 frame loop not reached, BOOT cap 400000, thread-as-fiber hijack, thSeqSndAdx2 SceLibKernel_C5C11EE7 F08DE149, next thread execution context/yield P5D_THRYIELD P5D_THRPUMP -> 18.4669 [relevant: GFD main loop], 18.4668 [relevant: ACF success], 18.4667 [relevant: sound init]
+### 18.4671 PORT M1126: 声音线程霸占 GFD fiber 的机制证据——HLE 线程栈与 guest 光纤对象地址重叠
+
+1) 证据（m1208/m1209）：
+```
+[FINIT] fiber=84836300 [f84]=81198BE9  /  fiber=848463A0 [f84]=81198C0B
+[FIBMETA] fiber=84836300 entry=81206BDC sp=84846390
+[FIBMETA] fiber=848463A0 entry=81206BDC sp=84856430
+[THR] start tid=40011000 … sp=84664080
+[THR2] start tid=40017000..4001E000 … sp=8499A690…
+[EXECSTART] #6 fib=848463A0 pc=81242D24 sp=848560F8 r0=848463A0 lr=848D9504 fexecthread=0
+[FIBSW] #83 fb=848463A0 fpc=81242D24 flr=848D9504 blk=108315
+```
+2) 机制：
+```
+① fiber 对象 84836300/848463A0 = guest FUN_81206700（FUN_811DA534）从 guest 堆分配
+② HLE 线程栈 = hle_malloc(0x40000)，g_heapA 从 0x84600000 递增
+③ 声纹线程栈顶 sp=848560F8 → 栈范围 [84817000,848560F8) 覆盖 fiber 对象 848463A0
+④ 线程栈写入把 [fiber+0x84]=entry / [fiber+0x88]=arg 覆盖成线程代码地址（81242D24/848D9504）
+⑤ fiber_load 把被覆盖的值当入口 → [EXECSTART] fib=848463A0 pc=81242D24（GFD 主循环 fiber 被劫持）
+```
+3) 两处实验结论：
+```
+① fiber_save 内 if(g_cur_thr) return;  → 无效（劫持发生在 fiber_load 读 guest 光纤对象，不经过 fiber_save）
+② g_heapA_ptr 0x84600000→0x85800000 → 回归（fiber 对象变 85A3xxxx、挂载破坏、[IO] 仅 2 条、无 ACF/CRILOG）
+   原因：guest 堆块本身由 HLE 分配，移动 arena 改变全链路地址假设 → 已回退
+```
+4) NEXT：
+```
+① 线程栈改用独立栈 arena（0x8C600000+ 或新增专用区），hle_malloc 校验不与 fiber 对象/guest 堆块重叠
+② 或先打印 guest 堆块范围（sceKernelAllocMemBlock HLE 返回值），把通用 arena 划分到 guest 堆未用子区
+③ 修复后 fiber B entry=81198C0B 保持：GFD 帧循环启动 → [FRAMECB]/[UPD]/[POST] + [COUNT] present 递增
+④ 随后标题资源请求（[FHOPEN]/[RQMGR]→PREAD）
+```
+验证：`m1208_fibguard_key.txt`、`m1209_heapa_key.txt`、`m1208_thrstack_key.txt`、`m1207_bootpc_key.txt`、`apploop.txt`、`jobmgrloop.txt`。
+
+ANTI-FORGETTING ENTRY. Keywords: M1126 sound thread hijacks GFD fiber mechanism = HLE thread stack allocation overlaps guest fiber objects. Fiber objects 84836300/848463A0 allocated by guest FUN_81206700 (FUN_811DA534) from the guest heap in the 0x84600000 window; HLE thread stacks come from hle_malloc(0x40000) with g_heapA starting at 0x84600000; sound thread stack top sp=848560F8 means its range [84817000,848560F8) covers fiber object 848463A0; thread stack writes overwrite [fiber+0x84]=entry (81242D24) and [fiber+0x88]=arg (848D9504), so fiber_load restores the GFD main-loop fiber with pc=81242D24 (FIBSW #83 fpc=81242D24 flr=848D9504) and [EXECSTART] #6 fib=848463A0 pc=81242D24 sp=848560F8. Experiments: fiber_save guard if (g_cur_thr) return ineffective (hijack is in fiber_load reading clobbered guest fiber object); g_heapA_ptr 0x84600000->0x85800000 regressed (fiber objects moved to 85A3xxxx, mount broke, only 2 [IO] lines, no ACF/CRILOG) because the guest heap block itself is HLE-allocated so moving the arena changes the whole address assumption chain; both reverted to known-good build. NEXT: give thread stacks a dedicated arena disjoint from the guest heap window / fiber objects (e.g. 0x8C600000+ g_big area or a new stack arena), validate in hle_malloc against recorded fiber objects and guest heap blocks, or print the guest heap block range from sceKernelAllocMemBlock and partition the general arena into an unused sub-region; then fiber B keeps entry=81198C0B, GFD frame loop starts ([FRAMECB]/[UPD]/[POST], [COUNT] present), then title asset requests. Verification: m1208_fibguard_key.txt, m1209_heapa_key.txt, m1208_thrstack_key.txt, m1207_bootpc_key.txt, apploop.txt, jobmgrloop.txt.
+
+LOOKUP: M1126 sound thread hijack GFD fiber HLE thread stack overlaps guest fiber objects 84836300 848463A0, hle_malloc 0x40000 g_heapA 0x84600000, sp=848560F8 stack range covers 848463A0, fiber+0x84 entry fiber+0x88 arg overwritten 81242D24 848D9504, fiber_load hijack FIBSW #83, fiber_save guard ineffective, g_heapA 0x85800000 regression reverted, guest heap block HLE-allocated, next dedicated stack arena 0x8C600000 disjoint validate overlap, then GFD frame loop FRAMECB UPD POST COUNT present -> 18.4670 [relevant: fiber B hijacked], 18.4669 [relevant: GFD main loop], 18.4668 [relevant: ACF success]
