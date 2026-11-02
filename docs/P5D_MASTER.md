@@ -1139,6 +1139,74 @@
 | M1121 | §18.4666: ★★★★★★★★ **卡点根因链闭合：游戏根本不发文件请求（[RQMGR]/[APOPEN]/[FHOPEN]=0）→ 卡在"init sound"步骤之前；AtomEx 的 DSP Bus Setting 校验 `FUN_8123EA10 → FUN_81263A66` 因 `DAT_8153FB30+0x44 == 0`（ACF 未注册）失败，报 `W2010110102:ACF file is not registered`；DSP 设置名 = `"BusSet_xrd722v2"`（文件 0x81305FE0）**
 | M1122 | §18.4667: ★★★★★★★★ **声音初始化路径确认真实执行（SNDINIT→ACFREG sound/common.acf→DSPSET BusSet_xrd722v2），但 ACF 读取不发主机 PREAD → ACF 注册失败 → DSP 设置失败**。新增 **IOPUMP_WAIT**（在 DelayThread 阻塞等待内泵 criFs reader，解决"嵌套 fiber spin 冻结 g_blkcnt_total → 主循环 IOPUMP 不触发"问题）；首版无门限泵动破坏 CPK 挂载（E2011022806 CPK broken，因 mount reader 需要 HDRFIX/TOCFIX 在前），改为 ≥100k 门限 + 动态 reader 扫描后挂载正常、等待泵成功（848FC5C0 pstate=7、848E9678 pstate=8），但 **ACF 仍注册失败**：`sound/common.acf` 的读取从未发出主机 IO PREAD**
 | M1123 | §18.4668: ★★★★★★★★★★ **ACF 注册成功！音频初始化错误全部清零（`[CRILOG]=0`）**。实现 **ACF_FILL**：在 `FUN_812309A4`（ACF 文件加载）入口用 FIOSFILL 从 vita.cpk 直服 `sound/common.acf`（5152B）。关键坑：第 5–8 个参数是**指向调用者局部变量的指针**（out-param），必须写穿指针而不是写栈槽（首版写栈槽导致 `E2015042302`/`E2010012613`/`E2010030613` 连锁报错）。修复后 `[ACFREG2] p1=84B967B0 p2=0x1420 p3=84B97BD0 p4=0x3E8` → `[CRILOG] 0`，声音线程 "thSeqSndAdx2" 开始运行（pc=81242D24），boot 链越过 init sound**
+| M1124 | §18.4669: ★★★★★★★★★★ **ACF 修复后 boot 链真实前进：进入 GFD_PSP2 主循环（fiber B = FUN_81198C0A），执行 app 初始化回调链，随后卡在 GFD 初始化/内存分配器（8115D0A8/8115D36A appAllocatorHandler）未能进入帧循环**。反编译明确 GFD 主循环结构（8 个回调槽 + 帧计数器 + fiber 让出）；确认 init 链驱动器 FUN_81184FFE（9 步表）在本流程**未被调用**——GFD 主循环才是真实驱动**
+m1203/m1204/m1205 证据（`m1205_gfdprobe_key.txt` 等）：
+```
+[CRILOG] 0                     ← ACF 修复后音频错误持续为零
+[ACFFILL] path=[sound/common.acf] size=5152 ...
+[FINIT] fiber=84836300 name=8130CC28 entry=81206BDD arg=84836300 [f84]=81198BE9 [f88]=00000000
+[FINIT] fiber=848463A0 name=8130CC28 entry=81206BDD arg=848463A0 [f84]=81198C0B [f88]=82EFFF28
+[FIBER-AUTOCREATE] t=848463A0 entry=81198C0B arg=82EFFF28
+[BOOT] 81206BDC → 81198BE8 → 81198BEA → 811E5CDA → … → 81198C0A → 81198C12 → 8115A336 → 811C02DA
+       → 8115A348 → 811845C8 → 81172EFC → 812B2260 → 81172F26 → 8115D7D0 → 8115F574 → … → 8115D3A6（GFD 初始化链）
+[MT] 81198C0A r0=82EFFF28 / 81198C12 r0=8115A337      ← fiber B 入口与 +0x78 回调
+[LKTR]/[D8E0]/[7C2]/[F7C2] 85 次：8115D36A appAllocatorHandler / 8115D0A8 appMemoryBuffer 分配循环
+[FRAMECB]/[UPD]/[POST] = 0     ← GFD 帧循环体从未执行
+[COUNT] present=0 begin_pass=0 draw=0
+[DRVSTATE]/[STEP:*] = 0        ← init 链驱动器 FUN_81184FFE 未被调用（9 步表不适用本流程）
+```
+**反编译（GFD 主循环 FUN_81198C0A，fiber B 入口）**：
+```c
+if (param+0x70) param[0x70](param[0x78]);          // 启动回调
+if (strcmp("GFD_PSP2_","...") != 0) return -1;      // 版本/目标校验
+if (FUN_81199D7E()!=0) return -1; else FUN_81198DAE("app0:");
+if (FUN_811995AC(param+8)!=0) return -1;            // ★ 初始化（当前卡点区域）
+DAT_816cc630 |= 1; FUN_811E5650("gfd: initialize PSP2\n"); FUN_811991BE();
+if (param+0x7c) param[0x7c](param[0x8c]);
+do {
+  f = FUN_812071F8();                                // 帧时间
+  DAT_816cc638 = f - DAT_816cc634; DAT_816cc634 = f;
+  if ((DAT_816cc630 & 0xC)==0) FUN_81199336();       // update
+  uVar4 = flags(bit8/bit4);
+  if (param+0x80) param[0x80](param[0x8c], uVar4);   // ★ 帧渲染回调（未到达）
+  FUN_8119934A();                                    // post
+  DAT_816cc63c++;                                    // 帧计数
+  DAT_816cc630 |= 0x10; FUN_812067A0();              // yield 到 fiber A
+  DAT_816cc630 &= ~0x10;
+} while (DAT_816cc630 & 2);                          // bit2 = app running
+if (param+0x84) param[0x84](param[0x8c]); ... return DAT_813B1F00;
+```
+**app 初始化 FUN_811989C8**：
+```c
+FUN_811E6A40(&DAT_816CBC08, 0xA24);                  // 应用控制块清零
+DAT_816CC628 = SceLibKernel_0FB972F9();
+SceSysmodule_79A0160A(DAT_813B1F04); SceSysmodule_79A0160A(DAT_813B1F06);
+SceAppUtil_DAFFE671(...);
+if (FUN_81198E2E(param)!=0) {
+  uVar2 = FUN_81206700(&LAB_81198BE8_1, 0, DAT_816CDA70);       // fiber A = 服务循环 81198BE8
+  uVar3 = FUN_81206700(0x81198C0B, param, DAT_816CDA70);        // fiber B = GFD 主循环 81198C0B
+  DAT_816CC630 |= 2;                                            // app running
+  FUN_81206BA8(); FUN_8120683C/090E(uVar2/3); ...               // 注册并启动 fiber
+}
+```
+**fiber A 服务循环（81198BE8）**：`loop { FUN_811E5CDA()  // 调用 DAT_81513DEC 回调; sceKernelCheckCallback(812B2AC0); FUN_812067A0() // yield } while (DAT_816CC630 & 2)`。
+**当前卡点**：GFD 初始化回调链（8115A336→811C02DA→811845C8→81172EFC→8115D7D0/8115F574）进入 **appAllocatorHandler_8115D36A / appMemoryBuffer_8115D0A8 的分配循环**后，fiber B 让出回 fiber A 且再未回到 GFD 主循环循环体（`[FRAMECB]/[UPD]/[POST]`=0，`, frame counter 不增长）。无主机 IO 请求（[FHOPEN]/[RQMGR]/[IO]=0 条新增）。
+**NEXT**：
+```
+① 查清 GFD 初始化为何不返回：8115D36A appAllocatorHandler / 8115D0A8 appMemoryBuffer 的分配循环是否等待
+   guest 内存池/堆事件（[LKTR] ALLOC_START→ALLOC_DONE 显示分配能完成，但 INSERT 后可能死等锁/信号）
+② 探针 FUN_811995AC（GFD 初始化主体）入口/出口 + FUN_81199336/FUN_8119934A 计数，确认是否到达主循环
+③ 若 GFD 主循环进入帧循环：帧渲染回调 param+0x80 应触发 GXM BeginScene/Present → [COUNT] present 递增
+④ 继续用 [DRVSTATE]/[STEP:*] 监控 init 链驱动器（本流程未用，保留观察）
+```
+验证：`m1205_gfdprobe_key.txt`、`m1204_gfdcb_key.txt`、`m1203_longdrv_key.txt`、`jobmgrloop.txt`、`apploop.txt`、`initchain.txt`、`flagrefs.txt`。 |
+| §18.4669 | After the ACF fix the boot chain really advanced: it enters the GFD_PSP2 main loop (fiber B = FUN_81198C0A), runs the app init callback chain, then stalls in GFD initialization / the memory allocator (8115D0A8/8115D36A appAllocatorHandler) and never reaches the frame loop. Decompiled the GFD main loop structure (8 callback slots + frame counter + fiber yield) and confirmed the init-chain driver FUN_81184FFE (9-step table) is NOT called in this flow - the GFD main loop is the real driver. '
+       'm1203/m1204/m1205 evidence: [CRILOG] 0 (audio errors stay cleared after ACF); [ACFFILL] sound/common.acf size=5152; [FINIT] fiber=84836300 entry=81206BDD [f84]=81198BE9 and fiber=848463A0 entry=81206BDD [f84]=81198C0B; [FIBER-AUTOCREATE] t=848463A0 entry=81198C0B arg=82EFFF28; [BOOT] 81206BDC -> 81198BE8 -> 81198BEA -> 811E5CDA -> ... -> 81198C0A -> 81198C12 -> 8115A336 -> 811C02DA -> 8115A348 -> 811845C8 -> 81172EFC -> 812B2260 -> 81172F26 -> 8115D7D0 -> 8115F574 -> ... -> 8115D3A6 (GFD init chain); [MT] 81198C0A r0=82EFFF28 / 81198C12 r0=8115A337; [LKTR]/[D8E0]/[7C2]/[F7C2] 85x at 8115D36A appAllocatorHandler / 8115D0A8 appMemoryBuffer allocation loop; [FRAMECB]/[UPD]/[POST] = 0 (GFD frame loop body never executes); [COUNT] present=0 begin_pass=0 draw=0; [DRVSTATE]/[STEP:*] = 0 (init-chain driver FUN_81184FFE not called). '
+       'Decompiled FUN_81198C0A (fiber B = GFD main loop): call slot +0x70 with +0x78; strcmp("GFD_PSP2_",...)==0; FUN_81199D7E; FUN_81198DAE("app0:"); FUN_811995AC(param+8) (init); DAT_816CC630 |= 1; FUN_811E5650("gfd: initialize PSP2"); FUN_811991BE; call +0x7c with +0x8c; do { f=FUN_812071F8() frame time; DAT_816CC638=f-DAT_816CC634; DAT_816CC634=f; if ((DAT_816CC630&0xC)==0) FUN_81199336() update; flags bit8/bit4; call +0x80 with (param+0x8c, flags) frame render callback; FUN_8119934A() post; DAT_816CC63C++ frame counter; DAT_816CC630|=0x10; FUN_812067A0() yield; DAT_816CC630&=~0x10; } while (DAT_816CC630&2) app running; call +0x84 with +0x8c; return DAT_813B1F00. '
+       'Decompiled FUN_811989C8 (app init): FUN_811E6A40(&DAT_816CBC08,0xA24); DAT_816CC628=SceLibKernel_0FB972F9(); SceSysmodule_79A0160A(DAT_813B1F04); SceSysmodule_79A0160A(DAT_813B1F06); SceAppUtil_DAFFE671; if (FUN_81198E2E(param)!=0) { FUN_81206700(&LAB_81198BE8_1,0,DAT_816CDA70) fiber A service loop 81198BE8; FUN_81206700(0x81198C0B,param,DAT_816CDA70) fiber B GFD main loop; DAT_816CC630|=2; FUN_81206BA8(); FUN_8120683C/090E register+start fibers; }. Fiber A service loop (81198BE8): loop { FUN_811E5CDA() calls DAT_81513DEC callback; sceKernelCheckCallback(812B2AC0); FUN_812067A0() yield } while (DAT_816CC630&2). '
+       'Current blocker: the GFD init callback chain (8115A336 -> 811C02DA -> 811845C8 -> 81172EFC -> 8115D7D0/8115F574) enters the appAllocatorHandler_8115D36A / appMemoryBuffer_8115D0A8 allocation loop, then fiber B yields back to fiber A and never returns to the GFD main-loop body ([FRAMECB]/[UPD]/[POST]=0, frame counter does not grow). No new host IO requests ([FHOPEN]/[RQMGR]/[IO] unchanged). '
+       'NEXT: (1) find out why GFD init does not return: whether the 8115D36A appAllocatorHandler / 8115D0A8 appMemoryBuffer allocation loop waits on a guest memory-pool/heap event ([LKTR] ALLOC_START -> ALLOC_DONE shows allocations complete, but after INSERT it may wait on a lock/signal); (2) probe FUN_811995AC (GFD init body) entry/exit plus FUN_81199336/FUN_8119934A counters to confirm reaching the main loop; (3) if the GFD main loop reaches the frame loop, the frame render callback param+0x80 should trigger GXM BeginScene/Present so [COUNT] present increments; (4) keep monitoring the init-chain driver with [DRVSTATE]/[STEP:*] (not used in this flow). '
+       'Verification: m1205_gfdprobe_key.txt, m1204_gfdcb_key.txt, m1203_longdrv_key.txt, jobmgrloop.txt, apploop.txt, initchain.txt, flagrefs.txt. |
 m1198 证据（`m1198_acffill_key.txt`）：
 ```
 [ACFFILL] path=[sound/common.acf] size=5152 buf=84B967B0 read_size=6152 sp=84856248
@@ -502157,3 +502225,58 @@ data.cpk: 无 ACF；有 title/logo.bin (2101012B)
 ANTI-FORGETTING ENTRY. Keywords: M1123 ACF registration SUCCESS via FIOSFILL ACF_FILL, all audio-init CRILOGs cleared (CRILOG=0), sound thread thSeqSndAdx2 running at pc=81242D24, boot chain passes init-sound. Implemented harness_acf_fill called at FUN_812309A4 (ACF file load) entry: if P5D_FIOSFILL and path found in CPK (vita.cpk sound/common.acf size=5152), allocate guest buffer, copy file bytes, and fill the 4 out-params THROUGH THE POINTERS (args 5-8 are pointers to caller locals: a5=guest_rd32(sp+0).., guest_wr32(a5,buf), guest_wr32(a6,size), guest_wr32(a7,buf+size), guest_wr32(a8,read_size-size)), then return 1 to short-circuit. First version wrote over the stack argument slots instead of through the pointers -> caller locals stayed 0 -> FUN_812305C6(0,0,0,0) -> FUN_81262CC0(0,0) -> E2015042302/E2010012613/E2010030613 chain. m1198 evidence: [ACFFILL] size=5152 buf=84B967B0 read_size=6152; [ACFREG2] p1=84B967B0 p2=0x1420 p3=84B97BD0 p4=0x3E8; [CRILOG] 0; [EXECSTART] #6 pc=81242D24; [SEQ] pc=81242D24; [COUNT] present=0 begin_pass=0 draw=0; new HLE-BADMEM va=0x28 blk=81198BEE stub=812B1BA0 sceFiberSwitch. ACF content: @UTF outer table with nested sub-tables, strings "ACF Format/PSP2 Ver.1.15.01 Build:", "BusSet_xrd722v2", DspSetting, BusLink; data.cpk has title/logo.bin 2101012B. NEXT: fix the fiber-switch null+0x28 read (probe 81198BEA/81198BF6 and fiber object), find the app main fiber wait object at 811E5CDA after ACF success, then expect title/asset file requests ([FHOPEN]/[RQMGR]) -> PREAD -> title resources -> GXM first frame. Verification: m1198_acffill_key.txt, m1197_acfdbg_key.txt, m1196_acffill_key.txt, cpkcheck/acfdump, acfreg3.txt, acftbl.txt.
 
 LOOKUP: M1123 ACF registration success ACF_FILL sound/common.acf vita.cpk 5152, out-param pointers write-through args 5-8, CRILOG 0 audio errors cleared, thSeqSndAdx2 pc=81242D24, boot passes init sound, HLE-BADMEM va=0x28 blk=81198BEE sceFiberSwitch next, COUNT present=0 draw=0, cpkcheck acfdump tools, ACF Format/PSP2 Ver.1.15.01 BusSet_xrd722v2 -> 18.4667 [relevant: ACF read gap], 18.4666 [relevant: ACF not registered], 18.4665 [relevant: Fios worker]
+### 18.4669 PORT M1124: ACF 修复后 boot 链前进到 GFD_PSP2 主循环；卡在 GFD 初始化/内存分配器，帧循环未启动
+
+1) m1205 证据：
+```
+[CRILOG] 0 / [ACFFILL] sound/common.acf size=5152        ← ACF 持续正常
+[FINIT] fiber=84836300 entry=81206BDD [f84]=81198BE9     ← fiber A = 服务循环
+[FINIT] fiber=848463A0 entry=81206BDD [f84]=81198C0B     ← fiber B = GFD 主循环
+[FIBER-AUTOCREATE] t=848463A0 entry=81198C0B arg=82EFFF28
+[BOOT] 81206BDC → 81198BE8 → 81198BEA → 811E5CDA → 811E5928 → … → 81198C0A → 81198C12
+       → 8115A336 → 811C02DA → 8115A348 → 811845C8 → 81172EFC → 812B2260 → 81172F26
+       → 8115D7D0 → 8115F574 → … → 8115D3A6（GFD 初始化链，进入分配器）
+[LKTR] ALLOC_START/ALLOC_DONE/INNER_RETNODE/INSERT ×85（8115D36A appAllocatorHandler）
+[D8E0]/[7C2]/[F7C2] ×85 对象 84856470/848564B4 +4=84856580（分配对象链）
+[FRAMECB]/[UPD]/[POST] = 0      ← GFD 帧循环体未执行
+[COUNT] present=0 begin_pass=0 draw=0
+[DRVSTATE]/[STEP:*] = 0         ← FUN_81184FFE 9 步 init 驱动器未被调用
+```
+2) GFD 主循环（fiber B 入口 FUN_81198C0A，反编译摘要）：
+```
+if (param+0x70) param[0x70](param[0x78]);   // 启动回调
+strcmp("GFD_PSP2_",...)!=0 → return -1
+FUN_81199D7E(); FUN_81198DAE("app0:"); FUN_811995AC(param+8)  // 初始化（当前卡点）
+DAT_816CC630 |= 1; FUN_811E5650("gfd: initialize PSP2\n"); FUN_811991BE();
+if (param+0x7C) param[0x7C](param[0x8C]);
+do {
+  f = FUN_812071F8(); DAT_816CC638 = f - DAT_816CC634; DAT_816CC634 = f;   // 帧时间
+  if ((DAT_816CC630 & 0xC)==0) FUN_81199336();                            // update
+  if (param+0x80) param[0x80](param[0x8C], flags);                        // ★帧渲染回调（未到）
+  FUN_8119934A(); DAT_816CC63C++;                                         // post/帧计数
+  DAT_816CC630 |= 0x10; FUN_812067A0(); DAT_816CC630 &= ~0x10;            // fiber 让出
+} while (DAT_816CC630 & 2);                                               // bit2=app running
+if (param+0x84) param[0x84](param[0x8C]); ... return DAT_813B1F00;
+```
+3) app 初始化 FUN_811989C8：
+```
+FUN_811E6A40(&DAT_816CBC08,0xA24); DAT_816CC628=SceLibKernel_0FB972F9();
+SceSysmodule_79A0160A(813B1F04/813B1F06); SceAppUtil_DAFFE671(...);
+FUN_81206700(&LAB_81198BE8_1,0,816CDA70)   // fiber A 服务循环
+FUN_81206700(0x81198C0B,param,816CDA70)    // fiber B GFD 主循环
+DAT_816CC630 |= 2; FUN_81206BA8(); FUN_8120683C/090E(...)
+```
+fiber A 服务循环：`loop { FUN_811E5CDA(); sceKernelCheckCallback(); FUN_812067A0(); } while (DAT_816CC630 & 2)`。
+4) 当前卡点：GFD 初始化回调链进入 appAllocatorHandler_8115D36A / appMemoryBuffer_8115D0A8 分配循环后，fiber B 让出到 fiber A 且不再回到主循环帧体；无主机 IO。
+5) NEXT：
+```
+① 查 8115D36A/8115D0A8 分配循环是否死等 guest 堆锁/事件（[LKTR] 分配可完成，但 INSERT 后可能等待）
+② 探针 FUN_811995AC 入口/出口 + FUN_81199336/FUN_8119934A 计数，确认是否到达帧循环
+③ 帧渲染回调 param+0x80 应触发 GXM BeginScene/Present → [COUNT] present 递增
+④ 保留 [DRVSTATE]/[STEP:*] 观察 init 链驱动器（本流程未用）
+```
+验证：`m1205_gfdprobe_key.txt`、`m1204_gfdcb_key.txt`、`m1203_longdrv_key.txt`、`jobmgrloop.txt`、`apploop.txt`、`initchain.txt`、`flagrefs.txt`。
+
+ANTI-FORGETTING ENTRY. Keywords: M1124 ACF fix unblocks boot chain into the GFD_PSP2 main loop (fiber B = FUN_81198C0A) - app init FUN_811989C8 creates fiber A service loop (entry 81198BE8) and fiber B GFD main loop (entry 81198C0B) via FUN_81206700 (name "gfdFiber", bootstrap 81206BDD), sets DAT_816CC630|=2 app-running; fiber A loop = FUN_811E5CDA (calls DAT_81513DEC callback) + sceKernelCheckCallback(812B2AC0) + FUN_812067A0 yield while DAT_816CC630&2; GFD main loop = call slot +0x70, strcmp("GFD_PSP2_",...), FUN_81199D7E/FUN_81198DAE("app0:")/FUN_811995AC(param+8) init, DAT_816CC630|=1, FUN_811E5650("gfd: initialize PSP2"), FUN_811991BE, call +0x7C, then do { frame time FUN_812071F8, FUN_81199336 update when (flag&0xC)==0, frame render callback param+0x80(param+0x8C,flags), FUN_8119934A post, DAT_816CC63C++ frame counter, flag|=0x10, FUN_812067A0 yield, flag&=~0x10 } while (flag&2), then +0x84 and return DAT_813B1F00. m1205 evidence: [CRILOG]=0, [ACFFILL] size=5152, [FINIT] fibers 84836300 [f84]=81198BE9 and 848463A0 [f84]=81198C0B, [FIBER-AUTOCREATE] entry=81198C0B arg=82EFFF28, [BOOT] chain 81206BDC->81198BE8->81198BEA->811E5CDA->...->81198C0A->81198C12->8115A336->811C02DA->...->8115D7D0->8115F574->...->8115D3A6, [LKTR]/[D8E0]/[7C2]/[F7C2] 85x at 8115D36A appAllocatorHandler / 8115D0A8 appMemoryBuffer, [FRAMECB]/[UPD]/[POST]=0, [COUNT] present=0 draw=0, [DRVSTATE]/[STEP:*]=0 proving the init-chain driver FUN_81184FFE (9-step table) is NOT used in this flow. Blocker: GFD init callback chain (8115A336->811C02DA->811845C8->81172EFC->8115D7D0/8115F574) enters the appAllocatorHandler_8115D36A / appMemoryBuffer_8115D0A8 allocation loop then fiber B yields back to fiber A and never returns to the frame-loop body; no host IO requests. NEXT: check whether the 8115D36A/8115D0A8 allocation loop dead-waits on a guest heap lock/event ([LKTR] shows ALLOC_START->ALLOC_DONE completes but INSERT may wait), probe FUN_811995AC entry/exit + FUN_81199336/FUN_8119934A counters to confirm the main loop is reached, then the frame render callback param+0x80 should trigger GXM BeginScene/Present so [COUNT] present increments. Verification: m1205_gfdprobe_key.txt, m1204_gfdcb_key.txt, m1203_longdrv_key.txt, jobmgrloop.txt, apploop.txt, initchain.txt, flagrefs.txt.
+
+LOOKUP: M1124 GFD_PSP2 main loop fiber B FUN_81198C0A fiber A service loop 81198BE8 FUN_811989C8 FUN_81206700 gfdFiber 81206BDD, DAT_816CC630 bit2 app running, DAT_816CC63C frame counter, callbacks +0x70 +0x78 +0x7C +0x80 +0x84 +0x8C, FUN_811995AC init, FUN_81199336 update, FUN_8119934A post, FUN_812071F8 frame time, FUN_812067A0 yield, blocker appAllocatorHandler_8115D36A appMemoryBuffer_8115D0A8 allocation loop, [FRAMECB]/[UPD]/[POST]=0 frame loop not reached, [DRVSTATE]/[STEP] init chain driver FUN_81184FFE unused, [LKTR] allocator, next probe FUN_811995AC exit -> 18.4668 [relevant: ACF registration success], 18.4667 [relevant: sound init], 18.4666 [relevant: ACF chain]

@@ -3520,6 +3520,10 @@ extern "C" uint32_t hle_call(uint32_t stub_va, RecState* s) {
     case 0x812B2AC0u: {                                               // sceKernelCheckCallback -> noop (18.4212, old-runtime n_noop); P5D_CB_YIELD=1 restores the old cooperative-yield behaviour
       r0 = 0;
       if (!g_cb_yield) break;
+      // M1124: gate cooperative yielding to the POST-MOUNT phase (>100k blocks, same rationale as the
+      // IOPUMP_WAIT gate: mount header reads freeze g_blkcnt_total in the 30-43k range, and yielding
+      // there breaks the CPK mount).
+      if (g_blkcnt_total < 100000u) break;
       if (g_in_fex == 1 && ((++g_yield_main_tick & 0x3F) == 0)) { g_yield_to_main = 1;
         if (g_ytest_n++ < 8) { printf("[YMAIN] request from CheckCallback fib=%08X pc=%08X\n", g_cur_fiber, s->r[15]); fflush(stdout); } break; }
       if (g_in_fex > 0 && g_in_fiber_exec && !g_fiber_switch_to && g_fiber_list.size() > 1) {
