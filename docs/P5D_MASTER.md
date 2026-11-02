@@ -1108,6 +1108,57 @@
 | M1090 | §18.4635: ★★★★★★★ **m1134 [GBACK] 统计否决了"gbn_back 是 movie 崩溃真凶"的假设：到崩溃前共 400 次块内回退，只有 2 个唯一目标——`0x811E53D2→块0x811E53CC back=6`（395 次，热循环 worker 入口）和 `0x8120767C→块0x8120767A back=2`（5 次）。**没有任何 movie 路径目标（0x8115927x）出现** ⇒ gbn_back 只在固定的两个已知点生效，与 movie 崩溃无关。GBACK 假设被否决。⇒ 改为直接探针"谁调用了 FUN_81159276"：在 `id_reg`（寄存器间接跳转）里对 target==0x81159276/0x811DACFC/0x81178F10 打印调用点 block、LR、SP、fiber 与 PC ring（`[CB9276]`）。**
 | M1091 | §18.4636: ★★★★★★★★★★★ **找到 Movie 崩溃的最终根因：batch_034 生成的 `blx r2` 块漏设 LR！m1135 `[CB9276] reg2 target=81159276 from_blk=81158504 lr=81178F10 sp=84856290` + ring `81178F10 81178F18 81178F1E 81178F2A 81178F36 811584DE 811584E4 81158504` 证明调用点是 0x81158504（我们补块函数 FUN_8115849E 内），而 batch_034 该块代码为 `s->r[2]=s->r[1]; s->r[0]=1; s->r[1]=s->r[4]; return id_reg(2,s);`——**没有设置 `s->r[14]`（LR）**！ARM `blx r2` 的正确语义是"LR=下一条指令地址，然后跳到 r2"；漏设 LR 让 movie 完成回调 FUN_81159276 带着 stale LR=0x81178F10 进入，其 epilogue `pop {r4,r5,r6,pc}` 于是返回 0x81178F10（FUN_81178F0A 中段）→ 错位返回链 → 0x811DACFC → 崩溃。这与所有观察完全吻合。**
 | M1092 | §18.4637: ★★★★★★★★★★★★ **blx LR 修复验证成功！错位返回链彻底消失：`[CB9276] lr=8115850C`、`[MOVCB-ENT] lr=8115850C`、`[MOVCB-EPI]` 保存槽 = 0x8115850C（正确）、`[ACFC-SAFE]=0`。运行首次稳定越过 64,278,346（WD 显示 64,278,999），并进入**全新阶段：CRI 文件系统加载**（CRILOG/FIOSW 首次出现）。新崩溃是"下游"问题：`criFsLoader_Create has been called before the library initialization` → BADMEM va=0x30 @0x81299570（criFs 加载器）。⇒ **movie 阶段正式通关，进入标题资源加载！** 下一层是 criFs 库初始化 HLE。**
+| M1093 | §18.4638: ★★★★★★★★ **criFs 层根因定位：`criFsLoader_Create`（FUN_8128DE06）检查 `DAT_815401B8`（loader 库初始化标志），为 0 时报 "called before the library initialization" 并返回 -1；而 `DAT_815401B8` 由 **FUN_8128D2BA（CriFsLoader_Initialize）** 设置——且该函数**正是从 FUN_8128399E（criFs_Initialize）内部 0x81283B56 调用的**。⇒ 我们 HLE 在 n=5000 强制的 criFs_Initialize 理论上会同时初始化 loader，但 m1136 里游戏在 n=1717 就已经报 "criFsLoader_Create 在库初始化前调用"（早于强制初始化），说明**初始化时序/状态在后续被破坏或从未生效**。M1093 加 `[CRIFST]` 状态探针（FECC/B8/C8/CC/D0）并在 n=61M 触发第二次 criFs_Initialize（P5D_CRIFSHLE2_AT），验证后重新初始化能否让 criFsLoader_Create 成功、崩溃后移。**
+m1136（`out80m_m1136blxfix.txt`）criFs 证据：
+```
+[CRIFSHLE] criFs_Initialize(NULL,0,0) -> 00000000 n=5000 binit_after=00000000
+[CRILOG] at=81278F96 n=1717 … msg=E2008102820:criFsLoader_Create has been called before the library initialization.（×多次）
+[CRILOG] at=81278F96 n=1717 … msg=E2009072703:Insufficient buffer size. / E2011102800:Reference counter has been already 0.
+[CRILOG] at=81279176 n=1717 … msg=E10062220 / E10062222
+[WD] loop=2 … 64278999/0 total=1500000 blk=81299570   ← 越过旧死亡点
+[SNAP] blk=81299570 r0=0 … r13=84856258 r14=812998DE   ← FUN_81299570(new param) = FUN_812A097C(*(param+0x30))，param=null → va=0x30
+[BADMEM] guest va=0x00000030 unmapped block=0x81299570
+```
+**criFs 反编译关键（`crifs2.txt`/`crifs3.txt`）**：
+```c
+// FUN_8128DE06 = criFsLoader_Create
+iVar3 = DAT_815401b8;                       // ★ loader 库初始化标志
+if (iVar3 == 0) { FUN_81278F96(0,"E2008102820:criFsLoader_Create has been called before the library initialization."); return 0xffffffff; }
+uVar1 = (param_2==0) ? DAT_815401c8 : DAT_815401cc;   // loader handle pool
+puVar2 = FUN_812b0050(uVar1,0);             // 从池分配 loader handle
+
+// FUN_8128D2BA = CriFsLoader_Initialize(5 args)
+if (DAT_815401b8 != 0) { log "E2008071723:CriFsLoader is initialized twice."; return -1; }
+DAT_815401b8 = 1;                            // ★ 设置初始化标志
+... 从工作缓冲 param_4/param_5 建立 DAT_815401c8 / DAT_815401cc 池 ...
+
+// FUN_8128D242 = CriFsLoader_Finalize：if (B8==0) 报错；否则清 C8/CC/D0 并 DAT_815401b8 = 0
+
+// xrefs: FUN_8128D2BA ← FUN_8128399E(criFs_Initialize) @0x81283B56
+//        FUN_8128399E ← FUN_81235A10 / FUN_81224160（游戏/应用初始化入口！）
+//        FUN_8128399E 内 DAT_8153FECC = "called twice" 标志；初始化成功置 1
+```
+**分析**：
+1. `criFs_Initialize` 与 `CriFsLoader_Initialize` 是**绑定在一起的**：只要 criFs_Initialize 真正执行完成，B8 应为 1（除非失败提前返回或后来被 Finalize）
+2. 但游戏在 n=1717（远早于 n=5000 强制初始化）就报 loader 未初始化——说明**游戏自己的初始化入口（FUN_81235A10/FUN_81224160）从未被调用**，而游戏后续的 loader 使用路径却执行了（在 n=64M 的 movie 完成后）
+3. 我们强制的 criFs_Initialize 是否真正生效需要运行时状态确认（B8/FECC 的实际值）
+**M1093 探针/实验**：
+- 新增 `[CRIFST] criFsInitFECC=%08X loaderB8=%08X poolC8=%08X poolCC=%08X D0=%08X`（在强制 criFs_Initialize 后打印真实状态）
+- 运行环境加 `P5D_CRIFSHLE2_AT=61000000`：在 movie 完成前（n=61M）再调用一次 criFs_Initialize（若 FECC=1 会返回"called twice"，若已被 finalize 则重新初始化）
+编译：harness exit 0；exe 重链 exit 0（57,118,250B 07:54:42）。验证运行 `out80m_m1137crifs.txt` 已启动。
+NEXT：
+```
+① 读 m1137 [CRIFST]：FECC/B8/C8/CC 的真实值
+   • B8=1 → loader 已初始化；崩溃是其它原因（如 loader 创建成功但后续 null）
+   • B8=0 且 FECC=0 → 强制初始化未生效/被 finalize → 找 finalize 调用者并阻止
+   • B8=0 且 FECC=1 → criFs_Initialize 提前失败（检查返回值/日志），修参数
+② 根据结果修 HLE：必要时在 movie 完成后（n≈64.3M）再初始化一次，或直接调用
+   FUN_8128D2BA(CriFsLoader_Initialize) 建立 loader 池
+③ 之后 criFsLoader_Create 成功 → title 资源加载 → 2D 上下文 → GXM → 画面
+④ 记录：movie 阶段已通关（M1092）
+```
+验证：`out80m_m1136blxfix.txt`、`crifs.txt`、`crifs2.txt`、`crifs3.txt`、`crifs_refs3/4.txt`、`out80m_m1137crifs.txt`（生成中）。 |
+| §18.4638 | criFs root cause located: criFsLoader_Create (FUN_8128DE06) checks DAT_815401B8 (loader library init flag) and returns -1 with 'called before the library initialization' when it is 0; DAT_815401B8 is set by FUN_8128D2BA (CriFsLoader_Initialize), which is called from inside FUN_8128399E (criFs_Initialize) at 0x81283B56. So our HLE-forced criFs_Initialize at n=5000 should also init the loader, but m1136 shows the game already reporting 'criFsLoader_Create called before library init' at n=1717 (before the forced init), meaning the init timing/state is broken or never effective. m1136 evidence: [CRIFSHLE] criFs_Initialize(NULL,0,0) -> 00000000 n=5000 binit_after=00000000; [CRILOG] at=81278F96 n=1717 E2008102820:criFsLoader_Create has been called before the library initialization (multiple times); [CRILOG] at=81278F96 n=1717 E2009072703:Insufficient buffer size. / E2011102800:Reference counter has been already 0.; [CRILOG] at=81279176 n=1717 E10062220 / E10062222; [WD] loop=2 cnt=... 64278999/0 blk=81299570 (passed the old death point); [SNAP] blk=81299570 r0=0 r13=84856258 r14=812998DE; [BADMEM] guest va=0x30 at 0x81299570. criFs decompile: FUN_8128DE06 = criFsLoader_Create: iVar3 = DAT_815401b8; if (iVar3==0) log E2008102820 and return 0xffffffff; uVar1=(param_2==0)?DAT_815401c8:DAT_815401cc; puVar2=FUN_812b0050(uVar1,0) allocates loader handle from pool. FUN_8128D2BA = CriFsLoader_Initialize(5 args): if (DAT_815401b8!=0) log E2008071723 initialized twice and return -1; DAT_815401b8 = 1; then builds DAT_815401c8/DAT_815401cc pools from work buffer param_4/param_5. FUN_8128D242 = CriFsLoader_Finalize: if (B8==0) error; else clears C8/CC/D0 and DAT_815401b8=0. Xrefs: FUN_8128D2BA <- FUN_8128399E (criFs_Initialize) @0x81283B56; FUN_8128399E <- FUN_81235A10 / FUN_81224160 (game/app init entries); FUN_8128399E uses DAT_8153FECC as 'called twice' flag and sets it on success. Analysis: (1) criFs_Initialize and CriFsLoader_Initialize are bound together - a fully executed criFs_Initialize should leave B8=1 (unless it returned early or was later finalized); (2) the game reported loader-uninitialized at n=1717, long before the n=5000 forced init, meaning the game's own init entries (FUN_81235A10/FUN_81224160) were never called while its loader usage path did execute after the movie at n=64M; (3) whether the forced criFs_Initialize actually took effect needs runtime state confirmation (B8/FECC). M1093 probe/experiment: added [CRIFST] criFsInitFECC=%08X loaderB8=%08X poolC8=%08X poolCC=%08X D0=%08X printed after the forced criFs_Initialize; run env adds P5D_CRIFSHLE2_AT=61000000 to call criFs_Initialize again just before movie completion (if FECC=1 it returns 'called twice'; if finalized it re-initializes). Build: harness exit 0; exe relink exit 0 (57,118,250B 07:54:42). Verification run out80m_m1137crifs.txt started. NEXT: read m1137 [CRIFST] real values - if B8=1 the loader is initialized and the crash is something else; if B8=0 and FECC=0 the forced init never took effect/was finalized -> find and stop the finalize caller; if B8=0 and FECC=1 criFs_Initialize failed early -> check its return value/logs and fix args; then fix the HLE as needed (possibly re-init after the movie at n~64.3M or call FUN_8128D2BA CriFsLoader_Initialize to build the loader pools); then criFsLoader_Create succeeds -> title asset loading -> 2D context -> GXM -> picture; record movie stage passed. |
 m1136（`out80m_m1136blxfix.txt`，BLX 修复后）关键证据：
 ```
 [CB9276] reg2 target=81159276 from_blk=81158504 lr=8115850C sp=84856290   ← ★ 修复前 81178F10 → 现在正确 8115850C
@@ -499253,3 +499304,47 @@ LOOKUP: M1091 blx missing LR root cause, batch_034 block 0x81158504 return id_re
 ANTI-FORGETTING ENTRY. Keywords: M1092 blx LR fix VERIFIED - misaligned-return chain gone: [CB9276] lr=8115850C, [MOVCB-ENT] lr=8115850C, [MOVCB-EPI] saved pc slot 0x8115850C, [ACFC-SAFE]=0; run passed 64,278,346 for the first time (WD 64278999) and entered a COMPLETELY NEW STAGE: CRI filesystem loading (CRILOG/FIOSW first appear). New crash is downstream: 'criFsLoader_Create has been called before the library initialization' (game's own log E2008102820) -> BADMEM va=0x30 at block 0x81299570 stub=812B2410; [SNAP] blk=81299570 r0=0 r1=811546E1 r2=811546ED r4=85CF301C r5=85CF304C r7=812B414C r13=84856258 r14=812998DE; [WD] pcring 812982DA 812982E8 811542CA 812998D8 812791E4 81282434 812791E8 81299570; [FIOSW] #7 at=8128DEFC n=64278721 r0=85CF31FC r2=0x204 r3=4; [CRILOG] at=81278F96 n=64278725 msg=E2008102820:criFsLoader_Create has been called before the library initialization; [CRILOG] at=81279176 n=64278897 msg=E2010062300M and n=64278948 msg=E2013052701M. So the movie stage (S0->movie) is officially passed and the game enters title asset loading via CRI FS; the next layer is criFs library initialization HLE. The old 0x811DAC9C/0x811EFFD6 crashes are all gone. NEXT: decompile 0x81299570 and the criFs init chain (0x81278xxx/0x8128Dxxx/0x81299xxx); check HLE criFs import stub interception/return values; implement/fix criFs init HLE (local dir/CPK reading) so criFsLoader_Create succeeds; then title assets load through criFs -> 2D context/views -> array2 -> GXM -> picture; record movie stage passed.
 
 LOOKUP: M1092 blx LR fix verified, [CB9276] lr=8115850C, [MOVCB-ENT] lr=8115850C, [MOVCB-EPI] saved pc slot 8115850C, [ACFC-SAFE]=0, passed 64,278,346 WD 64278999, new stage CRI filesystem CRILOG FIOSW, criFsLoader_Create has been called before the library initialization E2008102820, BADMEM va=0x30 block 0x81299570 stub=812B2410, [SNAP] r0=0 r1=811546E1 r2=811546ED r14=812998DE, pcring 812982DA 812982E8 811542CA 812998D8 812791E4 81282434 812791E8 81299570, movie stage passed, next criFs init HLE -> §18.4636 [relevant: blx LR fix], §18.4635 [relevant: CB9276 probe], §18.4631 [relevant: GXM crash], §18.4630 [relevant: ACFC-SAFE]
+### 18.4638 PORT M1093: criFsLoader_Create 检查 DAT_815401B8；初始化由 criFs_Initialize 内部的 FUN_8128D2BA 完成——需确认运行时状态并修复时序
+
+1) m1136 criFs 证据：
+```
+[CRIFSHLE] criFs_Initialize(NULL,0,0) -> 00000000 n=5000 binit_after=00000000
+[CRILOG] at=81278F96 n=1717 msg=E2008102820:criFsLoader_Create has been called before the library initialization.
+[CRILOG] … E2009072703:Insufficient buffer size. / E2011102800:Reference counter has been already 0.
+[WD] 64278999（越过旧死亡点）→ [SNAP] blk=81299570 r0=0 → [BADMEM] va=0x30
+```
+2) criFs 关键反编译：
+```c
+// FUN_8128DE06 = criFsLoader_Create
+iVar3 = DAT_815401b8;                       // loader 初始化标志
+if (iVar3 == 0) { log "E2008102820:criFsLoader_Create has been called before the library initialization."; return 0xffffffff; }
+uVar1 = (param_2==0) ? DAT_815401c8 : DAT_815401cc;
+puVar2 = FUN_812b0050(uVar1,0);             // 从池分配 loader handle
+
+// FUN_8128D2BA = CriFsLoader_Initialize(5 args)
+DAT_815401b8 = 1;                            // ★ 设置标志（从 criFs_Initialize 内部 0x81283B56 调用）
+// FUN_8128D242 = CriFsLoader_Finalize：清 C8/CC/D0 并 DAT_815401b8 = 0
+// xrefs: FUN_8128D2BA ← FUN_8128399E(criFs_Initialize) @0x81283B56
+//        FUN_8128399E ← FUN_81235A10 / FUN_81224160（游戏/应用初始化入口，从未被调用）
+```
+3) 分析：
+- criFs_Initialize 与 CriFsLoader_Initialize 绑定：真正执行完成则 B8=1
+- 游戏在 n=1717（早于我们的 n=5000 强制初始化）已报 loader 未初始化 → 游戏自己的初始化入口从未执行
+- 强制 criFs_Initialize 是否生效需运行时确认（B8/FECC）
+4) M1093：
+- 新增 `[CRIFST] criFsInitFECC=%08X loaderB8=%08X poolC8=%08X poolCC=%08X D0=%08X`
+- 运行 env 加 `P5D_CRIFSHLE2_AT=61000000`（movie 完成前再初始化一次）
+- 编译：harness exit 0；exe 57,118,250B（07:54:42）
+- 验证运行 `out80m_m1137crifs.txt` 已启动
+NEXT：
+```
+① [CRIFST] 真实值判断三种情形（B8=1 / B8=0&FECC=0 / B8=0&FECC=1）
+② 修 HLE 初始化时序：阻止 finalize / movie 后重初始化 / 直接调 FUN_8128D2BA
+③ criFsLoader_Create 成功 → title 资源 → 2D 上下文 → GXM → 画面
+④ 记录 movie 阶段已通关
+```
+验证：`out80m_m1136blxfix.txt`、`crifs*.txt`、`out80m_m1137crifs.txt`（生成中）。
+
+ANTI-FORGETTING ENTRY. Keywords: M1093 criFs root cause - criFsLoader_Create (FUN_8128DE06) checks DAT_815401B8 and returns -1 'called before the library initialization' when 0; DAT_815401B8 is set by FUN_8128D2BA (CriFsLoader_Initialize) which is called from FUN_8128399E (criFs_Initialize) at 0x81283B56; FUN_8128399E is called from game/app init entries FUN_81235A10 / FUN_81224160 which were never called. FUN_8128D2BA(5 args): if (DAT_815401b8!=0) log E2008071723 initialized twice return -1; DAT_815401b8=1; builds DAT_815401c8/DAT_815401cc pools from work buffer param_4/param_5. FUN_8128D242 = CriFsLoader_Finalize clears C8/CC/D0 and B8=0. FUN_8128399E uses DAT_8153FECC as called-twice flag, sets 1 on success. m1136: [CRIFSHLE] criFs_Initialize(NULL,0,0) -> 00000000 n=5000 binit_after=00000000; [CRILOG] at=81278F96 n=1717 E2008102820:criFsLoader_Create has been called before the library initialization; E2009072703 Insufficient buffer size; E2011102800 Reference counter already 0; [WD] 64278999 passed old death point; [SNAP] blk=81299570 r0=0 r13=84856258 r14=812998DE; [BADMEM] va=0x30. M1093 added [CRIFST] criFsInitFECC=%08X loaderB8=%08X poolC8=%08X poolCC=%08X D0=%08X printed after forced criFs_Initialize, and run env P5D_CRIFSHLE2_AT=61000000 triggers a second criFs_Initialize just before movie completion (if FECC=1 returns 'called twice'; if finalized it re-initializes). Build: harness exit 0; exe 57,118,250B 07:54:42; run out80m_m1137crifs.txt started. NEXT: read m1137 [CRIFST]: if B8=1 loader initialized (crash is elsewhere); if B8=0 and FECC=0 forced init ineffective/finalized -> find and stop finalize caller; if B8=0 and FECC=1 criFs_Initialize failed early -> check return/logs and fix args; then fix HLE init timing (re-init after movie at n~64.3M or call FUN_8128D2BA directly); then criFsLoader_Create succeeds -> title asset loading -> 2D context -> GXM -> picture; record movie stage passed.
+
+LOOKUP: M1093 criFsLoader_Create checks DAT_815401B8, FUN_8128D2BA CriFsLoader_Initialize sets it, called from FUN_8128399E criFs_Initialize @0x81283B56, callers of criFs_Initialize FUN_81235A10 FUN_81224160 never called, FUN_8128D242 CriFsLoader_Finalize clears B8, DAT_8153FECC called-twice flag, DAT_815401C8/CC pools, [CRIFSHLE] -> 0 n=5000, CRILOG E2008102820 n=1717, BADMEM va=0x30 0x81299570, [CRIFST] probe FECC/B8/C8/CC/D0, P5D_CRIFSHLE2_AT=61000000, exe 57,118,250B 07:54:42, out80m_m1137crifs.txt, next fix init timing -> §18.4637 [relevant: movie passed], §18.4636 [relevant: blx fix], §18.4631 [relevant: GXM code]

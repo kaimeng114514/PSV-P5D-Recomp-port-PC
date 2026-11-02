@@ -6851,7 +6851,7 @@ if (g_hacks && (ppc & ~1u) == 0x811E2B50u) {
       if ((long long)n >= _cfat && getenv("P5D_CRIFSHLE")) { static int _cfh = 0; if (!_cfh) { _cfh = 1;
         uint32_t _cr = call_guest_cb2(&s, 0x8128399Eu, 0u, 0u, 4000000);
         uint32_t _bi=0; { uint8_t* _q=GP(0x8153FEF4u); if(_q) std::memcpy(&_bi,_q,4); }
-        printf("[CRIFSHLE] criFs_Initialize(NULL,0,0) -> %08X n=%d binit_after=%08X\n", _cr, n, _bi); fflush(stdout); } } }
+        { uint32_t _f1=0,_f2=0,_f3=0,_f4=0,_f5=0; uint8_t* _p1=GP(0x8153FECCu); if(_p1) std::memcpy(&_f1,_p1,4); uint8_t* _p2=GP(0x815401B8u); if(_p2) std::memcpy(&_f2,_p2,4); uint8_t* _p3=GP(0x815401C8u); if(_p3) std::memcpy(&_f3,_p3,4); uint8_t* _p4=GP(0x815401CCu); if(_p4) std::memcpy(&_f4,_p4,4); uint8_t* _p5=GP(0x815401D0u); if(_p5) std::memcpy(&_f5,_p5,4); printf("[CRIFST] criFsInitFECC=%08X loaderB8=%08X poolC8=%08X poolCC=%08X D0=%08X\n",_f1,_f2,_f3,_f4,_f5); fflush(stdout); } printf("[CRIFSHLE] criFs_Initialize(NULL,0,0) -> %08X n=%d binit_after=%08X\n", _cr, n, _bi); fflush(stdout); } } }
     { static auto _rt0 = std::chrono::steady_clock::now(); static uint32_t _rn0 = 0;
       if ((uint32_t)n - _rn0 >= 5000000u) { auto _rt1 = std::chrono::steady_clock::now(); long long _ms = std::chrono::duration_cast<std::chrono::milliseconds>(_rt1-_rt0).count();
         printf("[RATE] n=%u dblk=%u wall_ms=%lld blocks_per_s=%.0f pc=%08X fib=%08X ctr_probe=%u\n", (uint32_t)n, (uint32_t)n-_rn0, _ms, _ms ? ((uint32_t)n-_rn0)*1000.0/_ms : 0.0, g_cur_block, g_cur_fiber, 0u); fflush(stdout); _rt0=_rt1; _rn0=(uint32_t)n; } }
