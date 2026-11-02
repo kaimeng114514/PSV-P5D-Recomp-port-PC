@@ -87,6 +87,7 @@ static std::mutex g_hle_mtx;
 static uint32_t g_cur_hle_stub = 0;   // 18.4239: guest threads as real host threads (P5D_HOSTTHREADS=1)
 static int g_ht_n = 0;
 static int g_ngs_env = -1;   // 18.4416: opt-in SceNgs HLE emulation (P5D_NGS=1)
+static uint32_t g_last_pread_dst = 0;   // M1114: last sceIoPread destination (CPK header buffer)
 static std::mutex g_lwm_mtx;
 static std::map<uint32_t, std::pair<uint32_t,uint32_t> > g_lwm_real;   // work -> (owner_tid, count)
 static int g_lwm_log_n = 0, g_trophy_log_n = 0, g_fdclass_log_n = 0, g_appmgr_log_n = 0, g_drm_n = 0, g_tick_log_n = 0;
@@ -1481,7 +1482,7 @@ static void job_probes(uint32_t pcv, RecState* s) {
       if ((_a0 == 0x81278F96u || _a0 == 0x81279176u || _a0 == 0x81279486u || _a0 == 0x81279520u) && _lg_n++ < 200) {
         uint32_t _fp = (_a0 == 0x81278F96u) ? s->r[1] : s->r[1]; char _msg[200] = {0};
         { uint8_t* _q = GP(_fp); if (_q) { for (int _k = 0; _k < 190; ++_k) { char _c = (char)_q[_k]; if (!_c) break; _msg[_k] = (_c >= 32 && _c < 127) ? _c : 0x2E; } } }
-        printf("[CRILOG] at=%08X n=%u r0=%08X r1=%08X r2=%08X r3=%08X msg=%s\n", _a0, g_main_n, s->r[0], s->r[1], s->r[2], s->r[3], _msg); fflush(stdout); } } }
+        printf("[CRILOG] at=%08X n=%u r0=%08X r1=%08X r2=%08X r3=%08X lr=%08X blk=%08X fib=%08X msg=%s\n", _a0, g_main_n, s->r[0], s->r[1], s->r[2], s->r[3], s->r[14], g_cur_block, g_cur_fiber, _msg); fflush(stdout); } } }
   { uint32_t _a0 = pcv & ~1u;
     if (_a0 == 0x81285E86u || _a0 == 0x81286336u || _a0 == 0x81286368u || _a0 == 0x812864B4u || _a0 == 0x8128665Au || _a0 == 0x8128E394u) {
       static int _bd_n = 0; static int _bd_late = 0; ++_bd_n;
@@ -3095,7 +3096,7 @@ extern "C" uint32_t hle_call(uint32_t stub_va, RecState* s) {
       uint32_t size = s->r[2]; uint8_t* dst = GP(s->r[1]); size_t n = 0;
       if (dst && size) { if (hh.isMem) { if (off < (int64_t)hh.mem.size()) { size_t avail = (size_t)((int64_t)hh.mem.size() - off); n = size < avail ? size : avail; std::memcpy(dst, hh.mem.data() + off, n); } }
         else if (hh.fp) { _fseeki64(hh.fp, off, SEEK_SET); n = std::fread(dst, 1, size, hh.fp); } }
-      hh.pos = off + (int64_t)n; r0 = (uint32_t)n;
+      hh.pos = off + (int64_t)n; r0 = (uint32_t)n; g_last_pread_dst = s->r[1];
       if (g_io_pn++ < 20) { printf("[IO] PREAD fd=%u off=%lld size=%u got=%zu\n", s->r[0], (long long)off, size, n); fflush(stdout); }
       { static int _pd=0; if (_pd++ < 6) { uint32_t _dst = s->r[1]; uint8_t* _d = GP(_dst); printf("[PREAD-DST] dst=%08X:", _dst); if (_d) for (int _i=0;_i<8;++_i){ uint32_t _v=0; std::memcpy(&_v,_d+_i*4,4); printf(" %08X",_v);} printf("\n"); fflush(stdout); } }
       break; }
@@ -3736,79 +3737,70 @@ static uint32_t fiber_exec_to_completion(RecState* s) {
       call_guest_cb2(s, _e, _x0, _x1, 400000);
       --g_disp_depth; pc = s->r[15];
     }
-    // M1109_IOPUMP: drain queued criFsIo requests (FUN_8128AE8E pops one request and invokes its callback).
-    // Armed only after the CPK binder mount wait is reached (block 0x81287A70/0x81287BBA), because the criFsIo
-    // context at 0x816A4F50 is not initialized before that. Requires P5D_IOPUMP=1.
+    // M1109/M1114_IOPUMP: drive the criFs load-state machine for every active reader. The reader list is
+    // refreshed by scanning for the progress-object signature (progress[0] == 0x81540460 and the
+    // reader->progress back-pointer at reader+0xB0), because each CPK mount creates its own reader.
     { static int _ip_env = -1, _ip_armed = 0; static uint32_t _ip_n = 0;
+      static uint32_t _ip_readers[8] = {0x848FC368u}; static int _ip_reader_n = 1; static int _ip_scan_tick = 0;
       if (_ip_env < 0) { const char* _e = getenv("P5D_IOPUMP"); _ip_env = (_e && atoi(_e)) ? 1 : 0; }
       if (!_ip_armed && (g_cur_block == 0x81287A70u || g_cur_block == 0x81287BBAu || g_cur_block == 0x81287C18u)) _ip_armed = 1;
       uint32_t _ctx = 0; { uint8_t* _q = GP(0x816A4F50u); if (_q) std::memcpy(&_ctx, _q, 4); }
       { static int _ip_bsy_n = 0;
         uint32_t _ana = 0; { uint8_t* _q = GP(0x84B1B984u); if (_q) std::memcpy(&_ana, _q, 4); }
         if (_ip_env > 0 && _ip_armed && _ana != 0u) {
-          // the CPK analyzer holds its busy flag across blocks of one logical call; do not re-enter guest code
-          // in the middle of it (that would leave the busy flag stuck). Only clear it if it stays stuck.
-          if (++_ip_bsy_n > 400) {
-            uint32_t _z = 0; uint8_t* _q = GP(0x84B1B984u); if (_q) std::memcpy(_q, &_z, 4);
-            if (_ip_bsy_n < 420) { printf("[IOPUMP-UNSTICK] analyzer busy -> 0 blk=%u\n", g_blkcnt_total); fflush(stdout); }
-            _ip_bsy_n = 0;
-          }
+          if (++_ip_bsy_n > 400) { uint32_t _z = 0; uint8_t* _q = GP(0x84B1B984u); if (_q) std::memcpy(_q, &_z, 4); _ip_bsy_n = 0; }
           goto _ip_skip;
         }
         _ip_bsy_n = 0;
       }
       if (_ip_env > 0 && _ip_armed && _ctx != 0u && g_disp_depth == 0 && !g_cur_thr && ((g_blkcnt_total % 1500u) == 0u)) {
-        int _cnt = 0;
-        { static int _dp=0; if (_dp++ < 8) { uint32_t _a1=0,_a2=0,_a3=0,_a4=0;
-          { uint8_t* _q = GP(0x848FC368u + 0xDCu); if (_q) std::memcpy(&_a1, _q, 4); }
-          { uint8_t* _q = GP(0x848FC368u + 0xE0u); if (_q) std::memcpy(&_a2, _q, 4); }
-          { uint8_t* _q = GP(0x848FC368u + 0xE4u); if (_q) std::memcpy(&_a3, _q, 4); }
-          { uint8_t* _q = GP(0x848FC368u + 0xE8u); if (_q) std::memcpy(&_a4, _q, 4); }
-          printf("[DECSTATE] reader+DC=%08X +E0=%08X +E4=%08X +E8=%08X blk=%u\n", _a1, _a2, _a3, _a4, g_blkcnt_total); fflush(stdout); } }
-        ++g_disp_depth;
-        for (int _i = 0; _i < 8; ++_i) {
-          uint32_t _stt = 0; { uint8_t* _q = GP(0x848FC368u + 0xBCu); if (_q) std::memcpy(&_stt, _q, 4); }
-          if (_stt == 2u) break;
-          call_guest_cb2(s, 0x8128D502u, 0x848FC368u, 0u, 300000);
-          ++_cnt;
-          // M1109: the async completion that FUN_8128D716 normally performs (it checks progress state==7
-          // and then sets reader+0xBC=2 with the loaded size). We are replacing that missing pump.
-          uint32_t _prog = 0; { uint8_t* _q = GP(0x848FC368u + 0xB0u); if (_q) std::memcpy(&_prog, _q, 4); }
-          uint32_t _pst = 0; if (_prog) { uint8_t* _q = GP(_prog + 0xCu); if (_q) std::memcpy(&_pst, _q, 4); }
-          if (_pst == 7u) {
-            { static int _hc=0; if (_hc++ < 6) { uint32_t _m=0,_u4=0,_u14=0;
-              { uint8_t* _q=GP(0x84B1BC00u); if(_q) std::memcpy(&_m,_q,4); }
-              { uint8_t* _q=GP(0x84B1BC04u); if(_q) std::memcpy(&_u4,_q,4); }
-              { uint8_t* _q=GP(0x84B1BC14u); if(_q) std::memcpy(&_u14,_q,4); }
-              printf("[HDRCHK] m=%08X u4=%08X u14=%08X blk=%u\n", _m, _u4, _u14, g_blkcnt_total); fflush(stdout); } }
-            // M1112_HDRFIX: vita.cpk is a 64-bit-header CPK variant (CPK+0x08 = u64 file size at +0x08,
-            // '+'0x10 = @UTF). The analyzer expects the standard layout (+0x04=0xFF flags, +0x08=table size).
-            { static int _hf=0; uint32_t _magic=0; { uint8_t* _q=GP(0x84B1BC00u); if(_q) std::memcpy(&_magic,_q,4); }
-              if (_magic == 0x204B5043u) {
-                uint32_t _u4=0,_u14=0; { uint8_t* _q=GP(0x84B1BC00u+0x14u); if(_q) std::memcpy(&_u14,_q,4); }
-                { uint8_t* _q=GP(0x84B1BC00u+0x04u); if(_q) std::memcpy(&_u4,_q,4); }
+        if ((_ip_scan_tick++ % 40) == 0) {
+          int _n = 0; _ip_readers[_n++] = 0x848FC368u;
+          for (uint32_t _a = 0x84600000u; _a < 0x85200000u && _n < 8; _a += 4u) {
+            uint32_t _v = 0; { uint8_t* _q = GP(_a); if (_q) std::memcpy(&_v, _q, 4); }
+            if (_v != 0x81540460u) continue;
+            uint32_t _rd = _a - 0x28u; uint32_t _bk = 0;
+            { uint8_t* _q = GP(_rd + 0xB0u); if (_q) std::memcpy(&_bk, _q, 4); }
+            if (_bk != _a) continue;
+            bool _dup = false; for (int _k = 0; _k < _n; ++_k) if (_ip_readers[_k] == _rd) { _dup = true; break; }
+            if (!_dup) { _ip_readers[_n++] = _rd; if (_ip_n < 20) { printf("[IOPUMP-READER] discovered reader=%08X blk=%u\n", _rd, g_blkcnt_total); fflush(stdout); } }
+          }
+          _ip_reader_n = _n;
+        }
+        int _cnt = 0; ++g_disp_depth;
+        for (int _ri = 0; _ri < _ip_reader_n; ++_ri) {
+          uint32_t _rd = _ip_readers[_ri];
+          for (int _i = 0; _i < 4; ++_i) {
+            uint32_t _stt = 0; { uint8_t* _q = GP(_rd + 0xBCu); if (_q) std::memcpy(&_stt, _q, 4); }
+            if (_stt != 1u) break;
+            call_guest_cb2(s, 0x8128D502u, _rd, 0u, 300000);
+            ++_cnt;
+            uint32_t _prog = 0; { uint8_t* _q = GP(_rd + 0xB0u); if (_q) std::memcpy(&_prog, _q, 4); }
+            uint32_t _pst = 0; if (_prog) { uint8_t* _q = GP(_prog + 0xCu); if (_q) std::memcpy(&_pst, _q, 4); }
+            if (_pst == 7u) {
+              uint32_t _dst = g_last_pread_dst;
+              if (_dst) {
+                uint32_t _magic = 0, _u4 = 0, _u14 = 0;
+                { uint8_t* _q = GP(_dst); if (_q) std::memcpy(&_magic, _q, 4); }
+                { uint8_t* _q = GP(_dst + 0x04u); if (_q) std::memcpy(&_u4, _q, 4); }
+                { uint8_t* _q = GP(_dst + 0x14u); if (_q) std::memcpy(&_u14, _q, 4); }
                 uint32_t _u14be = ((_u14 & 0xFFu) << 24) | ((_u14 & 0xFF00u) << 8) | ((_u14 >> 8) & 0xFF00u) | ((_u14 >> 24) & 0xFFu);
-                if (_u4 == 0xFFFFFFFFu && _u14be != 0u && _u14be < 0x800u) {
-                  uint32_t _ts = _u14be + 8u; uint32_t _flags = 0x000000FFu, _z = 0u;
-                  (void)_flags;
-                  // Keep +0x04 untouched: byte+4 is already 0xFF (skip CRI XOR) and the 0xFFFFFFFF marker may
-                  // select the 64-bit table layout used by the analyzer; only fix the table-size field at +0x08.
-                  { uint8_t* _q=GP(0x84B1BC00u); if(_q) { std::memcpy(_q+0x08u,&_ts,4); std::memcpy(_q+0x0Cu,&_z,4); } }
-                  if (_hf++ < 8) { printf("[HDRFIX] 64bit CPK header -> standard: old+8=%08X utf_size(BE)=%08X table_size=%08X flags=FF blk=%u\n", _u4, _u14be, _ts, g_blkcnt_total); fflush(stdout); }
+                if (_magic == 0x204B5043u && _u4 == 0xFFFFFFFFu && _u14be != 0u && _u14be < 0x800u) {
+                  uint32_t _ts = _u14be + 8u, _z = 0u;
+                  { uint8_t* _q = GP(_dst); if (_q) { std::memcpy(_q + 0x08u, &_ts, 4); std::memcpy(_q + 0x0Cu, &_z, 4); } }
+                  if (_ip_n < 20) { printf("[HDRFIX] dst=%08X utf_size(BE)=%08X table_size=%08X blk=%u\n", _dst, _u14be, _ts, g_blkcnt_total); fflush(stdout); }
                 }
-              } }
-            uint32_t _sz = call_guest_cb2(s, 0x8128F6C8u, _prog, 0u, 200000);
-            { uint8_t* _q = GP(0x848FC368u + 0x130u); if (_q) { uint32_t _v = _sz; std::memcpy(_q, &_v, 4); } }
-            { uint8_t* _q = GP(0x848FC368u + 0xBCu); if (_q) { uint32_t _v = 2u; std::memcpy(_q, &_v, 4); } }
-            if (_ip_n < 20) printf("[IOPUMP-DONE] state=7 size=%08X reader=%08X -> status=2 blk=%u\n", _sz, 0x848FC368u, g_blkcnt_total);
-            { uint32_t _addrs[3] = { 0x848E8EE8u, 0x84B1BA00u, 0x84B1BC00u };
-              for (int _a=0;_a<3;++_a) { uint8_t* _q = GP(_addrs[_a]); printf("[IODATA] %08X:", _addrs[_a]); if (_q) for (int _i=0;_i<8;++_i){ uint32_t _v=0; std::memcpy(&_v,_q+_i*4,4); printf(" %08X",_v);} printf("\n"); }
-              fflush(stdout); }
-            break;
+              }
+              uint32_t _sz = call_guest_cb2(s, 0x8128F6C8u, _prog, 0u, 200000);
+              { uint8_t* _q = GP(_rd + 0x130u); if (_q) { uint32_t _v = _sz; std::memcpy(_q, &_v, 4); } }
+              { uint8_t* _q = GP(_rd + 0xBCu); if (_q) { uint32_t _v = 2u; std::memcpy(_q, &_v, 4); } }
+              if (_ip_n < 30) { printf("[IOPUMP-DONE] reader=%08X state=7 size=%08X -> status=2 blk=%u\n", _rd, _sz, g_blkcnt_total); fflush(stdout); }
+              break;
+            }
           }
         }
         --g_disp_depth; pc = s->r[15];
-        if (_cnt && _ip_n++ < 60) { printf("[IOPUMP] drained=%d blk=%u ctx=%08X fib=%08X\n", _cnt, g_blkcnt_total, _ctx, g_cur_fiber); fflush(stdout); }
+        if (_cnt && _ip_n < 30) { printf("[IOPUMP] pumped=%d readers=%d blk=%u\n", _cnt, _ip_reader_n, g_blkcnt_total); fflush(stdout); }
       }
       _ip_skip: ;
     }

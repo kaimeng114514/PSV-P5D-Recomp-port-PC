@@ -1129,6 +1129,67 @@
 | M1111 | §18.4656: ★★★★★★★ **解密器注册链完全解码：progress 的 [0x20]/[0x21]（=reader+0xA8/+0xAC）由 FUN_8128EFF4(param1, cb, arg) 设置，数据来自 reader+0xF4/+0xF8（=reader+0xEC/+0xF0 的副本）；FUN_8128D716 在 blk 0x8128D9D0 无条件调用 FUN_8128EFF4(progress, reader+0xF4, reader+0xF8)。全对象写 watch（188 条 PROGWR）证明：reader+0xEC/+0xF0 在本运行中被 FUN_8128DEB4 初始化为 0，之后从未被置非零 → 游戏在本流程中从未给该 reader 注册解密器 → header 未解密 → Analyzer 报 broken。**
 | M1112 | §18.4657: ★★★★★★★ **HLE 头变换（HDRFIX）成功：把 64 位 CPK 头在内存中变换为标准头（+0x04=0xFF、+0x08=UTF表大小、+0x0C=0）后，Analyzer 的 `E2011022806:CPK is broken` 错误完全消失（CRILOG=0）！关键发现：CRI UTF 表字段是【大端序】（UTF+0x04 在内存中为 0x7A000000 → 大端 0x7A = 表大小-8）；变换后表大小=0x82。新卡点：分析继续推进后在 `blk 0x8129266E` 报 `BADMEM guest va=0x00000824`（某个小指针 0x820 未初始化）。**
 | M1113 | §18.4658: ★★★★★★★★★ **发现并修复 AOT 翻译器通用 bug：`LDRD rX,rY,[rX,#imm]`（基址寄存器=第一目标寄存器）被翻成"第一字读入 rX 后，第二字用被覆盖的新 rX 作基址"→ 读到错误地址。全库扫描命中 34 处（batch_000×7, batch_004×1, batch_005×1, batch_009×4, batch_018×2, batch_021×2, batch_023×15, batch_024×2），统一改为临时基址 `_ldrd_b`。修复后：BADMEM 归零、CPK 表读取解锁（新增 `PREAD off=2048 size=2048`）、游戏开始打开 `data.cpk`（第二个 CPK 挂载）！**
+| M1114 | §18.4659: ★★★★★★★ **错误调用点全部定位：`E06100301:Invalid IFF header` 来自 `FUN_812B074C`（CRI UTF Retriever/VITA Ver.1.00.02）——它期望大端 `@UTF`（0x40555446）；`E2009010913:Need more memory` 来自 CPK 分析器 `FUN_812938C6` 区（blk 0x81293978）。根因数据：vita.cpk 的 0x800 处是 `CRID` 段（@UTF 在 0x820），而 data.cpk 的 0x800 处是 `TOC ` 段（@UTF 在 0x810）——**vita.cpk 是"带 ID 表(CRID)的 CPK 变体"，TOC 段头长度不同**，Analyzer 按 32 位 CPK 的 0x10 字节段头解析 → 解析位置错 0x10 → four_cc 不匹配。另安装了**通用动态 reader 泵**（扫描 progress 对象签名 0x81540460 + reader+0xB0 反向指针），但本次运行只发现 1 个 reader（data.cpk 的新 reader 尚未创建/未进入）**
+m1176 证据（`out80m_m1176crilog2.txt`，CRILOG 已增强输出 lr/blk/fib）：
+```
+[CRILOG] at=81278F96 r1=81321264 r2=40555446 r3=000077DD lr=812B07E6 blk=812B07D8
+         msg=E06100301:Invalid IFF header (mismatched four_cc).
+[CRILOG] at=81279486 r1=8131D18C r2=8131D2A8 r3=8131D2A8 lr=81293988 blk=81293978
+         msg=E2009010913:CPK Analyzer::Need more memory. The heap user registrated is too small.%s
+[IOPUMP-DONE] reader=848FC368 state=7 size=848E8EE8 -> status=2 blk=31500/34500；size=00000000 blk=37500
+[HDRFIX] dst=84B1BC00 utf_size(BE)=0000007A table_size=00000082 blk=31500
+[IOPUMP-READER] 0（扫描未发现新 reader）
+[IO] OPEN vita.cpk fd=16385 size=2168403092；PREAD off=0 2048；PREAD off=2048 2048
+     OPEN data.cpk fd=16386 size=1913750232；PREAD off=0 2048
+[BADMEM]=0
+```
+**函数定位（function_bounds + 反编译）**：
+```
+0x812B07D8/0x812B07E6 -> FUN_812B074C (0x812B074C, size 460) = "CRI UTF Retriever/VITA Ver.1.00.02"
+  FUN_812B074C(param_1, param_2, ..., param_4, ..., param_6, param_7, param_8, param_9):
+    SceLibc_6DC1F0D8(param_1,0,0x60);
+    iVar2 = FUN_812B01F2(param_6, &local_48);       // 读取 u32 four_cc
+    if (local_48 == 0x40555446) {                    // ★ 期望大端 '@UTF'
+       if (param_7 < local_44 + 8) E06100311 "UTF header size error"
+       ... 解析 UTF 列/行 ...
+    } else { FUN_81278F96(0,"E06100301:Invalid IFF header (mismatched four_cc)."); param_1 = 0; }
+0x81293978/0x81293988 -> FUN_812938C6 (0x812938C6, size 262)（CPK 分析器区，计算/校验 work 大小）
+```
+**CPK 变体对照（关键数据结构差异）**：
+```
+vita.cpk（2,168,403,092B）：
+  0x0000  'CPK ' + FFFFFFFF + u64 filesize(0x813F3494) + 0
+  0x0010  '@UTF'（头表）
+  0x0800  'CRID' + 0x7F8 大小 + ...        ← ★ TOC 段是 "CRID"（ID 表）而不是 "TOC "
+  0x0820  '@UTF'                            ← CRID 段内的 UTF（段头 0x20 字节）
+  0x1020, 0x1220, 0x13A0 '@UTF'（更多子表）
+data.cpk（1,913,750,232B，正常 32 位 CPK）：
+  0x0000  'CPK ' + 000000FF + 00000350 + 0
+  0x0010  '@UTF'（头表）
+  0x0800  'TOC ' + FF000000...（段头 0x10 字节）
+  0x0810  '@UTF'
+```
+**⇒ 分析**：
+- Analyzer 读到 `TocOffset=0x800` → 读 0x800 处数据 → 按 32 位 CPK 规则在 **+0x10** 处找 @UTF；但 vita 的 @UTF 在 **+0x20**（CRID 段头更大）→ FUN_812B074C 读到非 @UTF → four_cc 错误
+- vita.cpk 属于"带 ID 表(CRID)"的 CPK 变体（字符串证据：`CpkIdAccessTable`、`E2011010302:No Cpk Binder`、`W2011010401:CpkIdAccessTable::CPK without ID information.`）——正常流程应先识别/跳过 CRID 段
+- `Need more memory`：CPK 分析器 FUN_812938C6 区请求 user heap 失败（请求大小或 HLE user heap 上限问题）
+**NEXT**：
+```
+① 在 FUN_812B074C 入口加探针：打印 param_6（UTF 指针）指向的前 16 字节 + 参数，确认被解析的位置（预期是 CRID 数据而非 @UTF）
+② 解析 vita.cpk 的 CRID 段（0x800 起）：'CRID' + size 0x7F8 + 后续指针/UTF —— 弄清其结构（可能是 CPK ID 表 + TOC 偏移表）
+③ 尝试把 HDRFIX 扩展：若 TocOffset 处是 CRID，则把段头"标准化"成 TOC 段（如把 0x800 处 0x10 字节改成 'TOC ' 头并让 @UTF 落在 +0x10），或改 @UTF 位置对齐
+④ 查 E2009010913：探针 FUN_812938C6 入口/请求的 work size，确定 user heap 需要多大；必要时 HLE 增大 user heap
+⑤ 动态 reader 泵继续完善（data.cpk 新 reader 何时创建）
+⑥ 目标：TOC 解析成功 → Analyzer state=0x1A → mount status=2 → 文件索引 → title 素材
+```
+验证：`out80m_m1176crilog2.txt`、`errfun.txt`、`_p_iopump_dyn_1132.py`。 |
+| §18.4659 | All error call sites located: E06100301:Invalid IFF header comes from FUN_812B074C (CRI UTF Retriever/VITA Ver.1.00.02) which expects the big-endian @UTF (0x40555446); E2009010913:Need more memory comes from the CPK analyzer region FUN_812938C6 (blk 0x81293978). Root-cause data: vita.cpk has a CRID section at 0x800 (with @UTF at 0x820), while data.cpk has a TOC section at 0x800 (with @UTF at 0x810) - vita.cpk is a CPK variant with an ID table (CRID), and its TOC section header is longer (0x20); the Analyzer parses with the 32-bit CPK 0x10-byte section header, so it looks at 0x810, which is CRID data -> four_cc mismatch. Also installed a general dynamic reader pump (scans for the progress-object signature 0x81540460 plus the reader+0xB0 back-pointer), but this run only found 1 reader (the data.cpk reader was not created/entered yet). '
+       'm1176 evidence (out80m_m1176crilog2.txt, CRILOG now prints lr/blk/fib): [CRILOG] at=81278F96 r1=81321264 r2=40555446 r3=000077DD lr=812B07E6 blk=812B07D8 msg=E06100301:Invalid IFF header (mismatched four_cc).; [CRILOG] at=81279486 r1=8131D18C r2=8131D2A8 r3=8131D2A8 lr=81293988 blk=81293978 msg=E2009010913:CPK Analyzer::Need more memory. The heap user registrated is too small.%s; [IOPUMP-DONE] reader=848FC368 state=7 size=848E8EE8 -> status=2 blk=31500/34500, size=00000000 blk=37500; [HDRFIX] dst=84B1BC00 utf_size(BE)=0000007A table_size=00000082 blk=31500; [IOPUMP-READER] 0 (scan found no new reader); [IO] OPEN vita.cpk fd=16385 size=2168403092, PREAD off=0 2048, PREAD off=2048 2048, OPEN data.cpk fd=16386 size=1913750232, PREAD off=0 2048; [BADMEM]=0. '
+       'Function locations (function_bounds + decompile): 0x812B07D8/0x812B07E6 -> FUN_812B074C (size 460) = CRI UTF Retriever/VITA Ver.1.00.02: SceLibc_6DC1F0D8(param_1,0,0x60); iVar2 = FUN_812B01F2(param_6, &local_48) reads the u32 four_cc; if (local_48 == 0x40555446) (expects big-endian @UTF) { if (param_7 < local_44 + 8) E06100311 UTF header size error; ... parse UTF columns/rows ... } else { FUN_81278F96(0, E06100301:Invalid IFF header (mismatched four_cc).); param_1 = 0; }. 0x81293978/0x81293988 -> FUN_812938C6 (size 262) (CPK analyzer region, computes/validates work size). '
+       'CPK variant comparison (key structure difference): vita.cpk (2,168,403,092B): 0x0000 CPK + FFFFFFFF + u64 filesize(0x813F3494) + 0; 0x0010 @UTF (header table); 0x0800 CRID + 0x7F8 size + ... (its TOC section is CRID (ID table) not TOC ); 0x0820 @UTF (UTF inside the CRID section, section header 0x20 bytes); 0x1020, 0x1220, 0x13A0 more @UTF. data.cpk (1,913,750,232B, normal 32-bit CPK): 0x0000 CPK + 000000FF + 00000350 + 0; 0x0010 @UTF; 0x0800 TOC + FF000000... (section header 0x10 bytes); 0x0810 @UTF. '
+       'Analysis: the Analyzer reads TocOffset=0x800 -> reads the data at 0x800 -> by 32-bit CPK rules looks for @UTF at +0x10; but vita has @UTF at +0x20 (CRID section header is bigger) -> FUN_812B074C reads non-@UTF -> four_cc error. vita.cpk belongs to the CPK-with-ID-table (CRID) variant (string evidence: CpkIdAccessTable, E2011010302:No Cpk Binder, W2011010401:CpkIdAccessTable::CPK without ID information.) - the normal flow should first recognize/skip the CRID section. Need more memory: the CPK analyzer FUN_812938C6 region fails a user-heap request (request size or HLE user heap limit). '
+       'NEXT: (1) probe the FUN_812B074C entry: print the first 16 bytes at param_6 and the args to confirm the position being parsed (expected CRID data, not @UTF); (2) parse the CRID section at vita.cpk 0x800 (CRID + size 0x7F8 + following pointers/UTF) and understand its layout (likely a CPK ID table + TOC offset table); (3) extend HDRFIX: if the TocOffset region is CRID, normalize the section header into a TOC section (e.g., rewrite the first 0x10 bytes at 0x800 as a TOC header so that @UTF lands at +0x10), or align the @UTF position; (4) investigate E2009010913: probe FUN_812938C6 entry and the requested work size, and enlarge the HLE user heap if needed; (5) keep improving the dynamic reader pump (when is the new data.cpk reader created); (6) target: TOC parse succeeds -> Analyzer state=0x1A -> mount status=2 -> file index -> title assets. '
+       'Verification: out80m_m1176crilog2.txt, errfun.txt, _p_iopump_dyn_1132.py. |
 m1174 证据（`out80m_m1174ldrd.txt`）：
 ```
 [BADMEM] 0                                              ← BADMEM va=0x824 彻底消失
@@ -501279,3 +501340,50 @@ NEXT：
 ANTI-FORGETTING ENTRY. Keywords: M1113 AOT translator bug LDRD fixed (34 occurrences), LDRD rX,rY,[rX,#imm] base register overwritten before second word load -> wrong address; temp base _ldrd_b patch across batch_000 x7, batch_004 x1, batch_005 x1, batch_009 x4, batch_018 x2, batch_021 x2, batch_023 x15, batch_024 x2. After fix: BADMEM=0 (the 0x824 fault disappeared; it was exactly [0x84B1B878 content=0x800]+0x24), CPK table reading unblocked (new PREAD fd=16385 off=2048 size=2048 got=2048), the game started opening data.cpk (OPEN app0:/data/data.cpk fd=16386 size=1913750232 + PREAD off=0 size=2048). m1174 evidence: [BADMEM] 0; [IO] OPEN vita.cpk size=2168403092, PREAD off=0 2048, PREAD off=2048 2048, OPEN data.cpk size=1913750232, PREAD off=0 2048; [HDRFIX] x3; [IOPUMP-DONE] x3; [CRILOG] E06100301:Invalid IFF header (mismatched four_cc) x3 r2=40555446 (@UTF BE) r3=000077DD; [CRILOG] E2009010913:CPK Analyzer::Need more memory. The heap user registrated is too small.%s x3; [MNTST] obj=84906480 stage=4 status=1; [INDIRECT-MISS]=0 [HARNESS]=0. New blockers: CPK table data (offset 2048) parsed as IFF/UTF with mismatched four_cc -> table data may be encrypted, or the 64-bit CPK table structure differs from the 32-bit one; CPK analysis user heap too small (E2009010913) -> HLE user heap size/allocation needs fixing; MNTST still stage=4 status=1 (vita.cpk flow advancing or parallel data.cpk). NEXT: inspect vita.cpk offset 2048 for 2048B (encrypted? compare with data.cpk table structure); find where E2009010913 triggers (user heap malloc return, allocation size computation); if the table is encrypted determine the 64-bit CPK table encryption; make IOPUMP get the new reader dynamically (data.cpk mount creates a new reader); analysis passes -> state=0x1A -> mount status=2 -> data.cpk -> file index -> title assets; run full regression to confirm the LDRD fixes have no side effects (BADMEM=0 and INDIRECT-MISS=0 already achieved). Verification: out80m_m1174ldrd.txt, _fix_ldrd_1131.py.
 
 LOOKUP: M1113 LDRD translator bug fixed 34 occurrences, temp base _ldrd_b, BADMEM 0, PREAD off=2048 second chunk, OPEN data.cpk, HDRFIX x3, E06100301 Invalid IFF header mismatched four_cc 40555446, E2009010913 CPK Analyzer Need more memory user heap too small, MNTST stage=4 status=1, next inspect table data at 2048 and user heap size -> §18.4657 [relevant: HDRFIX], §18.4656 [relevant: decryptor], §18.4654 [relevant: pump]
+### 18.4659 PORT M1114: 错误调用点定位（IFF=CRI UTF Retriever / 内存=CPK 分析器）；vita.cpk 是带 CRID(ID表)段的 CPK 变体
+
+1) CRILOG 增强后调用点：
+```
+[CRILOG] at=81278F96 ... lr=812B07E6 blk=812B07D8 msg=E06100301:Invalid IFF header (mismatched four_cc).
+[CRILOG] at=81279486 ... lr=81293988 blk=81293978 msg=E2009010913:CPK Analyzer::Need more memory...(user heap too small)
+```
+2) 函数定位与反编译：
+```
+0x812B074C (460B) = "CRI UTF Retriever/VITA Ver.1.00.02"
+  iVar2 = FUN_812B01F2(param_6,&local_48);   // 读 four_cc
+  if (local_48 == 0x40555446) {              // ★ 期望大端 '@UTF'
+     if (param_7 < local_44+8) E06100311 "UTF header size error"
+     ... 解析 UTF 列/行 ...
+  } else { E06100301:Invalid IFF header (mismatched four_cc) }
+0x812938C6 (262B) = CPK 分析器 work 大小校验/请求区
+```
+3) CPK 变体对照：
+```
+vita.cpk:  0x0000 'CPK ' FFFFFFFF u64filesize 0
+           0x0010 '@UTF'（头表）
+           0x0800 'CRID' 0x7F8 ...      ← ★ TOC 段 = CRID（ID 表），段头 0x20
+           0x0820 '@UTF'                 ← CRID 内 UTF
+           0x1020/0x1220/0x13A0 '@UTF'
+data.cpk:  0x0000 'CPK ' 000000FF 00000350 0
+           0x0010 '@UTF'
+           0x0800 'TOC ' FF000000 ...   ← 段头 0x10
+           0x0810 '@UTF'
+```
+4) 结论：
+- Analyzer 按 32 位 CPK 规则在段内 +0x10 找 @UTF；vita 的 @UTF 在 +0x20 → four_cc 错误
+- vita.cpk 是"带 ID 表(CRID)"的 CPK 变体（字符串：CpkIdAccessTable / No Cpk Binder / CPK without ID information）
+- Need more memory：CPK 分析器请求 user heap 失败（请求大小/HLE user heap 上限）
+5) NEXT：
+```
+① FUN_812B074C 入口探针：打印 param_6 前 16 字节 + 参数（确认解析位置是 CRID 而非 @UTF）
+② 解析 vita.cpk CRID 段结构（0x800 起：CRID+size0x7F8+指针/UTF）
+③ 扩展 HDRFIX：把 CRID 段头标准化为 TOC 段头（或对齐 @UTF 到 +0x10）
+④ 查 E2009010913：探针 FUN_812938C6 请求的 work size；必要时增大 HLE user heap
+⑤ 动态 reader 泵完善（data.cpk 新 reader）
+⑥ 目标：TOC 解析成功 → state=0x1A → mount status=2 → 文件索引 → title 素材
+```
+验证：`out80m_m1176crilog2.txt`、`errfun.txt`。
+
+ANTI-FORGETTING ENTRY. Keywords: M1114 error call sites located, E06100301 Invalid IFF header from FUN_812B074C (CRI UTF Retriever/VITA Ver.1.00.02) which expects big-endian @UTF (0x40555446), E2009010913 Need more memory from CPK analyzer FUN_812938C6 (blk 0x81293978); vita.cpk has CRID section at 0x800 (with @UTF at 0x820) while data.cpk has TOC section at 0x800 (with @UTF at 0x810) -> vita.cpk is a CPK variant with an ID table (CRID) and a longer section header (0x20); the Analyzer uses the 32-bit CPK 0x10-byte section header so it looks at 0x810 (CRID data) -> four_cc mismatch. Also installed a general dynamic reader pump (scans progress-object signature 0x81540460 + reader+0xB0 back-pointer) but only 1 reader was found (data.cpk reader not created yet). m1176 evidence: [CRILOG] at=81278F96 r1=81321264 r2=40555446 r3=000077DD lr=812B07E6 blk=812B07D8 msg=E06100301:Invalid IFF header (mismatched four_cc).; [CRILOG] at=81279486 r1=8131D18C r2=8131D2A8 r3=8131D2A8 lr=81293988 blk=81293978 msg=E2009010913:CPK Analyzer::Need more memory. The heap user registrated is too small.%s; [IOPUMP-DONE] x3 reader=848FC368; [HDRFIX] dst=84B1BC00 table_size=0x82; [IOPUMP-READER] 0; [IO] OPEN vita.cpk size=2168403092, PREAD 0/2048, PREad 2048/2048, OPEN data.cpk size=1913750232, PREAD 0/2048; [BADMEM]=0. Function locations: FUN_812B074C = CRI UTF Retriever/VITA Ver.1.00.02: FUN_812B01F2(param_6,&local_48) reads four_cc; if (local_48==0x40555446) parse UTF else E06100301. FUN_812938C6 (CPK analyzer work-size validation). CPK variant comparison: vita.cpk 0x0000 CPK + FFFFFFFF + u64 filesize 0x813F3494; 0x0010 @UTF; 0x0800 CRID + 0x7F8 + ...; 0x0820 @UTF; 0x1020/0x1220/0x13A0 @UTF. data.cpk 0x0000 CPK + 000000FF + 00000350; 0x0010 @UTF; 0x0800 TOC + FF000000...; 0x0810 @UTF. Analysis: Analyzer reads TocOffset=0x800 then looks for @UTF at +0x10 per 32-bit CPK, but vita has it at +0x20 -> four_cc error; vita.cpk is the CPK-with-ID-table (CRID) variant (CpkIdAccessTable / No Cpk Binder / CPK without ID information strings); need more memory = CPK analyzer's user-heap request fails. NEXT: probe FUN_812B074C entry (print first 16 bytes at param_6) to confirm the parsed position; parse vita.cpk CRID section at 0x800 (CRID + size 0x7F8 + pointers/UTF); extend HDRFIX to normalize the CRID section header into a TOC header or align @UTF to +0x10; investigate E2009010913 (probe FUN_812938C6 requested work size, enlarge HLE user heap if needed); improve the dynamic reader pump; target: TOC parse succeeds -> state=0x1A -> mount status=2 -> file index -> title assets. Verification: out80m_m1176crilog2.txt, errfun.txt, _p_iopump_dyn_1132.py.
+
+LOOKUP: M1114 IFF error call site FUN_812B074C CRI UTF Retriever VITA expects @UTF big-endian 40555446, memory error FUN_812938C6 CPK analyzer work size, vita.cpk CRID section at 0x800 @UTF at 0x820, data.cpk TOC at 0x800 @UTF 0x810, section header 0x10 vs 0x20, CpkIdAccessTable, dynamic reader pump progress signature 0x81540460, next probe FUN_812B074C entry and CRID structure -> §18.4658 [relevant: LDRD fix], §18.4657 [relevant: HDRFIX], §18.4656 [relevant: decryptor]
