@@ -1112,6 +1112,40 @@
 | M1094 | §18.4639: ★★★★★★★★★ **找到 criFs_Initialize 无效的两个技术原因并修复：(1) `call_guest_cb2` 的内层调度循环遇到 **HLE stub** 时直接 `break`（主循环有 hle_call 回退，嵌套调用没有）——criFs_Initialize 内部任何 HLE 调用都会导致其中途退出；(2) `call_guest_cb2` 只设置 r0/r1，不设置 **r2**，而 criFs_Initialize(param_1=work, param_2, param_3) 的参数 3 是工作缓冲大小——r2 为垃圾值会走 else 分支并报 "E2009071603:Insufficient buffer size."，随后 finalize 把 FECC 清 0。m1137 `[CRIFST] criFsInitFECC=00000000 loaderB8=00000000` 正是"初始化失败并被回滚"的确证。M1094 修复：嵌套循环加 HLE 回退 + 新增 `call_guest_cb3(r0,r1,r2)`，强制 criFs_Initialize 与 CRIFSHLE2 都用 cb3(0,0,0) 调用。**
 | M1095 | §18.4640: ★★★★★★★★★★★★ **criFs 初始化修复验证成功，运行进入全新稳态：首次稳定越过全部旧崩溃点（n=69.2M，旧崩溃 64.28M），帧计数 ctr=446（此前最高 221），**标题页场景对象首次创建（[SCENE] p=85A8EA70 / 85A8F190，不再是 logo 的 859BF220/859BF940）**，CRI loader 活跃（[FIOSW] 带 loader 句柄 84D8EA68/84D8ECC0），真实 movie 文件成功打开（[IO] OPEN 'movie/c_p5d000.usm' size=54,432,288）。下一层：CRI 资源读取（ACB 音频等）与场景视图/GXM 绘制。**
 | M1096 | §18.4641: ★★★★★★★ **找到 CRI 资源读取失败的时序根因，并发现两个新线索：(1) CPK 挂载函数 `FUN_811820B6` 在 **n=1717** 就被调用（挂载 vita.cpk + data.cpk：FUN_81286EC4=criFsBinder 挂载、FUN_81287BBA 等待、FUN_8128853E 绑定），但我们的 HLE 强制 criFs_Initialize 在 **n=5000** 才执行——挂载早于库初始化，必然失败，导致后续 sound/*.acb、sound/common.acf 全部打不开；(2) 把初始化提前到 n=1000（m1139）又太早：游戏自己的 CRI allocator 设置流程还没走完，出现 `E2009072402:Can not change allocator. Allocated memory is still active.`（×多次），随后 BADMEM va=0x38 @0x8127B37A 崩溃（n=15524）。⇒ 需要精确的初始化时机，或者**让游戏自己的初始化流程完成**（boot 流程经过多轮修复后可能已能自然走到 CRI 初始化）。**
+| M1097 | §18.4642: ★★★★★★★ **关键实验 m1140：完全不设 P5D_CRIFSHLE（去掉 HLE 强制初始化），让游戏自己的 boot 流程完成 criFs 初始化与 CPK 挂载。基于 M1096 的新线索（allocator 错误信息证明游戏自身 CRI 初始化在 n=1717 附近运行；且经过 M1068~M1095 修复后 boot 流程已大幅健康化）。**
+**M1096 已确认的时序问题回顾**：
+- CPK 挂载函数 `FUN_811820B6` 在 **n=1717** 执行（挂载 vita.cpk + data.cpk，经 FUN_81286EC4=criFsBinder 挂载、FUN_81287BBA 等待、FUN_8128853E 绑定；两个 CPK 名字表在 0x813AFF70="vita.cpk"、0x813B0074="data.cpk"）
+- 强制初始化 n=5000 → **太晚**（挂载已失败 → sound/*.acb、sound/common.acf 全部打不开）
+- 强制初始化 n=1000 → **太早**（与游戏自己的 CRI allocator 设置冲突：`E2009072402/E2009072404:Can not change allocator. Allocated memory is still active.` → BADMEM va=0x38 @0x8127B37A，n=15524）
+- **新线索**：allocator 错误发生在 n=1717 = 游戏自己的 CRI 初始化流程正在运行
+**m1140 实验设置**：
+```
+env（与 m1138 相同，但完全移除 CRIFS 相关）：
+P5D_NESTED_UNTIL=1500000 P5D_GXMABI=1 P5D_NOSCHEDRUN=1 P5D_GETSELFFIX=1 P5D_FASTSLEEP=1
+P5D_THRYIELD=1 P5D_PERIODPUMP=1 P5D_VTIME=1 P5D_P1TICK=1 P5D_RINIT=1
+P5D_OTFORCE=1 P5D_STEPFORCE=1 P5D_NOMOVIE=1
+P5D_FORCETITLE=1 P5D_FIOSFILL=1 P5D_WAITFORCE=1 P5D_SCNFORCE=1
+P5D_THRPUMP=1 P5D_PUMPMAIN=1 P5D_POSTMAIN=1
+（不设 P5D_CRIFSHLE / P5D_CRIFSHLE_AT / P5D_CRIFSHLE2_AT）
+recomp_harness.exe 0x81198464 300000000 > out80m_m1140noforced.txt
+```
+**观察目标**：
+```
+① 游戏自己的 criFs 初始化是否执行：查找 [CRILOG] 中 criFs_Initialize 相关消息、
+   或 [FIOSX] at=8128399E（criFs_Initialize 入口）
+② CPK 挂载结果（n=1717 附近）：[FIOSX] at=811820B6 / 81286EC4；
+   guest criFs 是否成功（[FIOS] 日志/文件打开成功）
+③ ACB/ACF 打开失败是否消失（E2010052670/E2010052671 是否不再出现）
+④ 是否出现 title 素材读取 → [SCENE] 视图注册（head0F 非空）→ GXM 绘制
+⑤ 若游戏自身初始化不完整：定位缺失步骤（对比正常 boot 应有的 allocator 设置/初始化调用链）
+备选方案（若 m1140 失败）：
+- 在 n=1200-1600 之间强制初始化（allocator 设置完成后、CPK 挂载前）
+- 或 HLE 拦截 criFs_SetAllocator（E2009072402 源头）让游戏自己的 allocator 设置成功
+验证：`out80m_m1140noforced.txt`（生成中）、M1096 的 cpkmount.txt / cpk_refs.txt、m1138/m1139 日志。 |
+| §18.4642 | KEY experiment m1140: completely unset P5D_CRIFSHLE (remove the HLE-forced init) and let the game's own boot flow complete the criFs initialization and CPK mount, based on M1096's new clue (the allocator errors prove the game's own CRI init flow runs around n=1717, and after the M1068..M1095 fixes the boot flow is much healthier). M1096 recap: the CPK mount FUN_811820B6 runs at n=1717 (mounts vita.cpk + data.cpk via FUN_81286EC4=criFsBinder mount, FUN_81287BBA wait, FUN_8128853E bind; the two CPK name tables are at 0x813AFF70='vita.cpk' and 0x813B0074='data.cpk'); forced init at n=5000 is TOO LATE (mount already failed -> all sound/*.acb and sound/common.acf fail to open); forced init at n=1000 is TOO EARLY (conflicts with the game's own CRI allocator setup: E2009072402/E2009072404:Can not change allocator. Allocated memory is still active. -> BADMEM va=0x38 at 0x8127B37A, n=15524); the allocator errors happen at n=1717 = the game's own CRI init flow is running. '
+       'm1140 setup: env same as m1138 but with all CRIFS variables removed - P5D_NESTED_UNTIL=1500000 P5D_GXMABI=1 P5D_NOSCHEDRUN=1 P5D_GETSELFFIX=1 P5D_FASTSLEEP=1 P5D_THRYIELD=1 P5D_PERIODPUMP=1 P5D_VTIME=1 P5D_P1TICK=1 P5D_RINIT=1 P5D_OTFORCE=1 P5D_STEPFORCE=1 P5D_NOMOVIE=1 P5D_FORCETITLE=1 P5D_FIOSFILL=1 P5D_WAITFORCE=1 P5D_SCNFORCE=1 P5D_THRPUMP=1 P5D_PUMPMAIN=1 P5D_POSTMAIN=1 (no P5D_CRIFSHLE/P5D_CRIFSHLE_AT/P5D_CRIFSHLE2_AT); recomp_harness.exe 0x81198464 300000000 > out80m_m1140noforced.txt. '
+       'Watch targets: (1) whether the game itself executes the criFs init (look for [CRILOG] criFs_Initialize messages or [FIOSX] at=8128399E criFs_Initialize entry); (2) CPK mount result around n=1717 ([FIOSX] at=811820B6 / 81286EC4; whether guest criFs succeeds - [FIOS] logs / successful file opens); (3) whether the ACB/ACF open failures disappear (E2010052670/E2010052671); (4) whether title asset reads appear -> [SCENE] view registrations (head0F non-empty) -> GXM draws; (5) if the game's own init is incomplete, locate the missing steps (compare with the normal boot allocator setup/init call chain). Fallback options: force init between n=1200-1600 (after allocator setup, before CPK mount); or HLE-intercept criFs_SetAllocator (the E2009072402 source) so the game's own allocator setup succeeds. '
+       'Verification: out80m_m1140noforced.txt (running), cpkmount.txt/cpk_refs.txt from M1096, m1138/m1139 logs. |
 m1138（`out80m_m1138crifs3.txt`）证据（挂载早于初始化）：
 ```
 [FIOSX] #1 at=811820B6 n=1717 r0=849FD140 r1=812F23C8 r2=8156A6B4 r3=8118321D   ← ★ CPK 挂载函数被调用
@@ -499632,3 +499666,36 @@ done: iVar3++; piVar5 += 0x41; pcVar4 += 0x104;
 ANTI-FORGETTING ENTRY. Keywords: M1096 two timing clues for CRI asset loading - (1) the CPK mount function FUN_811820B6 runs at n=1717 (mounts vita.cpk + data.cpk via FUN_81286EC4 criFsBinder mount + FUN_81287BBA wait + FUN_8128853E bind) but the HLE-forced criFs_Initialize only runs at n=5000, so the mount happens before library init and must fail, making all later sound/*.acb and sound/common.acf opens fail; (2) moving init to n=1000 (m1139) is too early: the game's own CRI allocator setup has not completed, producing E2009072402:Can not change allocator. Allocated memory is still active. (multiple) and E2009072404, then BADMEM va=0x38 at 0x8127B37A (n=15524). So an exact timing is needed, or better let the game's own init flow complete. m1138 evidence: [FIOSX] #1 at=811820B6 n=1717 r0=849FD140 r1=812F23C8 r2=8156A6B4 r3=8118321D; [FIOSX] #4 at=81286EC4 n=1717 r0=0 r1=0 r2=848562D0 r3=0; [CRIFSHLE] criFs_Initialize(NULL,0,0) -> 0 n=5000; [CRILOG] n=1717 E2010052671:Can not open ACF file (path = sound/common.acf); [CRILOG] n=59668119 E2010052670:Can not open ACB file (sound/bgm/p5d_bgm.acb); [FIOS] mounted data.cpk files=10555 / vita.cpk files=531. CPK mount function decompile (FUN_811820B6): FUN_812859FA(&DAT_813B0174); piVar5=&DAT_813AFF6C; iVar3=0; pcVar4=s_vita_cpk_813AFF70 ('vita.cpk'); do { uVar1=FUN_81199D7E(); uVar2=FUN_81199D8A(); SceLibc_7449B359(stack,'%s%s/%s',uVar1,uVar2,pcVar4); FUN_81207402(DAT_8156A6C0,0); FUN_81286EC4(DAT_813B0174,0,stack,0,0,&h); if (h) { while(1){ FUN_81287BBA(h,&st); if(st==2) break; if(st==6){ FUN_8128782A(h); goto done; } FUN_81207454(DAT_8156A6C0,1); FUN_8120760C(10000); } FUN_81207454(DAT_8156A6C0,1); if(h && *piVar5!=-1) FUN_8128853E(h,*piVar5); } done: iVar3++; piVar5+=0x41; pcVar4+=0x104; if(iVar3>1) return; } while(true); } - two CPKs vita.cpk (0x813AFF70) + data.cpk (0x813B0074). m1139 (P5D_CRIFSHLE_AT=1000) evidence: [CRILOG] at=81278F96 n=1717 E2009072402:Can not change allocator. Allocated memory is still active. (multiple) and E2009072404; [LEAK] block=8123F04C sp 84856318->848561F8 delta=-288; [SNAP] blk=8127B37A r0=0 r1=100000E4 r2=16 r4=8153FB18 r13=848561E8 r14=812619DA; [BADMEM] guest va=0x38 unmapped block=0x8127B37A tid=0 stub=812B2260; [WD] pcring 8125CF44 8125CF52 812619CA 8127B37A. Analysis: (1) game boot at n=1717 does CPK mount first (requires criFs initialized); (2) forced init n=5000 too late -> mount fails -> assets unreadable; (3) n=1000 too early -> conflict with the game's own CRI allocator setup -> BADMEM va=0x38; (4) key new clue: the allocator errors show the game's own CRI init flow IS running around n=1717, so after the many fixes (M1068..M1095) the boot flow may now naturally complete the game's own CRI init, removing the need for the forced init. NEXT (highest priority): (1) run with P5D_CRIFSHLE completely unset and let the game's own boot flow do the criFs init (~n=1717), watching [FIOS] mount results, whether ACB/ACF open failures disappear, and whether title asset reads + scene view registrations appear; (2) if the game's own init is incomplete analyze its missing steps (allocator setup call chain); (3) fallback: force init between n=1200-1600 (after allocator setup, before mount); (4) once assets are in place criFs reads title assets -> 2D context/views -> array2 -> per-frame GXM -> picture; (5) record that criFs init timing relative to the game's boot CRI flow is the key to CPK mount success.
 
 LOOKUP: M1096 CPK mount FUN_811820B6 n=1717 vs forced criFs_Initialize n=5000 timing, [FIOSX] at=811820B6, [FIOSX] at=81286EC4 criFsBinder mount, FUN_81287BBA wait FUN_8128853E bind, vita.cpk 0x813AFF70 data.cpk 0x813B0074, ACB/ACF failures E2010052670 E2010052671, m1139 P5D_CRIFSHLE_AT=1000 too early allocator conflict E2009072402 E2009072404 BADMEM va=0x38 0x8127B37A stub 812B2260, next experiment run WITHOUT P5D_CRIFSHLE to let the game's own CRI init complete, fallback n=1200-1600 -> §18.4640 [relevant: criFs fix verified], §18.4639 [relevant: criFs init fix], §18.4638 [relevant: criFs chain]
+### 18.4642 PORT M1097: 关键实验 m1140——去掉 HLE 强制初始化，让游戏自己的 boot 流程完成 criFs 初始化与 CPK 挂载
+
+1) M1096 时序问题回顾：
+- CPK 挂载 FUN_811820B6 在 n=1717（vita.cpk + data.cpk，经 FUN_81286EC4=criFsBinder 挂载、FUN_81287BBA 等待、FUN_8128853E 绑定；名字表 0x813AFF70="vita.cpk"、0x813B0074="data.cpk"）
+- 强制初始化 n=5000 → 太晚（挂载失败 → ACB/ACF 全部打不开）
+- 强制初始化 n=1000 → 太早（与游戏自身 CRI allocator 设置冲突：E2009072402/E2009072404 → BADMEM va=0x38 @0x8127B37A，n=15524）
+- allocator 错误在 n=1717 = **游戏自身 CRI 初始化流程正在运行**
+2) m1140 实验设置（env 同 m1138，去掉所有 CRIFS 变量）：
+```
+P5D_NESTED_UNTIL=1500000 P5D_GXMABI=1 P5D_NOSCHEDRUN=1 P5D_GETSELFFIX=1 P5D_FASTSLEEP=1
+P5D_THRYIELD=1 P5D_PERIODPUMP=1 P5D_VTIME=1 P5D_P1TICK=1 P5D_RINIT=1
+P5D_OTFORCE=1 P5D_STEPFORCE=1 P5D_NOMOVIE=1
+P5D_FORCETITLE=1 P5D_FIOSFILL=1 P5D_WAITFORCE=1 P5D_SCNFORCE=1
+P5D_THRPUMP=1 P5D_PUMPMAIN=1 P5D_POSTMAIN=1
+（不设 P5D_CRIFSHLE / P5D_CRIFSHLE_AT / P5D_CRIFSHLE2_AT）
+```
+3) 观察目标：
+```
+① 游戏自己是否执行 criFs 初始化（[CRILOG] 相关消息 / [FIOSX] at=8128399E）
+② CPK 挂载结果（[FIOSX] at=811820B6 / 81286EC4，guest criFs 是否成功）
+③ ACB/ACF 打开失败是否消失（E2010052670/E2010052671）
+④ title 素材读取 → [SCENE] 视图注册（head0F 非空）→ GXM 绘制
+⑤ 若自身初始化不完整 → 定位缺失步骤
+```
+4) 备选：
+- n=1200-1600 强制初始化
+- HLE 拦截 criFs_SetAllocator（E2009072402 源头）让游戏自身 allocator 设置成功
+5) 验证运行 `out80m_m1140noforced.txt` 已启动（maxb=300M）
+验证：`out80m_m1140noforced.txt`（生成中）、`cpkmount.txt`、`cpk_refs.txt`、m1138/m1139 日志。
+
+ANTI-FORGETTING ENTRY. Keywords: M1097 key experiment m1140 - completely unset P5D_CRIFSHLE (remove the HLE-forced init) and let the game's own boot flow complete the criFs initialization and CPK mount. Context from M1096: CPK mount FUN_811820B6 runs at n=1717 (mounts vita.cpk + data.cpk via FUN_81286EC4=criFsBinder mount, FUN_81287BBA wait, FUN_8128853E bind; CPK name tables at 0x813AFF70='vita.cpk' and 0x813B0074='data.cpk'); forced init at n=5000 is too late (mount already failed -> all sound/*.acb and sound/common.acf fail to open with E2010052670/E2010052671); forced init at n=1000 is too early (conflicts with the game's own CRI allocator setup: E2009072402/E2009072404:Can not change allocator. Allocated memory is still active. -> BADMEM va=0x38 at 0x8127B37A, n=15524); the allocator errors at n=1717 prove the game's own CRI init flow is running. m1140 env: P5D_NESTED_UNTIL=1500000 P5D_GXMABI=1 P5D_NOSCHEDRUN=1 P5D_GETSELFFIX=1 P5D_FASTSLEEP=1 P5D_THRYIELD=1 P5D_PERIODPUMP=1 P5D_VTIME=1 P5D_P1TICK=1 P5D_RINIT=1 P5D_OTFORCE=1 P5D_STEPFORCE=1 P5D_NOMOVIE=1 P5D_FORCETITLE=1 P5D_FIOSFILL=1 P5D_WAITFORCE=1 P5D_SCNFORCE=1 P5D_THRPUMP=1 P5D_PUMPMAIN=1 P5D_POSTMAIN=1, NO P5D_CRIFSHLE/P5D_CRIFSHLE_AT/P5D_CRIFSHLE2_AT; recomp_harness.exe 0x81198464 300000000 > out80m_m1140noforced.txt. Watch: (1) whether the game itself executes criFs init ([CRILOG] criFs_Initialize messages or [FIOSX] at=8128399E); (2) CPK mount result around n=1717 ([FIOSX] at=811820B6 / 81286EC4, guest criFs success); (3) whether ACB/ACF failures disappear (E2010052670/E2010052671); (4) title asset reads -> [SCENE] view registrations (head0F non-empty) -> GXM draws; (5) if the game's own init is incomplete locate missing steps. Fallbacks: force init between n=1200-1600; or HLE-intercept criFs_SetAllocator (E2009072402 source) so the game's own allocator setup succeeds. Verification: out80m_m1140noforced.txt (running), cpkmount.txt, cpk_refs.txt, m1138/m1139 logs.
+
+LOOKUP: M1097 experiment m1140 no forced criFs init, unset P5D_CRIFSHLE, let game's own boot flow init criFs and mount CPK, CPK mount FUN_811820B6 n=1717, forced init n=5000 too late vs n=1000 too early allocator conflict E2009072402 E2009072404 BADMEM va=0x38 0x8127B37A, watch [CRILOG] criFs_Initialize [FIOSX] at=8128399E at=811820B6 at=81286EC4, ACB/ACF failures E2010052670 E2010052671, fallback n=1200-1600 or intercept criFs_SetAllocator, out80m_m1140noforced.txt -> §18.4641 [relevant: timing root cause], §18.4640 [relevant: criFs fix verified], §18.4639 [relevant: criFs init fix]
