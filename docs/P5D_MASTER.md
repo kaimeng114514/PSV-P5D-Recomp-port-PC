@@ -1122,6 +1122,67 @@
 | M1104 | §18.4649: ★★★★★★★★★★★★ **决定性突破：E2009011903 的 39MB 假大小来自 SceNgs（NGS 音频引擎）HLE 未开启！FUN_8125AC84 是语音/音效接口调度器（ASR/HCA-MX），其注册的接口函数 FUN_8125CFB6→FUN_8125C2F0 是 **CRI NGS 初始化**（"\nCRI NGS/VITA Ver.1.10.00 Build:Jan 30 2018 18:45:39\n"，调用 SceSysmodule_53099B7A/79A0160A(sysmodule=0xB)、SceNgs_ED14CF4A=sceNgsSystemInit、SceNgs_6CE8B36F、SceNgs_E9B572B7、SceNgs_477318C0、SceNgs_14EF65A0 等 NGS HLE stub）。此前所有运行都**没设 P5D_NGS=1**，NGS stub 全部返回 0/假值 → NGS 工作大小算错（-1 或 39MB）→ E2009011903 → cleanup finalize → binder 清 0。**开启 P5D_NGS=1 后：NGS 工作大小=0x1DEF0（正常）、`[CMPBUF2] r9=0001E5CC r6=0001E7CC`（检查通过）、`[E1903HIT] 0`、`[BINDWARN] 0`（binder 保持）、`[CRIFMT] 0`（ACB/ACF 错误消失）；游戏自身 CRI 初始化链完全打通。**新问题：n=181,619 处 `E2009072321:Cannot allocate memory.`（criFs user-heap 相关，字符串 0x8131AD18，附近有 E2009072322:The user-heap API is unset.）后原地循环（n 停在 181,670）。**
 | M1105 | §18.4650: ★★★★★★★★★★★ **CPK 装载打通关键一步：补块函数 0x8128A576（criFs user-heap 分配回调）后，`[INDIRECT-MISS] 0`、`[HARNESS] 0`、无 BADMEM/CRILOG；游戏自身 criFs 通过 HLE `sceIoOpen` **真正打开了 vita.cpk**（`[IO] OPEN 'app0:/data/vita.cpk' -> fd=16385 ...vita.cpk size=2168403092`）并 PREAD 读取（off=0 size=2048）；运行从 n=181,670 的卡死推进到 **n=4,600,000+（25 倍）**，当前在 binder 挂载等待循环（[FIOSX] at=81287BBA，已 54000+ 次等待、状态未变）。**
 | M1106 | §18.4651: ★★★★★★★★ **CPK 挂载卡点精确到"CPK Analyzer 状态机 state=4 但不推进"：新增 MNTST/CPKANA/CPKRET/CPKRES 探针实测——binder 对象 0x84906480 的 `stage=4 status=1` 永不变化；CPK Analyzer 结构 0x84B1B828 = `[0]=state(3→4) [1]=0x848FC368(reader对象) [3]=[4]=0x84B1BC00(工作缓冲)`；每次轮询 `FUN_81293BC4` 返回 0、`FUN_81293F7C` 返回 4（即 state 仍为 4）→ status 不变。state=4 分支需要 reader 状态（+0xBC）==2（FUN_8128E9BC 查询），但 IOSTAT 探针 0 次命中 → **FUN_81293BC4 在进入状态机前被 try-lock 挡住**（反编译首个操作：`iVar1 = FUN_8127BBF8(param_1+0x57,1); if (iVar1 != 0) { return 0; }`）。已确认 3 次 I/O 提交（[FIOSW] at=8128E394 r0=848FC368 r2=84B1BA00）与 1 次真实 PREAD 2048B（CPK 头），但读完成状态从未置 2。**
+| M1107 | §18.4652: ★★★★★★★ **锁不是卡点——SWAP 原子操作探针显示所有相关锁 acquire/release 成对正常（CPK Analyzer busy 0x84B1B984、binder mount lock 0x849064AC、reader I/O 对象锁 0x848FC424/0x848FC434 均正常）；真正卡点是 reader 状态 +0xBC 永远没有从 1(loading) 变到 2/3(完成)。另修复一个重要探针基础设施 bug：batch_022 因缺少 `harness_cur_fiber2` 声明编译失败但链接仍复用旧 .o，导致此前 IOSTAT/IOSUB/SWAP 探针"神秘不命中"。**
+m1156（`out80m_m1156swap2.txt`）SWAP 实测（60 条，节选）：
+```
+[SWAP] #0  addr=84B1B984 new=1 old=0 lr=81293BE8   ← CPK Analyzer busy flag 获取（state3 通过）
+[SWAP] #1  addr=848FC434 new=1 old=0 lr=8128E400   ← 读请求 I/O 对象锁
+[SWAP] #2  addr=848FC424 new=0 old=0 lr=8128E102
+[SWAP] #3  addr=848FC434 new=0 old=1 lr=8128E43A   ← 释放（成对）
+[SWAP] #4  addr=848FC434 new=1 old=0 lr=8128D73A
+[SWAP] #5  addr=848FC424 new=0 old=0 lr=8128D928
+[SWAP] #6  addr=848FC424 new=1 old=0 lr=8128DA92
+[SWAP] #7  addr=848FC434 new=0 old=1 lr=8128DAA2
+[SWAP] #8  addr=84B1B984 new=0 old=1 lr=81293E08   ← Analyzer busy 释放
+[SWAP] #9  addr=849064AC new=1 old=0 lr=81287A86   ← binder mount lock 获取
+[SWAP] #10 addr=84B1B984 new=1 old=0 lr=81293BE8   ← 每轮轮询重复 acquire/release 成对
+[SWAP] #11 addr=84B1B984 new=0 old=1 lr=81293E08
+[SWAP] #12 addr=849064AC new=0 old=1 lr=81287BB4   ← mount lock 释放（成对）
+[SWAP] #14/#15 addr=84B1B984 1/0
+[SWAP] #18/#19 addr=84B1B984 1/0
+（模式稳定：每次 poll 都成功获取并释放；无死锁、无泄漏）
+```
+`[CPKANA3] #0..#9 p=84B1B828 st=00000004 busy=00000000 w3=84B1BC00 w4=84B1BC00` — 状态机每轮都进入，busy=0，但 state 停 4。
+**criFs 读请求路径反编译（`criread.txt`）**：
+```c
+// FUN_8128E394（criFs 读提交，264B）：
+if ((param_1==0)||(param_3==0)||...) return -2;
+iVar1 = FUN_8127BBF8(param_1 + 0xCC, 1);            // 读对象自带锁
+if (iVar1 == 1) { "E2008071787"; return -4; }       // 已在读
+iVar1 = FUN_8128E03E(param_1, param_2, param_3, 0xFFFFFFFF, 0);   // 建立读请求状态
+FUN_8127BBF8(param_1 + 0xCC, 0);                    // 释放
+if (iVar1 == 0) { … FUN_8128D716(param_1, param_7, param_5, param_6, …); }   // 调度读
+// FUN_8128E03E（读请求初始化，852B）：
+if (*(int *)(param_1 + 0xBC) == 1) { "E2008071780:Can not execute this function while loading."; return -1; }
+*(param_1+0xB4)=0; *(param_1+0xB8)=0; *(param_1+0xC0)=0xFFFFFFFF; … 
+*(int *)(param_1 + 0xFC) = param_2; *(param_1+0x100)=0;
+uVar1 = FUN_8128F966(*(param_1+4), *(param_1+8), param_3);   // 偏移/大小换算
+*(param_1+0x104)=uVar1; … 初始化大量请求字段 …
+FUN_8127BBF8(param_1 + 0xBC, 0);                    // ★ +0xBC=0
+*(param_1+0xD9)=0; *(param_1+0xD4)=0; …
+// FUN_8128E9BC（读状态查询）：st = *(int*)(reader+0xBC)（2/3=完成；+0xD9 字节为真时归 0）
+```
+**分析**：
+1. 之前怀疑的 try-lock 死锁被排除：所有锁在 SWAP 层面成对、正常
+2. CPK Analyzer 每轮都成功跑完 case 4 的状态机（busy 获取→释放），但 state 保持 4，说明 case 4 里 `FUN_8128E9BC(reader)` 返回的状态**不是 2**（或为 1/loading），因此不进入分析、不置 state=0x1A
+3. 唯一实际发生的 I/O 是 `PREAD 2048`（CPK 头）；读请求已提交（FUN_8128E394/FUN_8128E03E 路径执行），但 reader 的 +0xBC 状态从未由 1(loading) 变为 2/3(completed) —— **读完成通知缺失**
+4. 读完成应由 criFs I/O 线程/异步回调置位；嫌疑：该线程未被泵、或完成时使用的 HLE semaphore/event 未被触发
+5. 探针基础设施 bug 修复：batch_022 编译失败（`harness_cur_fiber2` 未声明）但 link 复用旧 .o → 之前 IOSTAT/IOSUB "0 命中"是假象；已在 batch_022 头部补 `extern "C" uint32_t harness_cur_fiber2(void);` 并重编通过
+NEXT：
+```
+① 找 +0xBC 被置 2/3 的代码（完成路径）：xref 或搜索 criFs 完成函数；在写点加探针
+② 查 criFs I/O 线程：它是否在 guest 线程列表中被泵（PUMP 日志中的 tid）、是否阻塞在 HLE 信号量
+③ 读路径 HLE 依赖：FUN_8128D716/FUN_8128E03E 内部调用的 HLE stub（sceIoRead/Pread/异步/事件）逐一核对返回值与副作用
+④ 修好后：reader+0xBC=2 → case 4 分析 CPK → state=0x1A → mount status=2 → data.cpk 挂载 → 文件索引 → title 素材
+⑤ 记录 REA 工具已接入（M1106）可辅助 xref/调用关系
+```
+验证：`out80m_m1156swap2.txt`、`out80m_m1155swap.txt`、`criread.txt`、`cpkio.txt`、`mountflow3.txt`。 |
+| §18.4652 | The lock is NOT the blocker - the SWAP atomic-operation probes show all involved locks acquire/release in pairs normally (CPK Analyzer busy 0x84B1B984, binder mount lock 0x849064AC, reader I/O object locks 0x848FC424/0x848FC434 all normal); the real blocker is that the reader status +0xBC never goes from 1 (loading) to 2/3 (completed). Also fixed an important probe-infrastructure bug: batch_022 failed to compile because it lacked the harness_cur_fiber2 declaration but the link still reused the stale .o, which caused the earlier IOSTAT/IOSUB/SWAP probes to mysteriously miss. '
+       'm1156 SWAP evidence (60 entries, excerpt): [SWAP] #0 addr=84B1B984 new=1 old=0 lr=81293BE8 (CPK Analyzer busy flag acquire on the state-3 pass); #1 addr=848FC434 new=1 old=0 lr=8128E400 (read request I/O object lock); #2 addr=848FC424 new=0 old=0 lr=8128E102; #3 addr=848FC434 new=0 old=1 lr=8128E43A (release, paired); #4 addr=848FC434 new=1 old=0 lr=8128D73A; #5 addr=848FC424 new=0 old=0 lr=8128D928; #6 addr=848FC424 new=1 old=0 lr=8128DA92; #7 addr=848FC434 new=0 old=1 lr=8128DAA2; #8 addr=84B1B984 new=0 old=1 lr=81293E08 (Analyzer busy release); #9 addr=849064AC new=1 old=0 lr=81287A86 (binder mount lock acquire); #10 addr=84B1B984 new=1 old=0 lr=81293BE8 (repeated paired acquire/release every poll); #11 addr=84B1B984 new=0 old=1 lr=81293E08; #12 addr=849064AC new=0 old=1 lr=81287BB4 (mount lock release, paired); #14/#15 and #18/#19 addr=84B1B984 1/0 (stable pattern: every poll acquires and releases successfully, no deadlock, no leak). [CPKANA3] #0..#9 p=84B1B828 st=00000004 busy=00000000 w3=84B1BC00 w4=84B1BC00 - the state machine is entered every poll with busy=0 but the state stays 4. '
+       'criFs read request path decompile (criread.txt): FUN_8128E394 (criFs read submit, 264B): if ((param_1==0)||(param_3==0)||...) return -2; iVar1 = FUN_8127BBF8(param_1 + 0xCC, 1) (read-object lock); if (iVar1 == 1) { E2008071787; return -4; } iVar1 = FUN_8128E03E(param_1, param_2, param_3, 0xFFFFFFFF, 0) (set up read request state); FUN_8127BBF8(param_1 + 0xCC, 0) (release); if (iVar1 == 0) { ... FUN_8128D716(param_1, param_7, param_5, param_6, ...) (schedule read) }. FUN_8128E03E (read request init, 852B): if (*(int *)(param_1 + 0xBC) == 1) { log E2008071780:Can not execute this function while loading.; return -1; } *(param_1+0xB4)=0; *(param_1+0xB8)=0; *(param_1+0xC0)=0xFFFFFFFF; ... *(int *)(param_1 + 0xFC) = param_2; *(param_1+0x100)=0; uVar1 = FUN_8128F966(*(param_1+4), *(param_1+8), param_3) (offset/size conversion); *(param_1+0x104)=uVar1; ... initializes many request fields ...; FUN_8127BBF8(param_1 + 0xBC, 0) (+0xBC=0); *(param_1+0xD9)=0; *(param_1+0xD4)=0. FUN_8128E9BC (read status query): st = *(int*)(reader+0xBC) (2/3 = complete; when the +0xD9 byte is set it maps to 0). '
+       'Analysis: (1) the previously suspected try-lock deadlock is ruled out: all locks are paired and normal at the SWAP level; (2) the CPK Analyzer runs case 4 every poll (busy acquired->released) but state stays 4, meaning the FUN_8128E9BC(reader) status is not 2 (likely 1/loading), so the analysis is never entered and state=0x1A is never set; (3) the only actual I/O is PREAD 2048 (CPK header); the read request was submitted (FUN_8128E394/FUN_8128E03E executed) but the reader +0xBC never transitions from 1 (loading) to 2/3 (completed) - the read-completion notification is missing; (4) completion is supposed to be set by the criFs I/O thread/asynchronous callback; the suspicion is that the thread is not pumped or the HLE semaphore/event used at completion is never fired; (5) probe infrastructure bug fixed: batch_022 failed to compile (harness_cur_fiber2 undeclared) but link reused the stale .o, so the earlier IOSTAT/IOSUB 0-hit results were artifacts; added extern "C" uint32_t harness_cur_fiber2(void); at the top of batch_022 and rebuilt successfully. '
+       'NEXT: (1) find the code that sets +0xBC to 2/3 (completion path) via xref or by searching criFs completion functions and probe the write site; (2) check the criFs I/O thread: whether it is in the guest thread list and pumped (PUMP tid), and whether it blocks on an HLE semaphore; (3) verify the read-path HLE dependencies: the HLE stubs called inside FUN_8128D716/FUN_8128E03E (sceIoRead/Pread/async/event) one by one - return values and side effects; (4) after the fix: reader+0xBC=2 -> case 4 analyzes the CPK -> state=0x1A -> mount status=2 -> data.cpk mounts -> file index -> title assets; (5) note the REA tooling (M1106) can help with xref/call relationships. '
+       'Verification: out80m_m1156swap2.txt, out80m_m1155swap.txt, criread.txt, cpkio.txt, mountflow3.txt. |
 m1153/m1154（`out80m_m1153cpkana.txt`/`out80m_m1154cpkana2.txt`）证据：
 ```
 [MNTST] #0 obj=84906480 stage=00000004 status=00000001 r0=00000002 lr=81287C70   ← 永不变化
@@ -500596,3 +500657,47 @@ rea decompile --procedure 0x81287a70 → 伪代码 + 证据封装（evidence_id/
 ANTI-FORGETTING ENTRY. Keywords: M1106 CPK mount stuck = CPK Analyzer state=4 not advancing (try-lock blocks the state machine entry); REA tool integrated. m1153/m1154 probes: [MNTST] #0 obj=84906480 stage=00000004 status=00000001 r0=00000002 lr=81287C70 (never changes); [CPKANA2] #0 p=84B1B828 w 00000003 848FC368 00000000 ... lr=81293F04; [CPKANA2] #1 w 00000004 848FC368 00000000 84B1BC00 84B1BC00 ... lr=81287AEA; [CPKANA] state 3 then 4; [CPKRET] ret=0 st=4 (x12); [CPKRES] res=4 st=4 (x12); [FIOSW] #1-3 at=8128E394 r0=848FC368 r1=0 r2=84B1BA00 r3=0; [IO] OPEN app0:/data/vita.cpk size=2168403092 + PREAD fd=16385 off=0 size=2048 got=2048; [IOSTAT] 0 [IOSUB] 0; [SEM] wait/signal obj=50018000 normal (thread 0x40020000); [BADMEM]=0 [CRILOG]=0. Structures: CPK Analyzer @0x84B1B828 [0]=state(3->4) [1]=0x848FC368(reader) [3]=[4]=0x84B1BC00(work buffers); binder mount obj @0x84906480 +0x18=stage(4) +0x20=status(1). FUN_81293BC4 decompile: iVar1 = FUN_8127BBF8(param_1+0x57,1) try-lock (if !=0 return 0); switch (*param_1) { case 3: alloc 0x800 buffer, submit read -> state=4; case 4: if (param_1[1]==0 || (FUN_8128E9BC(param_1[1],&st), st!=2)) break; FUN_81292794(...) analyze CPK; success -> state=0x1A }. FUN_8128E9BC(reader,&st): st = *(int*)(reader+0xBC) (2/3 = complete). FUN_81287A70 stage-4 branch: do { r=FUN_81293BC4(p); } while (r!=0); r=FUN_81293F7C(p); r==0x1A -> status=2, r==-1 -> status=6, else stays 1. Conclusion: mount is at stage 4 because the CPK Analyzer does not advance (state stuck at 4, return value always 0); prime suspect is the try-lock FUN_8127BBF8 at the state machine entry (or the HLE lwmutex semantics) so case 4 is never entered and FUN_8128E9BC never queries the read-completion status; the CPK header PREAD 2048 really happened but reader+0xBC was never set to 2 (completion notification missing); the other call site 0x8128958E may be the real analysis driver thread. REA tooling: rea v6.5.0 (npm rea-agents); env GHIDRA_INSTALL_DIR=C:\dev\ghidra + JAVA_HOME=C:\dev\jdk-21 -> rea doctor ghidra provider available=true (Ghidra 12.1.3); rea analyze C:\dev\p5d_build\p5d_true.elf (elf/arm) works; rea decompile --procedure 0x81287a70 returns pseudocode + evidence envelope (evidence_id/sha256/confidence/limitations); supports --format json/md, --token-limit, --snapshot, --file-offset. NEXT: probe FUN_8127BBF8 return value on the mount path; inspect the HLE lwmutex (SEMREC self-re-wait hack may break try-lock/unlock); inspect the 0x8128958E call site's owning function (analysis driver thread) and whether it runs; find who sets reader+0xBC=2 (criFs I/O thread pumped or blocked?); use REA rea function/inspect-native-api for call relationships; once open state=0x1A -> mount status=2 -> data.cpk -> file index -> title assets. Verification: out80m_m1153cpkana.txt, out80m_m1154cpkana2.txt, cpkio.txt, cpkio2.txt, mountflow3.txt.
 
 LOOKUP: M1106 CPK mount stuck CPK Analyzer state=4 try-lock FUN_8127BBF8 param+0x57, [MNTST] obj=84906480 stage=4 status=1, CPK Analyzer struct 0x84B1B828 [0]state [1]=0x848FC368 [3][4]=0x84B1BC00, [CPKRET] ret=0 [CPKRES] res=4, FUN_8128E9BC reader+0xBC status, [FIOSW] at=8128E394 r0=848FC368 r2=84B1BA00, [IO] PREAD 2048 CPK header, missing completion notification, other call site 0x8128958E, REA v6.5.0 integration GHIDRA_INSTALL_DIR JAVA_HOME rea doctor ghidra available, rea analyze p5d_true.elf elf/arm, rea decompile evidence envelope, next probe FUN_8127BBF8 and HLE lwmutex -> §18.4650 [relevant: batch_035], §18.4649 [relevant: NGS], §18.4647 [relevant: binder]
+### 18.4652 PORT M1107: 锁不是卡点（SWAP 探针证实锁成对正常）；真正卡点 = reader 状态 +0xBC 永远 1(loading)；修复 batch_022 探针编译 bug
+
+1) 探针基础设施 bug（重要）：
+```
+batch_022.cpp 编译失败：'harness_cur_fiber2' was not declared in this scope
+但 link 仍复用旧 batch_022.o → 之前 IOSTAT/IOSUB/SWAP 探针“神秘不命中”是假象
+修复：batch_022 头部补 extern "C" uint32_t harness_cur_fiber2(void); → 编译 exit 0
+```
+2) m1156 SWAP 实测（锁全部成对正常）：
+```
+[SWAP] #0  addr=84B1B984 new=1 old=0 lr=81293BE8   ← Analyzer busy 获取
+[SWAP] #1  addr=848FC434 new=1 old=0 lr=8128E400   ← 读 I/O 对象锁
+[SWAP] #3  addr=848FC434 new=0 old=1 lr=8128E43A   ← 成对释放
+[SWAP] #8  addr=84B1B984 new=0 old=1 lr=81293E08   ← Analyzer busy 释放
+[SWAP] #9  addr=849064AC new=1 old=0 lr=81287A86   ← mount lock 获取
+[SWAP] #12 addr=849064AC new=0 old=1 lr=81287BB4   ← mount lock 释放（成对）
+[SWAP] #10..#19 addr=84B1B984 每轮 1/0 成对        ← 无死锁、无泄漏
+[CPKANA3] 每轮 st=4 busy=0 → 状态机运行但 state 不推进
+```
+3) criFs 读路径反编译：
+```c
+FUN_8128E394(criFs 读提交): 对象锁 +0xCC → FUN_8128E03E（初始化请求状态）→ 解锁 → FUN_8128D716（调度）
+FUN_8128E03E(读请求初始化): if (*(param_1+0xBC)==1) 报"while loading"; 初始化 B4/B8/C0/FC/104/108/110/114/130/144… 
+                            FUN_8127BBF8(param_1+0xBC,0); *(param_1+0xD9)=0; *(param_1+0xD4)=0;
+FUN_8128E9BC(读状态查询): st = *(int*)(reader+0xBC)（2/3=完成；+0xD9 字节置位时归 0）
+```
+4) 结论：
+- try-lock 死锁假设被排除（所有锁成对）
+- Analyzer 每轮跑 case 4 但 state 停 4 → FUN_8128E9BC 返回的不是 2（是 1/loading）
+- 唯一实际 I/O = PREAD 2048（CPK 头）；读请求已提交，但 reader +0xBC 从未由 1→2/3
+- ⇒ **读完成通知缺失**（criFs I/O 线程未泵 / 完成用的 HLE 信号量未触发）
+5) NEXT：
+```
+① 找 +0xBC 置 2/3 的完成路径（xref/搜索）并在写点加探针
+② 查 criFs I/O 线程是否被泵、是否阻塞在 HLE 信号量
+③ 核对 FUN_8128D716/FUN_8128E03E 内部调用的 HLE stub（读/异步/事件）
+④ 修好后：+0xBC=2 → 分析 CPK → state=0x1A → mount status=2 → data.cpk → 文件索引 → title 素材
+⑤ REA 工具（M1106 接入）可辅助 xref
+```
+验证：`out80m_m1156swap2.txt`、`out80m_m1155swap.txt`、`criread.txt`、`cpkio.txt`、`mountflow3.txt`。
+
+ANTI-FORGETTING ENTRY. Keywords: M1107 locks NOT the blocker - SWAP atomic probes show all locks paired normal (CPK Analyzer busy 0x84B1B984, binder mount lock 0x849064AC, reader I/O object locks 0x848FC424/0x848FC434), real blocker = reader status +0xBC never transitions from 1(loading) to 2/3(completed); also fixed a probe infrastructure bug: batch_022 failed to compile (harness_cur_fiber2 undeclared) but link reused the stale .o, so earlier IOSTAT/IOSUB/SWAP 0-hit results were artifacts. m1156 SWAP evidence: #0 addr=84B1B984 new=1 old=0 lr=81293BE8 (Analyzer busy acquire on state-3 pass); #1 addr=848FC434 new=1 old=0 lr=8128E400 (read I/O object lock); #2 addr=848FC424 new=0 old=0 lr=8128E102; #3 addr=848FC434 new=0 old=1 lr=8128E43A (release paired); #4 addr=848FC434 new=1 old=0 lr=8128D73A; #5 addr=848FC424 new=0 old=0 lr=8128D928; #6 addr=848FC424 new=1 old=0 lr=8128DA92; #7 addr=848FC434 new=0 old=1 lr=8128DAA2; #8 addr=84B1B984 new=0 old=1 lr=81293E08 (Analyzer busy release); #9 addr=849064AC new=1 old=0 lr=81287A86 (binder mount lock acquire); #10 addr=84B1B984 new=1 old=0 lr=81293BE8 (repeated paired acquire/release every poll); #11 addr=84B1B984 new=0 old=1 lr=81293E08; #12 addr=849064AC new=0 old=1 lr=81287BB4 (mount lock release paired); #14/#15 #18/#19 addr=84B1B984 1/0 (stable, no deadlock/leak). [CPKANA3] #0..#9 p=84B1B828 st=00000004 busy=00000000 w3=84B1BC00 w4=84B1BC00 - state machine entered every poll with busy=0 but state stays 4. criFs read path decompile: FUN_8128E394 (read submit): if ((param_1==0)||(param_3==0)||...) return -2; iVar1 = FUN_8127BBF8(param_1+0xCC,1); if (iVar1==1) { E2008071787; return -4; } iVar1 = FUN_8128E03E(param_1,param_2,param_3,0xFFFFFFFF,0); FUN_8127BBF8(param_1+0xCC,0); if (iVar1==0) { ... FUN_8128D716(...) schedule read }. FUN_8128E03E: if (*(int*)(param_1+0xBC)==1) { log E2008071780:Can not execute this function while loading.; return -1; } *(param_1+0xB4)=0; *(param_1+0xB8)=0; *(param_1+0xC0)=0xFFFFFFFF; ... *(int*)(param_1+0xFC)=param_2; *(param_1+0x100)=0; uVar1 = FUN_8128F966(*(param_1+4), *(param_1+8), param_3); *(param_1+0x104)=uVar1; ... FUN_8127BBF8(param_1+0xBC,0); *(param_1+0xD9)=0; *(param_1+0xD4)=0. FUN_8128E9BC: st = *(int*)(reader+0xBC) (2/3=complete; +0xD9 set -> 0). Analysis: try-lock deadlock ruled out; the Analyzer runs case 4 every poll but state stays 4 meaning the FUN_8128E9BC(reader) status is not 2 (likely 1/loading) so the analysis is never entered and state=0x1A never set; the only actual I/O is PREAD 2048 (CPK header), the read request was submitted but reader +0xBC never goes 1->2/3 - the read-completion notification is missing; completion should be set by the criFs I/O thread/asynchronous callback, suspect the thread is not pumped or the HLE semaphore/event at completion never fires. NEXT: find the +0xBC=2/3 completion path (xref/search) and probe the write site; check the criFs I/O thread (guest thread list, pumped, blocked on HLE semaphore?); verify the HLE stubs called inside FUN_8128D716/FUN_8128E03E one by one; then reader+0xBC=2 -> analysis -> state=0x1A -> mount status=2 -> data.cpk -> file index -> title assets; REA tooling (M1106) can help with xref. Verification: out80m_m1156swap2.txt, out80m_m1155swap.txt, criread.txt, cpkio.txt, mountflow3.txt.
+
+LOOKUP: M1107 locks not blocker SWAP probes paired, reader status +0xBC stuck 1 loading, CPK Analyzer busy 0x84B1B984, binder mount lock 0x849064AC, reader I/O locks 0x848FC424 0x848FC434, FUN_8128E394 read submit +0xCC lock, FUN_8128E03E read init +0xBC=0 +0xD9 +0xD4, FUN_8128E9BC status query, FUN_8128D716 schedule read, batch_022 harness_cur_fiber2 compile bug stale .o, next find +0xBC=2 completion path and criFs I/O thread pumping -> §18.4651 [relevant: CPK Analyzer state stuck], §18.4650 [relevant: batch_035], §18.4649 [relevant: NGS]
