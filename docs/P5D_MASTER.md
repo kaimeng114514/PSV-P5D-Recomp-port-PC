@@ -1130,6 +1130,51 @@
 | M1112 | §18.4657: ★★★★★★★ **HLE 头变换（HDRFIX）成功：把 64 位 CPK 头在内存中变换为标准头（+0x04=0xFF、+0x08=UTF表大小、+0x0C=0）后，Analyzer 的 `E2011022806:CPK is broken` 错误完全消失（CRILOG=0）！关键发现：CRI UTF 表字段是【大端序】（UTF+0x04 在内存中为 0x7A000000 → 大端 0x7A = 表大小-8）；变换后表大小=0x82。新卡点：分析继续推进后在 `blk 0x8129266E` 报 `BADMEM guest va=0x00000824`（某个小指针 0x820 未初始化）。**
 | M1113 | §18.4658: ★★★★★★★★★ **发现并修复 AOT 翻译器通用 bug：`LDRD rX,rY,[rX,#imm]`（基址寄存器=第一目标寄存器）被翻成"第一字读入 rX 后，第二字用被覆盖的新 rX 作基址"→ 读到错误地址。全库扫描命中 34 处（batch_000×7, batch_004×1, batch_005×1, batch_009×4, batch_018×2, batch_021×2, batch_023×15, batch_024×2），统一改为临时基址 `_ldrd_b`。修复后：BADMEM 归零、CPK 表读取解锁（新增 `PREAD off=2048 size=2048`）、游戏开始打开 `data.cpk`（第二个 CPK 挂载）！**
 | M1114 | §18.4659: ★★★★★★★ **错误调用点全部定位：`E06100301:Invalid IFF header` 来自 `FUN_812B074C`（CRI UTF Retriever/VITA Ver.1.00.02）——它期望大端 `@UTF`（0x40555446）；`E2009010913:Need more memory` 来自 CPK 分析器 `FUN_812938C6` 区（blk 0x81293978）。根因数据：vita.cpk 的 0x800 处是 `CRID` 段（@UTF 在 0x820），而 data.cpk 的 0x800 处是 `TOC ` 段（@UTF 在 0x810）——**vita.cpk 是"带 ID 表(CRID)的 CPK 变体"，TOC 段头长度不同**，Analyzer 按 32 位 CPK 的 0x10 字节段头解析 → 解析位置错 0x10 → four_cc 不匹配。另安装了**通用动态 reader 泵**（扫描 progress 对象签名 0x81540460 + reader+0xB0 反向指针），但本次运行只发现 1 个 reader（data.cpk 的新 reader 尚未创建/未进入）**
+| M1115 | §18.4660: ★★★★★★★★ **CPK 头分析已成功（`[CPKRESULT] ret=00000000`），但解析出的字段全错（ContentOffset/TocOffset/TocSize/Align 全部=0x800）；同时用文件级分析**找到了 vita.cpk 真正的 TOC：在文件末尾 0x813EE800，大小 0x4C94（正好到 EOF），UTF 表内含文件条目（内容偏移 0x7A31E0、0x01E9A320、0x03B8C400 等）。头 UTF 行数据实际是 4 列 u64 大端：ContentOffset=0x800、TocOffset=0x813EE800、TocSize=0x4C94、Align=0 —— 说明 Analyzer 的 UTF 字段读取把每列都读成了第 1 列值（0x800）**
+m1177 证据（`out80m_m1177cpkresult.txt`）：
+```
+[CPKRESULT] #0 ret=00000000 p2=84B1B858 w: 00000800 00000000 00000800 00000000 00000800 00000000 00000800 00000000 00000800 00000000
+   → param_2 的 5 个 64-bit 槽全 = 0x0000000000000800（UpdateDateTime/ContentOffset/ContentSize/TocOffset/TocSize 全=0x800）
+[CPKBUF] buf=84B1BC00 w: 204B5043 FFFFFFFF 00000082 00000000 46545540 7A000000 2C000000 4C000000
+[HDRFIX] dst=84B1BC00 utf_size(BE)=0000007A table_size=00000082
+[CRILOG] E06100301:Invalid IFF header (mismatched four_cc) ×3（TOC 解析失败）
+[CRILOG] E2009010913:CPK Analyzer::Need more memory...(user heap too small) ×3
+[IO] PREAD fd=16385 off=2048 size=2048 got=2048   ← 用错误的 TocOffset=0x800 去读 TOC
+[BADMEM]=0 [MNTST] stage=4 status=1
+```
+**vita.cpk 头 UTF 表行数据真实值（文件级解析，m1177 后的分析）**：
+```
+头 UTF @0x10..0x92：@UTF | size(BE)=0x7A | ... | 列定义 ... | 行数据
+行数据 @ table+0x34（4 列 × 8 字节，大端 u64）：
+  ContentOffset = 0x0000000000000800   （内容从 0x800 开始，那里是 USM 影片 "CRID" 容器 ✓）
+  TocOffset     = 0x00000000813EE800   （★ 文件末尾附近）
+  TocSize       = 0x0000000000004C94   （19604 = 文件大小 0x813F3494 - 0x813EE800 ✓ 正好到 EOF）
+  Align         = 0
+字节级证据（vita.cpk @0x813EE800）：
+  40 55 54 46 00 00 4C 94 00 00 00 36 00 00 2D D8 ...   ← '@UTF' + BE 0x4C94（表大小）
+  后续行含文件偏移：0x7A31E0 / 0x01E9A320 / 0x03B8C400 / 0x033E9220 等
+（全文件扫描：vita.cpk 中无 "TOC " four_cc；"CRID" 出现在 0x800、0x33e9a20、0x3b8cc00… 每处 +0x20 跟 @UTF → 均为 USM 影片容器；"GTOC"@0x408904c0）
+```
+**分析**：
+1. 头分析返回成功（ret=0）→ HDRFIX 让 Analyzer 认为 CPK 头合法
+2. 但 UTF 字段读取异常：所有字段都=0x800（= ContentOffset/第 1 列值）→ 说明 `FUN_812AEA4C`（按键名查找列）或 `FUN_812AF434`（取值）在这个 **64-bit 列（u64）UTF 变体**上读错列/类型
+3. 结果 TocOffset=0x800 → 去 0x800 读 TOC → 读到 USM "CRID" 数据 → UTF four_cc 错误（E06100301）+ 后续 user heap 需求错误（E2009010913）
+4. 真正的 TOC 在 **0x813EE800（EOF 前 19604 字节）**，其 UTF 表含完整文件索引
+**NEXT**：
+```
+① 探针 FUN_812AEA4C（列名查找）/FUN_812AF434（取值）入口与返回：分别用 "ContentOffset"/"TocOffset"/"TocSize" 调用时返回什么，确认列索引/类型解析错误点
+② 探针 FUN_812AFF10（UTF reader 创建）入口参数：确认传给它的 UTF 指针（应为 0x84B1BC10）
+③ 若 Analyzer 的 UTF 读取不支持该 64-bit 列变体：在 HDRFIX 中把 0x800 头缓冲里的 UTF 行数据**规范化**为 Analyzer 期望的形式（需先由 ② 探针确定期望类型/布局；可能是 32-bit 列或大端/小端差异）
+④ 或者更直接：HDRFIX 里预先解析 UTF 行（4×u64 BE），若 TocOffset/TocSize 与文件实际结构匹配，就把它们写入 Analyzer 之后使用的结构（如 param_2），绕开读取错误
+⑤ 之后：TOC 从 0x813EE800 加载成功 → 文件索引建立 → mount status=2 → data.cpk（同样处理）→ title 素材
+```
+验证：`out80m_m1177cpkresult.txt`、`_p_cpkresult_1134.py`、文件级 dump 分析（0x813EE800 TOC）。 |
+| §18.4660 | The CPK header analysis now succeeds ([CPKRESULT] ret=00000000), but the parsed fields are all wrong (ContentOffset/TocOffset/TocSize/Align are all 0x800); meanwhile a file-level analysis found vita.cpk's real TOC: at file end 0x813EE800, size 0x4C94 (exactly to EOF), and its UTF table contains file entries (content offsets 0x7A31E0, 0x01E9A320, 0x03B8C400 etc.). The header UTF row data is really 4 columns of u64 big-endian: ContentOffset=0x800, TocOffset=0x813EE800, TocSize=0x4C94, Align=0 - so the Analyzer UTF field reader returns the first column value (0x800) for every field. '
+       'm1177 evidence: [CPKRESULT] #0 ret=00000000 p2=84B1B858 w: 00000800 00000000 00000800 00000000 00000800 00000000 00000800 00000000 00000800 00000000 (all five 64-bit slots = 0x800: UpdateDateTime/ContentOffset/ContentSize/TocOffset/TocSize all 0x800); [CPKBUF] buf=84B1BC00 w: 204B5043 FFFFFFFF 00000082 00000000 46545540 7A000000 2C000000 4C000000; [HDRFIX] dst=84B1BC00 utf_size(BE)=0000007A table_size=00000082; [CRILOG] E06100301:Invalid IFF header (mismatched four_cc) x3 (TOC parse failed); [CRILOG] E2009010913:CPK Analyzer::Need more memory...(user heap too small) x3; [IO] PREAD fd=16385 off=2048 size=2048 got=2048 (read TOC using the wrong TocOffset=0x800); [BADMEM]=0; [MNTST] stage=4 status=1. '
+       'Real header UTF row values (file-level parse): header UTF at 0x10..0x92: @UTF | size(BE)=0x7A | ... column defs ... row data; row data at table+0x34 (4 columns x 8 bytes, big-endian u64): ContentOffset = 0x0000000000000800 (content starts at 0x800, where the USM movie CRID container is); TocOffset = 0x00000000813EE800 (near file end); TocSize = 0x0000000000004C94 (19604 = file size 0x813F3494 - 0x813EE800, exactly to EOF); Align = 0. Byte evidence at vita.cpk 0x813EE800: 40 55 54 46 00 00 4C 94 00 00 00 36 00 00 2D D8 ... (@UTF + BE 0x4C94 table size); following rows contain file offsets 0x7A31E0 / 0x01E9A320 / 0x03B8C400 / 0x033E9220 etc. Whole-file scan: no TOC four_cc in vita.cpk; CRID appears at 0x800, 0x33e9a20, 0x3b8cc00... each followed by @UTF at +0x20 (all USM movie containers); GTOC at 0x408904c0. '
+       'Analysis: (1) header analysis returns success (ret=0) -> HDRFIX made the Analyzer accept the CPK header; (2) but the UTF field reading is wrong: every field = 0x800 (= ContentOffset/first column) -> FUN_812AEA4C (name->column lookup) or FUN_812AF434 (value getter) reads the wrong column/type on this 64-bit-column (u64) UTF variant; (3) as a result TocOffset=0x800 -> reads TOC at 0x800 -> gets USM CRID data -> UTF four_cc error (E06100301) plus the later user-heap error (E2009010913); (4) the real TOC is at 0x813EE800 (19604 bytes before EOF) and its UTF table holds the full file index. '
+       'NEXT: (1) probe FUN_812AEA4C (column name lookup) / FUN_812AF434 (value getter) entry and return: what they return when called with ContentOffset/TocOffset/TocSize, and confirm the column index/type parsing error; (2) probe FUN_812AFF10 (UTF reader creation) entry arg: confirm the UTF pointer passed (should be 0x84B1BC10); (3) if the Analyzer UTF reader does not support this 64-bit column variant, normalize the UTF row data in the 0x800 header buffer in HDRFIX into the layout the Analyzer expects (first determine the expected type/layout from the probe; maybe 32-bit columns or a BE/LE difference); (4) or more directly: parse the UTF row in HDRFIX (4 x u64 BE) and, if TocOffset/TocSize match the actual file structure, write them into the structure the Analyzer uses afterwards (e.g. param_2) to bypass the reader bug; (5) then: TOC loads from 0x813EE800 -> file index built -> mount status=2 -> data.cpk (handle the same way) -> title assets. '
+       'Verification: out80m_m1177cpkresult.txt, _p_cpkresult_1134.py, file-level dump analysis (0x813EE800 TOC). |
 m1176 证据（`out80m_m1176crilog2.txt`，CRILOG 已增强输出 lr/blk/fib）：
 ```
 [CRILOG] at=81278F96 r1=81321264 r2=40555446 r3=000077DD lr=812B07E6 blk=812B07D8
@@ -501387,3 +501432,45 @@ data.cpk:  0x0000 'CPK ' 000000FF 00000350 0
 ANTI-FORGETTING ENTRY. Keywords: M1114 error call sites located, E06100301 Invalid IFF header from FUN_812B074C (CRI UTF Retriever/VITA Ver.1.00.02) which expects big-endian @UTF (0x40555446), E2009010913 Need more memory from CPK analyzer FUN_812938C6 (blk 0x81293978); vita.cpk has CRID section at 0x800 (with @UTF at 0x820) while data.cpk has TOC section at 0x800 (with @UTF at 0x810) -> vita.cpk is a CPK variant with an ID table (CRID) and a longer section header (0x20); the Analyzer uses the 32-bit CPK 0x10-byte section header so it looks at 0x810 (CRID data) -> four_cc mismatch. Also installed a general dynamic reader pump (scans progress-object signature 0x81540460 + reader+0xB0 back-pointer) but only 1 reader was found (data.cpk reader not created yet). m1176 evidence: [CRILOG] at=81278F96 r1=81321264 r2=40555446 r3=000077DD lr=812B07E6 blk=812B07D8 msg=E06100301:Invalid IFF header (mismatched four_cc).; [CRILOG] at=81279486 r1=8131D18C r2=8131D2A8 r3=8131D2A8 lr=81293988 blk=81293978 msg=E2009010913:CPK Analyzer::Need more memory. The heap user registrated is too small.%s; [IOPUMP-DONE] x3 reader=848FC368; [HDRFIX] dst=84B1BC00 table_size=0x82; [IOPUMP-READER] 0; [IO] OPEN vita.cpk size=2168403092, PREAD 0/2048, PREad 2048/2048, OPEN data.cpk size=1913750232, PREAD 0/2048; [BADMEM]=0. Function locations: FUN_812B074C = CRI UTF Retriever/VITA Ver.1.00.02: FUN_812B01F2(param_6,&local_48) reads four_cc; if (local_48==0x40555446) parse UTF else E06100301. FUN_812938C6 (CPK analyzer work-size validation). CPK variant comparison: vita.cpk 0x0000 CPK + FFFFFFFF + u64 filesize 0x813F3494; 0x0010 @UTF; 0x0800 CRID + 0x7F8 + ...; 0x0820 @UTF; 0x1020/0x1220/0x13A0 @UTF. data.cpk 0x0000 CPK + 000000FF + 00000350; 0x0010 @UTF; 0x0800 TOC + FF000000...; 0x0810 @UTF. Analysis: Analyzer reads TocOffset=0x800 then looks for @UTF at +0x10 per 32-bit CPK, but vita has it at +0x20 -> four_cc error; vita.cpk is the CPK-with-ID-table (CRID) variant (CpkIdAccessTable / No Cpk Binder / CPK without ID information strings); need more memory = CPK analyzer's user-heap request fails. NEXT: probe FUN_812B074C entry (print first 16 bytes at param_6) to confirm the parsed position; parse vita.cpk CRID section at 0x800 (CRID + size 0x7F8 + pointers/UTF); extend HDRFIX to normalize the CRID section header into a TOC header or align @UTF to +0x10; investigate E2009010913 (probe FUN_812938C6 requested work size, enlarge HLE user heap if needed); improve the dynamic reader pump; target: TOC parse succeeds -> state=0x1A -> mount status=2 -> file index -> title assets. Verification: out80m_m1176crilog2.txt, errfun.txt, _p_iopump_dyn_1132.py.
 
 LOOKUP: M1114 IFF error call site FUN_812B074C CRI UTF Retriever VITA expects @UTF big-endian 40555446, memory error FUN_812938C6 CPK analyzer work size, vita.cpk CRID section at 0x800 @UTF at 0x820, data.cpk TOC at 0x800 @UTF 0x810, section header 0x10 vs 0x20, CpkIdAccessTable, dynamic reader pump progress signature 0x81540460, next probe FUN_812B074C entry and CRID structure -> §18.4658 [relevant: LDRD fix], §18.4657 [relevant: HDRFIX], §18.4656 [relevant: decryptor]
+### 18.4660 PORT M1115: 头分析 ret=0（成功）但 UTF 字段全读成 0x800；找到真实 TOC = 0x813EE800（EOF 前 0x4C94）
+
+1) m1177 探针：
+```
+[CPKRESULT] #0 ret=00000000 p2=84B1B858 w: 00000800 00000000 00000800 00000000 00000800 00000000 00000800 ...
+   → param_2 的 5 个 64-bit 槽全 = 0x800（ContentOffset/TocOffset/TocSize 都错）
+[CPKBUF] buf=84B1BC00 w: 204B5043 FFFFFFFF 00000082 00000000 46545540 7A000000 ...
+[HDRFIX] dst=84B1BC00 utf_size(BE)=0x7A table_size=0x82
+[CRILOG] E06100301 Invalid IFF header ×3；E2009010913 Need more memory ×3
+[IO] PREAD off=2048 size=2048（用错误 TocOffset=0x800 读 TOC）
+```
+2) 文件级解析（头 UTF 行数据 @table+0x34，4 列 × u64 大端）：
+```
+ContentOffset = 0x800
+TocOffset     = 0x813EE800   ★ 真实 TOC
+TocSize       = 0x4C94       （= 文件大小 - 0x813EE800，正好到 EOF）
+Align         = 0
+```
+3) 真实 TOC @0x813EE800：
+```
+40 55 54 46 00 00 4C 94 00 00 00 36 00 00 2D D8 ...   '@UTF' + BE size 0x4C94
+后续行含文件偏移：0x7A31E0 / 0x01E9A320 / 0x03B8C400 / 0x033E9220 等
+（全文件扫描：无 "TOC "；CRID 均=USM 影片容器（0x800、0x33e9a20… 每处 +0x20 跟 @UTF）；GTOC@0x408904c0）
+```
+4) 分析：
+- 头分析成功（ret=0）→ HDRFIX 生效
+- UTF 字段读取错误：所有字段=0x800（第 1 列）→ FUN_812AEA4C/FUN_812AF434 在 64-bit 列（u64）UTF 变体上读错列/类型
+- TocOffset=0x800 → 去 0x800 读 TOC → USM CRID 数据 → four_cc 错误 + user heap 错误
+- 真实 TOC 在 0x813EE800（EOF 前 19604B）
+5) NEXT：
+```
+① 探针 FUN_812AEA4C/FUN_812AF434：用 "ContentOffset"/"TocOffset"/"TocSize" 调用，看返回值，定位列索引/类型解析错误
+② 探针 FUN_812AFF10（UTF reader 创建）入参（应为 0x84B1BC10）
+③ 若不支持该 64-bit 列变体：HDRFIX 里把 UTF 行数据规范化成 Analyzer 期望形式（先由②确定期望布局）
+④ 或直接：HDRFIX 解析行（4×u64 BE）并把正确 TocOffset/TocSize 写入 param_2 结构，绕开读取错误
+⑤ TOC 从 0x813EE800 加载成功 → 文件索引 → mount status=2 → data.cpk（同样处理）→ title 素材
+```
+验证：`out80m_m1177cpkresult.txt`、`_p_cpkresult_1134.py`。
+
+ANTI-FORGETTING ENTRY. Keywords: M1115 CPK header analysis succeeded ret=0 but UTF fields all read as 0x800; real TOC of vita.cpk found at 0x813EE800 size 0x4C94 (exactly to EOF). m1177: [CPKRESULT] #0 ret=00000000 p2=84B1B858 w: 00000800 00000000 00000800 00000000 00000800 00000000 00000800 00000000 00000800 00000000 (all five 64-bit slots = 0x800); [CPKBUF] buf=84B1BC00 w: 204B5043 FFFFFFFF 00000082 00000000 46545540 7A000000 2C000000 4C000000; [HDRFIX] dst=84B1BC00 utf_size(BE)=0x7A table_size=0x82; [CRILOG] E06100301 Invalid IFF header x3 + E2009010913 Need more memory x3; [IO] PREAD fd=16385 off=2048 size=2048 got=2048 (TOC read with wrong TocOffset=0x800); [BADMEM]=0; [MNTST] stage=4 status=1. Real header UTF row values (file-level parse, row at table+0x34, 4 columns x u64 BE): ContentOffset=0x800, TocOffset=0x813EE800, TocSize=0x4C94 (= file size 0x813F3494 - 0x813EE800), Align=0. Real TOC at 0x813EE800: 40 55 54 46 00 00 4C 94 00 00 00 36 00 00 2D D8 ... (@UTF + BE size 0x4C94); following rows contain file offsets 0x7A31E0 / 0x01E9A320 / 0x03B8C400 / 0x033E9220. Whole-file scan: no TOC four_cc in vita.cpk; CRID occurrences at 0x800, 0x33e9a20, 0x3b8cc00... each followed by @UTF at +0x20 (USM movie containers); GTOC at 0x408904c0. Analysis: header analysis returns success (ret=0) -> HDRFIX works; but UTF field reading is wrong (every field = 0x800 = first column) -> FUN_812AEA4C (name->column lookup) or FUN_812AF434 (value getter) misreads column/type on this u64-column UTF variant; TocOffset=0x800 -> reads USM CRID data at 0x800 -> UTF four_cc error + user-heap error; real TOC is at 0x813EE800 (19604 bytes before EOF) with the full file index in its UTF table. NEXT: probe FUN_812AEA4C/FUN_812AF434 entry and return for ContentOffset/TocOffset/TocSize to find the column index/type parsing error; probe FUN_812AFF10 (UTF reader creation) entry arg (should be 0x84B1BC10); if the reader does not support the 64-bit column variant, normalize the UTF row data in the 0x800 buffer in HDRFIX into the expected layout; or parse the row in HDRFIX (4 x u64 BE) and write the correct TocOffset/TocSize into the param_2 structure directly; then TOC loads from 0x813EE800 -> file index -> mount status=2 -> data.cpk (same) -> title assets. Verification: out80m_m1177cpkresult.txt, _p_cpkresult_1134.py.
+
+LOOKUP: M1115 CPK header analysis ret=0 success, UTF fields all 0x800, real TOC 0x813EE800 size 0x4C94 EOF, header UTF row at table+0x34 4 columns u64 BE ContentOffset 0x800 TocOffset 0x813EE800 TocSize 0x4C94 Align 0, USM CRID at 0x800, GTOC 0x408904c0, UTF field reader FUN_812AEA4C FUN_812AF434 misreads column, FUN_812AFF10 reader creation, next probe field getters and normalize UTF row -> §18.4659 [relevant: IFF error], §18.4658 [relevant: LDRD], §18.4657 [relevant: HDRFIX]
