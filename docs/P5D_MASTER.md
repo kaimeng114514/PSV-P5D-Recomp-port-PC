@@ -1154,6 +1154,41 @@
 | M1136 | §18.4681: ★★★★★★★★★★★★ **Huffman 死循环根因找到并修复：`fiber_load` 的 r0 修补分支误伤"恢复的中途上下文"——`if (pc==0x81206BDC || c.r[0] < 0x80000000)` 会把任何 r0<0x80000000 的已保存上下文 r0 改写成 fiber 对象指针**。证据：`[FLOAD-BAD] fiber=848463A0 r0=00000000 r13=8484EDD0 r15=811DFA0E -> repair r0`（正是 huff 循环中途被 fiber 切换保存/恢复的上下文），修 r0=848463A0 后，趟重启 811DF9FA `r7=r0; r8=r7` → r7=r8=0x848463A0（有符号负数），`cmp sb,r8; bgt` 因 sb(0x11) > 负数恒真 → 内层扫描永不退出 → BADMEM 0xB0000000。R0CHG 探针证明 r0 在 ring `... 812068F2 811DFA3C → 812B1BA0(sceFiberSwitch@8120682A) → 811DFA0E` 后变为 fiber 指针。**修复**：r0 修补只在 start-stub（pc==0x81206BDC）或旧 start-arg bug（r0==2）时执行；恢复的中途上下文保留原 r0。**验证 m1228（NESTED_UNTIL=35M）**：`[FLOAD-BAD]=2`（仅两个 start stub）、`[DECOMP]=40 / [HUFF]=24 / [LZ]=39`（**40 个资源全部开始解压**）、`[PASSSUM]=420` 趟全部 r0=0 健康、`[BADMEM]=0`，流程推进到 `[NESTED-STOP] total=35000000 pc=811DFB18`（撞我们自己的 NESTED_UNTIL 上限=好现象）
 | M1137 | §18.4682: ★★★★★★★★ **M1136 修复后的长跑（m1229，NESTED_UNTIL=300M）验证解压链持续推进（[DECOMP]38 / [HUFF]22 / [LZ]37，[VFW] 顶点格式写入 n 达 44,180,000，[FLOAD-BAD]=2 仅 start stub，[BADMEM]=0），但最终卡在"fiber B 的保存上下文 pc 变成栈地址 0x84855A58"**：`[FIBER-EXEC] no block for pc=84855A58 (cur=848463A0) lr=84855A58 sp=8484EF28 blk=812B1B70` → no-block 路径只保存上下文返回；guest 调度器（GetSelf 812B1B70 → 812067A0 → … → Switch 812B1BA0@8120682A）每次都切到这个 pc 非法的 fiber → 无限无进展循环（g_blkcnt_total 冻结在 39,242,012、[PUMP] blocks=0）。证据：`[FEXEC-IN] n=39242012 cur=848463A0 pc=84855A58 r0=0 r7=5 r14=84855A58 r13=8484EF28`；`[FIBSW] #3571 fpc=811DFAFE flr=84855A58`（LR 已是栈地址值）；重复 `[SPOLL] pc=812068F2/812068C4 f80=1 g18=g1c=848463A0`；`[STALLTRACE] pc=812B1BA0 blk=812B1B70 fib=0 sp=82EFFE68 fex=0`。推断：某处 **pop/return 的返回地址从被破坏的栈帧读出**（pc=栈槽值），需在"fiber ctx 保存时 pc 非代码"处加探针抓最后的合法块与栈内容
 | M1138 | §18.4683: ★★★★★★★★★★★★ **重大突破：修复 GetSelf 的 fiber2 泵未保存/恢复调用者上下文 → 消除静默 no-block 死循环，执行首次进入帧循环并首次提交 GXM 绘制**。根因（NEXTBAD 探针抓到）：`sceFiberGetSelf`（812B1B70）HLE 中的周期性 fiber2 泵直接 `fiber_load(s, fiber2)` + `fiber_exec_to_completion(s)`，**没有 rc_save/rc_restore**：fiber_load 把调用者 s（含 r14）覆盖成 fiber2 的保存上下文（huffman 解码中途，r14=节点数组指针 84855E80/84855A58），而嵌套 exec 在 depth=2 立刻 [NESTED-REFUSED] 返回 0 不恢复 → GetSelf 返回 `s->r[14]`（数据指针）当作下一个 pc → 跳到栈/数据地址 → no-block 静默 livelock（m1230/1231 复现：`[NEXTBAD] from=812B1B70 nx=84855E80 lr=84855E80`、`[FIBER-EXEC] no block for pc=84855A58`）。修复：GetSelf 两处 fiber2 泵（一次性 + 周期 PUMP2）前后包 `rc_save(s)`/`rc_restore(s)`。验证 m1232：`[NEXTBAD]=0`、`[FIBER-EXEC]=0`、**【FRAMECB]=20 / [UPD]=20 / [POST]=20（帧循环首次运行）**、**[GXMABI] 首次出现 sceGxmSetVertexProgram/SetFragmentProgram/SetVertexStream/sceGxmDraw（首次绘制提交）**、[DECOMP]=48、[NESTED-STOP] 45M pc=811DFB14、[BADMEM]=0
+| M1139 | §18.4684: ★★★★★★★★ **M1138 修复后长跑首次进入 S0_LOGO 渲染路径（LOGO 状态机 5→8、LOGODRAW 80 次、场景构建 120 次、FLUSH frame 计数到 2），并确认 Vulkan 后端 present 成功（gxm_vk.o 的 [PRESENT] 探针：imgIdx=0 result=VK_SUCCESS）**。m1233（NESTED_UNTIL=300M）在 blk≈64.5M 时：`[LOGO] state=5→8`（状态机推进）、`[LOGODRAW] #80 arg=85BD6024`（8119351C 绘制入口被调用 80 次）、`[TRRET] #160`（811DB24E job trampoline）、`[SCBUILD] #100`（811C241E 场景构建）、`[SCENE] #120`（811C2964 场景对象 p=85BD52A0 st=1 head=0 cnt=0，已创建但尚无渲染条目）、`[FLUSH] #120 frame=2`（帧计数推进到 2）；`[NESTED-STOP]=0`、`[BADMEM]=0`、`[IO]=6`。Vulkan 证据：`gxm_vk.o` 含 `[PRESENT]` 探针，m1232 日志出现 `[PRESENT] #1 imgIdx=0 result=0(VK_SUCCESS)`（GXM→Vulkan 呈现路径打通）；但 harness 的 `[GXM-PRESENT]`（sceGxmDisplayQueueAddEntry 812B1720）=0、`[GFX]` begin/end/present 计数=0 → 游戏尚未提交 GXM 场景/显示队列
+m1233 证据（`m1233_long4_key.txt`）：
+```
+[LOGO] #42 state=5 task=85CE556C        → 最后一次 [LOGO] #132 state=8 task=85CE556C
+[LOGODRAW] #42 arg=85BD6024 r1=85CE55BC r2=8119351D r3=0    → 最后 #80
+[SCBUILD] #97 tid=0 r0=85BD4B80 r1=0 r2=0x1444 lr=811993C0 sp=848563C8
+[SCENE] #97 tid=0 p=85BD4B80 st=1 head0F=0 head19=0 cnt=0 e0=0 … lr=81199FF6
+[C2964] #97 tid=0 r0=85BD4B80 r1=81199FDB r2=0x1398 lr=81199FF6 sp=84856398
+[TRRET] #152 job=84618180 ret=0 tramp=8105A261 node=85CCC610 wf=00000004
+[FLUSH] #49 frame=0                     → 最后 [FLUSH] #120 frame=2
+[PUMP] #3268400 … tid=40021000 pc=8127B36A blocks=0 blk=64557161 fex=1 fib=848463A0  ← 声音线程仍活跃
+[DECOMP] 48 / [PASSSUM] 420 / [BADMEM] 0 / [NESTED-STOP] 0 / [IO] 6 / [FHOPEN] 0
+（Vulkan 呈现证据来自 m1232）
+[PRESENT] #1 imgIdx=0 result=0(VK_SUCCESS)
+[GFX] blk=…/40000000 ctx=0 begin=0 end=0 present=0 dqfin=0
+[FRAMECB]=20 / [UPD]=20 / [POST]=20 / [GXMABI]=4028（含 sceGxmDraw 1 次）
+```
+**分析**：
+- M1138 的 `rc_save/rc_restore` 修复让执行真正走过初始化尾部，进入 **S0_LOGO 的渲染状态机**：LOGO 状态从 5 推进到 8、LOGODRAW 调用 80 次、每帧 FLUSH 的 frame 计数从 0 增至 2；
+- 场景对象已创建（[SCENE] st=1），但 `head0F/head19=0、cnt=0` → 场景图目前为空（还没有渲染条目/绘制节点挂入）；
+- **Vulkan 后端呈现已成功过一次**（[PRESENT] VK_SUCCESS），说明 gxm_vk 的 swapchain/present 路径可用；但游戏的 GXM 场景提交路径（BeginScene/EndScene/DisplayQueueAddEntry）尚未被调用（[GFX]/[GXM-PRESENT]=0）；
+- 长跑仍在进行（m1233 已到 64.5M 块，无 BADMEM/截断），声音线程活跃，属正常推进。
+**NEXT**：
+```
+① 继续 m1233（NESTED_UNTIL=300M）观察 [SCENE] cnt 是否变 >0、[FLUSH] frame 是否继续增长、[LOGODRAW] 是否 → GXM 提交
+② 若场景一直为空：检查 [SCBUILD]/[SCENE] 探针对应的场景管理对象字段（head/entry 链表），确认是 HLE 返回/内存对象问题还是游戏逻辑等待
+③ 关注 [GXM-PRESENT]（812B1720 DisplayQueueAddEntry）/sceGxmBeginScene 等 stub 何时被调用 → 与 gxm_vk present 计数对齐
+④ 达到 BeginScene/Present 后：截图验证像素（清屏/LOGO 画面）→ S0_LOGO 可视 → S1_TITLE
+```
+验证：`m1233_long4_key.txt`、`m1232_fix2_key.txt`、`recomp_harness_getselfpump_4683.cpp`、`gxm_vk.o`（含 [PRESENT] 探针）、`[TABLE] blocks=230291`。 |
+| §18.4684 | After the M1138 fix the long run enters the S0_LOGO render path for the first time (LOGO state machine 5->8, LOGODRAW 80 calls, scene builds 120, FLUSH frame counter up to 2) and the Vulkan backend present success is confirmed (gxm_vk.o [PRESENT] probe: imgIdx=0 result=VK_SUCCESS). m1233 (NESTED_UNTIL=300M) at blk~64.5M: [LOGO] state=5->8 (state machine advancing), [LOGODRAW] #80 arg=85BD6024 (draw entry 8119351C called 80 times), [TRRET] #160 (811DB24E job trampoline), [SCBUILD] #100 (811C241E scene build), [SCENE] #120 (811C2964 scene object p=85BD52A0 st=1 head=0 cnt=0, created but no render entries yet), [FLUSH] #120 frame=2 (frame counter advanced to 2); [NESTED-STOP]=0, [BADMEM]=0, [IO]=6. Vulkan evidence: gxm_vk.o contains the [PRESENT] probe and the m1232 log shows [PRESENT] #1 imgIdx=0 result=0(VK_SUCCESS) (GXM->Vulkan present path works); however the harness [GXM-PRESENT] (sceGxmDisplayQueueAddEntry 812B1720)=0 and [GFX] begin/end/present counters=0 => the game has not submitted a GXM scene/display queue yet. '
+       'm1233 evidence: [LOGO] #42 state=5 task=85CE556C -> last #132 state=8 task=85CE556C; [LOGODRAW] #42 arg=85BD6024 r1=85CE55BC r2=8119351D r3=0 -> last #80; [SCBUILD] #97 tid=0 r0=85BD4B80 r1=0 r2=0x1444 lr=811993C0 sp=848563C8; [SCENE] #97 tid=0 p=85BD4B80 st=1 head0F=0 head19=0 cnt=0 e0=0 lr=81199FF6; [C2964] #97 tid=0 r0=85BD4B80 r1=81199FDB r2=0x1398 lr=81199FF6 sp=84856398; [TRRET] #152 job=84618180 ret=0 tramp=8105A261 node=85CCC610 wf=4; [FLUSH] #49 frame=0 -> last #120 frame=2; [PUMP] #3268400 tid=40021000 pc=8127B36A blocks=0 blk=64557161 fex=1 fib=848463A0 (sound thread active); [DECOMP]=48 / [PASSSUM]=420 / [BADMEM]=0 / [NESTED-STOP]=0 / [IO]=6 / [FHOPEN]=0; (Vulkan present evidence from m1232) [PRESENT] #1 imgIdx=0 result=0(VK_SUCCESS); [GFX] blk=40000000 ctx=0 begin=0 end=0 present=0 dqfin=0; [FRAMECB]=20 / [UPD]=20 / [POST]=20 / [GXMABI]=4028 (including sceGxmDraw x1). '
+       'Analysis: the M1138 rc_save/rc_restore fix let execution truly pass the end of initialization and enter the S0_LOGO render state machine: LOGO state advances 5->8, LOGODRAW is called 80 times, and the per-frame FLUSH frame counter grows from 0 to 2. Scene objects are created ([SCENE] st=1) but head0F/head19=0 and cnt=0, i.e. the scene graph is currently empty (no render entries/draw nodes attached yet). The Vulkan backend present already succeeded once ([PRESENT] VK_SUCCESS), so the gxm_vk swapchain/present path is functional; but the game GXM scene submission path (BeginScene/EndScene/DisplayQueueAddEntry) has not been called yet ([GFX]/[GXM-PRESENT]=0). The long run is still going (m1233 at 64.5M blocks, no BADMEM/truncation), sound thread active - normal progress. '
+       'NEXT: (1) continue m1233 (NESTED_UNTIL=300M) and watch whether [SCENE] cnt becomes >0, [FLUSH] frame keeps growing, and [LOGODRAW] leads to GXM submission; (2) if the scene stays empty, inspect the scene-manager object fields (head/entry lists) behind [SCBUILD]/[SCENE] to decide whether it is an HLE return/memory-object issue or the game waiting on logic; (3) watch when [GXM-PRESENT] (812B1720 DisplayQueueAddEntry)/sceGxmBeginScene stubs are called and align with the gxm_vk present count; (4) after BeginScene/Present, screenshot-verify pixels (clear/LOGO picture) -> S0_LOGO visible -> S1_TITLE. '
+       'Verification: m1233_long4_key.txt, m1232_fix2_key.txt, recomp_harness_getselfpump_4683.cpp, gxm_vk.o (contains the [PRESENT] probe), [TABLE] blocks=230291. |
 m1230/m1231/m1232 证据（`m1230_nextbad_key.txt`、`m1231_nopumpmain_key.txt`、`m1232_fix2_key.txt`）：
 ```
 （修复前 m1230，PUMPMAIN=1）
@@ -503368,3 +503403,43 @@ g_in_fiber_exec = 0;
 ANTI-FORGETTING ENTRY. Keywords: M1138 MAJOR BREAKTHROUGH - fixed GetSelf fiber2 pump missing rc_save/rc_restore; silent no-block livelock eliminated; execution enters the frame loop for the first time and submits the first GXM draws. Root cause: in sceFiberGetSelf (812B1B70) HLE the one-shot and periodic (PUMP2) fiber2 pump paths do `g_in_fiber_exec=1; fiber_load(s, g_fiber_list[1], ...); fiber_exec_to_completion(s); g_in_fiber_exec=0;` with NO rc_save/rc_restore. fiber_load overwrites the caller s (r14 becomes fiber2's saved huffman-decode node pointer 84855A58/84855E80), the nested exec is refused at depth 2 ([NESTED-REFUSED] depth=2 pc=811DFB14) and returns 0 without restoring, so GetSelf returns s->r[14] (data pointer) as next pc -> no-block silent livelock (address inside heap mapping, no BADMEM). Evidence m1230: [NEXTBAD] from=812B1B70 nx=84855A58 lr=84855A58 fib=848463A0 sp=8484EF28, ring ... 811DFB14 8120682A 81206832 81198BF6 81198BEA 811E5CDA 811E5CEA 81198BEE 812B2AC0 81198BF2 812067A0 812B1B70, stack sp+4=0x47484D30 (huffman magic); [PUMP2] tick=20000 fiber2=848463A0 pc=811DFB14 ret=0; [FIBER-EXEC] no block for pc=84855A58. m1231 without PUMPMAIN: same class with 84855E80. FIX: wrap both pumps with rc_save(s)/rc_restore(s). VERIFIED m1232 (NESTED_UNTIL=45M): [NEXTBAD]=0, [FIBER-EXEC]=0, [FRAMECB]=20 / [UPD]=20 / [POST]=20 (frame loop running), [GXMABI] 31 functions now including sceGxmSetVertexProgram/SetFragmentProgram/SetVertexStream/sceGxmDraw (first draw submissions), [DECOMP]=48, [PASSSUM]=420, [FLOAD-BAD]=2, [BADMEM]=0, [NESTED-STOP] total=45000000 pc=811DFB14; [COUNT]/BeginScene/Present still 0. NEXT: long run NESTED_UNTIL=300M+ to see BeginScene/EndScene/Present and COUNT present; verify gxm_vk/gxm_abi Draw reaches Vulkan command buffers; more resource IO/FHOPEN for title assets; first verifiable picture (clear/LOGO) then S1_TITLE. Verification: m1232_fix2_key.txt, m1231_nopumpmain_key.txt, m1230_nextbad_key.txt, recomp_harness_getselfpump_4683.cpp, [TABLE] blocks=230291.
 
 LOOKUP: M1138 GetSelf fiber2 pump missing rc_save rc_restore root cause, fiber_load overwrites caller r14 huffman node pointer 84855A58 84855E80, NESTED-REFUSED depth 2 pc 811DFB14, PUMP2 tick 20000, NEXTBAD from 812B1B70 nx 84855A58 lr 84855A58 sp 8484EF28, FIBER-EXEC no block pc 84855A58, stack huffman magic 47484D30, fix rc_save rc_restore both pumps, m1232 verification FRAMECB 20 UPD 20 POST 20 frame loop first run, GXMABI sceGxmDraw first draw submission 31 functions, DECOMP 48 PASSSUM 420 BADMEM 0 NESTED-STOP 45M, COUNT BeginScene Present still 0, next long run 300M BeginScene Present Vulkan command buffer verification title assets -> 18.4682 [relevant: previous stall], 18.4681 [relevant: fiber_load r0 fix], 18.4680 [relevant: PASSSUM]
+### 18.4684 PORT M1139: M1138 修复后首次进入 S0_LOGO 渲染路径；Vulkan present 已成功（VK_SUCCESS）
+
+1) m1233 长跑（NESTED_UNTIL=300M，blk≈64.5M）证据：
+```
+[LOGO] #42 state=5 task=85CE556C           → 最后 #132 state=8（状态机推进）
+[LOGODRAW] #42 arg=85BD6024 r1=85CE55BC r2=8119351D r3=0   → 最后 #80（8119351C 绘制入口）
+[SCBUILD] #97 r0=85BD4B80 r1=0 r2=0x1444 lr=811993C0 sp=848563C8   → 最后 #100
+[SCENE] #97 p=85BD4B80 st=1 head0F=0 head19=0 cnt=0 e0=0 lr=81199FF6   → 最后 #120（场景已建但为空）
+[TRRET] #152 job=84618180 ret=0 tramp=8105A261 node=85CCC610 wf=4   → 最后 #160
+[FLUSH] #49 frame=0                        → 最后 #120 frame=2（帧计数推进）
+[PUMP] tid=40021000 pc=8127B36A blocks=0 blk=64557161 fex=1 fib=848463A0（声音线程活跃）
+[DECOMP]=48 / [PASSSUM]=420 / [BADMEM]=0 / [NESTED-STOP]=0 / [IO]=6 / [FHOPEN]=0
+```
+2) Vulkan 呈现证据（m1232 + gxm_vk.o）：
+```
+gxm_vk.o 内含 [PRESENT] 探针
+m1232 日志: [PRESENT] #1 imgIdx=0 result=0(VK_SUCCESS)      ← GXM→Vulkan 呈现成功
+[GFX] ctx=0 begin=0 end=0 present=0 dqfin=0                  ← 游戏的 GXM 场景提交尚未调用
+[GXM-PRESENT]=0（sceGxmDisplayQueueAddEntry 812B1720 未被调用）
+[FRAMECB]=20 / [UPD]=20 / [POST]=20 / [GXMABI]=4028（含 sceGxmDraw×1）
+```
+3) 分析：
+```
+M1138 rc_save/rc_restore 修复让执行真正走过初始化 → 进入 S0_LOGO 渲染状态机
+LOGO 状态 5→8、LOGODRAW×80、每帧 FLUSH 的 frame 计数 0→2
+场景对象已创建（st=1）但 head/cnt=0 → 场景图为空（渲染条目尚未挂入）
+Vulkan swapchain/present 已成功一次；游戏 GXM BeginScene/EndScene/DisplayQueueAddEntry 尚未调用
+```
+4) NEXT：
+```
+① 继续 m1233 观察 [SCENE] cnt>0、[FLUSH] frame 增长、LOGODRAW→GXM 提交
+② 若场景一直为空：检查场景管理对象 head/entry 链表字段（HLE 返回/内存对象问题 vs 游戏逻辑等待）
+③ 跟踪 [GXM-PRESENT]/sceGxmBeginScene 何时调用，与 gxm_vk present 计数对齐
+④ 到 BeginScene/Present 后截图验证像素（清屏/LOGO）→ S0_LOGO 可视 → S1_TITLE
+```
+验证：`m1233_long4_key.txt`、`m1232_fix2_key.txt`、`recomp_harness_getselfpump_4683.cpp`、`gxm_vk.o`、`[TABLE] blocks=230291`。
+
+ANTI-FORGETTING ENTRY. Keywords: M1139 after the M1138 fix the long run enters the S0_LOGO render path for the first time and the Vulkan backend present is confirmed successful. m1233 (NESTED_UNTIL=300M) at blk~64.5M: [LOGO] state=5->8 (task=85CE556C), [LOGODRAW] 80 calls (entry 8119351C, arg=85BD6024 r1=85CE55BC r2=8119351D), [TRRET] 160 (811DB24E job trampoline, node=85CCC610), [SCBUILD] 100 (811C241E), [SCENE] 120 (811C2964 p=85BD52A0 st=1 head0F=0 head19=0 cnt=0 => scene created but empty), [FLUSH] 120 with frame counter reaching 2, sound thread active ([PUMP] tid=40021000 pc=8127B36A), [DECOMP]=48, [PASSSUM]=420, [BADMEM]=0, [NESTED-STOP]=0, [IO]=6, [FHOPEN]=0. Vulkan evidence: gxm_vk.o contains the [PRESENT] probe; m1232 log shows [PRESENT] #1 imgIdx=0 result=0(VK_SUCCESS) so the gxm_vk swapchain/present path works; but [GXM-PRESENT] (sceGxmDisplayQueueAddEntry 812B1720)=0 and [GFX] begin/end/present counters=0, so the game has not yet submitted a GXM scene/display queue. [FRAMECB]=20 / [UPD]=20 / [POST]=20 / [GXMABI]=4028 (including sceGxmDraw x1). Analysis: M1138's rc_save/rc_restore fix let execution pass initialization and enter the S0_LOGO render state machine (state 5->8, LOGODRAW 80, FLUSH frame 0->2); scene objects are created (st=1) but head/cnt=0 so the scene graph is empty (no render entries attached); Vulkan present succeeded once; game GXM BeginScene/EndScene/DisplayQueueAddEntry not yet called. NEXT: continue m1233 watching [SCENE] cnt>0, [FLUSH] frame growth, LOGODRAW->GXM submission; if the scene stays empty inspect the scene-manager head/entry list fields (HLE return/memory-object issue vs game logic wait); track when [GXM-PRESENT]/sceGxmBeginScene are called and align with the gxm_vk present count; after BeginScene/Present screenshot-verify pixels (clear/LOGO) -> S0_LOGO visible -> S1_TITLE. Verification: m1233_long4_key.txt, m1232_fix2_key.txt, recomp_harness_getselfpump_4683.cpp, gxm_vk.o, [TABLE] blocks=230291.
+
+LOOKUP: M1139 S0_LOGO render path first entry after M1138 fix, [LOGO] state 5 to 8 task 85CE556C, [LOGODRAW] 80 calls 8119351C arg 85BD6024, [TRRET] 160 811DB24E node 85CCC610, [SCBUILD] 100 811C241E, [SCENE] 120 811C2964 p 85BD52A0 st 1 head0F 0 head19 0 cnt 0 empty scene, [FLUSH] 120 frame 2, Vulkan [PRESENT] imgIdx 0 VK_SUCCESS gxm_vk.o, [GXM-PRESENT] 0 sceGxmDisplayQueueAddEntry 812B1720 not called, [GFX] begin end present 0, [FRAMECB] 20 UPD 20 POST 20 GXMABI 4028 sceGxmDraw 1, next scene cnt>0 flush frame growth GXM submission screenshot pixels S0_LOGO visible S1_TITLE -> 18.4683 [relevant: GetSelf pump fix], 18.4682 [relevant: previous stall], 18.4680 [relevant: PASSSUM]
