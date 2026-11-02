@@ -1109,6 +1109,54 @@
 | M1091 | §18.4636: ★★★★★★★★★★★ **找到 Movie 崩溃的最终根因：batch_034 生成的 `blx r2` 块漏设 LR！m1135 `[CB9276] reg2 target=81159276 from_blk=81158504 lr=81178F10 sp=84856290` + ring `81178F10 81178F18 81178F1E 81178F2A 81178F36 811584DE 811584E4 81158504` 证明调用点是 0x81158504（我们补块函数 FUN_8115849E 内），而 batch_034 该块代码为 `s->r[2]=s->r[1]; s->r[0]=1; s->r[1]=s->r[4]; return id_reg(2,s);`——**没有设置 `s->r[14]`（LR）**！ARM `blx r2` 的正确语义是"LR=下一条指令地址，然后跳到 r2"；漏设 LR 让 movie 完成回调 FUN_81159276 带着 stale LR=0x81178F10 进入，其 epilogue `pop {r4,r5,r6,pc}` 于是返回 0x81178F10（FUN_81178F0A 中段）→ 错位返回链 → 0x811DACFC → 崩溃。这与所有观察完全吻合。**
 | M1092 | §18.4637: ★★★★★★★★★★★★ **blx LR 修复验证成功！错位返回链彻底消失：`[CB9276] lr=8115850C`、`[MOVCB-ENT] lr=8115850C`、`[MOVCB-EPI]` 保存槽 = 0x8115850C（正确）、`[ACFC-SAFE]=0`。运行首次稳定越过 64,278,346（WD 显示 64,278,999），并进入**全新阶段：CRI 文件系统加载**（CRILOG/FIOSW 首次出现）。新崩溃是"下游"问题：`criFsLoader_Create has been called before the library initialization` → BADMEM va=0x30 @0x81299570（criFs 加载器）。⇒ **movie 阶段正式通关，进入标题资源加载！** 下一层是 criFs 库初始化 HLE。**
 | M1093 | §18.4638: ★★★★★★★★ **criFs 层根因定位：`criFsLoader_Create`（FUN_8128DE06）检查 `DAT_815401B8`（loader 库初始化标志），为 0 时报 "called before the library initialization" 并返回 -1；而 `DAT_815401B8` 由 **FUN_8128D2BA（CriFsLoader_Initialize）** 设置——且该函数**正是从 FUN_8128399E（criFs_Initialize）内部 0x81283B56 调用的**。⇒ 我们 HLE 在 n=5000 强制的 criFs_Initialize 理论上会同时初始化 loader，但 m1136 里游戏在 n=1717 就已经报 "criFsLoader_Create 在库初始化前调用"（早于强制初始化），说明**初始化时序/状态在后续被破坏或从未生效**。M1093 加 `[CRIFST]` 状态探针（FECC/B8/C8/CC/D0）并在 n=61M 触发第二次 criFs_Initialize（P5D_CRIFSHLE2_AT），验证后重新初始化能否让 criFsLoader_Create 成功、崩溃后移。**
+| M1094 | §18.4639: ★★★★★★★★★ **找到 criFs_Initialize 无效的两个技术原因并修复：(1) `call_guest_cb2` 的内层调度循环遇到 **HLE stub** 时直接 `break`（主循环有 hle_call 回退，嵌套调用没有）——criFs_Initialize 内部任何 HLE 调用都会导致其中途退出；(2) `call_guest_cb2` 只设置 r0/r1，不设置 **r2**，而 criFs_Initialize(param_1=work, param_2, param_3) 的参数 3 是工作缓冲大小——r2 为垃圾值会走 else 分支并报 "E2009071603:Insufficient buffer size."，随后 finalize 把 FECC 清 0。m1137 `[CRIFST] criFsInitFECC=00000000 loaderB8=00000000` 正是"初始化失败并被回滚"的确证。M1094 修复：嵌套循环加 HLE 回退 + 新增 `call_guest_cb3(r0,r1,r2)`，强制 criFs_Initialize 与 CRIFSHLE2 都用 cb3(0,0,0) 调用。**
+m1137（`out80m_m1137crifs.txt`）证据：
+```
+[CRIFST] criFsInitFECC=00000000 loaderB8=00000000 poolC8=00000000 poolCC=00000000 D0=00000000
+        ↑ 强制 criFs_Initialize 返回 0 但 FECC/B8 全 0 → 初始化失败并被 FUN_812838BA(finalize) 回滚
+[CRIFSHLE] criFs_Initialize(NULL,0,0) -> 00000000 n=5000 binit_after=00000000
+[CRILOG] … E2009072703:Insufficient buffer size. / E2008102820:criFsLoader_Create has been called before the library initialization.
+```
+**criFs_Initialize（FUN_8128399E）关键流程（`crifs.txt`）**：
+```c
+if (param_1 == NULL) { 使用默认配置 local_5c[3..0xc] = {0,0x10,0x10,2,0x10,0,0x10,0x10,0x100,0x2740100}; param_1 = &config; }
+iVar1 = FUN_812836FC(param_1);              // 版本/参数检查
+if (DAT_8153FECC != 0) { "called twice"; return -1; }
+DAT_8153FECC = 1;                            // ★ 初始化标志
+iVar1 = FUN_81283784(param_1,&local_68);
+if (local_68 < 0) { FUN_812838ba(); goto end; }        // 失败 → finalize（清 FECC）
+if (param_2 == 0 && param_3 == 0) {          // ★ 默认工作缓冲路径（我们的调用应命中此分支）
+    param_2 = FUN_81279b54(&DAT_816a0b80); param_3 = local_68; }
+else {                                        // 否则要求 param_3 >= local_68，否则 "E2009071603:Insufficient buffer size." + finalize
+    if (param_3 < local_68) { log("E2009071603:Insufficient buffer size."); FUN_812838ba(); goto end; } }
+... 之后调用 FUN_8128FFAE / FUN_8128A728（loader 初始化会走到 FUN_8128D2BA）...
+```
+**M1094 修复（recomp_harness.cpp）**：
+```cpp
+// 1) 嵌套调度循环（call_guest_cb / call_guest_cb2 / call_guest_cb3 共 2 处相同模式）加 HLE 回退：
+BlockFn fn = gbn(pc);
+if (!fn) {
+  uint32_t _hp = hle_call(pc, s);                     // 与主循环一致地分发 HLE stub
+  if (_hp == 0xFFFFFFFFu || _hp == 0u || _hp >= 0xFFFFFF00u) break;
+  pc = _hp; continue;
+}
+// 2) 新增 call_guest_cb3（设置 r0,r1,r2）：
+static uint32_t call_guest_cb3(RecState* s, uint32_t entry, uint32_t a0, uint32_t a1, uint32_t a2, int maxblocks);
+// 3) 强制初始化改为三参调用：
+call_guest_cb3(&s, 0x8128399Eu, 0u, 0u, 0u, 4000000);   // criFs_Initialize(NULL, 0, 0)
+```
+编译：harness exit 0；exe 重链 exit 0（57,119,944B，08:02:08）。验证运行 `out80m_m1138crifs3.txt` 已启动（env 同 m1137：CRIFSHLE_AT=5000、CRIFSHLE2_AT=61000000）。
+**预期**：`[CRIFST]` FECC=1、loaderB8=1、poolC8/CC 非 0 → criFs 真正初始化成功；movie 之后 criFsLoader_Create 成功 → 标题资源加载开始（FIOS/CRI 读取）。
+NEXT：
+```
+① 读 m1138 [CRIFST]/[CRIFSHLE]/[CRIFSHLE2]：FECC/B8/C8/CC/D0 是否非 0
+② 若成功：观察 movie 后是否还崩在 0x81299570；若不再崩 → 进入 title 资源加载（FIOSFILL 新文件 OPEN）
+③ 若仍崩：检查 criFs 后续（LoaderCreate 成功但其它 null）→ 继续用 pc-ring 定位
+④ 之后：2D 上下文/视图注册 → array2 → GXM → 画面
+⑤ 记录 criFs 初始化修复
+```
+验证：`out80m_m1137crifs.txt`、`crifs.txt`、`out80m_m1138crifs3.txt`（生成中）、`recomp_harness.cpp`。 |
+| §18.4639 | Found and fixed the two technical reasons criFs_Initialize was ineffective: (1) call_guest_cb2's inner dispatch loop breaks immediately on any HLE stub (the main loop has an hle_call fallback, nested calls did not) - any HLE call inside criFs_Initialize aborts it midway; (2) call_guest_cb2 only sets r0/r1 and not r2, while criFs_Initialize(param_1=work, param_2, param_3) uses param_3 as the work-buffer size - a garbage r2 takes the else branch and reports 'E2009071603:Insufficient buffer size.', then finalize clears FECC. m1137 [CRIFST] criFsInitFECC=00000000 loaderB8=00000000 is the proof of 'init failed and rolled back'. M1094 fixes: HLE fallback in nested loops + new call_guest_cb3(r0,r1,r2), and the forced criFs_Initialize and CRIFSHLE2 now use cb3(0,0,0). m1137 evidence: [CRIFST] criFsInitFECC=00000000 loaderB8=00000000 poolC8=00000000 poolCC=00000000 D0=00000000 (the forced criFs_Initialize returned 0 but FECC/B8 are all 0 -> init failed and was rolled back by FUN_812838BA finalize); [CRIFSHLE] criFs_Initialize(NULL,0,0) -> 00000000 n=5000 binit_after=00000000; [CRILOG] E2009072703:Insufficient buffer size. / E2008102820:criFsLoader_Create has been called before the library initialization. criFs_Initialize (FUN_8128399E) key flow: if (param_1 == NULL) use default config local_5c[3..0xc] = {0,0x10,0x10,2,0x10,0,0x10,0x10,0x100,0x2740100}, param_1=&config; iVar1=FUN_812836FC(param_1) version check; if (DAT_8153FECC != 0) 'called twice' return -1; DAT_8153FECC = 1; FUN_81283784(param_1,&local_68); if (local_68<0) FUN_812838ba() finalize; if (param_2==0 && param_3==0) { param_2=FUN_81279b54(&DAT_816a0b80); param_3=local_68; } else { if (param_3 < local_68) { log 'E2009071603:Insufficient buffer size.'; FUN_812838ba(); goto end; } }; later FUN_8128FFAE / FUN_8128A728 (loader init reaches FUN_8128D2BA). M1094 fix (recomp_harness.cpp): (1) nested dispatch loops (call_guest_cb / call_guest_cb2 / call_guest_cb3, 2 identical patterns) get an HLE fallback: BlockFn fn = gbn(pc); if (!fn) { uint32_t _hp = hle_call(pc, s); if (_hp == 0xFFFFFFFFu || _hp == 0u || _hp >= 0xFFFFFF00u) break; pc = _hp; continue; } (2) new call_guest_cb3(RecState* s, uint32_t entry, uint32_t a0, uint32_t a1, uint32_t a2, int maxblocks) setting r0/r1/r2; (3) forced init now uses call_guest_cb3(&s, 0x8128399Eu, 0u, 0u, 0u, 4000000) = criFs_Initialize(NULL,0,0). Build: harness exit 0; exe relink exit 0 (57,119,944B 08:02:08). Verification run out80m_m1138crifs3.txt started (env same as m1137: CRIFSHLE_AT=5000, CRIFSHLE2_AT=61000000). EXPECTED: [CRIFST] FECC=1, loaderB8=1, poolC8/CC non-zero -> criFs truly initialized; after the movie criFsLoader_Create succeeds -> title asset loading (FIOS/CRI reads). NEXT: read m1138 [CRIFST]/[CRIFSHLE]/[CRIFSHLE2] whether FECC/B8/C8/CC/D0 are non-zero; if successful watch whether the movie-after crash at 0x81299570 is gone and FIOSFILL opens new (title) files; if still crashing check criFs later stage (LoaderCreate succeeded but other null) with pc-ring; then 2D context/views -> array2 -> GXM -> picture; record the criFs init fix. |
 m1136（`out80m_m1136blxfix.txt`）criFs 证据：
 ```
 [CRIFSHLE] criFs_Initialize(NULL,0,0) -> 00000000 n=5000 binit_after=00000000
@@ -499348,3 +499396,49 @@ NEXT：
 ANTI-FORGETTING ENTRY. Keywords: M1093 criFs root cause - criFsLoader_Create (FUN_8128DE06) checks DAT_815401B8 and returns -1 'called before the library initialization' when 0; DAT_815401B8 is set by FUN_8128D2BA (CriFsLoader_Initialize) which is called from FUN_8128399E (criFs_Initialize) at 0x81283B56; FUN_8128399E is called from game/app init entries FUN_81235A10 / FUN_81224160 which were never called. FUN_8128D2BA(5 args): if (DAT_815401b8!=0) log E2008071723 initialized twice return -1; DAT_815401b8=1; builds DAT_815401c8/DAT_815401cc pools from work buffer param_4/param_5. FUN_8128D242 = CriFsLoader_Finalize clears C8/CC/D0 and B8=0. FUN_8128399E uses DAT_8153FECC as called-twice flag, sets 1 on success. m1136: [CRIFSHLE] criFs_Initialize(NULL,0,0) -> 00000000 n=5000 binit_after=00000000; [CRILOG] at=81278F96 n=1717 E2008102820:criFsLoader_Create has been called before the library initialization; E2009072703 Insufficient buffer size; E2011102800 Reference counter already 0; [WD] 64278999 passed old death point; [SNAP] blk=81299570 r0=0 r13=84856258 r14=812998DE; [BADMEM] va=0x30. M1093 added [CRIFST] criFsInitFECC=%08X loaderB8=%08X poolC8=%08X poolCC=%08X D0=%08X printed after forced criFs_Initialize, and run env P5D_CRIFSHLE2_AT=61000000 triggers a second criFs_Initialize just before movie completion (if FECC=1 returns 'called twice'; if finalized it re-initializes). Build: harness exit 0; exe 57,118,250B 07:54:42; run out80m_m1137crifs.txt started. NEXT: read m1137 [CRIFST]: if B8=1 loader initialized (crash is elsewhere); if B8=0 and FECC=0 forced init ineffective/finalized -> find and stop finalize caller; if B8=0 and FECC=1 criFs_Initialize failed early -> check return/logs and fix args; then fix HLE init timing (re-init after movie at n~64.3M or call FUN_8128D2BA directly); then criFsLoader_Create succeeds -> title asset loading -> 2D context -> GXM -> picture; record movie stage passed.
 
 LOOKUP: M1093 criFsLoader_Create checks DAT_815401B8, FUN_8128D2BA CriFsLoader_Initialize sets it, called from FUN_8128399E criFs_Initialize @0x81283B56, callers of criFs_Initialize FUN_81235A10 FUN_81224160 never called, FUN_8128D242 CriFsLoader_Finalize clears B8, DAT_8153FECC called-twice flag, DAT_815401C8/CC pools, [CRIFSHLE] -> 0 n=5000, CRILOG E2008102820 n=1717, BADMEM va=0x30 0x81299570, [CRIFST] probe FECC/B8/C8/CC/D0, P5D_CRIFSHLE2_AT=61000000, exe 57,118,250B 07:54:42, out80m_m1137crifs.txt, next fix init timing -> §18.4637 [relevant: movie passed], §18.4636 [relevant: blx fix], §18.4631 [relevant: GXM code]
+### 18.4639 PORT M1094: criFs_Initialize 无效的两个原因（嵌套循环无 HLE 回退 + r2 未设置）→ 修复并验证
+
+1) m1137 证据：
+```
+[CRIFST] criFsInitFECC=00000000 loaderB8=00000000 poolC8=00000000 poolCC=00000000 D0=00000000
+         ↑ 强制初始化返回 0 但状态全 0 = 初始化失败并被 finalize 回滚
+[CRIFSHLE] criFs_Initialize(NULL,0,0) -> 00000000 n=5000 binit_after=00000000
+[CRILOG] E2009072703:Insufficient buffer size. / E2008102820:criFsLoader_Create has been called before the library initialization.
+```
+2) criFs_Initialize 流程（关键分支）：
+```c
+if (param_1 == NULL) { 默认配置 = {0,0x10,0x10,2,0x10,0,0x10,0x10,0x100,0x2740100}; param_1=&config; }
+FUN_812836FC 版本检查;  if (DAT_8153FECC) 报"called twice" return -1;  DAT_8153FECC = 1;
+FUN_81283784(param_1,&local_68); if (local_68 < 0) finalize;
+if (param_2==0 && param_3==0) { 默认工作缓冲路径 } else { if (param_3 < local_68) { "Insufficient buffer size."; finalize; } }
+→ 之后 FUN_8128FFAE / FUN_8128A728（内部会调 FUN_8128D2BA=CriFsLoader_Initialize）
+```
+3) 两个技术原因：
+- **call_guest_cb2 的内层循环遇到 HLE stub 直接 break**（主循环有 hle_call 回退）→ criFs_Initialize 内 HLE 调用导致中途退出
+- **call_guest_cb2 不设置 r2** → param_3=垃圾 → else 分支 "Insufficient buffer size." → finalize 清 FECC=0
+4) M1094 修复：
+```cpp
+// 嵌套调度循环（2 处）加 HLE 回退
+BlockFn fn = gbn(pc);
+if (!fn) { uint32_t _hp = hle_call(pc, s);
+  if (_hp == 0xFFFFFFFFu || _hp == 0u || _hp >= 0xFFFFFF00u) break;
+  pc = _hp; continue; }
+// 新增 call_guest_cb3（设置 r0,r1,r2）
+static uint32_t call_guest_cb3(RecState* s, uint32_t entry, uint32_t a0, uint32_t a1, uint32_t a2, int maxblocks);
+// 强制初始化改用 cb3(0,0,0)
+call_guest_cb3(&s, 0x8128399Eu, 0u, 0u, 0u, 4000000);
+```
+5) 编译：harness exit 0；exe 57,119,944B（08:02:08）
+6) 验证运行 `out80m_m1138crifs3.txt` 已启动
+NEXT：
+```
+① [CRIFST] FECC/B8/C8/CC 是否非 0
+② movie 后 0x81299570 崩溃是否消失
+③ 新 FIOSFILL OPEN（title 资源）→ 2D 上下文 → GXM → 画面
+④ 记录 criFs 初始化修复
+```
+验证：`out80m_m1137crifs.txt`、`crifs.txt`、`out80m_m1138crifs3.txt`（生成中）。
+
+ANTI-FORGETTING ENTRY. Keywords: M1094 criFs_Initialize ineffective for two reasons - (1) call_guest_cb2's inner dispatch loop breaks immediately on any HLE stub (main loop has hle_call fallback, nested calls did not), so any HLE call inside criFs_Initialize aborts it midway; (2) call_guest_cb2 sets only r0/r1 not r2, and criFs_Initialize(param_1=work, param_2, param_3) uses param_3 as work-buffer size - a garbage r2 takes the else branch, logs E2009071603:Insufficient buffer size., then finalize clears FECC. m1137 [CRIFST] criFsInitFECC=00000000 loaderB8=00000000 poolC8=00000000 poolCC=00000000 D0=00000000 proves init failed and was rolled back; [CRIFSHLE] criFs_Initialize(NULL,0,0) -> 00000000 n=5000 binit_after=00000000. criFs_Initialize FUN_8128399E flow: if (param_1 == NULL) default config {0,0x10,0x10,2,0x10,0,0x10,0x10,0x100,0x2740100}, param_1=&config; FUN_812836FC version check; if (DAT_8153FECC != 0) 'called twice' return -1; DAT_8153FECC = 1; FUN_81283784(param_1,&local_68); if (local_68<0) FUN_812838ba finalize; if (param_2==0 && param_3==0) default work buffer path via FUN_81279b54(&DAT_816a0b80) and param_3=local_68; else if (param_3 < local_68) log E2009071603:Insufficient buffer size and finalize; later FUN_8128FFAE / FUN_8128A728 (loader init reaches FUN_8128D2BA). M1094 fix: (1) nested dispatch loops (2 identical patterns in call_guest_cb/call_guest_cb2/call_guest_cb3) get an HLE fallback: BlockFn fn = gbn(pc); if (!fn) { uint32_t _hp = hle_call(pc, s); if (_hp == 0xFFFFFFFFu || _hp == 0u || _hp >= 0xFFFFFF00u) break; pc = _hp; continue; } (2) new call_guest_cb3(RecState* s, uint32_t entry, uint32_t a0, uint32_t a1, uint32_t a2, int maxblocks) sets r0/r1/r2; (3) forced init now call_guest_cb3(&s, 0x8128399Eu, 0u, 0u, 0u, 4000000) = criFs_Initialize(NULL,0,0). Build: harness exit 0; exe relink exit 0 (57,119,944B 08:02:08). Verification run out80m_m1138crifs3.txt started. EXPECTED: [CRIFST] FECC=1 loaderB8=1 poolC8/CC non-zero -> criFs truly initialized; after the movie criFsLoader_Create succeeds -> title asset loading (FIOS/CRI reads). NEXT: read m1138 [CRIFST]/[CRIFSHLE]/[CRIFSHLE2] whether FECC/B8/C8/CC/D0 are non-zero; if successful watch whether the movie-after crash at 0x81299570 is gone and FIOSFILL opens new title files; if still crashing check the later criFs stage with pc-ring; then 2D context/views -> array2 -> GXM -> picture; record the criFs init fix.
+
+LOOKUP: M1094 criFs_Initialize ineffective due to nested call_guest_cb2 breaking on HLE stubs and not setting r2, fixed with hle_call fallback in nested loops plus call_guest_cb3(r0,r1,r2), forced call_guest_cb3(&s, 0x8128399Eu, 0u,0u,0u,4000000), [CRIFST] FECC/B8/C8/CC/D0 all zero in m1137, E2009071603 Insufficient buffer size, FUN_8128399E default config {0,0x10,0x10,2,0x10,0,0x10,0x10,0x100,0x2740100}, FUN_812838BA finalize clears DAT_8153FECC, exe 57,119,944B 08:02:08, out80m_m1138crifs3.txt, next check FECC=1 loaderB8=1 and movie-after crash gone -> §18.4638 [relevant: criFs chain], §18.4637 [relevant: movie passed], §18.4636 [relevant: blx fix]

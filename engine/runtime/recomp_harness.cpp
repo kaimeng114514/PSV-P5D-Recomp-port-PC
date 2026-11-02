@@ -4791,7 +4791,15 @@ static uint32_t call_guest_cb(RecState* s, uint32_t entry, uint32_t arg, int max
     if (q == 0x811E5EC2u) ++g_cb5ec2; else if (q == 0x811E5EC6u) ++g_cb5ec6; else if (q == 0x811E5EF0u) ++g_cb5ef0;
     if (q >= 0xFFFFFF00u || pc == 0u) break;
     BlockFn fn = gbn(pc);
-    if (!fn) { if (g_disp_n++ < 8) { printf("[DISPCALL-NOBLK] pc=%08X lr=%08X\n", pc, s->r[14]); fflush(stdout); } break; }
+    if (!fn) {
+      // M1094: HLE stub inside a nested guest call (criFs_Initialize etc.) - dispatch it like the main loop.
+      uint32_t _hp = hle_call(pc, s);
+      if (_hp == 0xFFFFFFFFu || _hp == 0u || _hp >= 0xFFFFFF00u) {
+        if (g_disp_n++ < 8) { printf("[DISPCALL-NOBLK] pc=%08X lr=%08X\n", pc, s->r[14]); fflush(stdout); }
+        break;
+      }
+      pc = _hp; continue;
+    }
     g_cur_block = pc;
     uint32_t nx = fn(s);
     if (nx == 0u || nx == 0xFFFFFFF0u || nx == 0xFFFFFFFEu || nx == 0xFFFFFFFDu) break;
@@ -4819,7 +4827,50 @@ static uint32_t call_guest_cb2(RecState* s, uint32_t entry, uint32_t a0, uint32_
     if (q == 0x811E5EC2u) ++g_cb5ec2; else if (q == 0x811E5EC6u) ++g_cb5ec6; else if (q == 0x811E5EF0u) ++g_cb5ef0;
     if (q >= 0xFFFFFF00u || pc == 0u) break;
     BlockFn fn = gbn(pc);
-    if (!fn) { if (g_disp_n++ < 8) { printf("[DISPCALL-NOBLK] pc=%08X lr=%08X\n", pc, s->r[14]); fflush(stdout); } break; }
+    if (!fn) {
+      // M1094: HLE stub inside a nested guest call (criFs_Initialize etc.) - dispatch it like the main loop.
+      uint32_t _hp = hle_call(pc, s);
+      if (_hp == 0xFFFFFFFFu || _hp == 0u || _hp >= 0xFFFFFF00u) {
+        if (g_disp_n++ < 8) { printf("[DISPCALL-NOBLK] pc=%08X lr=%08X\n", pc, s->r[14]); fflush(stdout); }
+        break;
+      }
+      pc = _hp; continue;
+    }
+    g_cur_block = pc;
+    uint32_t nx = fn(s);
+    if (nx == 0u || nx == 0xFFFFFFF0u || nx == 0xFFFFFFFEu || nx == 0xFFFFFFFDu) break;
+    pc = nx;
+  }
+  uint32_t _ret = s->r[0];
+  if (g_disp_n++ < 12) { printf("[DISPCALL2] cb=%08X a0=%08X a1=%08X blocks=%d ret=%08X\n", entry, a0, a1, n, _ret); fflush(stdout); }
+  if ((g_cb5ec2||g_cb5ec6||g_cb5ef0) && g_cb5ec_n++ < 20) { printf("[CB5EC] entry=%08X blocks=%d pro=%d loop=%d epi=%d\n", entry, n, g_cb5ec2, g_cb5ec6, g_cb5ef0); fflush(stdout); g_cb5ec2=0; g_cb5ec6=0; g_cb5ef0=0; }
+  { RecState _chk = *s; std::memcpy(_chk.r, save, sizeof(save)); ctxchk(5, 0u, &_chk); }
+  std::memcpy(s->r, save, sizeof(save)); s->apsr = savea;
+  return _ret;
+}
+static uint32_t call_guest_cb3(RecState* s, uint32_t entry, uint32_t a0, uint32_t a1, uint32_t a2, int maxblocks) {
+  if (!entry) return 0;
+  uint32_t save[16]; std::memcpy(save, s->r, sizeof(save)); uint32_t savea = s->apsr;
+  s->r[0] = a0; s->r[1] = a1; s->r[2] = a2; s->r[14] = 0xFFFFFFFEu; s->r[15] = entry & ~1u;
+  uint32_t pc = s->r[15]; int n = 0;
+  while (n++ < maxblocks) {
+    hw_check(pc);
+    if ((pc == 0x81181C2Au || pc == 0x81181C3Eu || pc == 0x81181A3Cu || pc == 0x81182EEAu || pc == 0x81181B60u || pc == 0x81181BB2u) && g_reg_n++ < 40) {
+      uint32_t _pa=s->r[0]; char _nm[64]={0}; uint8_t* _p=GP(_pa); if(_p){ for(int _k=0;_k<60;++_k){ char _c=(char)_p[_k]; _nm[_k]=(_c>=32&&_c<127)?_c:0x2E; if(!_c) break; } }
+      printf("[REGCB] pc=%08X name=%s r0=%08X r1=%08X r2=%08X r3=%08X lr=%08X sp=%08X fib=%08X thr=%08X\n", pc, _nm, s->r[0], s->r[1], s->r[2], s->r[3], s->r[14], s->r[13], g_cur_fiber, g_cur_thr); fflush(stdout); }
+    uint32_t q = pc & ~1u;
+    if (q == 0x811E5EC2u) ++g_cb5ec2; else if (q == 0x811E5EC6u) ++g_cb5ec6; else if (q == 0x811E5EF0u) ++g_cb5ef0;
+    if (q >= 0xFFFFFF00u || pc == 0u) break;
+    BlockFn fn = gbn(pc);
+    if (!fn) {
+      // M1094: HLE stub inside a nested guest call (criFs_Initialize etc.) - dispatch it like the main loop.
+      uint32_t _hp = hle_call(pc, s);
+      if (_hp == 0xFFFFFFFFu || _hp == 0u || _hp >= 0xFFFFFF00u) {
+        if (g_disp_n++ < 8) { printf("[DISPCALL-NOBLK] pc=%08X lr=%08X\n", pc, s->r[14]); fflush(stdout); }
+        break;
+      }
+      pc = _hp; continue;
+    }
     g_cur_block = pc;
     uint32_t nx = fn(s);
     if (nx == 0u || nx == 0xFFFFFFF0u || nx == 0xFFFFFFFEu || nx == 0xFFFFFFFDu) break;
@@ -6844,12 +6895,12 @@ if (g_hacks && (ppc & ~1u) == 0x811E2B50u) {
       // never got built at the title phase and forced criFs_Initialize again during page1.
       { static long long _cfat2 = -1; if (_cfat2 < 0) { const char* _e2 = getenv("P5D_CRIFSHLE2_AT"); _cfat2 = _e2 ? atoll(_e2) : -1; }
         if (_cfat2 > 0 && (long long)n >= _cfat2) { static int _cfh2 = 0; if (!_cfh2) { _cfh2 = 1;
-          uint32_t _cr2 = call_guest_cb2(&s, 0x8128399Eu, 0u, 0u, 4000000);
+          uint32_t _cr2 = call_guest_cb3(&s, 0x8128399Eu, 0u, 0u, 0u, 4000000);
           uint32_t _bi2 = 0; { uint8_t* _q2 = GP(0x8153FEF4u); if (_q2) std::memcpy(&_bi2, _q2, 4); }
           printf("[CRIFSHLE2] criFs_Initialize(NULL,0,0) -> %08X n=%d binit_after=%08X\n", _cr2, n, _bi2);
           fflush(stdout); } } }
       if ((long long)n >= _cfat && getenv("P5D_CRIFSHLE")) { static int _cfh = 0; if (!_cfh) { _cfh = 1;
-        uint32_t _cr = call_guest_cb2(&s, 0x8128399Eu, 0u, 0u, 4000000);
+        uint32_t _cr = call_guest_cb3(&s, 0x8128399Eu, 0u, 0u, 0u, 4000000);
         uint32_t _bi=0; { uint8_t* _q=GP(0x8153FEF4u); if(_q) std::memcpy(&_bi,_q,4); }
         { uint32_t _f1=0,_f2=0,_f3=0,_f4=0,_f5=0; uint8_t* _p1=GP(0x8153FECCu); if(_p1) std::memcpy(&_f1,_p1,4); uint8_t* _p2=GP(0x815401B8u); if(_p2) std::memcpy(&_f2,_p2,4); uint8_t* _p3=GP(0x815401C8u); if(_p3) std::memcpy(&_f3,_p3,4); uint8_t* _p4=GP(0x815401CCu); if(_p4) std::memcpy(&_f4,_p4,4); uint8_t* _p5=GP(0x815401D0u); if(_p5) std::memcpy(&_f5,_p5,4); printf("[CRIFST] criFsInitFECC=%08X loaderB8=%08X poolC8=%08X poolCC=%08X D0=%08X\n",_f1,_f2,_f3,_f4,_f5); fflush(stdout); } printf("[CRIFSHLE] criFs_Initialize(NULL,0,0) -> %08X n=%d binit_after=%08X\n", _cr, n, _bi); fflush(stdout); } } }
     { static auto _rt0 = std::chrono::steady_clock::now(); static uint32_t _rn0 = 0;
