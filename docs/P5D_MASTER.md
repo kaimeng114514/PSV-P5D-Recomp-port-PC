@@ -1127,6 +1127,53 @@
 | M1109 | §18.4654: ★★★★★★★★ **HLE I/O 泵成功打通"读完成"：CPK Analyzer 已进入分析函数 FUN_81292794（首次 [CPKANAL] 命中）！但新卡点=分析报 `E2011022806:CPK Analyzer::Cannot possibly analyze the CPK File. This CPK is broken.`（头数据缓冲内容不对）。**
 | M1110 | §18.4655: ★★★★★★★ **缓冲 dump 证明 HLE 读数据 100% 正确（与真实 vita.cpk 前 64 字节逐字节一致），"CPK is broken" 的真正原因浮出水面：CPK Analyzer 在 +0x08 处读取的是"表大小"，而 vita.cpk 该字段=0x813F3494(文件大小) → 触发 `if (0x800 < uVar8+0x10) 返回错误 1（CPK broken）`；vita.cpk 的 +0x04=0xFFFFFFFF、+0x08..0x0F=64 位文件大小 0x813F3494，说明它是"64 位/加密变体 CPK"，正常流程应在 load state 4 调用解密回调 param_1[0x20] 处理后才能给 Analyzer 解析。我们泵的完成 shim 跳过了 state 4（因为 param_1[0x20]==0），所以 Analyzer 看到原始头 → 报 broken。**
 | M1111 | §18.4656: ★★★★★★★ **解密器注册链完全解码：progress 的 [0x20]/[0x21]（=reader+0xA8/+0xAC）由 FUN_8128EFF4(param1, cb, arg) 设置，数据来自 reader+0xF4/+0xF8（=reader+0xEC/+0xF0 的副本）；FUN_8128D716 在 blk 0x8128D9D0 无条件调用 FUN_8128EFF4(progress, reader+0xF4, reader+0xF8)。全对象写 watch（188 条 PROGWR）证明：reader+0xEC/+0xF0 在本运行中被 FUN_8128DEB4 初始化为 0，之后从未被置非零 → 游戏在本流程中从未给该 reader 注册解密器 → header 未解密 → Analyzer 报 broken。**
+| M1112 | §18.4657: ★★★★★★★ **HLE 头变换（HDRFIX）成功：把 64 位 CPK 头在内存中变换为标准头（+0x04=0xFF、+0x08=UTF表大小、+0x0C=0）后，Analyzer 的 `E2011022806:CPK is broken` 错误完全消失（CRILOG=0）！关键发现：CRI UTF 表字段是【大端序】（UTF+0x04 在内存中为 0x7A000000 → 大端 0x7A = 表大小-8）；变换后表大小=0x82。新卡点：分析继续推进后在 `blk 0x8129266E` 报 `BADMEM guest va=0x00000824`（某个小指针 0x820 未初始化）。**
+m1172 证据（`out80m_m1172hdrfix2.txt`）：
+```
+[HDRCHK] m=204B5043 u4=FFFFFFFF u14=7A000000 blk=31500     ← UTF+4 内存值为 0x7A000000（大端 0x7A）
+[HDRFIX] 64bit CPK header -> standard: old+8=FFFFFFFF utf_size(BE)=0000007A table_size=00000082 flags=FF blk=31500
+[CRILOG] 0                                                 ← ★ "CPK is broken" 消失（之前 ×3）
+[CPKANAL] #0 r0=84B1B84C r1=84B1B858 r2=84B1BC00 r3=84B1B990 lr=81293CB8   ← 分析继续执行
+[BADMEM] guest va=0x00000824 unmapped block=0x8129266E tid=0 stub=812B28A0  ← 新卡点（小指针 0x820）
+[MNTST] obj=84906480 stage=4 status=1                                      ← mount 仍在等待（分析未完成）
+[IO] OPEN vita.cpk size=2168403092；PREAD off=0 size=2048 got=2048
+```
+**变换公式（HLE，写 buf=0x84B1BC00 的 0x800 头缓冲）**：
+```c
+// 检测：magic=="CPK " && *(u32*)(buf+4)==0xFFFFFFFF && 大端(UTF_size)∈(0,0x800)
+uint32_t utf_be = bswap32(*(u32*)(buf+0x14));      // 0x7A000000 -> 0x7A
+uint32_t table_size = utf_be + 8;                  // 0x7A + 8 = 0x82
+*(u32*)(buf+4)  = 0x000000FF;                      // flags（与正常 data.cpk 相同 → 跳过 CRI XOR 解密）
+*(u32*)(buf+8)  = table_size;                      // ★ Analyzer 读取的"表大小"（LE）
+*(u32*)(buf+0xC) = 0;
+// 保持 magic 和 +0x10 起的 UTF 表不变
+```
+**背景（M1110/M1111 结论延续）**：
+- vita.cpk（2,168,403,092B）是 64 位头/变体 CPK：`+0x04=0xFFFFFFFF`、`+0x08=u64 文件大小 0x813F3494`、`+0x10="@UTF"`（CRI UTF 表，**大端序**）
+- 正常 data.cpk（1,913,750,232B）：`+0x04=0x000000FF`、`+0x08=0x00000350`（表大小，LE）、`+0x10="@UTF"`（UTF+4 大端 0x348=0x350-8）
+- 游戏从未注册 decrypter（M1111 全 watch 证据），故在 HLE 内做等效"头标准化"变换——**不改游戏文件、不改游戏代码**，只改 HLE 中读入的头缓冲
+**新卡点分析**：
+- header 检查已过（CRILOG=0 是决定性证据），分析进入更深阶段
+- `BADMEM va=0x824`（= 0x820+4）说明某个应指向堆对象的指针为 0x820（很小），可能是：
+  1) CPK 分析结构（work area）某字段未初始化/被我们的 fake completion 跳过
+  2) 分析需要继续读 CPK 表数据（更多 PREAD），但读请求未发出（IO 仍只有 1 次 PREAD）
+  3) 分析回调依赖 decrypter/callback 对象（我们仍是空）
+NEXT：
+```
+① 反编译 fun@0x812925xx（含 blk 0x8129266E），看 0x820 偏移来源（哪个对象字段）
+② 反编译 FUN_812AFF10（UTF 解析）/ FUN_812AEA4C/FUN_812AF434 调用链，看是否需额外读
+③ 确认分析是否需要第 2 次 PREAD（CPK 表数据）——若需要，检查读请求为什么没发出（可能被 BADMEM 中断）
+④ 修 BADMEM 对象字段后：分析成功 → Analyzer state=0x1A → mount status=2 → data.cpk 挂载 → 文件索引 → title 素材
+⑤ 若 UTF 解析需要 64 位字段：继续按 data.cpk 对照补全头字段（ContentOffset/ContentSize 等在 UTF 内，大端）
+```
+验证：`out80m_m1172hdrfix2.txt`、`out80m_m1171hdrchk.txt`、`out80m_m1170hdrfix.txt`、`cpkana.txt`。 |
+| §18.4657 | The HLE header transform (HDRFIX) works: after transforming the 64-bit CPK header in memory into the standard layout (+0x04=0xFF, +0x08=UTF table size, +0x0C=0), the Analyzer CPK-is-broken error completely disappeared (CRILOG=0)! Key discovery: CRI UTF table fields are big-endian (UTF+0x04 reads 0x7A000000 in memory -> big-endian 0x7A = table size - 8); after the transform the table size is 0x82. New blocker: the analysis proceeds further and then hits BADMEM guest va=0x00000824 at blk 0x8129266E (a small pointer 0x820 that was not initialized). '
+       'm1172 evidence: [HDRCHK] m=204B5043 u4=FFFFFFFF u14=7A000000 blk=31500 (UTF+4 = 0x7A000000 in memory, big-endian 0x7A); [HDRFIX] 64bit CPK header -> standard: old+8=FFFFFFFF utf_size(BE)=0000007A table_size=00000082 flags=FF blk=31500; [CRILOG] 0 (the CPK-is-broken error is gone, previously x3); [CPKANAL] #0 r0=84B1B84C r1=84B1B858 r2=84B1BC00 r3=84B1B990 lr=81293CB8 (analysis continues); [BADMEM] guest va=0x00000824 unmapped block=0x8129266E tid=0 stub=812B28A0 (new blocker, small pointer 0x820); [MNTST] obj=84906480 stage=4 status=1 (mount still waiting, analysis not finished); [IO] OPEN vita.cpk size=2168403092; PREAD off=0 size=2048 got=2048. '
+       'Transform formula (HLE, writes the 0x800 header buffer at buf=0x84B1BC00): detect magic==CPK && *(u32*)(buf+4)==0xFFFFFFFF && big-endian(UTF_size) in (0,0x800); uint32_t utf_be = bswap32(*(u32*)(buf+0x14)) (0x7A000000 -> 0x7A); uint32_t table_size = utf_be + 8 (0x7A + 8 = 0x82); *(u32*)(buf+4) = 0x000000FF (flags, same as normal data.cpk -> skip the CRI XOR decrypt); *(u32*)(buf+8) = table_size (the table size the Analyzer reads, LE); *(u32*)(buf+0xC) = 0; keep magic and the UTF table at +0x10. '
+       'Background (continues M1110/M1111): vita.cpk (2,168,403,092B) is a 64-bit-header/variant CPK: +0x04=0xFFFFFFFF, +0x08=u64 file size 0x813F3494, +0x10=@UTF (CRI UTF table, big-endian). Normal data.cpk (1,913,750,232B): +0x04=0x000000FF, +0x08=0x00000350 (table size, LE), +0x10=@UTF (UTF+4 big-endian 0x348 = 0x350-8). The game never registered a decrypter (M1111 whole-object watch evidence), so the HLE performs an equivalent header-normalization transform - without modifying the game files or the game code, only the header buffer read into the HLE. '
+       'New blocker analysis: the header check now passes (CRILOG=0 is decisive), the analysis goes deeper, and BADMEM va=0x824 (= 0x820+4) shows some pointer that should point to a heap object is 0x820 (very small). Possible causes: (1) a field in the CPK analysis structure (work area) is not initialized / was skipped by our fake completion; (2) the analysis needs to keep reading CPK table data (more PREADs) but the read request was never issued (IO still has only 1 PREAD); (3) the analysis callback depends on the decrypter/callback object (still empty). '
+       'NEXT: (1) decompile the function at 0x812925xx (containing blk 0x8129266E) and find where the 0x820 offset comes from (which object field); (2) decompile FUN_812AFF10 (UTF parser) / the FUN_812AEA4C/FUN_812AF434 call chain and see whether extra reads are needed; (3) check whether the analysis needs a 2nd PREAD (CPK table data) - if so, find why the read request was not issued (possibly interrupted by BADMEM); (4) after fixing the BADMEM object fields: analysis succeeds -> Analyzer state=0x1A -> mount status=2 -> data.cpk mounted -> file index -> title assets; (5) if UTF parsing needs 64-bit fields, continue filling the header fields per the data.cpk comparison (ContentOffset/ContentSize etc. are inside the UTF table, big-endian). '
+       'Verification: out80m_m1172hdrfix2.txt, out80m_m1171hdrchk.txt, out80m_m1170hdrfix.txt, cpkana.txt. |
 m1169 证据（`out80m_m1169decstate.txt`）：
 ```
 [DECSTATE] reader+DC=00000000 +E0=00000000 +E4=00000000 +E8=00000000 (blk 31500/33000)
@@ -501107,3 +501154,39 @@ CRI CPK Analyzer/VITA Ver.0.99.54 Build:Jan 30 2018
 ANTI-FORGETTING ENTRY. Keywords: M1111 decryptor registration chain decoded, progress[0x20]/[0x21]=reader+0xA8/0xAC set by FUN_8128EFF4(p,cb,arg) from reader+0xF4/0xF8 (= copies of reader+0xEC/0xF0), FUN_8128D716 unconditionally calls FUN_8128EFF4(progress, reader+0xF4, reader+0xF8) at blk 0x8128D9D0, whole-object write watch 188 PROGWR entries proves reader+0xEC/0xF0 initialized to 0 by FUN_8128DEB4 and never set non-zero -> game never registered a decryptor -> header not decrypted -> Analyzer CPK broken. Evidence m1169: [DECSTATE] reader+DC=0 +E0=0 +E4=0 +E8=0 at blk 31500/33000; [PROGWR] a=848FC408 off=0A0 v=8128EEC7 blk=28805 pc=8128EFEE (I/O callback 0x8128EEC6|1); a=848FC40C off=0A4 v=848FC368 (arg=reader); a=848FC454 off=0EC v=0 blk=28804 pc=8128DEB4 (decryptor fn=0); a=848FC458 off=0F0 v=0 blk=28804 (decryptor arg=0); a=848FC45C off=0F4 v=0; a=848FC460 off=0F8 v=0; rest of 0x848FC4xx writes 0 or I/O object addrs. Decompiles: FUN_8128EFF4(p,a,b){ *(u32*)(p+0x80)=a; *(u32*)(p+0x84)=b; }; FUN_8128EFEE(p,a,b){ *(u32*)(p+0x78)=a; *(u32*)(p+0x7C)=b; }; FUN_8128F6C8(p){ return *(u32*)(p+4); } (progress[1]=user buffer/size). FUN_8128D716: FUN_8127bbf8(iVar10,0) (reader+0xBC=0); *(param_1+0xd9)=0; pcVar1=DAT_815401d4 (global I/O interface read/write pointer = 0); if (*(char*)(param_1+0xd4)==0) iVar7=*(char*)(param_1+0xd7); bVar11 = DAT_815401d4 != 0; if (bVar11) { uVar5=2; ... (*pcVar1)(DAT_815401d8, *(param_1+200), uVar5, *(param_1+0x108), *(param_1+0x104)); } FUN_8128eff4(*(param_1+0xb0), *(param_1+0xf4), *(param_1+0xf8)) (decryptor = reader+0xF4/0xF8 = copies of reader+0xEC/0xF0). CONCLUSION: decrypt callback fields are progress[0x20]/[0x21] (reader+0xA8/0xAC), filled by FUN_8128EFF4 from reader+0xF4/0xF8; reader+0xF4/0xF8 copied from reader+0xEC/0xF0 at load start; watch proves reader+0xEC/0xF0 only written once with 0 (FUN_8128DEB4) -> no decryptor registered; DAT_815401D4/D8 global criFsIo read/write interface never registered either (=0), so the if (bVar11) branch in D716 was skipped. CRI strings: E2011030301:Only one decrypter is creatable. @0x81314F15, E2015042403:Decryption failure. @0x8131C878, CPKC @0x8131D184, CRI CPK Analyzer/VITA Ver.0.99.54 Build:Jan 30 2018. Suspicion: P5D init code that creates the decrypter / registers the I/O interface never executed or failed halfway (some HLE API returned wrong value and registration was skipped), so reader+0xEC/0xF0 empty at mount. NEXT: xref the Only one decrypter is creatable. / CPKC strings to locate the owning functions (criFsDecrypter_Create etc.) and their callers (game init); probe/log whether those functions are called in our run; find why the upper init branch was skipped; inspect the preconditions for writing reader+0xEC/0xF0 (binder mount params / CPK file flag / HLE memory allocation return values); check the DAT_815401D4/D8 registration function (criFsIo_SetIoInterface-like) - whether called and why no write, if needed register a compatible interface from the HLE; if decrypter cannot be recovered identify the CPK header encryption algorithm (possibly P5D custom) and evaluate transforming the header in HLE (known plaintext format: +0x08=table_size, +0x04=0...); after decryption valid +0x08 table size -> UTF parse -> analysis succeeds state=0x1A -> mount status=2 -> data.cpk -> file index -> title assets. Verification: out80m_m1169decstate.txt, decfn.txt, criread2.txt, cpkana.txt.
 
 LOOKUP: M1111 decryptor registration chain, progress+0x80/+0x84 = reader+0xA8/0xAC, FUN_8128EFF4 setter, reader+0xEC/0xF0 zero, FUN_8128DEB4 init, DAT_815401D4/D8 global criFsIo interface never registered, FUN_8128EEC7 I/O callback at reader+0xA0, CRI strings Only one decrypter is creatable 0x81314F15 CPKC 0x8131D184 Decryption failure 0x8131C878, CPK Analyzer/VITA Ver.0.99.54, next xref decrypter create functions and check init path -> §18.4655 [relevant: header decrypt], §18.4654 [relevant: pump], §18.4653 [relevant: load state machine]
+### 18.4657 PORT M1112: HLE 头变换（HDRFIX）成功——"CPK is broken" 消失；UTF 表字段是【大端序】；新卡点 BADMEM va=0x824
+
+1) m1172 结果：
+```
+[HDRCHK] m=204B5043 u4=FFFFFFFF u14=7A000000 blk=31500     ← UTF+4 内存值 0x7A000000（大端 0x7A）
+[HDRFIX] 64bit CPK header -> standard: old+8=FFFFFFFF utf_size(BE)=0000007A table_size=00000082 flags=FF
+[CRILOG] 0                                                 ← ★ "CPK is broken" 完全消失（之前 ×3）
+[CPKANAL] #0 r0=84B1B84C r1=84B1B858 r2=84B1BC00 r3=84B1B990 lr=81293CB8
+[BADMEM] guest va=0x00000824 unmapped block=0x8129266E tid=0 stub=812B28A0  ← 新卡点
+[MNTST] obj=84906480 stage=4 status=1
+[IO] PREAD off=0 size=2048 got=2048（仍只有 1 次读）
+```
+2) 头变换公式（HLE，buf=0x84B1BC00）：
+```c
+uint32_t utf_be = bswap32(*(u32*)(buf+0x14));   // 0x7A000000 -> 0x7A（UTF 表大小-8，大端）
+uint32_t table_size = utf_be + 8;               // 0x82
+*(u32*)(buf+4)  = 0x000000FF;                   // flags（与 data.cpk 相同 → 跳过 XOR）
+*(u32*)(buf+8)  = table_size;                   // Analyzer 读的"表大小"（LE）
+*(u32*)(buf+0xC) = 0;
+```
+3) 关键知识：**CRI UTF 表字段是大端序**（UTF+0x04 内存 0x7A000000 → BE 0x7A；data.cpk UTF+4 内存 0x48030000 → BE 0x348=0x350-8）
+4) 背景：vita.cpk 为 64 位/变体 CPK（+4=0xFFFFFFFF，+8=u64 文件大小，+10=@UTF）；正常 data.cpk（+4=0xFF，+8=0x350 表大小）
+5) 新卡点：分析推进更深后 BADMEM va=0x824（0x820+4）——某对象字段是小指针 0x820（未初始化/被跳过）
+NEXT：
+```
+① 反编译 0x812925xx（含 blk 0x8129266E），找 0x820 偏移的来源对象
+② 反编译 FUN_812AFF10（UTF 解析）/FUN_812AEA4C/FUN_812AF434 调用链
+③ 确认是否需要第 2 次 PREAD（CPK 表数据）；若需要查读请求为何未发
+④ 修好后：分析成功 → state=0x1A → mount status=2 → data.cpk → 文件索引 → title 素材
+⑤ UTF 64 位字段需要时按 data.cpk 对照补全（UTF 内字段大端）
+```
+验证：`out80m_m1172hdrfix2.txt`、`out80m_m1171hdrchk.txt`、`out80m_m1170hdrfix.txt`、`cpkana.txt`。
+
+ANTI-FORGETTING ENTRY. Keywords: M1112 HLE header transform HDRFIX works, CPK is broken error gone (CRILOG=0), CRI UTF table fields are BIG-ENDIAN (UTF+0x04 in memory = 0x7A000000 -> BE 0x7A = table size-8; data.cpk UTF+4 = 0x48030000 -> BE 0x348 = 0x350-8), transform: detect magic CPK && buf+4==0xFFFFFFFF && be(UTF_size) in (0,0x800), utf_be=bswap32(*(u32*)(buf+0x14)), table_size=utf_be+8=0x82, write buf+4=0x000000FF, buf+8=table_size, buf+0xC=0, keep magic and UTF; m1172 evidence: [HDRCHK] m=204B5043 u4=FFFFFFFF u14=7A000000 blk=31500; [HDRFIX] old+8=FFFFFFFF utf_size(BE)=0000007A table_size=00000082 flags=FF blk=31500; [CRILOG] 0 (previously x3); [CPKANAL] #0 r0=84B1B84C r1=84B1B858 r2=84B1BC00 r3=84B1B990 lr=81293CB8; new blocker [BADMEM] guest va=0x00000824 unmapped block=0x8129266E tid=0 stub=812B28A0 (small pointer 0x820 = 0x820+4); [MNTST] obj=84906480 stage=4 status=1; [IO] PREAD off=0 size=2048 got=2048 (only 1 PREAD so far). Background: vita.cpk 64-bit/variant CPK (+4=0xFFFFFFFF, +8=u64 file size 0x813F3494, +10=@UTF big-endian), data.cpk normal (+4=0xFF, +8=0x350 table size). NEXT: decompile function at 0x812925xx containing blk 0x8129266E to find where the 0x820 offset comes from; decompile FUN_812AFF10 (UTF parser) / FUN_812AEA4C/FUN_812AF434 chain and check whether extra reads are needed; check whether the analysis needs a 2nd PREAD (CPK table data) and why the read request was not issued; after fixing the BADMEM object fields -> analysis succeeds -> Analyzer state=0x1A -> mount status=2 -> data.cpk mounted -> file index -> title assets; if UTF 64-bit fields are needed, fill header fields per data.cpk comparison (UTF fields big-endian). Verification: out80m_m1172hdrfix2.txt, out80m_m1171hdrchk.txt, out80m_m1170hdrfix.txt, cpkana.txt.
+
+LOOKUP: M1112 HDRFIX 64-bit CPK header normalization, CRI UTF big-endian, utf_size BE 0x7A000000, table_size 0x82, buf+4=0xFF buf+8=table_size, CPK is broken gone CRILOG=0, BADMEM va=0x824 blk=0x8129266E, small pointer 0x820, only 1 PREAD, next decompile 0x812925xx / FUN_812AFF10 UTF parser and check 2nd PREAD -> §18.4656 [relevant: decryptor], §18.4655 [relevant: 64bit header], §18.4654 [relevant: pump]

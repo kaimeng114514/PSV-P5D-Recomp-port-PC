@@ -3776,6 +3776,24 @@ static uint32_t fiber_exec_to_completion(RecState* s) {
           uint32_t _prog = 0; { uint8_t* _q = GP(0x848FC368u + 0xB0u); if (_q) std::memcpy(&_prog, _q, 4); }
           uint32_t _pst = 0; if (_prog) { uint8_t* _q = GP(_prog + 0xCu); if (_q) std::memcpy(&_pst, _q, 4); }
           if (_pst == 7u) {
+            { static int _hc=0; if (_hc++ < 6) { uint32_t _m=0,_u4=0,_u14=0;
+              { uint8_t* _q=GP(0x84B1BC00u); if(_q) std::memcpy(&_m,_q,4); }
+              { uint8_t* _q=GP(0x84B1BC04u); if(_q) std::memcpy(&_u4,_q,4); }
+              { uint8_t* _q=GP(0x84B1BC14u); if(_q) std::memcpy(&_u14,_q,4); }
+              printf("[HDRCHK] m=%08X u4=%08X u14=%08X blk=%u\n", _m, _u4, _u14, g_blkcnt_total); fflush(stdout); } }
+            // M1112_HDRFIX: vita.cpk is a 64-bit-header CPK variant (CPK+0x08 = u64 file size at +0x08,
+            // '+'0x10 = @UTF). The analyzer expects the standard layout (+0x04=0xFF flags, +0x08=table size).
+            { static int _hf=0; uint32_t _magic=0; { uint8_t* _q=GP(0x84B1BC00u); if(_q) std::memcpy(&_magic,_q,4); }
+              if (_magic == 0x204B5043u) {
+                uint32_t _u4=0,_u14=0; { uint8_t* _q=GP(0x84B1BC00u+0x14u); if(_q) std::memcpy(&_u14,_q,4); }
+                { uint8_t* _q=GP(0x84B1BC00u+0x04u); if(_q) std::memcpy(&_u4,_q,4); }
+                uint32_t _u14be = ((_u14 & 0xFFu) << 24) | ((_u14 & 0xFF00u) << 8) | ((_u14 >> 8) & 0xFF00u) | ((_u14 >> 24) & 0xFFu);
+                if (_u4 == 0xFFFFFFFFu && _u14be != 0u && _u14be < 0x800u) {
+                  uint32_t _ts = _u14be + 8u; uint32_t _flags = 0x000000FFu, _z = 0u;
+                  { uint8_t* _q=GP(0x84B1BC00u); if(_q) { std::memcpy(_q+0x04u,&_flags,4); std::memcpy(_q+0x08u,&_ts,4); std::memcpy(_q+0x0Cu,&_z,4); } }
+                  if (_hf++ < 8) { printf("[HDRFIX] 64bit CPK header -> standard: old+8=%08X utf_size(BE)=%08X table_size=%08X flags=FF blk=%u\n", _u4, _u14be, _ts, g_blkcnt_total); fflush(stdout); }
+                }
+              } }
             uint32_t _sz = call_guest_cb2(s, 0x8128F6C8u, _prog, 0u, 200000);
             { uint8_t* _q = GP(0x848FC368u + 0x130u); if (_q) { uint32_t _v = _sz; std::memcpy(_q, &_v, 4); } }
             { uint8_t* _q = GP(0x848FC368u + 0xBCu); if (_q) { uint32_t _v = 2u; std::memcpy(_q, &_v, 4); } }
