@@ -1153,6 +1153,45 @@
 | M1135 | §18.4680: ★★★★★★★★★ **PASSSUM 每趟汇总证明 Huffman 选择排序前 239 趟完全健康（r8 恰好等于 sb、r4 每趟 +0x38、r7=0x100+趟数），卡死发生在第 240 趟（sb=0x11）的内层扫描**。PASSSUM 数据：#1 sb=0x100/r8=0x100/r7=0x100/r4=sp+0x3800；#239 sb=0x12/r8=0x12/r7=0x1EE/r4=sp+0x6BD0（仍在 0x7420 栈帧内，健康）；**第 240 趟（sb=0x11）的内层扫描不再收敛**（HUFFLOOP 采样 r8 变成 fiber 指针等）→ 最终 BADMEM 0xB0000000。结论：树构建状态在前 239 趟正确，故障点在"剩余 17 个节点"这一趟——扫描走到节点表/帧边界之外的脏数据，`node[+0x440] != -1` 使 r8 计数停止、循环永不退出
 | M1136 | §18.4681: ★★★★★★★★★★★★ **Huffman 死循环根因找到并修复：`fiber_load` 的 r0 修补分支误伤"恢复的中途上下文"——`if (pc==0x81206BDC || c.r[0] < 0x80000000)` 会把任何 r0<0x80000000 的已保存上下文 r0 改写成 fiber 对象指针**。证据：`[FLOAD-BAD] fiber=848463A0 r0=00000000 r13=8484EDD0 r15=811DFA0E -> repair r0`（正是 huff 循环中途被 fiber 切换保存/恢复的上下文），修 r0=848463A0 后，趟重启 811DF9FA `r7=r0; r8=r7` → r7=r8=0x848463A0（有符号负数），`cmp sb,r8; bgt` 因 sb(0x11) > 负数恒真 → 内层扫描永不退出 → BADMEM 0xB0000000。R0CHG 探针证明 r0 在 ring `... 812068F2 811DFA3C → 812B1BA0(sceFiberSwitch@8120682A) → 811DFA0E` 后变为 fiber 指针。**修复**：r0 修补只在 start-stub（pc==0x81206BDC）或旧 start-arg bug（r0==2）时执行；恢复的中途上下文保留原 r0。**验证 m1228（NESTED_UNTIL=35M）**：`[FLOAD-BAD]=2`（仅两个 start stub）、`[DECOMP]=40 / [HUFF]=24 / [LZ]=39`（**40 个资源全部开始解压**）、`[PASSSUM]=420` 趟全部 r0=0 健康、`[BADMEM]=0`，流程推进到 `[NESTED-STOP] total=35000000 pc=811DFB18`（撞我们自己的 NESTED_UNTIL 上限=好现象）
 | M1137 | §18.4682: ★★★★★★★★ **M1136 修复后的长跑（m1229，NESTED_UNTIL=300M）验证解压链持续推进（[DECOMP]38 / [HUFF]22 / [LZ]37，[VFW] 顶点格式写入 n 达 44,180,000，[FLOAD-BAD]=2 仅 start stub，[BADMEM]=0），但最终卡在"fiber B 的保存上下文 pc 变成栈地址 0x84855A58"**：`[FIBER-EXEC] no block for pc=84855A58 (cur=848463A0) lr=84855A58 sp=8484EF28 blk=812B1B70` → no-block 路径只保存上下文返回；guest 调度器（GetSelf 812B1B70 → 812067A0 → … → Switch 812B1BA0@8120682A）每次都切到这个 pc 非法的 fiber → 无限无进展循环（g_blkcnt_total 冻结在 39,242,012、[PUMP] blocks=0）。证据：`[FEXEC-IN] n=39242012 cur=848463A0 pc=84855A58 r0=0 r7=5 r14=84855A58 r13=8484EF28`；`[FIBSW] #3571 fpc=811DFAFE flr=84855A58`（LR 已是栈地址值）；重复 `[SPOLL] pc=812068F2/812068C4 f80=1 g18=g1c=848463A0`；`[STALLTRACE] pc=812B1BA0 blk=812B1B70 fib=0 sp=82EFFE68 fex=0`。推断：某处 **pop/return 的返回地址从被破坏的栈帧读出**（pc=栈槽值），需在"fiber ctx 保存时 pc 非代码"处加探针抓最后的合法块与栈内容
+| M1138 | §18.4683: ★★★★★★★★★★★★ **重大突破：修复 GetSelf 的 fiber2 泵未保存/恢复调用者上下文 → 消除静默 no-block 死循环，执行首次进入帧循环并首次提交 GXM 绘制**。根因（NEXTBAD 探针抓到）：`sceFiberGetSelf`（812B1B70）HLE 中的周期性 fiber2 泵直接 `fiber_load(s, fiber2)` + `fiber_exec_to_completion(s)`，**没有 rc_save/rc_restore**：fiber_load 把调用者 s（含 r14）覆盖成 fiber2 的保存上下文（huffman 解码中途，r14=节点数组指针 84855E80/84855A58），而嵌套 exec 在 depth=2 立刻 [NESTED-REFUSED] 返回 0 不恢复 → GetSelf 返回 `s->r[14]`（数据指针）当作下一个 pc → 跳到栈/数据地址 → no-block 静默 livelock（m1230/1231 复现：`[NEXTBAD] from=812B1B70 nx=84855E80 lr=84855E80`、`[FIBER-EXEC] no block for pc=84855A58`）。修复：GetSelf 两处 fiber2 泵（一次性 + 周期 PUMP2）前后包 `rc_save(s)`/`rc_restore(s)`。验证 m1232：`[NEXTBAD]=0`、`[FIBER-EXEC]=0`、**【FRAMECB]=20 / [UPD]=20 / [POST]=20（帧循环首次运行）**、**[GXMABI] 首次出现 sceGxmSetVertexProgram/SetFragmentProgram/SetVertexStream/sceGxmDraw（首次绘制提交）**、[DECOMP]=48、[NESTED-STOP] 45M pc=811DFB14、[BADMEM]=0
+m1230/m1231/m1232 证据（`m1230_nextbad_key.txt`、`m1231_nopumpmain_key.txt`、`m1232_fix2_key.txt`）：
+```
+（修复前 m1230，PUMPMAIN=1）
+[NEXTBAD] from=812B1B70 nx=84855A58 lr=84855A58 fib=848463A0 sp=8484EF28 r0=0 r7=5
+  ring: 811DFB18 811DFAFE 811DFB06 811DFB0A 811DFB14 … 811DFB14 8120682A 81206832 81198BF6 81198BEA 811E5CDA 811E5CEA 81198BEE 812B2AC0 81198BF2 812067A0 812B1B70
+  stack: FFFFFFC0=0000013D … 000=000000C4 004=47484D30 008=01080003 …（sp 附近是 huffman 头/节点数据）
+[NESTED-REFUSED] depth=2 cur=848463A0 pc=811DFB14 r0=00000000
+[PUMP2] tick=20000 fiber2=848463A0 pc=811DFB14 ret=00000000     ← 泵调用后 pc 残留 811DFB14（未恢复）
+[FIBER-EXEC] no block for pc=84855A58 (cur=848463A0) lr=84855A58 sp=8484EF28 blk=812B1B70
+（修复前 m1231，去掉 PUMPMAIN 同样复现，仅指针值变为 84855E80）
+[NEXTBAD] from=812B1B70 nx=84855E80 lr=84855E80
+（M1138 FIX：GetSelf 两处 fiber2 泵前后 rc_save/rc_restore）
+（修复后 m1232，NESTED_UNTIL=45M）
+[NEXTBAD]=0 / [NEXTBAD-FIX]=0 / [FIBER-EXEC]=0 / [PUMP2]=1 pc=812B1B70 ret=0
+[FRAMECB] ×20  #0 cb=812B4150 arg=8115A36B lr=811C2418；#1 cb=0 lr=8120735C …
+[UPD] ×20     r0=816CC630 r1=0 r2=3 lr=81198D10
+[POST] ×20    r0=85BD92A0 r1=1 r2=1 lr=81198CDC
+[GXMABI] 31 个函数：新增 sceGxmSetVertexProgram / SetFragmentProgram / SetVertexStream / sceGxmDraw
+[DECOMP] 48 / [PASSSUM] 420 / [FLOAD-BAD]=2 / [BADMEM]=0
+[NESTED-STOP] total=45000000 pc=811DFB14 cur=848463A0
+[COUNT]/BeginScene/Present 仍 0（帧循环已启动但还没到首个 BeginScene/Present）
+```
+**分析**：
+- 修复前：GetSelf 的 PUMP2 路径 `fiber_load` 覆盖调用者寄存器；嵌套 exec 在 depth2 被拒后直接返回，并未恢复 s → 返回地址变成 huffman 节点指针 → 静默 livelock（地址在 heap 映射内不触发 BADMEM）。
+- 修复后：调用者上下文完整恢复，fiber 调度/解压/初始化继续推进，**首次触发 [FRAMECB]/[UPD]/[POST] 帧回调（各 20 次）**，并且 **GXM 首次收到绘制提交（sceGxmDraw）**——这是距离"出画面"最近的一次实质性跨越。
+**NEXT**：
+```
+① 长跑 NESTED_UNTIL=300M+：观察 BeginScene/EndScene/Present 是否出现、[COUNT] present 是否递增
+② 检查 gxm_vk/gxm_abi 的 Draw 真正落到 Vulkan 命令缓冲（当前 HLE 返回 0，需要验证渲染管线）
+③ [FRAMECB]/[UPD]/[POST] 每个都跑完 → 资源 IO 增多（[IO]/[FHOPEN]）→ 标题素材加载
+④ 目标：第一张可验证画面（清屏/LOGO）→ S1_TITLE
+```
+验证：`m1232_fix2_key.txt`、`m1231_nopumpmain_key.txt`、`m1230_nextbad_key.txt`、`recomp_harness_getselfpump_4683.cpp`、`[TABLE] blocks=230291`。 |
+| §18.4683 | MAJOR BREAKTHROUGH: fixed the GetSelf fiber2 pump not saving/restoring the caller context -> the silent no-block livelock is gone and execution enters the frame loop for the first time and submits the first GXM draws. Root cause (caught by the NEXTBAD probe): in sceFiberGetSelf (812B1B70) HLE the periodic fiber2 pump directly does fiber_load(s, fiber2) + fiber_exec_to_completion(s) WITHOUT rc_save/rc_restore: fiber_load overwrote the caller s (including r14) with fiber2 saved context (mid-huffman-decode, r14=node array pointer 84855E80/84855A58), and the nested exec immediately returned 0 at depth 2 ([NESTED-REFUSED]) without restoring, so GetSelf returned s->r[14] (a data pointer) as the next pc -> jumped to stack/data address -> no-block silent livelock (m1230/1231 reproduction: [NEXTBAD] from=812B1B70 nx=84855E80 lr=84855E80; [FIBER-EXEC] no block for pc=84855A58). FIX: rc_save(s)/rc_restore(s) around both fiber2 pump paths in GetSelf (one-shot + periodic PUMP2). VERIFIED m1232: [NEXTBAD]=0, [FIBER-EXEC]=0, [FRAMECB]=20 / [UPD]=20 / [POST]=20 (frame loop running for the first time), [GXMABI] first sees sceGxmSetVertexProgram/SetFragmentProgram/SetVertexStream/sceGxmDraw (first draw submissions), [DECOMP]=48, [NESTED-STOP] 45M pc=811DFB14, [BADMEM]=0. '
+       'm1230/m1231/m1232 evidence: (before fix m1230, PUMPMAIN=1) [NEXTBAD] from=812B1B70 nx=84855A58 lr=84855A58 fib=848463A0 sp=8484EF28 r0=0 r7=5 ring 811DFB18 811DFAFE 811DFB06 811DFB0A 811DFB14 ... 811DFB14 8120682A 81206832 81198BF6 81198BEA 811E5CDA 811E5CEA 81198BEE 812B2AC0 81198BF2 812067A0 812B1B70, stack sp+0=0xC4 sp+4=0x47484D30 sp+8=0x01080003 (huffman header/node data near sp); [NESTED-REFUSED] depth=2 cur=848463A0 pc=811DFB14 r0=0; [PUMP2] tick=20000 fiber2=848463A0 pc=811DFB14 ret=0 (pump left pc stale 811DFB14); [FIBER-EXEC] no block for pc=84855A58 (cur=848463A0) lr=84855A58 sp=8484EF28 blk=812B1B70. (before fix m1231, no PUMPMAIN: same reproduced, pointer value 84855E80) [NEXTBAD] from=812B1B70 nx=84855E80 lr=84855E80. (after the M1138 fix: rc_save/rc_restore around both GetSelf fiber2 pumps) m1232 with NESTED_UNTIL=45M: [NEXTBAD]=0 / [NEXTBAD-FIX]=0 / [FIBER-EXEC]=0 / [PUMP2]=1 pc=812B1B70 ret=0; [FRAMECB] x20 #0 cb=812B4150 arg=8115A36B lr=811C2418, #1 cb=0 lr=8120735C; [UPD] x20 r0=816CC630 r1=0 r2=3 lr=81198D10; [POST] x20 r0=85BD92A0 r1=1 r2=1 lr=81198CDC; [GXMABI] 31 functions now including sceGxmSetVertexProgram/SetFragmentProgram/SetVertexStream/sceGxmDraw; [DECOMP] 48 / [PASSSUM] 420 / [FLOAD-BAD]=2 / [BADMEM]=0; [NESTED-STOP] total=45000000 pc=811DFB14 cur=848463A0; [COUNT]/BeginScene/Present still 0 (frame loop started but the first BeginScene/Present not yet). '
+       'Analysis: before the fix the GetSelf PUMP2 path fiber_load overwrote caller registers; the nested exec was refused at depth 2 and merely returned without restoring s, so the return address became a huffman node pointer -> silent livelock (address inside the heap mapping so no BADMEM). After the fix the caller context is restored, fiber scheduling/decompression/initialization keep advancing, the frame callbacks [FRAMECB]/[UPD]/[POST] fire for the first time (20 each), and GXM receives its first draw submission (sceGxmDraw) - the biggest step toward an actual picture so far. '
+       'NEXT: (1) long run with NESTED_UNTIL=300M+ and watch whether BeginScene/EndScene/Present appear and [COUNT] present increments; (2) verify gxm_vk/gxm_abi Draw actually lands in a Vulkan command buffer (currently HLE returns 0; the render pipeline needs end-to-end verification); (3) run each [FRAMECB]/[UPD]/[POST] to completion -> more resource IO ([IO]/[FHOPEN]) -> title asset loading; (4) goal: first verifiable picture (clear/LOGO) -> S1_TITLE. '
+       'Verification: m1232_fix2_key.txt, m1231_nopumpmain_key.txt, m1230_nextbad_key.txt, recomp_harness_getselfpump_4683.cpp, [TABLE] blocks=230291. |
 m1229 证据（`m1229_long3_key.txt`）：
 ```
 [DECOMP] 38 / [HUFF] 22 / [LZ] 37 / [PASSSUM] 420（全部 r0=0 健康）
@@ -503278,3 +503317,54 @@ tail [PUMP] … blocks=0 blk=39242012 fex=1 fib=84836300
 ANTI-FORGETTING ENTRY. Keywords: M1137 after the M1136 fiber_load r0 fix the long run m1229 (NESTED_UNTIL=300M) keeps progressing through decompression ([DECOMP] 38 / [HUFF] 22 / [LZ] 37, [PASSSUM] 420 all r0=0 healthy, [FLOAD-BAD]=2 start stubs only, [BADMEM]=0, [VFW] vertex format writes n=44,180,000) but finally stalls with fiber B context pc becoming the stack address 0x84855A58 (not code): [FIBER-EXEC] no block for pc=84855A58 (cur=848463A0) lr=84855A58 sp=8484EF28 blk=812B1B70; the no-block path only saves the context and returns; the guest scheduler (GetSelf 812B1B70 -> 812067A0 -> ... -> Switch 812B1BA0@8120682A) keeps switching to this fiber whose pc stays invalid -> infinite no-progress loop, g_blkcnt_total frozen at 39,242,012, [PUMP] blocks=0. Evidence: [FEXEC-IN] n=39242012 cur=848463A0 pc=84855A58 r0=0 r7=5 r14=84855A58 r13=8484EF28; [FIBSW] #3571 fpc=811DFAFE flr=84855A58 (LR already a stack value); repeated [SPOLL] pc=812068F2/812068C4 f80=1 g18=g1c=848463A0; [STALLTRACE] pc=812B1BA0 blk=812B1B70 fib=0 sp=82EFFE68 fex=0; [FIBSW] #3999 fpc=811DFB14 flr=84855DD8 blk=9338023; [FRAMEDUMP] n=44180000 pc=812067A0 blk=81198BF2 sp=84846380 fib=84836300; tail [PUMP] #965200 blocks=0 blk=39242012 fex=1 fib=84836300; [COUNT] not printed; [FRAMECB]/[UPD]/[POST]=0; [IO]=6; [FHOPEN]=0. Analysis: switches do happen (FIB-XFER-FEX shows B tgtpc advancing 81170C3E -> 8115DB9C -> ... -> 811DFAFE decode loop, FIB-UNBAL-FEX=0), but finally B ctx pc becomes 84855A58, a stack address (B huffman-decode frame around 0x8484EF28); a stack value is used as pc. Since 0x84855A58 lies in the GP-mapped heap window (not unmapped) BADMEM does not fire and the bug is silent. Inference: a pop/return address is read from a corrupted stack frame. NEXT: add a fiber_save/switch-load probe that when the saved pc has no AOT block prints a 40-entry pc ring, g_cur_block, sp and stack words [sp-0x40..sp+0x40] to catch the last valid block -> invalid pc transition; inspect the huffman decode completion path (811DFB4E/811DFB7E area) and the FUN_811DF434 return path pop/return sequences/frame offsets; if the frame is overwritten (node array 0x3800 overlapping the saved area/out of bounds) fix the array bounds or stack size; after the fix continue the long run -> BeginScene/frame loop. Verification: m1229_long3_key.txt, m1228_fix_key.txt, recomp_harness_fiberload_4681.cpp, [TABLE] blocks=230291.
 
 LOOKUP: M1137 M1136 fix long run m1229 decompression progress DECOMP 38 HUFF 22 LZ 37 PASSSUM 420 FLOAD-BAD 2 BADMEM 0 VFW n 44180000, stall fiber B ctx pc stack address 84855A58 FIBER-EXEC no block cur 848463A0 lr 84855A58 sp 8484EF28 blk 812B1B70, FEXEC-IN n 39242012, FIBSW 3571 fpc 811DFAFE flr 84855A58, SPOLL 812068F2 812068C4 f80 1 g18 g1c 848463A0, STALLTRACE 812B1BA0, PUMP blocks 0 blk 39242012, heap-mapped silent no BADMEM, inference corrupted stack-pop return, next fiber_save probe non-code pc ring stack words 811DFB4E 811DFB7E pop return frame offsets node array 0x3800 bounds, then BeginScene frame loop, verification m1229_long3_key.txt -> 18.4681 [relevant: M1136 r0 fix], 18.4680 [relevant: PASSSUM], 18.4679 [relevant: boundary probes]
+### 18.4683 PORT M1138: 重大突破——GetSelf fiber2 泵未保存上下文（静默死循环根因）修复后首次进入帧循环并首次 GXM 绘制提交
+
+1) 根因（NEXTBAD 现场，m1230）：
+```
+[NEXTBAD] from=812B1B70 nx=84855A58 lr=84855A58 fib=848463A0 sp=8484EF28
+  ring: … 811DFB14 8120682A 81206832 81198BF6 81198BEA 811E5CDA 811E5CEA 81198BEE 812B2AC0 81198BF2 812067A0 812B1B70
+  stack: sp+0=0xC4 sp+4=0x47484D30 sp+8=0x01080003（huffman 头/节点数据）
+[NESTED-REFUSED] depth=2 cur=848463A0 pc=811DFB14
+[PUMP2] tick=20000 fiber2=848463A0 pc=811DFB14 ret=00000000
+[FIBER-EXEC] no block for pc=84855A58 (cur=848463A0) lr=84855A58 sp=8484EF28
+```
+机制：`sceFiberGetSelf`（812B1B70）HLE 内的 fiber2 泵（一次性 + 周期 PUMP2）：
+```c
+g_in_fiber_exec = 1;
+fiber_load(s, g_fiber_list[1], ...);   // ← 覆盖调用者 s（含 r14=节点数组指针）
+uint32_t pr2 = fiber_exec_to_completion(s);  // ← depth2 立即 NESTED-REFUSED 返回 0
+g_in_fiber_exec = 0;                   // ← 没有恢复 s
+```
+→ GetSelf 按 HLE 约定返回 `s->r[14]`（已是数据指针）当下一 pc → 跳数据地址 → no-block 静默 livelock（地址在 heap 映射内不报 BADMEM）。
+
+2) 修复（recomp_harness.cpp）：
+```c
+rc_save(s);
+fiber_load(s, g_fiber_list[1], g_fiber_entry, g_fiber_arg);
+uint32_t pr2 = fiber_exec_to_completion(s);
+rc_restore(s);          // M1138 FIX
+g_in_fiber_exec = 0;
+```
+（两处：一次性泵 + 周期 PUMP2 泵；去掉 PUMPMAIN 也复现 → 非线程泵问题）
+
+3) 修复验证（m1232，NESTED_UNTIL=45M）：
+```
+[NEXTBAD]=0 / [NEXTBAD-FIX]=0 / [FIBER-EXEC]=0
+[FRAMECB] ×20 / [UPD] ×20 / [POST] ×20        ← 帧循环首次运行
+[GXMABI] 31 个函数，新增 sceGxmSetVertexProgram / SetFragmentProgram / SetVertexStream / sceGxmDraw   ← 首次绘制提交
+[DECOMP] 48 / [PASSSUM] 420 / [FLOAD-BAD]=2 / [BADMEM]=0
+[NESTED-STOP] total=45000000 pc=811DFB14
+[COUNT] present/BeginScene/Present 仍 0（已进帧循环但未到首个 BeginScene/Present）
+```
+4) NEXT：
+```
+① 长跑 NESTED_UNTIL=300M+：观察 BeginScene/EndScene/Present 与 [COUNT] present 递增
+② 验证 gxm_vk/gxm_abi 的 Draw 真正落到 Vulkan 命令缓冲（端到端）
+③ [FRAMECB]/[UPD]/[POST] 完整跑 → 资源 IO 增多（[IO]/[FHOPEN]）→ 标题素材
+④ 目标：第一张可验证画面（清屏/LOGO）→ S1_TITLE
+```
+验证：`m1232_fix2_key.txt`、`m1231_nopumpmain_key.txt`、`m1230_nextbad_key.txt`、`recomp_harness_getselfpump_4683.cpp`、`[TABLE] blocks=230291`。
+
+ANTI-FORGETTING ENTRY. Keywords: M1138 MAJOR BREAKTHROUGH - fixed GetSelf fiber2 pump missing rc_save/rc_restore; silent no-block livelock eliminated; execution enters the frame loop for the first time and submits the first GXM draws. Root cause: in sceFiberGetSelf (812B1B70) HLE the one-shot and periodic (PUMP2) fiber2 pump paths do `g_in_fiber_exec=1; fiber_load(s, g_fiber_list[1], ...); fiber_exec_to_completion(s); g_in_fiber_exec=0;` with NO rc_save/rc_restore. fiber_load overwrites the caller s (r14 becomes fiber2's saved huffman-decode node pointer 84855A58/84855E80), the nested exec is refused at depth 2 ([NESTED-REFUSED] depth=2 pc=811DFB14) and returns 0 without restoring, so GetSelf returns s->r[14] (data pointer) as next pc -> no-block silent livelock (address inside heap mapping, no BADMEM). Evidence m1230: [NEXTBAD] from=812B1B70 nx=84855A58 lr=84855A58 fib=848463A0 sp=8484EF28, ring ... 811DFB14 8120682A 81206832 81198BF6 81198BEA 811E5CDA 811E5CEA 81198BEE 812B2AC0 81198BF2 812067A0 812B1B70, stack sp+4=0x47484D30 (huffman magic); [PUMP2] tick=20000 fiber2=848463A0 pc=811DFB14 ret=0; [FIBER-EXEC] no block for pc=84855A58. m1231 without PUMPMAIN: same class with 84855E80. FIX: wrap both pumps with rc_save(s)/rc_restore(s). VERIFIED m1232 (NESTED_UNTIL=45M): [NEXTBAD]=0, [FIBER-EXEC]=0, [FRAMECB]=20 / [UPD]=20 / [POST]=20 (frame loop running), [GXMABI] 31 functions now including sceGxmSetVertexProgram/SetFragmentProgram/SetVertexStream/sceGxmDraw (first draw submissions), [DECOMP]=48, [PASSSUM]=420, [FLOAD-BAD]=2, [BADMEM]=0, [NESTED-STOP] total=45000000 pc=811DFB14; [COUNT]/BeginScene/Present still 0. NEXT: long run NESTED_UNTIL=300M+ to see BeginScene/EndScene/Present and COUNT present; verify gxm_vk/gxm_abi Draw reaches Vulkan command buffers; more resource IO/FHOPEN for title assets; first verifiable picture (clear/LOGO) then S1_TITLE. Verification: m1232_fix2_key.txt, m1231_nopumpmain_key.txt, m1230_nextbad_key.txt, recomp_harness_getselfpump_4683.cpp, [TABLE] blocks=230291.
+
+LOOKUP: M1138 GetSelf fiber2 pump missing rc_save rc_restore root cause, fiber_load overwrites caller r14 huffman node pointer 84855A58 84855E80, NESTED-REFUSED depth 2 pc 811DFB14, PUMP2 tick 20000, NEXTBAD from 812B1B70 nx 84855A58 lr 84855A58 sp 8484EF28, FIBER-EXEC no block pc 84855A58, stack huffman magic 47484D30, fix rc_save rc_restore both pumps, m1232 verification FRAMECB 20 UPD 20 POST 20 frame loop first run, GXMABI sceGxmDraw first draw submission 31 functions, DECOMP 48 PASSSUM 420 BADMEM 0 NESTED-STOP 45M, COUNT BeginScene Present still 0, next long run 300M BeginScene Present Vulkan command buffer verification title assets -> 18.4682 [relevant: previous stall], 18.4681 [relevant: fiber_load r0 fix], 18.4680 [relevant: PASSSUM]

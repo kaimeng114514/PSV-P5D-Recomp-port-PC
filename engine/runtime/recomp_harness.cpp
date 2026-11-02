@@ -377,6 +377,7 @@ extern "C" uint32_t harness_cur_fiber2(void) { return g_cur_fiber; }
 static int g_winchk_n = 0;
 static uint32_t g_last_fiber = 0;
 static uint32_t g_prev_block = 0;
+static int g_badnext_fix_n = 0;
 static int g_hm_n = 0;
 static int g_hm2_n = 0;
 static int g_fiosmiss_n = 0;
@@ -2969,8 +2970,10 @@ extern "C" uint32_t hle_call(uint32_t stub_va, RecState* s) {
               printf("[FCTX] fiber2=%08X pc=%08X sp=%08X r0=%08X r14=%08X\n",
                      g_fiber_list[1], itp->second.r[15], itp->second.r[13], itp->second.r[0], itp->second.r[14]); }
       if (g_in_fex >= 1) { g_fiber_switch_to = g_fiber_list[1]; g_switch_save_pc = s->r[14]; r0 = 0; break; }   // 18.3901: defer non-nested switch to loop-top
+          rc_save(s);
           fiber_load(s, g_fiber_list[1], g_fiber_entry, g_fiber_arg);
           uint32_t pr = fiber_exec_to_completion(s);
+          rc_restore(s);   // M1138 FIX: restore the GetSelf caller context
           g_pt_on = 0;
           g_in_fiber_exec = 0;
           if (g_pump_n++ < 5) printf("[PUMP] fiber2=%08X ran -> pc=%08X ret=%08X listhead=%08X\n",
@@ -2981,8 +2984,14 @@ extern "C" uint32_t hle_call(uint32_t stub_va, RecState* s) {
         // so the game keeps making frame progress instead of idling forever.
         if (nested_allowed() && g_fiber_list.size() > 1 && (++g_pump_tick % 20000) == 0) {   // 18.4221: no nested exec after the hybrid cutoff
           g_in_fiber_exec = 1;
+          // M1138 FIX: save the caller context before loading/running fiber2. Previously fiber_load()
+          // overwrote the caller's registers (incl. r14) and fiber_exec_to_completion returns 0 at
+          // nesting depth 2 (NESTED-REFUSED) without restoring them, so GetSelf returned fiber2's LR
+          // (a huffman node pointer) as the next pc -> silent no-block livelock at 84855A58/84855E80.
+          rc_save(s);
           fiber_load(s, g_fiber_list[1], g_fiber_entry, g_fiber_arg);
           uint32_t pr2 = fiber_exec_to_completion(s);
+          rc_restore(s);
           g_in_fiber_exec = 0;
           if (g_pump_n < 12) { ++g_pump_n; printf("[PUMP2] tick=%u fiber2=%08X pc=%08X ret=%08X\n",
                  g_pump_tick, g_fiber_list[1], s->r[15], pr2); }
@@ -4699,6 +4708,22 @@ BlockFn fn = gbn(pc);
     s->r[15] = fn(s);
     if (g_pumpmain_env > 0 && !g_cur_thr && ((g_blkcnt_total & 0x3FFu) == 0u)) { g_pump_force = 1; hle_thr_pump(s, 300); g_pump_force = 0; }
     g_mr_pc[g_mr_n % 40u] = pc; g_mr_nx[g_mr_n % 40u] = s->r[15]; ++g_mr_n;
+    { uint32_t _nx = s->r[15];
+      if (_nx && _nx != 0xFFFFFFF0u && _nx != 0xFFFFFFFEu && _nx != 0xFFFFFFFDu &&
+          !(((_nx & ~1u) >= 0x80600000u) && ((_nx & ~1u) < 0x81330000u))) {
+        static int _nbx = 0; if (_nbx++ < 8) {
+          printf("[NEXTBAD] #%d from=%08X nx=%08X fib=%08X lr=%08X sp=%08X r0=%08X r5=%08X r7=%08X r9=%08X ring:",
+                 _nbx-1, pc, _nx, g_cur_fiber, s->r[14], s->r[13], s->r[0], s->r[5], s->r[7], s->r[9]);
+          for (int _k=0;_k<40;++_k) printf(" %08X", g_pc_ring[(g_pc_ring_n - 40u + (uint32_t)_k) & 63u]);
+          printf("\n  mr:"); for (int _k=0;_k<24;++_k) { uint32_t _ii=(g_mr_n - 24u + (uint32_t)_k) % 40u; printf(" %08Xto%08X", g_mr_pc[_ii], g_mr_nx[_ii]); }
+          printf("\n  stack:"); { uint32_t _base = s->r[13];
+            for (int _o=-0x40;_o<=0x40;_o+=4) { uint32_t _v=0; uint8_t* _q=GP(_base + (uint32_t)_o); if(_q) std::memcpy(&_v,_q,4); printf(" %+03X=%08X", _o, _v); } }
+          printf("\n"); fflush(stdout); }
+        uint32_t _lr = s->r[14];
+        if (_lr && ((_lr & ~1u) >= 0x80600000u) && ((_lr & ~1u) < 0x81330000u) && gbn(_lr)) {
+          s->r[15] = _lr;
+          if (g_badnext_fix_n++ < 8) printf("[NEXTBAD-FIX] nx=%08X -> lr=%08X\n", _nx, _lr);
+        } } }
     { uint32_t nx = s->r[15];
       if ((nx & ~1u) == 0x81206BDCu || (nx & ~1u) == 0x81206BDCu) {
         printf("[STUBRET] from pc=%08X nx=%08X r0=%08X r7=%08X r14=%08X sp=%08X cur=%08X\n",
