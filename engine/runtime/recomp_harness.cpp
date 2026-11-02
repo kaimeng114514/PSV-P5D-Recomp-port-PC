@@ -151,7 +151,7 @@ extern "C" uint32_t (*find_block_000(uint32_t pc))(RecState*);
 #define FB(N) extern "C" uint32_t (*find_block_##N(uint32_t pc))(RecState*);
 FB(000) FB(001) FB(002) FB(003) FB(004) FB(005) FB(006) FB(007) FB(008) FB(009)
 FB(010) FB(011) FB(012) FB(013) FB(014) FB(015) FB(016) FB(017) FB(018) FB(019)
-FB(020) FB(021) FB(022) FB(023) FB(024) FB(025) FB(026) FB(027) FB(028) FB(029) FB(030) FB(031) FB(032) FB(033) FB(034) FB(035) FB(036)
+FB(020) FB(021) FB(022) FB(023) FB(024) FB(025) FB(026) FB(027) FB(028) FB(029) FB(030) FB(031) FB(032) FB(033) FB(034) FB(035) FB(036) FB(037)
 extern "C" const void* get_table_000(unsigned* cnt);
 extern "C" const void* get_table_001(unsigned* cnt);
 extern "C" const void* get_table_002(unsigned* cnt);
@@ -186,8 +186,8 @@ extern "C" const void* get_table_030(unsigned* cnt);
 extern "C" const void* get_table_031(unsigned* cnt);
   extern "C" const void* get_table_032(unsigned* cnt);
   extern "C" const void* get_table_033(unsigned* cnt);
-extern "C" const void* get_table_034(unsigned* cnt); extern "C" const void* get_table_035(unsigned* cnt); extern "C" const void* get_table_036(unsigned* cnt);
-extern "C" BlockFn find_block_034(uint32_t pc); extern "C" BlockFn find_block_035(uint32_t pc); extern "C" BlockFn find_block_036(uint32_t pc);
+extern "C" const void* get_table_034(unsigned* cnt); extern "C" const void* get_table_035(unsigned* cnt); extern "C" const void* get_table_036(unsigned* cnt); extern "C" const void* get_table_037(unsigned* cnt);
+extern "C" BlockFn find_block_034(uint32_t pc); extern "C" BlockFn find_block_035(uint32_t pc); extern "C" BlockFn find_block_036(uint32_t pc); extern "C" BlockFn find_block_037(uint32_t pc);
 static const uint32_t IMG_VA_BASE = 0x80600000;
 static const uint32_t IMG_SIZE = 0x38000000;   // 18.4279: 896MB - extended 224MB tail window for memblock capacity
 static const uint32_t REGIONB_OFF = 0x7000000u;  // region B base -> image+0x7A00000 (VA 0x88000000), no aliasing
@@ -3576,12 +3576,12 @@ extern "C" uint32_t hle_call(uint32_t stub_va, RecState* s) {
   return s->r[14];
 }
 typedef BlockFn (*FinderFn)(uint32_t);
-static FinderFn ALL_FINDERS[37] = {
+static FinderFn ALL_FINDERS[38] = {
   find_block_000, find_block_001, find_block_002, find_block_003, find_block_004, find_block_005,
   find_block_006, find_block_007, find_block_008, find_block_009, find_block_010, find_block_011,
   find_block_012, find_block_013, find_block_014, find_block_015, find_block_016, find_block_017,
   find_block_018, find_block_019, find_block_020, find_block_021, find_block_022, find_block_023,
-  find_block_024, find_block_025, find_block_026, find_block_027, find_block_028, find_block_029, find_block_030, find_block_031, find_block_032, find_block_033, find_block_034, find_block_035, find_block_036 };
+  find_block_024, find_block_025, find_block_026, find_block_027, find_block_028, find_block_029, find_block_030, find_block_031, find_block_032, find_block_033, find_block_034, find_block_035, find_block_036, find_block_037 };
 struct GBlk { uint32_t va; BlockFn fn; };
 static std::vector<GBlk> g_all;
 static void fiber_save(RecState* s) {
@@ -4543,7 +4543,7 @@ BlockFn fn = gbn(pc);
           if (pc >= 0x81242C3Au && pc < 0x81242DD2u) printf("[TAILRET] hit missing-tail address pc=%08X\n", pc);
           if (pc == 0xFFFFFFFDu || pc == 0xFFFFFFFEu || pc == 0xFFFFFFF0u) {
             static int _sn=0; if (_sn++ < 12) { printf("[SENTINEL] pc=%08X fiber=%08X lr=%08X sp=%08X r0=%08X r1=%08X blk=%08X\n", pc, g_cur_fiber, s->r[14], s->r[13], s->r[0], s->r[1], g_cur_block); fflush(stdout); } } } }
-            fiber_save(s); break; }
+                  fiber_save(s); break; }
     if (pc==0x811DA024u) { RecState* _ps = SPTR(s); g_last_alloc_sz = _ps->r[0]; g_last_alloc_fp = _ps->r[4]; }
     else if ((pc==0x811DA028u||pc==0x811DA02Au||pc==0x811DA030u||pc==0x811DA036u) && SPTR(s)->r[0]==0u && g_allocf_n++ < 24) { RecState* _ps = SPTR(s); printf("[ALLOCFAIL] pc=%08X size=%08X fp=%08X r0=%08X r1=%08X r4=%08X r5=%08X r6=%08X r7=%08X sp=%08X lr=%08X fib=%08X thr=%08X\n", pc, g_last_alloc_sz, g_last_alloc_fp, _ps->r[0],_ps->r[1],_ps->r[4],_ps->r[5],_ps->r[6],_ps->r[7],_ps->r[13],_ps->r[14],g_cur_fiber,g_cur_thr); fflush(stdout); }
     job_probes(pc, SPTR(s));
@@ -4731,7 +4731,7 @@ static uint32_t run_guest(RecState* s, uint32_t entry, uint32_t arg) {
   return fiber_exec_to_completion(s);
 }
 static void build_all_blocks() {
-  for (int i = 0; i < 37; ++i) {
+  for (int i = 0; i < 38; ++i) {
     unsigned cnt = 0;
     const GBlk* tab = (const GBlk*)(
         i == 0 ? get_table_000(&cnt) : i == 1 ? get_table_001(&cnt) : i == 2 ? get_table_002(&cnt) :
@@ -4742,7 +4742,7 @@ static void build_all_blocks() {
         i == 15 ? get_table_015(&cnt) : i == 16 ? get_table_016(&cnt) : i == 17 ? get_table_017(&cnt) :
         i == 18 ? get_table_018(&cnt) : i == 19 ? get_table_019(&cnt) : i == 20 ? get_table_020(&cnt) :
         i == 21 ? get_table_021(&cnt) : i == 22 ? get_table_022(&cnt) : i == 23 ? get_table_023(&cnt) :
-        i == 24 ? get_table_024(&cnt) : i == 25 ? get_table_025(&cnt) : i == 26 ? get_table_026(&cnt) : i == 27 ? get_table_027(&cnt) : i == 28 ? get_table_028(&cnt) : i == 29 ? get_table_029(&cnt) : i == 30 ? get_table_030(&cnt) : i == 31 ? get_table_031(&cnt) : i == 32 ? get_table_032(&cnt) : i == 33 ? get_table_033(&cnt) : i == 34 ? get_table_034(&cnt) : i == 35 ? get_table_035(&cnt) : get_table_036(&cnt));
+        i == 24 ? get_table_024(&cnt) : i == 25 ? get_table_025(&cnt) : i == 26 ? get_table_026(&cnt) : i == 27 ? get_table_027(&cnt) : i == 28 ? get_table_028(&cnt) : i == 29 ? get_table_029(&cnt) : i == 30 ? get_table_030(&cnt) : i == 31 ? get_table_031(&cnt) : i == 32 ? get_table_032(&cnt) : i == 33 ? get_table_033(&cnt) : i == 34 ? get_table_034(&cnt) : i == 35 ? get_table_035(&cnt) : i == 36 ? get_table_036(&cnt) : get_table_037(&cnt));
     for (unsigned k = 0; k < cnt; ++k) g_all.push_back(tab[k]);
   }
   // M842: duplicate VAs exist because the supplemental batches (027/028) re-translate functions that the main batches
@@ -4752,7 +4752,7 @@ static void build_all_blocks() {
   // batches are the corrected/authoritative translations) and emit a sorted table for the lower_bound lookup.
   {
     std::map<uint32_t, BlockFn> _ded;
-    for (int i = 36; i >= 0; --i) {
+    for (int i = 37; i >= 0; --i) {
       unsigned cnt = 0;
       const GBlk* tab = (const GBlk*)(
           i == 0 ? get_table_000(&cnt) : i == 1 ? get_table_001(&cnt) : i == 2 ? get_table_002(&cnt) :
@@ -4763,7 +4763,7 @@ static void build_all_blocks() {
           i == 15 ? get_table_015(&cnt) : i == 16 ? get_table_016(&cnt) : i == 17 ? get_table_017(&cnt) :
           i == 18 ? get_table_018(&cnt) : i == 19 ? get_table_019(&cnt) : i == 20 ? get_table_020(&cnt) :
           i == 21 ? get_table_021(&cnt) : i == 22 ? get_table_022(&cnt) : i == 23 ? get_table_023(&cnt) :
-          i == 24 ? get_table_024(&cnt) : i == 25 ? get_table_025(&cnt) : i == 26 ? get_table_026(&cnt) : i == 27 ? get_table_027(&cnt) : i == 28 ? get_table_028(&cnt) : i == 29 ? get_table_029(&cnt) : i == 30 ? get_table_030(&cnt) : i == 31 ? get_table_031(&cnt) : i == 32 ? get_table_032(&cnt) : i == 33 ? get_table_033(&cnt) : i == 34 ? get_table_034(&cnt) : i == 35 ? get_table_035(&cnt) : get_table_036(&cnt));
+          i == 24 ? get_table_024(&cnt) : i == 25 ? get_table_025(&cnt) : i == 26 ? get_table_026(&cnt) : i == 27 ? get_table_027(&cnt) : i == 28 ? get_table_028(&cnt) : i == 29 ? get_table_029(&cnt) : i == 30 ? get_table_030(&cnt) : i == 31 ? get_table_031(&cnt) : i == 32 ? get_table_032(&cnt) : i == 33 ? get_table_033(&cnt) : i == 34 ? get_table_034(&cnt) : i == 35 ? get_table_035(&cnt) : i == 36 ? get_table_036(&cnt) : get_table_037(&cnt));
       for (unsigned k = 0; k < cnt; ++k) _ded.emplace(tab[k].va, tab[k].fn);   // first insert wins = highest batch index
     }
     g_all.clear(); g_all.reserve(_ded.size());

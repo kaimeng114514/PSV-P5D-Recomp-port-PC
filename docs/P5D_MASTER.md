@@ -1145,6 +1145,45 @@
 | M1127 | §18.4672: ★★★★★★★★★ **独立线程栈 arena 实验（negative result）+ 修订 fiber 劫持假说**。新增 `[STKARENA]`（0x8C600000..0x8D000000 专用栈区，big arena 让位到 0x8D000000）：fiber 劫持消失（[EXECSTART] 不再出现 pc=81242D24），但 **boot 回归**（[IO] 仅 2 条、无 CPK TOC PREAD、[ACFFILL]=0、[FLOAD-BAD]×31、主 n 仅 ~37k、卡在 GSIG 循环）——因线程栈移出 heapA 后 guest 堆块/fiber 对象地址整体下移（84836300→84676300）。结合 `[HM]` 日志修订假说：fiber 对象 84836300/848463A0 **本身就是 HLE hle_malloc 分配**（size **0x100A0** = 0xA0 头 + 0x10000 栈，调用方 lr=811E6A0E），heapA 分配顺序为 6 个小块 → 0x50000 → **7×0x40000 线程栈** → 2×0x100A0 fiber 对象；单调 bump 分配不会让后分配的线程栈覆盖先前 fiber 对象，故劫持更可能来自 **fiber 上下文保存/恢复路径把错误 pc 写入 g_fctx[848463A0].r[15]**（flr=848D9504 为堆地址，说明保存的是混合/错误寄存器组）。下一轮：对 g_fctx[848463A0].r[15] 的每次写入加监视打印（值落入 81240000-81280000 时打印调用来源），定位真实写入点
 | M1128 | §18.4673: ★★★★★★★★★★ **找到并修复 fiber 劫持真正根因：AOT 函数边界截断导致 0x81242C3A..0x81242DD2（FUN_81241F46 尾部）未翻译，执行跳入未翻译地址 0x81242D24 → "no block" livelock**。用 gap-fill 管线生成 **batch_036**（38 blocks，覆盖 0x81242C3A..0x81242DD2），注册进 harness（ALL_FINDERS[37]、表分发 ternary、去重循环），`[TABLE] blocks=230290`（+38）；**fiber 劫持证据 [HUNT-EXEC]=0**；遗留新卡点：`[FIBER-EXEC] no block for pc=FFFFFFFD` ×9800（fiber 返回哨兵 0xFFFFFFFD 未被 fiber 执行循环处理，需按"回调返回"语义收尾）
 | M1129 | §18.4674: ★★★★★★★★★ **fiber 返回哨兵 0xFFFFFFFD 上下文完全定位**：`[FIBER-EXEC] no block for pc=FFFFFFFD (cur=848463A0) lr=81279C20 sp=84856050 r0=<heap>`，前驱块链 **81279BEE→81279C02→81279C0C→81279C1C（bl 812068F2）→812068F2（fiber 管理器）→812068D8/8120685A→812B1B70/812B1BA0（sceFiberSwitch HLE）**；哨兵在 fiber 切换往返后由恢复上下文带入。实验 A（把哨兵当"返回到 LR"：`s->r[15]=s->r[14]; continue`）只降低 livelock 日志量（[SENTRET]×20 后仍循环 81279BEE→81279C02→81279C0C→81279C1C），**未解锁帧循环**，已回退（保留诊断打印）
+| M1130 | §18.4675: ★★★★★★★★★★ **哨兵 0xFFFFFFFD 根因 = AOT 缺失间接调用目标 0x8122A9A8（又一函数边界遗漏）**：`[INDIRECT-MISS] reg3=8122A9A9 target=8122A9A8 block=81279C1C` → `id_reg()` 未找到块时返回 0xFFFFFFFD（harness 行 5186-5188）→ pc=FFFFFFFD→"no block" livelock。反汇编确认 0x8122A9A8 是合法 Thumb 函数（`push {r4,lr}`），位于 FUN_8122A7BC（end 0x8122A9A6）与 FUN_8122A9D0 之间的 0x28 字节缝隙，未收录函数边界。用同管线生成 **batch_037**（5 blocks，0x8122A9A8..0x8122A9D0）并注册（ALL_FINDERS[38]）→ `[TABLE] blocks=230291`；**运行结果显示 [INDIRECT-MISS]=0、[TBB-MISS]=0、[SENTINEL]=0、[FIBER-EXEC]=0（哨兵 livelock 消除）**，且执行进入 GXM 子系统（新探针 [ABIVFMT]×22,770 / [GXMABI]×4,008 / [GBACK]×400 / [ABIVARG]×120 / [VCNT]×120 首次触发），线程数 16→17、flags=3；新卡点：blk=811DFDC8 循环（hle_ring `812B2AE0@8127BE56` 事件标志 set / `812B1810@811539FE`）
+m1215/m1216 证据（`m1215_sentC_key.txt`、`m1216_gap2_key.txt`）：
+```
+[INDIRECT-MISS] reg3=8122A9A9 target=8122A9A8 block=81279C1C   ← 根因（id_reg 返回 0xFFFFFFFD）
+[FIBER-EXEC] no block for pc=FFFFFFFD (cur=848463A0) lr=81279C20 sp=84856050   ← 旧哨兵 livelock
+修复后 m1216：
+[INDIRECT-MISS]=0 / [TBB-MISS]=0 / [SENTINEL]=0 / [FIBER-EXEC]=0
+[TABLE] blocks=230291（+1）
+[ABIVFMT] 22770 / [GXMABI] 4008 / [GBACK] 400 / [ABIVARG] 120 / [VCNT] 120   ← GXM 子系统首次活跃
+[THRD] n=5000000 … threads=16 → n=10000000 … threads=17 flags=3
+[WD] n=300000 blk=811DFDC8 fib=848463A0 stall=57
+     hle_ring: 812B2AE0@8127BE56 812B1810@811539FE …（事件标志/线程等待环）
+     pcring: 811DFDE4 811DFDD4 811DFDEA 811DFDF6 811DFE08 … 811DFDC8
+[COUNT] present=0 begin_pass=0 draw=0（GXM 尚未到 BeginScene/Present）
+[IO] 6 / [ACFFILL] size=5152 / [CRILOG]=0
+```
+**gap-fill 管线（第二次使用，已固化为两步）**：
+```
+1) gap2_bounds.json = [{"va":2166532520(=0x8122A9A8),"size":40(=0x28),"name":"FUN_8122A9A8_gap"}]
+2) _gen_tail2.py = _gen_tail.py 改 BOUNDS/OUTDIR（OUTDIR=C:\dev\tmp\recomp_gap3）→ py -3 _gen_tail2.py 500 4
+   → recomp_gap3/batch_000.cpp（10 定义/5 表项，.o 4996B，覆盖 0x8122A9A8..0x8122A9D0）
+3) 重命名 batch_000→batch_037（g_blocks_/find_block_/get_table_/batch 0:）→ recomp_split/batch_037.cpp 编译 exit=0
+4) harness 注册：FB(037)、extern get_table_037/find_block_037、ALL_FINDERS[37]→[38]、两个 ternary 链
+   （… : i == 36 ? get_table_036(&cnt) : get_table_037(&cnt));）、for i<38、去重 i=37..0 → recompile+link exit=0
+```
+**NEXT**：
+```
+① 分析新卡点 811DFDC8 循环：跑 [WD]/pcring 对应 guest 函数（反汇编 0x811DFDC8 附近），确认是等待哪个事件标志
+   （hle_ring 812B2AE0@8127BE56 = 事件标志 set；812B1810@811539FE = 线程/回调），是否需补 HLE 唤醒/信号或 guest 线程调度
+② 检查 [ABIVFMT]/[GXMABI] 输出：GXM 初始化推进到哪一步（shader/uniform/RT 创建），为 BeginScene 做准备
+③ 目标：GFD 帧循环启动（[FRAMECB]/[UPD]/[POST] 计数、[COUNT] present 递增）→ 标题资源请求
+④ 继续用 [INDIRECT-MISS]/[TBB-MISS] 监控 AOT 覆盖缺口，出现即按同一管线补批（batch_038+）
+```
+验证：`m1216_gap2_key.txt`、`m1215_sentC_key.txt`、`gap2_bounds.json`、`_gen_tail2.py`、`batch_037.cpp`、`[TABLE] blocks=230291`。 |
+| §18.4675 | Root cause of the 0xFFFFFFFD sentinel = another missing AOT indirect-call target, 0x8122A9A8: [INDIRECT-MISS] reg3=8122A9A9 target=8122A9A8 block=81279C1C; id_reg() returns 0xFFFFFFFD when no block is found (harness lines 5186-5188), so pc=FFFFFFFD -> "no block" livelock. Disassembly confirms 0x8122A9A8 is a valid Thumb function (push {r4,lr}) in the 0x28-byte gap between FUN_8122A7BC (end 0x8122A9A6) and FUN_8122A9D0, missing from the function bounds. Generated batch_037 with the same pipeline (5 blocks, 0x8122A9A8..0x8122A9D0) and registered it (ALL_FINDERS[38]) -> [TABLE] blocks=230291; the run now shows [INDIRECT-MISS]=0, [TBB-MISS]=0, [SENTINEL]=0, [FIBER-EXEC]=0 (sentinel livelock eliminated) and execution enters the GXM subsystem (new probes [ABIVFMT] x22,770 / [GXMABI] x4,008 / [GBACK] x400 / [ABIVARG] x120 / [VCNT] x120 fire for the first time), threads 16 -> 17, flags=3. New stall: loop at blk=811DFDC8 (hle_ring 812B2AE0@8127BE56 event-flag set / 812B1810@811539FE). '
+       'm1215/m1216 evidence: [INDIRECT-MISS] reg3=8122A9A9 target=8122A9A8 block=81279C1C (root cause, id_reg returns 0xFFFFFFFD); [FIBER-EXEC] no block for pc=FFFFFFFD (cur=848463A0) lr=81279C20 sp=84856050 (old sentinel livelock). After the fix (m1216): [INDIRECT-MISS]=0 / [TBB-MISS]=0 / [SENTINEL]=0 / [FIBER-EXEC]=0; [TABLE] blocks=230291 (+1); [ABIVFMT] 22770 / [GXMABI] 4008 / [GBACK] 400 / [ABIVARG] 120 / [VCNT] 120 (GXM subsystem active for the first time); [THRD] n=5000000 threads=16 -> n=10000000 threads=17 flags=3; [WD] n=300000 blk=811DFDC8 fib=848463A0 stall=57 hle_ring 812B2AE0@8127BE56 812B1810@811539FE (event flag / thread wait loop), pcring 811DFDE4 811DFDD4 811DFDEA 811DFDF6 811DFE08 ... 811DFDC8; [COUNT] present=0 begin_pass=0 draw=0 (GXM has not reached BeginScene/Present); [IO]=6; [ACFFILL] size=5152; [CRILOG]=0. '
+       'Gap-fill pipeline (second use, now a fixed two-step procedure): (1) gap2_bounds.json = [{"va":2166532520 (=0x8122A9A8),"size":40 (=0x28),"name":"FUN_8122A9A8_gap"}]; (2) _gen_tail2.py = _gen_tail.py with BOUNDS/OUTDIR changed (OUTDIR=C:\\dev\\tmp\\recomp_gap3) -> py -3 _gen_tail2.py 500 4 -> recomp_gap3/batch_000.cpp (10 defs / 5 table entries, .o 4996B, covering 0x8122A9A8..0x8122A9D0); (3) rename batch_000->batch_037 (g_blocks_/find_block_/get_table_/"batch 0:") -> recomp_split/batch_037.cpp compiles exit=0; (4) harness registration: FB(037), externs get_table_037/find_block_037, ALL_FINDERS[37]->[38], both ternary chains (... : i == 36 ? get_table_036(&cnt) : get_table_037(&cnt));), for i<38, dedupe i=37..0; recompile+link exit=0. '
+       'NEXT: (1) analyze the new stall loop at 811DFDC8 (disassemble around 0x811DFDC8, check which event flag it waits on: hle_ring 812B2AE0@8127BE56 event-flag set; 812B1810@811539FE thread/callback) and decide whether an HLE wake/signal or guest thread scheduling is needed; (2) inspect the [ABIVFMT]/[GXMABI] output to see how far GXM init got (shader/uniform/RT creation) before BeginScene; (3) goal: GFD frame loop starts ([FRAMECB]/[UPD]/[POST] counters, [COUNT] present increments) -> title asset requests; (4) keep watching [INDIRECT-MISS]/[TBB-MISS] for AOT coverage gaps and fill new batches (batch_038+) with the same pipeline. '
+       'Verification: m1216_gap2_key.txt, m1215_sentC_key.txt, gap2_bounds.json, _gen_tail2.py, batch_037.cpp, [TABLE] blocks=230291. |
 m1213/m1214 证据（`m1213_sentinel_key.txt`、`m1214_sentret_key.txt`）：
 ```
 [FIBER-EXEC] no block for pc=FFFFFFFD (cur=848463A0) lr=81279C20 sp=84856050 r0=84B99630 blk=81279C1C
@@ -502658,3 +502697,44 @@ no-block 分支对 pc∈{FFFFFFFD,FFFFFFFE,FFFFFFF0}: s->r[15]=s->r[14]; continu
 ANTI-FORGETTING ENTRY. Keywords: M1129 fiber return sentinel 0xFFFFFFFD localized: [FIBER-EXEC] no block for pc=FFFFFFFD (cur=848463A0) lr=81279C20 sp=84856050 r0=84B99630 blk=81279C1C, predecessor chain 81279BEE -> 81279C02 -> 81279C0C -> 81279C1C (bl 812068F2) -> 812068F2 fiber manager -> 812068D8/8120685A -> 812B1B70/812B1BA0 sceFiberSwitch HLE; ring 81278C8E 81278C94 81253406 81278C96 81278CB0 81278CB8 812B28A0 81278CC4 81278CDA 81278CEC 81253414 81254C5A 8122724C 81254C14 8125326C 81253278 81279BEE 81279C08 81279C0C 81279C1C. Experiment A (s->r[15]=s->r[14]; continue on sentinel) reduced log volume only; [SENTRET] x20 then loop 81279BEE->81279C02->81279C0C->81279C1C->FFFFFFFD persists, [FRAMECB]/[UPD]/[POST] still 0, reverted (diagnostics kept). batch_036 still effective: [TABLE]=230290, [HUNT-EXEC]=0, [TAILRET]=0; [COUNT] present=0, [IO]=6, [ACFFILL] size=5152, [CRILOG]=0. Inference: the sentinel is brought in by the fiber switch/restore path (lr=81279C20 is the return address of bl 812068F2 at 81279C1C); 812068F2/812068D8/8120685A/812B1B70/812B1BA0 = guest fiber manager + HLE sceFiberSwitch; 0xFFFFFFFD is likely the HLE nested-callback/fiber-return convention (call_guest_cb family uses LR=0xFFFFFFFE + sentinel break at lines 5004-5319) and must be handled as restore caller context (rc_restore/g_caller_ctx) and return to the main dispatcher instead of pc=lr. NEXT: inspect HLE 812B1B70/812B1BA0/812B1B60 to find which case makes s->r[15]=0xFFFFFFFD (or restores it from guest fiber object/stack); check call_guest_cb/call_guest_cb2 callers (HLE fiber path) returning the sentinel during nested execution and requiring rc_restore; when fiber exec receives the sentinel perform the nested return (restore g_caller_ctx + g_cur_fiber, let outer dispatcher continue); then GFD frame loop should start ([FRAMECB]/[UPD]/[POST], [COUNT] present) -> title asset requests. Verification: m1214_sentret_key.txt, m1213_sentinel_key.txt, m1212_tail_key.txt, [TABLE] blocks=230290.
 
 LOOKUP: M1129 fiber return sentinel 0xFFFFFFFD lr=81279C20 sp=84856050 blk=81279C1C chain 81279BEE 81279C02 81279C0C 81279C1C bl 812068F2 fiber manager 812B1B70 812B1BA0 sceFiberSwitch HLE, experiment A (sentinel-lr recovery) failed reverted, call_guest_cb LR 0xFFFFFFFE sentinel break lines 5004-5319, next rc_restore g_caller_ctx nested return inspect HLE 812B1B70 812B1B60, batch_036 effective TABLE 230290 HUNT-EXEC 0 TAILRET 0, COUNT present 0 frame loop not entered -> 18.4673 [relevant: batch_036 gap fix], 18.4672 [relevant: hijack hypothesis], 18.4670 [relevant: GFD fiber]
+### 18.4675 PORT M1130: 哨兵 0xFFFFFFFD 根因=AOT 缺失间接调用目标 0x8122A9A8（batch_037 修复）→ GXM 子系统首次活跃
+
+1) 根因证据（m1215）：
+```
+[INDIRECT-MISS] reg3=8122A9A9 target=8122A9A8 block=81279C1C   ← id_reg() 找不到块→返回 0xFFFFFFFD（行 5186-5188）
+[FIBER-EXEC] no block for pc=FFFFFFFD (cur=848463A0) lr=81279C20 sp=84856050   ← 哨兵 livelock
+反汇编确认 0x8122A9A8 = 合法 Thumb 函数（push {r4,lr}），位于 FUN_8122A7BC（end 0x8122A9A6）
+与 FUN_8122A9D0 之间的 0x28 字节缝隙，未收录函数边界（第二次函数边界遗漏）
+```
+2) 修复（gap-fill 第二次使用）：
+```
+gap2_bounds.json: [{"va":2166532520(=0x8122A9A8),"size":40(=0x28),"name":"FUN_8122A9A8_gap"}]
+_gen_tail2.py（_gen_tail.py 改 BOUNDS/OUTDIR=C:\dev\tmp\recomp_gap3）→ py -3 _gen_tail2.py 500 4
+→ recomp_gap3/batch_000.cpp（10 定义/5 表项，.o 4996B，覆盖 0x8122A9A8..0x8122A9D0）
+→ 重命名 batch_000→batch_037 → 编译 exit=0
+→ harness 注册：FB(037)、ALL_FINDERS[38]、ternary 链、for i<38、去重 i=37..0 → recompile+link exit=0
+```
+3) 修复后（m1216）：
+```
+[INDIRECT-MISS]=0 / [TBB-MISS]=0 / [SENTINEL]=0 / [FIBER-EXEC]=0     ← 哨兵 livelock 消除
+[TABLE] blocks=230291（+1）
+[ABIVFMT] 22770 / [GXMABI] 4008 / [GBACK] 400 / [ABIVARG] 120 / [VCNT] 120   ← GXM 子系统首次活跃
+[THRD] threads 16→17 flags=3
+[WD] n=300000 blk=811DFDC8 fib=848463A0 stall=57
+     hle_ring: 812B2AE0@8127BE56（事件标志 set） 812B1810@811539FE
+     pcring: 811DFDE4 811DFDD4 811DFDEA 811DFDF6 811DFE08 … 811DFDC8
+[COUNT] present=0 begin_pass=0 draw=0
+[IO] 6 / [ACFFILL] size=5152 / [CRILOG]=0
+```
+4) 新卡点与 NEXT：
+```
+① 分析 811DFDC8 循环：等待哪个事件标志（812B2AE0@8127BE56）/线程（812B1810@811539FE），是否需 HLE 唤醒或线程调度
+② 检查 [ABIVFMT]/[GXMABI]：GXM 初始化进度（shader/uniform/RT），为 BeginScene 做准备
+③ 目标：GFD 帧循环启动（[FRAMECB]/[UPD]/[POST]、[COUNT] present）→ 标题资源请求
+④ 继续用 [INDIRECT-MISS]/[TBB-MISS] 监控 AOT 缺口，出现即补 batch_038+
+```
+验证：`m1216_gap2_key.txt`、`m1215_sentC_key.txt`、`gap2_bounds.json`、`_gen_tail2.py`、`batch_037.cpp`、`[TABLE] blocks=230291`。
+
+ANTI-FORGETTING ENTRY. Keywords: M1130 sentinel 0xFFFFFFFD root cause = missing AOT indirect-call target 0x8122A9A8; [INDIRECT-MISS] reg3=8122A9A9 target=8122A9A8 block=81279C1C; id_reg() returns 0xFFFFFFFD when gbn(target) is null (harness lines 5186-5188), so pc=FFFFFFFD -> no-block livelock. 0x8122A9A8 is a valid Thumb function (push {r4,lr}) in the 0x28-byte gap between FUN_8122A7BC (end 0x8122A9A6) and FUN_8122A9D0, missing from the function bounds (second AOT bounds omission). Fixed with the gap-fill pipeline: gap2_bounds.json [{"va":2166532520 (=0x8122A9A8),"size":40 (=0x28),"name":"FUN_8122A9A8_gap"}], _gen_tail2.py (copy of _gen_tail.py with BOUNDS/OUTDIR=C:\\dev\\tmp\\recomp_gap3), py -3 _gen_tail2.py 500 4 -> recomp_gap3/batch_000.cpp (10 defs/5 table entries/.o 4996B covering 0x8122A9A8..0x8122A9D0), rename to batch_037, harness registration FB(037)+externs+ALL_FINDERS[37]->[38]+ternary chains+for i<38+dedupe i=37, recompile+link exit=0. After the fix m1216: [INDIRECT-MISS]=0, [TBB-MISS]=0, [SENTINEL]=0, [FIBER-EXEC]=0 (sentinel livelock eliminated); [TABLE] blocks=230291 (+1); [ABIVFMT] 22770 / [GXMABI] 4008 / [GBACK] 400 / [ABIVARG] 120 / [VCNT] 120 fire for the first time (GXM subsystem active); threads 16->17, flags=3; new stall at blk=811DFDC8 (WD stall=57, hle_ring 812B2AE0@8127BE56 event-flag set / 812B1810@811539FE, pcring 811DFDE4 811DFDD4 811DFDEA 811DFDF6 811DFE08 ... 811DFDC8); [COUNT] present=0 begin_pass=0 draw=0; [IO]=6; [ACFFILL] size=5152; [CRILOG]=0. NEXT: analyze the 811DFDC8 loop (which event flag/thread it waits on and whether an HLE wake or thread scheduling is needed), inspect [ABIVFMT]/[GXMABI] for GXM init progress before BeginScene, goal GFD frame loop ([FRAMECB]/[UPD]/[POST], [COUNT] present) -> title asset requests; keep watching [INDIRECT-MISS]/[TBB-MISS] and fill batch_038+ with the same pipeline. Verification: m1216_gap2_key.txt, m1215_sentC_key.txt, gap2_bounds.json, _gen_tail2.py, batch_037.cpp, [TABLE] blocks=230291.
+
+LOOKUP: M1130 sentinel FFFFFFFD root cause missing AOT target 0x8122A9A8 INDIRECT-MISS id_reg returns FFFFFFFD lines 5186-5188 gap between FUN_8122A7BC end 8122A9A6 and FUN_8122A9D0, gap2_bounds.json _gen_tail2.py recomp_gap3 batch_037 5 blocks TABLE 230291 ALL_FINDERS 38, after fix INDIRECT-MISS 0 SENTINEL 0 FIBER-EXEC 0, ABIVFMT 22770 GXMABI 4008 GBACK 400 ABIVARG 120 VCNT 120 GXM subsystem active threads 17 flags 3, new stall blk 811DFDC8 hle_ring 812B2AE0@8127BE56 event flag 812B1810@811539FE, next analyze 811DFDC8 event wait GXM init progress frame loop, verification m1216_gap2_key.txt -> 18.4674 [relevant: sentinel localized], 18.4673 [relevant: batch_036 bounds gap], 18.4670 [relevant: GFD fiber]
