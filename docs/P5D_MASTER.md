@@ -1143,6 +1143,43 @@
 | M1125 | §18.4670: ★★★★★★★★★ **GFD 初始化继续推进（BOOT 高上限跟踪）：经过 appSystem 初始化 FUN_81172EFC（2MB 堆/内存缓冲对象）后，执行流进入 CRI Atom 声音代码（81236D9C→8126A09C→81242xxx），随后 fiber B（848463A0 = GFD 主循环）被切入 pc=81242D24（CRI Atom 声音线程代码）且不再返回；[WD] 确认光纤 A 在 811E5CDA 空转、hle_ring 显示 A↔B 切换，GFD 帧循环仍未被到达**。新增 BOOT 跟踪上限 400→400000 用于精确定位卡点 pc
 | M1126 | §18.4671: ★★★★★★★★★ **找到声音线程霸占 GFD fiber 的机制证据：HLE 线程栈分配地址（sp=848560F8 → 栈区 ≈[84817000,848560F8)）与 guest 光纤对象地址（84836300 / 848463A0）重叠；线程栈运行写入会覆盖光纤对象字段 [fiber+0x84]=entry / [fiber+0x88]=arg，随后 fiber_load 读到被覆盖的"入口"（81242D24 等线程代码地址）→ GFD 主循环 fiber 被劫持**。本轮两处实验（① fiber_save 线程期禁止写 fiber；② HLE arena 从 0x84600000 上移到 0x85800000）均未修复：①不足（劫持不经过 fiber_save），②直接回归（fiber 对象/host 堆随 HLE arena 迁移，挂载破坏、[IO] 仅 2 条）；已回退到已知良好构建
 | M1127 | §18.4672: ★★★★★★★★★ **独立线程栈 arena 实验（negative result）+ 修订 fiber 劫持假说**。新增 `[STKARENA]`（0x8C600000..0x8D000000 专用栈区，big arena 让位到 0x8D000000）：fiber 劫持消失（[EXECSTART] 不再出现 pc=81242D24），但 **boot 回归**（[IO] 仅 2 条、无 CPK TOC PREAD、[ACFFILL]=0、[FLOAD-BAD]×31、主 n 仅 ~37k、卡在 GSIG 循环）——因线程栈移出 heapA 后 guest 堆块/fiber 对象地址整体下移（84836300→84676300）。结合 `[HM]` 日志修订假说：fiber 对象 84836300/848463A0 **本身就是 HLE hle_malloc 分配**（size **0x100A0** = 0xA0 头 + 0x10000 栈，调用方 lr=811E6A0E），heapA 分配顺序为 6 个小块 → 0x50000 → **7×0x40000 线程栈** → 2×0x100A0 fiber 对象；单调 bump 分配不会让后分配的线程栈覆盖先前 fiber 对象，故劫持更可能来自 **fiber 上下文保存/恢复路径把错误 pc 写入 g_fctx[848463A0].r[15]**（flr=848D9504 为堆地址，说明保存的是混合/错误寄存器组）。下一轮：对 g_fctx[848463A0].r[15] 的每次写入加监视打印（值落入 81240000-81280000 时打印调用来源），定位真实写入点
+| M1128 | §18.4673: ★★★★★★★★★★ **找到并修复 fiber 劫持真正根因：AOT 函数边界截断导致 0x81242C3A..0x81242DD2（FUN_81241F46 尾部）未翻译，执行跳入未翻译地址 0x81242D24 → "no block" livelock**。用 gap-fill 管线生成 **batch_036**（38 blocks，覆盖 0x81242C3A..0x81242DD2），注册进 harness（ALL_FINDERS[37]、表分发 ternary、去重循环），`[TABLE] blocks=230290`（+38）；**fiber 劫持证据 [HUNT-EXEC]=0**；遗留新卡点：`[FIBER-EXEC] no block for pc=FFFFFFFD` ×9800（fiber 返回哨兵 0xFFFFFFFD 未被 fiber 执行循环处理，需按"回调返回"语义收尾）
+m1211/m1212 证据（`m1211_hunt_key.txt`、`m1212_tail_key.txt`）：
+```
+[FIBER-EXEC] no block for pc=81242D24 (cur=848463A0)   ← 旧：未翻译地址被当 pc
+[HUNT-SAVE] #17 fiber=848463A0 pc=81242D24 sp=848560F8 lr=848D9504 blk=8124217E
+[HUNT-EXEC] #1 fiber=848463A0 pc=81242D24 … meta_entry=81206BDC obj84=81198C0B obj88=82EFFF28 obj80=1
+（根因）0x81242D24 不在任何函数边界内；反汇编确认 0x81242C3A 起仍是 FUN_81241F46 的合法 Thumb 代码
+  （cmp/add.w/ldr.w/str/adds/b.w/beq/bne/pop.w 等），边界记录 size=0xCF4 只到 0x81242C3A，尾部 0x198 字节被截断
+（修复后 m1212）
+[TABLE] blocks=230290                                            ← +38 新块
+[HUNT-EXEC] 0                                                    ← 劫持 pc 81242D24 消失
+[FIBER-EXEC] no block for pc=FFFFFFFD ×9800（新卡点：fiber 返回哨兵）
+[IO] 6（挂载 4 条 + ACF 相关），[ACFFILL] sound/common.acf size=5152 正常，[CRILOG]=0
+[FRAMECB]/[UPD]/[POST]/[COUNT] = 0（帧循环仍未进入）
+```
+**gap-fill 管线（可复用）**：
+1. `tail_bounds.json = [{"va":2166631482(=0x81242C3A),"size":408(=0x198),"name":"FUN_81241F46_tail"}]`（★ decimal 必须正确：首次误写 339268666 导致 0 块）
+2. `_gen_tail.py` = `_gen_miss_blocks3.py` 改 BOUNDS/OUTDIR（OUTDIR=C:\dev\tmp\recomp_tail）
+3. `py -3 _gen_tail.py 500 4` → recomp_tail/batch_000.cpp（76 定义/38 表项，.o 20678B，含 blk_81242D24）
+4. 重命名 batch_000→batch_036（同时 g_blocks_/find_block_/get_table_/batch 0: 全部替换）→ `recomp_split/batch_036.cpp` 编译 exit=0
+5. harness 注册：`FB(036)`、extern `get_table_036/find_block_036`、`ALL_FINDERS[36]→[37]` + `find_block_036`、`build_all_blocks` 两个 ternary 链（`... : i == 34 ? get_table_034(&cnt) : i == 35 ? get_table_035(&cnt) : get_table_036(&cnt));`）、`for i<36→37` 与去重 `i=35→36`；recompile+link exit=0
+6. 验证：`[TABLE] blocks=230290`；`[HUNT-EXEC]=0`；`[FIBER-EXEC] no block for pc=81242D24` 消失
+**NEXT**：
+```
+① 处理 fiber 返回哨兵：pc∈{0xFFFFFFFD,0xFFFFFFFE,0xFFFFFFF0,0} 在 fiber 执行循环里按"回调/光纤返回"收尾
+   （参考 call_guest_cb 系列 5004-5319 行的哨兵语义：nx 命中即 break 并返回），不要落入 no-block→fiber_save→livelock
+② 探清 0xFFFFFFFD 的来源：在 fiber_save/load 处当 lr/pc=0xFFFFFFFD 时打印 fiber、sp、ring，确认是 HLE 嵌套调用
+   还是 guest fiber 返回
+③ 修复后 GFD 帧循环应启动：[FRAMECB]/[UPD]/[POST] 计数、[COUNT] present 递增 → 标题资源请求
+④ 保持 AOT 覆盖检查：对 [FIBER-EXEC]/[HARNESS] no block 做定期扫描，发现新 gap 立即用同管线补批
+```
+验证：`m1212_tail_key.txt`、`m1211_hunt_key.txt`、`tail_bounds.json`、`_gen_tail.py`、`batch_036.cpp`、`[TABLE] blocks=230290`。 |
+| §18.4673 | Found and fixed the real root cause of the fiber hijack: the AOT function bounds were truncated, so 0x81242C3A..0x81242DD2 (the tail of FUN_81241F46) was never translated; execution jumped into the untranslated address 0x81242D24 -> "no block" livelock. Generated batch_036 via the gap-fill pipeline (38 blocks covering 0x81242C3A..0x81242DD2) and registered it in the harness (ALL_FINDERS[37], table-dispatch ternaries, dedupe loop); [TABLE] blocks=230290 (+38); the fiber hijack evidence [HUNT-EXEC] is now 0. Remaining new blocker: [FIBER-EXEC] no block for pc=FFFFFFFD x9800 (the fiber return sentinel 0xFFFFFFFD is not handled by the fiber exec loop and must be treated as a callback/fiber return). '
+       'm1211/m1212 evidence: [FIBER-EXEC] no block for pc=81242D24 (cur=848463A0) <- previously an untranslated address used as pc; [HUNT-SAVE] #17 fiber=848463A0 pc=81242D24 sp=848560F8 lr=848D9504 blk=8124217E; [HUNT-EXEC] #1 fiber=848463A0 pc=81242D24 meta_entry=81206BDC obj84=81198C0B obj88=82EFFF28 obj80=1. Root cause: 0x81242D24 is not inside any function bounds; disassembly confirms 0x81242C3A onwards is still valid Thumb code of FUN_81241F46 (cmp/add.w/ldr.w/str/adds/b.w/beq/bne/pop.w), and the recorded size=0xCF4 only reaches 0x81242C3A, truncating the last 0x198 bytes. After the fix (m1212): [TABLE] blocks=230290 (+38); [HUNT-EXEC]=0 (hijack gone); [FIBER-EXEC] no block for pc=FFFFFFFD x9800 (new blocker: fiber return sentinel); [IO] 6; [ACFFILL] sound/common.acf size=5152; [CRILOG]=0; [FRAMECB]/[UPD]/[POST]/[COUNT]=0 (frame loop still not entered). '
+       'Gap-fill pipeline (reusable): (1) tail_bounds.json = [{"va":2166631482 (=0x81242C3A),"size":408 (=0x198),"name":"FUN_81241F46_tail"}] (decimal value must be correct - the first attempt used 339268666 and produced 0 blocks); (2) _gen_tail.py = copy of _gen_miss_blocks3.py with BOUNDS/OUTDIR changed (OUTDIR=C:\\dev\\tmp\\recomp_tail); (3) py -3 _gen_tail.py 500 4 -> recomp_tail/batch_000.cpp (76 defs / 38 table entries, .o 20678B, includes blk_81242D24); (4) rename batch_000->batch_036 (also g_blocks_/find_block_/get_table_ and "batch 0:" -> 36) -> recomp_split/batch_036.cpp compiles exit=0; (5) harness registration: FB(036), externs get_table_036/find_block_036, ALL_FINDERS[36]->[37] + find_block_036, both build_all_blocks ternary chains (... : i == 34 ? get_table_034(&cnt) : i == 35 ? get_table_035(&cnt) : get_table_036(&cnt));), for i<36->37 and dedupe i=35->36; recompile+link exit=0; (6) verification: [TABLE] blocks=230290, [HUNT-EXEC]=0, [FIBER-EXEC] no block for 81242D24 gone. '
+       'NEXT: (1) handle the fiber return sentinels: when pc in {0xFFFFFFFD,0xFFFFFFFE,0xFFFFFFF0,0} in the fiber exec loop, finish the callback/fiber return properly (see the call_guest_cb helpers at lines 5004-5319 where hitting the sentinel breaks and returns) instead of falling into no-block -> fiber_save -> livelock; (2) trace the 0xFFFFFFFD source by printing fiber/sp/ring when lr/pc==0xFFFFFFFD in fiber_save/load to distinguish HLE nested calls from guest fiber returns; (3) after the fix the GFD frame loop should start ([FRAMECB]/[UPD]/[POST] counters, [COUNT] present increments) -> title asset requests; (4) keep scanning [FIBER-EXEC]/[HARNESS] no block periodically and fill new gaps with the same pipeline. '
+       'Verification: m1212_tail_key.txt, m1211_hunt_key.txt, tail_bounds.json, _gen_tail.py, batch_036.cpp, [TABLE] blocks=230290. |
 m1210/m1208 证据（`m1210_stkarena_key.txt`、`m1208_hm_key.txt`）：
 ```
 [STKARENA] n=00040000 -> 8C600000 (range [8C600000,8C640000)) ×16   ← 专用栈区生效
@@ -502502,3 +502539,44 @@ LOOKUP: M1126 sound thread hijack GFD fiber HLE thread stack overlaps guest fibe
 ANTI-FORGETTING ENTRY. Keywords: M1127 dedicated thread-stack arena experiment negative result + revised fiber hijack hypothesis. Tested [STKARENA] dedicated stack region 0x8C600000..0x8D000000 (big arena moved to 0x8D000000) with hle_stack_alloc(0x40000) for thread stacks: hijack pc 81242D24 disappeared from [EXECSTART] but boot regressed ([IO] only 2 lines, no CPK TOC PREADs, [ACFFILL]=0, [FLOAD-BAD] x31, [FINIT] fibers shifted 84836300->84676300, main n only ~37k stalled in GSIG loop) because moving thread stacks out of heapA shifts the guest heap block/fiber objects down and changes the whole address assumption chain; reverted and SHA256 of recomp_harness.cpp matches recomp_harness_known_good_4671.cpp. New evidence from [HM] allocation log: fiber objects 84836300/848463A0 are themselves HLE hle_malloc allocations of size 0x100A0 (0xA0 header + 0x10000 stack, caller lr=811E6A0E = FUN_81206700 calling FUN_811DA534(0x10000+0xA0)); heapA order: 6 small blocks (84600230 846102B0 84617B30 8461EBC0 84621050 846650C0) -> 7x0x40000 thread stacks (846B50C0..848350C0) -> 2x0x100A0 fiber objects (84836300, 848463A0). A monotonic bump allocator cannot let later thread stacks overwrite earlier fiber objects, so the hijack more likely comes from a fiber save/restore path writing a wrong pc into g_fctx[848463A0].r[15]; flr=848D9504 being a heap address indicates a mixed/wrong register set was saved. NEXT: add a watch on every harness write to g_fctx[..].r[15] printing fiber id/source/lr when the value falls in [0x81240000,0x81280000) to locate the exact write path (fiber_save/fiber_load/SWCH/pump2); validate in fiber_load that guest fiber object [f84] matches g_fib_meta entry, warn and use meta on mismatch; fix the save path without moving arenas; goal fiber B keeps entry=81198C0B and the GFD frame loop starts ([FRAMECB]/[UPD]/[POST], [COUNT] present). Verification: m1210_stkarena_key.txt, m1208_hm_key.txt, m1208_fibguard_key.txt, m1207_bootpc_key.txt, recomp_harness_known_good_4671.cpp.
 
 LOOKUP: M1127 STKARENA dedicated stack arena 0x8C600000 0x8D000000 big arena 0x8D000000 hle_stack_alloc 0x40000 negative boot regression fiber shift 84836300 84676300 FLOAD-BAD 31 IO 2 ACFFILL 0 GSIG 37394, HM allocation log fiber objects hle_malloc 0x100A0 caller 811E6A0E FUN_81206700 FUN_811DA534 0x10000, heapA order thread stacks 846B50C0 848350C0, revised hypothesis fiber save/restore writes wrong pc g_fctx 848463A0 r15 81242D24 flr 848D9504 mixed register set, next watch writes to g_fctx r15 range 81240000-81280000 fiber_load validate f84 vs g_fib_meta, SHA256 known-good match recomp_harness_known_good_4671.cpp -> 18.4671 [relevant: thread stacks overlap], 18.4670 [relevant: fiber B hijack], 18.4669 [relevant: GFD main loop]
+### 18.4673 PORT M1128: 找到 fiber 劫持根因=AOT 函数边界截断（0x81242C3A..0x81242DD2 未翻译）→ 生成 batch_036 修复
+
+1) 根因证据：
+```
+[FIBER-EXEC] no block for pc=81242D24 (cur=848463A0)      ← 未翻译地址被当作 pc
+[HUNT-SAVE] #17 fiber=848463A0 pc=81242D24 sp=848560F8 lr=848D9504 blk=8124217E
+[HUNT-EXEC] #1 fiber=848463A0 pc=81242D24 meta_entry=81206BDC obj84=81198C0B obj88=82EFFF28 obj80=1
+反汇编：0x81242C3A 起仍是 FUN_81241F46 的合法 Thumb 代码（cmp/add.w/ldr.w/str/adds/b.w/beq/bne/pop.w）
+函数边界记录 size=0xCF4 → 只到 0x81242C3A，尾部 0x198 字节（到 0x81242DD2）被截断 → 0x81242D24 无块
+```
+2) 修复：gap-fill 管线生成 batch_036（38 块）：
+```
+tail_bounds.json: [{"va":2166631482(=0x81242C3A),"size":408(=0x198),"name":"FUN_81241F46_tail"}]
+（注：decimal 必须正确；首版误写 339268666 → 0 块）
+_gen_tail.py = _gen_miss_blocks3.py 改 BOUNDS/OUTDIR → py -3 _gen_tail.py 500 4
+→ recomp_tail/batch_000.cpp（76 定义/38 表项，.o 20678B，含 blk_81242D24）
+→ 重命名 batch_000→batch_036 → recomp_split/batch_036.cpp 编译 exit=0
+→ harness 注册：FB(036)、extern get_table_036/find_block_036、ALL_FINDERS[37]、build_all_blocks 两个 ternary 链、
+   for i<37、去重 i=36..0 → recompile+link exit=0
+```
+3) 修复后（m1212）：
+```
+[TABLE] blocks=230290（+38）
+[HUNT-EXEC] 0（fiber 劫持 pc=81242D24 消失）
+[FIBER-EXEC] no block for pc=FFFFFFFD ×9800   ← 新卡点：fiber 返回哨兵
+[IO] 6 / [ACFFILL] size=5152 / [CRILOG]=0
+[FRAMECB]/[UPD]/[POST]/[COUNT]=0（帧循环仍未进入）
+```
+4) NEXT：
+```
+① fiber 执行循环处理返回哨兵 pc∈{0xFFFFFFFD,0xFFFFFFFE,0xFFFFFFF0,0}：按"回调/光纤返回"收尾
+   （参考 call_guest_cb 系列行 5004-5319：命中哨兵即 break 并返回），避免 no-block→fiber_save→livelock
+② 在 fiber_save/load 处对 lr/pc==0xFFFFFFFD 打印 fiber/sp/ring，确认哨兵来源（HLE 嵌套调用 vs guest fiber 返回）
+③ 修复后 GFD 帧循环启动（[FRAMECB]/[UPD]/[POST]、[COUNT] present）→ 标题资源请求
+④ 定期扫描 [FIBER-EXEC]/[HARNESS] no block，发现新 gap 用同管线补批
+```
+验证：`m1212_tail_key.txt`、`m1211_hunt_key.txt`、`tail_bounds.json`、`_gen_tail.py`、`batch_036.cpp`、`[TABLE] blocks=230290`。
+
+ANTI-FORGETTING ENTRY. Keywords: M1128 fiber hijack root cause = AOT function bounds truncation, 0x81242C3A..0x81242DD2 tail of FUN_81241F46 untranslated so execution jumped into 0x81242D24 with no translated block -> livelock. Fixed with gap-fill pipeline: tail_bounds.json [{"va":2166631482 (=0x81242C3A),"size":408 (=0x198),"name":"FUN_81241F46_tail"}], _gen_tail.py copy of _gen_miss_blocks3.py with BOUNDS/OUTDIR, py -3 _gen_tail.py 500 4 -> recomp_tail/batch_000.cpp (76 defs/38 table entries/.o 20678B incl blk_81242D24), rename to batch_036 with g_blocks_/find_block_/get_table_/batch 0: substitutions, harness registration FB(036)+externs+ALL_FINDERS[36]->[37]+build_all_blocks ternary chains (... : i == 34 ? get_table_034 : i == 35 ? get_table_035 : get_table_036) + loops i<37 and dedupe i=36; recompile+link exit=0; verification [TABLE] blocks=230290 (+38), [HUNT-EXEC]=0 (hijack pc 81242D24 gone). Root-cause evidence: [FIBER-EXEC] no block for pc=81242D24 (cur=848463A0), [HUNT-SAVE] #17 fiber=848463A0 pc=81242D24 sp=848560F8 lr=848D9504 blk=8124217E, [HUNT-EXEC] #1 meta_entry=81206BDC obj84=81198C0B obj88=82EFFF28 obj80=1; disassembly of 0x81242C3A.. shows valid Thumb code (cmp/add.w/ldr.w/str/adds/b.w/beq/bne/pop.w) but recorded function size 0xCF4 only reaches 0x81242C3A. New blocker after fix: [FIBER-EXEC] no block for pc=FFFFFFFD x9800 - the fiber return sentinel 0xFFFFFFFD is not handled by the fiber exec loop; [FRAMECB]/[UPD]/[POST]/[COUNT]=0, [IO]=6, [ACFFILL] size=5152, [CRILOG]=0. NEXT: handle pc in {0xFFFFFFFD,0xFFFFFFFE,0xFFFFFFF0,0} in the fiber exec loop as a callback/fiber return (see call_guest_cb helpers lines 5004-5319 where the sentinel breaks and returns) instead of no-block -> fiber_save -> livelock; trace the 0xFFFFFFFD source in fiber_save/load; then the GFD frame loop should start and title asset requests follow; keep scanning no-block and filling new gaps with the same pipeline. Verification: m1212_tail_key.txt, m1211_hunt_key.txt, tail_bounds.json, _gen_tail.py, batch_036.cpp, [TABLE] blocks=230290.
+
+LOOKUP: M1128 fiber hijack root cause AOT function bounds truncation FUN_81241F46 tail 0x81242C3A 0x81242DD2 untranslated 0x81242D24 no block, gap-fill pipeline tail_bounds.json _gen_tail.py _gen_miss_blocks3.py batch_036 38 blocks TABLE blocks 230290, harness FB(036) ALL_FINDERS[37] ternary chains dedupe, HUNT-EXEC 0 hijack fixed, new blocker FIBER-EXEC no block pc=FFFFFFFD x9800 fiber return sentinel, next handle sentinels FFFFFFFD FFFFFFFE FFFFFFF0 0 in fiber exec as callback return, FRAMECB UPD POST COUNT 0 frame loop not entered -> 18.4672 [relevant: revised hijack hypothesis], 18.4671 [relevant: thread stack overlap], 18.4670 [relevant: fiber B hijack]
