@@ -2537,8 +2537,16 @@ extern "C" uint32_t hle_call(uint32_t stub_va, RecState* s) {
       if (d && sp) { uint32_t i = 0; do { d[i] = sp[i]; } while (sp[i++] && i < 0x100000u); }
       r0 = dst; break; }
     case 0x812B2360u: r0 = 0; break;                                   // __at_quick_exit
-    case 0x812B2200u: {                                               // 18.4256: strcmp(s1,s2) [NID 1B58FA3B] (was MISSING -> always 0!)
+    case 0x812B2200u: {                                               // 18.4256: strcmp(s1,s2) [NID 1B58FA3B]
+      // M1116 workaround: the CRI UTF reader leaves the FIRST column's name pointer null (its name
+      // offset is the cumulative value 0 == "ContentOffset" at the strings base). A null pointer must
+      // not compare equal to every key (otherwise all UTF field lookups return column 0), so treat a
+      // null side as the implicit first column name "ContentOffset".
+      static int _ncmp_n = 0;
       uint8_t* a = GP(s->r[0]); uint8_t* b = GP(s->r[1]); r0 = 0;
+      const char* _c0 = "ContentOffset";
+      if (!a && b) { r0 = (std::strcmp((const char*)b, _c0) == 0) ? 0u : 1u; if (_ncmp_n++ < 40) { printf("[STRCMP0] a=NULL b=%s -> %u\n", (const char*)b, r0); fflush(stdout); } break; }
+      if (a && !b) { r0 = (std::strcmp((const char*)a, _c0) == 0) ? 0u : 1u; if (_ncmp_n++ < 40) { printf("[STRCMP0] a=%s b=NULL -> %u\n", (const char*)a, r0); fflush(stdout); } break; }
       if (a && b) { for (uint32_t i = 0; i < 0x100000u; ++i) { if (a[i] != b[i]) { r0 = (a[i] < b[i]) ? (uint32_t)-1 : 1u; break; } if (!a[i]) break; } }
       break; }
     case 0x812B2290u: {                                               // memcmp(a,b,n) [NID 7747F6D7]

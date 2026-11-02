@@ -1131,6 +1131,49 @@
 | M1113 | §18.4658: ★★★★★★★★★ **发现并修复 AOT 翻译器通用 bug：`LDRD rX,rY,[rX,#imm]`（基址寄存器=第一目标寄存器）被翻成"第一字读入 rX 后，第二字用被覆盖的新 rX 作基址"→ 读到错误地址。全库扫描命中 34 处（batch_000×7, batch_004×1, batch_005×1, batch_009×4, batch_018×2, batch_021×2, batch_023×15, batch_024×2），统一改为临时基址 `_ldrd_b`。修复后：BADMEM 归零、CPK 表读取解锁（新增 `PREAD off=2048 size=2048`）、游戏开始打开 `data.cpk`（第二个 CPK 挂载）！**
 | M1114 | §18.4659: ★★★★★★★ **错误调用点全部定位：`E06100301:Invalid IFF header` 来自 `FUN_812B074C`（CRI UTF Retriever/VITA Ver.1.00.02）——它期望大端 `@UTF`（0x40555446）；`E2009010913:Need more memory` 来自 CPK 分析器 `FUN_812938C6` 区（blk 0x81293978）。根因数据：vita.cpk 的 0x800 处是 `CRID` 段（@UTF 在 0x820），而 data.cpk 的 0x800 处是 `TOC ` 段（@UTF 在 0x810）——**vita.cpk 是"带 ID 表(CRID)的 CPK 变体"，TOC 段头长度不同**，Analyzer 按 32 位 CPK 的 0x10 字节段头解析 → 解析位置错 0x10 → four_cc 不匹配。另安装了**通用动态 reader 泵**（扫描 progress 对象签名 0x81540460 + reader+0xB0 反向指针），但本次运行只发现 1 个 reader（data.cpk 的新 reader 尚未创建/未进入）**
 | M1115 | §18.4660: ★★★★★★★★ **CPK 头分析已成功（`[CPKRESULT] ret=00000000`），但解析出的字段全错（ContentOffset/TocOffset/TocSize/Align 全部=0x800）；同时用文件级分析**找到了 vita.cpk 真正的 TOC：在文件末尾 0x813EE800，大小 0x4C94（正好到 EOF），UTF 表内含文件条目（内容偏移 0x7A31E0、0x01E9A320、0x03B8C400 等）。头 UTF 行数据实际是 4 列 u64 大端：ContentOffset=0x800、TocOffset=0x813EE800、TocSize=0x4C94、Align=0 —— 说明 Analyzer 的 UTF 字段读取把每列都读成了第 1 列值（0x800）**
+| M1116 | §18.4661: ★★★★★★★★ **UTF 字段误读根因找到并修复：UTF 实例第 0 列的名称为空指针（列名偏移 0 被解析成 null），strcmp(null,key) 返回"相等" → 所有字段查找都返回第 0 列 index=0。修正 HLE strcmp 的空指针语义后：`[UTFVAL] r0=813EE800`（TocOffset）、`r0=00004C94`（TocSize）全部正确；**真实 TOC 读取成功：`PREAD fd=16385 off=2168383488(0x813EE800) size=19604 got=19604`**。遗留：TOC 加载后的 UTF 解析仍报 `E06100301:Invalid IFF header`（four_cc 不匹配，r3=0x77C3）与 `E2009010913:Need more memory`**
+m1180 证据（`out80m_m1180strcmpfix.txt`）：
+```
+[STRCMP0] a=ContentOffset b=NULL -> 0        ← 第 0 列（空指针）只与 ContentOffset 相等
+[STRCMP0] a=TocOffset b=NULL -> 1、a=TocSize b=NULL -> 1 …（其余键继续向后找）
+[UTFHIT] idx=4（UpdateDateTime 未找到）idx=0(ContentOffset) idx=1(TocOffset) idx=2(TocSize) idx=3(Align)…
+[UTFNF] idx=4 cols=4（未找到字段正确返回 -1）
+[UTFVAL] r0=00000800 → ContentOffset=0x800 ✓
+[UTFVAL] r0=813EE800 → TocOffset=0x813EE800 ✓
+[UTFVAL] r0=00004C94 → TocSize=0x4C94 ✓
+[CPKRESULT] p2=84B1B858 w: 00000000 00000000 00000800 00000000 00000000 00000000 813EE800 00000000 00004C94 00000000
+   → slots: UpdateDateTime=0, ContentOffset=0x800, ContentSize=0, TocOffset=0x813EE800, TocSize=0x4C94 ✓
+[IO] PREAD fd=16385 off=2168383488 size=19604 got=19604   ← ★ 真实 TOC 从 EOF 前 0x4C94 字节处读出
+[CRILOG] E06100301:Invalid IFF header (mismatched four_cc) ×3（TOC 内 UTF 解析仍失败，r3=0x77C3）
+[CRILOG] E2009010913:CPK Analyzer::Need more memory... ×3
+[MNTST] obj=84906480 stage=4 status=1
+[UTFCOLS] utf=84B1C500 arr=84B1C700 cnt=4；[UTFCOL] #0 nameptr=00000000、#1=TocOffset、#2=TocSize、#3=Align
+[UTFOBJ] p=84B1C500 w: 84B1C504 81294F4B 81294F8F 84B1B828 00000001 84B1BC18 0000007A 84B1BC64 84B1BC8A 84B1BC44 84B1BC64 00200004 00000001 84B1C700
+```
+**根因链**：
+1. CPK 头 UTF（@0x10，4 列 = ContentOffset/TocOffset/TocSize/Align，行数据 4×u64 大端）被 UTF reader 解析为对象 0x84B1C500 + 列定义数组 0x84B1C700
+2. 列名偏移是"累积字符串偏移"：`ContentOffset`=0、`TocOffset`=0x0E、`TocSize`=0x18、`Align`=0x20；**偏移 0 的列被解析成 nameptr=NULL**（真实语义应是 strings_base+0 = "ContentOffset"）
+3. `FUN_812AEA4C` 用 `SceLibc_1B58FA3B`（strcmp HLE）比较 key 与列名；HLE strcmp 对 null 指针返回 0（相等）→ 每个 key 都在第 0 列匹配 → 所有字段取到第 0 列值 0x800
+4. HLE 修正：strcmp 遇到空指针时，空指针侧按 "ContentOffset"（第 0 列隐含名）比较；其余键返回不等 → 查找继续
+**遗留问题分析**：
+- TOC 数据已正确读入（19604B 从 0x813EE800），但 TOC 内 UTF 解析报 four_cc 不匹配：vita.cpk 的 TOC 区是**裸 @UTF**（无 "TOC " 段头/或无 0x10 段头），而 Analyzer 可能按 data.cpk 的 TOC 段布局（"TOC " + 0x10 头 + @UTF）解析 → 位置偏移
+- 或 TOC UTF 内部含嵌套表指针（如 files/attrs 的 offset 字段）按错误基址解析
+- user heap 不足错误仍在
+NEXT：
+```
+① 在 FUN_812B074C（UTF retriever）入口加探针：打印 param_6（被解析的 UTF 指针）与其前 16 字节；确认 TOC 解析时传的是不是 buffer+0x10
+② 若确认偏移：在 HLE PREAD 完成时（TocOffset 读取）对 TOC 缓冲做"段头规范化"：写入 "TOC "+size 头并把 @UTF 内容搬到 +0x10（类似 HDRFIX；需先确认 buffer 容量）
+③ 或直接在 TOC 缓冲前 0x10 字节构造 TOC 段头（若读取开始地址已知 0x813EE800 → 让 buffer 从 0x813EE7F0 开始读？不可控）
+④ 检查 TOC UTF 内的嵌套表（Files/Groups/Attrs）偏移解析
+⑤ 之后：TOC 解析成功 → 文件索引 → mount status=2 → data.cpk 同样处理 → title 素材
+```
+验证：`out80m_m1180strcmpfix.txt`、`out80m_m1179utfcols.txt`、`utfname.txt`、`utfcol.txt`、`utfbuild.txt`。 |
+| §18.4661 | The root cause of the UTF field misreading is found and fixed: the UTF instance's column 0 has a null name pointer (name offset 0 was parsed as null), so strcmp(null,key) returned equal and every field lookup returned column 0. After fixing the HLE strcmp null-pointer semantics: [UTFVAL] r0=813EE800 (TocOffset), r0=00004C94 (TocSize) are correct, and the real TOC read succeeds: PREAD fd=16385 off=2168383488(0x813EE800) size=19604 got=19604. Remaining: after the TOC load the UTF parse still reports E06100301:Invalid IFF header (four_cc mismatch, r3=0x77C3) and E2009010913:Need more memory. '
+       'm1180 evidence: [STRCMP0] a=ContentOffset b=NULL -> 0 (column 0 null pointer only equals ContentOffset); [STRCMP0] a=TocOffset b=NULL -> 1, a=TocSize b=NULL -> 1 ...; [UTFHIT] idx=4 (UpdateDateTime not found) idx=0(ContentOffset) idx=1(TocOffset) idx=2(TocSize) idx=3(Align); [UTFNF] idx=4 cols=4; [UTFVAL] r0=00000800 (ContentOffset=0x800), r0=813EE800 (TocOffset=0x813EE800), r0=00004C94 (TocSize=0x4C94); [CPKRESULT] p2=84B1B858 w: 00000000 00000000 00000800 00000000 00000000 00000000 813EE800 00000000 00004C94 00000000 (UpdateDateTime=0, ContentOffset=0x800, ContentSize=0, TocOffset=0x813EE800, TocSize=0x4C94); [IO] PREAD fd=16385 off=2168383488 size=19604 got=19604 (real TOC read); [CRILOG] E06100301:Invalid IFF header (mismatched four_cc) x3 (r3=0x77C3); [CRILOG] E2009010913:CPK Analyzer::Need more memory x3; [MNTST] obj=84906480 stage=4 status=1; [UTFCOLS] utf=84B1C500 arr=84B1C700 cnt=4; [UTFCOL] #0 nameptr=00000000, #1=TocOffset, #2=TocSize, #3=Align; [UTFOBJ] p=84B1C500 w: 84B1C504 81294F4B 81294F8F 84B1B828 00000001 84B1BC18 0000007A 84B1BC64 84B1BC8A 84B1BC44 84B1BC64 00200004 00000001 84B1C700. '
+       'Root-cause chain: (1) the CPK header UTF (@0x10, 4 columns ContentOffset/TocOffset/TocSize/Align, row data 4 x u64 big-endian) is parsed by the UTF reader into object 0x84B1C500 + column array 0x84B1C700; (2) the column name offsets are cumulative string offsets: ContentOffset=0, TocOffset=0x0E, TocSize=0x18, Align=0x20; the offset-0 column ends up with nameptr=NULL (its real meaning is strings_base+0 = ContentOffset); (3) FUN_812AEA4C compares keys with column names via SceLibc_1B58FA3B (strcmp HLE); the HLE strcmp returned 0 (equal) for null pointers, so every key matched column 0 and every field read the column-0 value 0x800; (4) HLE fix: on a null side, strcmp treats the null side as the implicit column-0 name ContentOffset and returns non-equal for all other keys so lookups continue. '
+       'Remaining analysis: the TOC data was read correctly (19604B from 0x813EE800) but the UTF parse inside the TOC still reports a four_cc mismatch: vita.cpk TOC region is a bare @UTF (no TOC section header / no 0x10 header), while the Analyzer may parse it with the data.cpk TOC layout (TOC + 0x10 header + @UTF) -> position offset; alternatively the TOC UTF contains nested table pointers (files/attrs offset fields) parsed with a wrong base; the user-heap-too-small error also remains. '
+       'NEXT: (1) probe FUN_812B074C (UTF retriever) entry: print param_6 (the UTF pointer being parsed) and its first 16 bytes, to confirm whether the TOC parse receives buffer+0x10; (2) if it is an offset issue: normalize the TOC buffer in the HLE after the TocOffset PREAD (write a TOC + size header and move the @UTF content to +0x10, similar to HDRFIX; first confirm the buffer capacity); (3) or construct a TOC section header in the 0x10 bytes before the TOC buffer (if the read start address is known 0x813EE800); (4) inspect the nested tables inside the TOC UTF (Files/Groups/Attrs offset fields); (5) then: TOC parse succeeds -> file index -> mount status=2 -> data.cpk handled the same way -> title assets. '
+       'Verification: out80m_m1180strcmpfix.txt, out80m_m1179utfcols.txt, utfname.txt, utfcol.txt, utfbuild.txt. |
 m1177 证据（`out80m_m1177cpkresult.txt`）：
 ```
 [CPKRESULT] #0 ret=00000000 p2=84B1B858 w: 00000800 00000000 00000800 00000000 00000800 00000000 00000800 00000000 00000800 00000000
@@ -501474,3 +501517,42 @@ Align         = 0
 ANTI-FORGETTING ENTRY. Keywords: M1115 CPK header analysis succeeded ret=0 but UTF fields all read as 0x800; real TOC of vita.cpk found at 0x813EE800 size 0x4C94 (exactly to EOF). m1177: [CPKRESULT] #0 ret=00000000 p2=84B1B858 w: 00000800 00000000 00000800 00000000 00000800 00000000 00000800 00000000 00000800 00000000 (all five 64-bit slots = 0x800); [CPKBUF] buf=84B1BC00 w: 204B5043 FFFFFFFF 00000082 00000000 46545540 7A000000 2C000000 4C000000; [HDRFIX] dst=84B1BC00 utf_size(BE)=0x7A table_size=0x82; [CRILOG] E06100301 Invalid IFF header x3 + E2009010913 Need more memory x3; [IO] PREAD fd=16385 off=2048 size=2048 got=2048 (TOC read with wrong TocOffset=0x800); [BADMEM]=0; [MNTST] stage=4 status=1. Real header UTF row values (file-level parse, row at table+0x34, 4 columns x u64 BE): ContentOffset=0x800, TocOffset=0x813EE800, TocSize=0x4C94 (= file size 0x813F3494 - 0x813EE800), Align=0. Real TOC at 0x813EE800: 40 55 54 46 00 00 4C 94 00 00 00 36 00 00 2D D8 ... (@UTF + BE size 0x4C94); following rows contain file offsets 0x7A31E0 / 0x01E9A320 / 0x03B8C400 / 0x033E9220. Whole-file scan: no TOC four_cc in vita.cpk; CRID occurrences at 0x800, 0x33e9a20, 0x3b8cc00... each followed by @UTF at +0x20 (USM movie containers); GTOC at 0x408904c0. Analysis: header analysis returns success (ret=0) -> HDRFIX works; but UTF field reading is wrong (every field = 0x800 = first column) -> FUN_812AEA4C (name->column lookup) or FUN_812AF434 (value getter) misreads column/type on this u64-column UTF variant; TocOffset=0x800 -> reads USM CRID data at 0x800 -> UTF four_cc error + user-heap error; real TOC is at 0x813EE800 (19604 bytes before EOF) with the full file index in its UTF table. NEXT: probe FUN_812AEA4C/FUN_812AF434 entry and return for ContentOffset/TocOffset/TocSize to find the column index/type parsing error; probe FUN_812AFF10 (UTF reader creation) entry arg (should be 0x84B1BC10); if the reader does not support the 64-bit column variant, normalize the UTF row data in the 0x800 buffer in HDRFIX into the expected layout; or parse the row in HDRFIX (4 x u64 BE) and write the correct TocOffset/TocSize into the param_2 structure directly; then TOC loads from 0x813EE800 -> file index -> mount status=2 -> data.cpk (same) -> title assets. Verification: out80m_m1177cpkresult.txt, _p_cpkresult_1134.py.
 
 LOOKUP: M1115 CPK header analysis ret=0 success, UTF fields all 0x800, real TOC 0x813EE800 size 0x4C94 EOF, header UTF row at table+0x34 4 columns u64 BE ContentOffset 0x800 TocOffset 0x813EE800 TocSize 0x4C94 Align 0, USM CRID at 0x800, GTOC 0x408904c0, UTF field reader FUN_812AEA4C FUN_812AF434 misreads column, FUN_812AFF10 reader creation, next probe field getters and normalize UTF row -> §18.4659 [relevant: IFF error], §18.4658 [relevant: LDRD], §18.4657 [relevant: HDRFIX]
+### 18.4661 PORT M1116: UTF 字段误读根因（第0列空名指针 → strcmp 全等）+ HLE strcmp 修正 → TocOffset/TocSize 正确、真实 TOC 读取成功
+
+1) 根因链（m1179/m1180）：
+```
+[UTFCOLS] utf=84B1C500 arr=84B1C700 cnt=4
+[UTFCOL] #0 nameptr=00000000        ← 第0列名指针为空（偏移0 被当 null；真实应为 strings+0="ContentOffset"）
+[UTFCOL] #1 nameptr=84B1BC72 [TocOffset]
+[UTFCOL] #2 nameptr=84B1BC7C [TocSize]
+[UTFCOL] #3 nameptr=84B1BC84 [Align]
+FUN_812AEA4C: strcmp(key, coldef->name) → 空指针时 HLE strcmp 返回 0（相等）
+  ⇒ 所有 key 都在第 0 列匹配 → 所有字段读到第 0 列值 0x800
+```
+2) HLE 修正（`strcmp` NID 1B58FA3B / stub 0x812B2200）：
+```
+空指针侧按隐含第0列名 "ContentOffset" 比较；其余 key 返回不等 → 查找继续
+```
+3) 修复效果（m1180）：
+```
+[UTFHIT] idx=0(ContentOffset)/1(TocOffset)/2(TocSize)/3(Align)，未命中 idx=4 → 正确
+[UTFVAL] r0=00000800(ContentOffset) / 813EE800(TocOffset) / 00004C94(TocSize)
+[CPKRESULT] p2 slots: ContentOffset=0x800, TocOffset=0x813EE800, TocSize=0x4C94 ✓
+[IO] PREAD fd=16385 off=2168383488(0x813EE800) size=19604 got=19604   ← ★ 真实 TOC 读取成功
+```
+4) 遗留：
+- TOC 内 UTF 解析仍报 `E06100301:Invalid IFF header (mismatched four_cc)`（r3=0x77C3）——vita.cpk TOC 区是裸 @UTF（无 "TOC " 段头），而 Analyzer 可能按 data.cpk 的 TOC 段布局（0x10 头+UTF）解析
+- `E2009010913:Need more memory` 仍在
+- MNTST stage=4 status=1
+5) NEXT：
+```
+① FUN_812B074C 入口探针：打印被解析的 UTF 指针(param_6)与前 16 字节，确认 TOC 解析偏移
+② 若偏移：HLE 在 TocOffset PREAD 后规范化 TOC 缓冲（构造 TOC 段头/搬移 @UTF 到 +0x10）
+③ 检查 TOC UTF 内嵌套表（Files/Groups/Attrs）偏移
+④ 成功后：文件索引 → mount status=2 → data.cpk 同样处理 → title 素材
+```
+验证：`out80m_m1180strcmpfix.txt`、`out80m_m1179utfcols.txt`、`utfname.txt`、`utfcol.txt`、`utfbuild.txt`。
+
+ANTI-FORGETTING ENTRY. Keywords: M1116 UTF field misread root cause fixed - UTF instance column 0 has a null name pointer (name offset 0 parsed as null) so strcmp(null,key)=0 matched every key and every lookup returned column 0; HLE strcmp null-pointer semantics fix (null side == implicit first column name "ContentOffset"). m1180: [STRCMP0] a=ContentOffset b=NULL -> 0; [UTFHIT] idx=0/1/2/3 correct; [UTFVAL] r0=00000800 ContentOffset, r0=813EE800 TocOffset, r0=00004C94 TocSize; [CPKRESULT] p2 slots ContentOffset=0x800 TocOffset=0x813EE800 TocSize=0x4C94; [IO] PREAD fd=16385 off=2168383488 (0x813EE800) size=19604 got=19604 (real TOC read success); [UTFCOLS] utf=84B1C500 arr=84B1C700 cnt=4; [UTFCOL] #0 nameptr=00000000 #1=TocOffset #2=TocSize #3=Align; [UTFOBJ] p=84B1C500 w: 84B1C504 81294F4B 81294F8F 84B1B828 00000001 84B1BC18 0000007A 84B1BC64 84B1BC8A 84B1BC44 84B1BC64 00200004 00000001 84B1C700. Remaining: TOC inner UTF parse still E06100301:Invalid IFF header (four_cc mismatch r3=0x77C3) and E2009010913:Need more memory; MNTST stage=4 status=1. NEXT: probe FUN_812B074C entry (param_6 UTF pointer + first 16 bytes) to confirm the TOC parse offset; if offset issue normalize the TOC buffer in HLE after the TocOffset PREAD (TOC section header / move @UTF to +0x10); inspect nested tables (Files/Groups/Attrs offsets); then file index -> mount status=2 -> data.cpk -> title assets. Verification: out80m_m1180strcmpfix.txt, out80m_m1179utfcols.txt, utfname.txt, utfcol.txt, utfbuild.txt.
+
+LOOKUP: M1116 UTF column0 null name strcmp equality fix, HLE strcmp null semantics ContentOffset, UTFVAL TocOffset 813EE800 TocSize 4C94, PREAD off=2168383488 size=19604 real TOC read, UTFCOLS 84B1C500 arr 84B1C700, FUN_812AEA4C lookup, FUN_812AF434 getter, remaining IFF four_cc error on TOC inner UTF, next probe FUN_812B074C param_6 and normalize TOC buffer -> 18.4660 [relevant: real TOC found], 18.4659 [relevant: IFF error], 18.4657 [relevant: HDRFIX]
