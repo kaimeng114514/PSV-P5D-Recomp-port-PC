@@ -3735,6 +3735,51 @@ static uint32_t fiber_exec_to_completion(RecState* s) {
       call_guest_cb2(s, _e, _x0, _x1, 400000);
       --g_disp_depth; pc = s->r[15];
     }
+    // M1109_IOPUMP: drain queued criFsIo requests (FUN_8128AE8E pops one request and invokes its callback).
+    // Armed only after the CPK binder mount wait is reached (block 0x81287A70/0x81287BBA), because the criFsIo
+    // context at 0x816A4F50 is not initialized before that. Requires P5D_IOPUMP=1.
+    { static int _ip_env = -1, _ip_armed = 0; static uint32_t _ip_n = 0;
+      if (_ip_env < 0) { const char* _e = getenv("P5D_IOPUMP"); _ip_env = (_e && atoi(_e)) ? 1 : 0; }
+      if (!_ip_armed && (g_cur_block == 0x81287A70u || g_cur_block == 0x81287BBAu || g_cur_block == 0x81287C18u)) _ip_armed = 1;
+      uint32_t _ctx = 0; { uint8_t* _q = GP(0x816A4F50u); if (_q) std::memcpy(&_ctx, _q, 4); }
+      { static int _ip_bsy_n = 0;
+        uint32_t _ana = 0; { uint8_t* _q = GP(0x84B1B984u); if (_q) std::memcpy(&_ana, _q, 4); }
+        if (_ip_env > 0 && _ip_armed && _ana != 0u) {
+          // the CPK analyzer holds its busy flag across blocks of one logical call; do not re-enter guest code
+          // in the middle of it (that would leave the busy flag stuck). Only clear it if it stays stuck.
+          if (++_ip_bsy_n > 400) {
+            uint32_t _z = 0; uint8_t* _q = GP(0x84B1B984u); if (_q) std::memcpy(_q, &_z, 4);
+            if (_ip_bsy_n < 420) { printf("[IOPUMP-UNSTICK] analyzer busy -> 0 blk=%u\n", g_blkcnt_total); fflush(stdout); }
+            _ip_bsy_n = 0;
+          }
+          goto _ip_skip;
+        }
+        _ip_bsy_n = 0;
+      }
+      if (_ip_env > 0 && _ip_armed && _ctx != 0u && g_disp_depth == 0 && !g_cur_thr && ((g_blkcnt_total % 1500u) == 0u)) {
+        int _cnt = 0; ++g_disp_depth;
+        for (int _i = 0; _i < 8; ++_i) {
+          uint32_t _stt = 0; { uint8_t* _q = GP(0x848FC368u + 0xBCu); if (_q) std::memcpy(&_stt, _q, 4); }
+          if (_stt == 2u) break;
+          call_guest_cb2(s, 0x8128D502u, 0x848FC368u, 0u, 300000);
+          ++_cnt;
+          // M1109: the async completion that FUN_8128D716 normally performs (it checks progress state==7
+          // and then sets reader+0xBC=2 with the loaded size). We are replacing that missing pump.
+          uint32_t _prog = 0; { uint8_t* _q = GP(0x848FC368u + 0xB0u); if (_q) std::memcpy(&_prog, _q, 4); }
+          uint32_t _pst = 0; if (_prog) { uint8_t* _q = GP(_prog + 0xCu); if (_q) std::memcpy(&_pst, _q, 4); }
+          if (_pst == 7u) {
+            uint32_t _sz = call_guest_cb2(s, 0x8128F6C8u, _prog, 0u, 200000);
+            { uint8_t* _q = GP(0x848FC368u + 0x130u); if (_q) { uint32_t _v = _sz; std::memcpy(_q, &_v, 4); } }
+            { uint8_t* _q = GP(0x848FC368u + 0xBCu); if (_q) { uint32_t _v = 2u; std::memcpy(_q, &_v, 4); } }
+            if (_ip_n < 20) printf("[IOPUMP-DONE] state=7 size=%08X reader=%08X -> status=2 blk=%u\n", _sz, 0x848FC368u, g_blkcnt_total);
+            break;
+          }
+        }
+        --g_disp_depth; pc = s->r[15];
+        if (_cnt && _ip_n++ < 60) { printf("[IOPUMP] drained=%d blk=%u ctx=%08X fib=%08X\n", _cnt, g_blkcnt_total, _ctx, g_cur_fiber); fflush(stdout); }
+      }
+      _ip_skip: ;
+    }
     { uint32_t _fp = pc & ~1u;
       if (_fp == 0x811E5928u || _fp == 0x811E5A9Au || _fp == 0x811E5AECu || _fp == 0x811E5B9Au) {
         static int _sm2 = 0, _sm2b = 0;

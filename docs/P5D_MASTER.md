@@ -1124,6 +1124,57 @@
 | M1106 | §18.4651: ★★★★★★★★ **CPK 挂载卡点精确到"CPK Analyzer 状态机 state=4 但不推进"：新增 MNTST/CPKANA/CPKRET/CPKRES 探针实测——binder 对象 0x84906480 的 `stage=4 status=1` 永不变化；CPK Analyzer 结构 0x84B1B828 = `[0]=state(3→4) [1]=0x848FC368(reader对象) [3]=[4]=0x84B1BC00(工作缓冲)`；每次轮询 `FUN_81293BC4` 返回 0、`FUN_81293F7C` 返回 4（即 state 仍为 4）→ status 不变。state=4 分支需要 reader 状态（+0xBC）==2（FUN_8128E9BC 查询），但 IOSTAT 探针 0 次命中 → **FUN_81293BC4 在进入状态机前被 try-lock 挡住**（反编译首个操作：`iVar1 = FUN_8127BBF8(param_1+0x57,1); if (iVar1 != 0) { return 0; }`）。已确认 3 次 I/O 提交（[FIOSW] at=8128E394 r0=848FC368 r2=84B1BA00）与 1 次真实 PREAD 2048B（CPK 头），但读完成状态从未置 2。**
 | M1107 | §18.4652: ★★★★★★★ **锁不是卡点——SWAP 原子操作探针显示所有相关锁 acquire/release 成对正常（CPK Analyzer busy 0x84B1B984、binder mount lock 0x849064AC、reader I/O 对象锁 0x848FC424/0x848FC434 均正常）；真正卡点是 reader 状态 +0xBC 永远没有从 1(loading) 变到 2/3(完成)。另修复一个重要探针基础设施 bug：batch_022 因缺少 `harness_cur_fiber2` 声明编译失败但链接仍复用旧 .o，导致此前 IOSTAT/IOSUB/SWAP 探针"神秘不命中"。**
 | M1108 | §18.4653: ★★★★★★★★ **CPK 首次读的加载状态机只被驱动了 2 步就停：FUN_8128F04E（criFs 异步 Load 状态机）实测只被调用 2 次（state=1 初始化 → state=2 提交读、in-flight 置 1），之后没有第 3 次调用；progress 对象状态 1→2→3，但 reader +0xBC 仍停在 1(loading)，完成处理永远不发生。同时确认：全局 I/O 接口指针 DAT_815401D4/D8 = 0（未注册），但实际读路径用每请求 vtable（progress 对象 [0]=0x81540460，guest 函数指针 81294FDC=stat/81295016=open/8129513F…）。**
+| M1109 | §18.4654: ★★★★★★★★ **HLE I/O 泵成功打通"读完成"：CPK Analyzer 已进入分析函数 FUN_81292794（首次 [CPKANAL] 命中）！但新卡点=分析报 `E2011022806:CPK Analyzer::Cannot possibly analyze the CPK File. This CPK is broken.`（头数据缓冲内容不对）。**
+关键进展（m1163→m1166）：
+1) **I/O 派发链解码**：
+```
+FUN_8128AEEE(param)：worker 循环体（if *(p+100)==1 → FUN_8127BE36(*(p+0x80))；==0 → FUN_8128AE8E()）—— 从未被调用
+FUN_8128AE8E(param)：从队列取一个请求并执行回调（FUN_8128B06C 取请求、(*puVar3)(puVar3[1]) 调回调、
+                      返回 0/1 → FUN_8128B092 标记完成）—— 正常仅 4 次（lr=8128AF8E）
+FUN_8128B06C：加锁从 ctx+0x5C 队列取请求（FUN_8128D178）
+FUN_8129019A：另一调用者 —— 从未被调用
+```
+2) **HLE 泵（P5D_IOPUMP=1）**：在 harness 主循环中，当 mount 等待块（0x81287A70/81287BBA）出现后，每 1500 块：
+   - 若 CPK Analyzer busy 标志（0x84B1B984）非 0 → 跳过（避免在 analyzer 逻辑调用中途重入导致锁卡死）；连续 400 次仍卡则强制清 0
+   - 否则直接 `call_guest_cb2(s, FUN_8128D502, reader=0x848FC368)` 泵 Load 状态机，并在 progress state==7 时执行原 FUN_8128D716 的完成动作：
+     `size=FUN_8128F6C8(progress); reader+0x130=size; reader+0xBC=2`
+3) **泵成功**（m1163/m1164/m1166 证据）：
+```
+[IOSTATE] state 1 → 2 → 3 → 7（无错误，err=0）；共 24 次 F04E 调用
+[IOPUMP] drained=8 blk=30000 ctx=816A4F58 …；drained=1 blk=31500
+[IOPUMP-DONE] state=7 size=848E8EE8 reader=848FC368 -> status=2 blk=31500
+[CPKANAL] #0 r0=84B1B84C r1=84B1B858 r2=84B1BC00 r3=84B1B990 lr=81293CB8   ← ★ FUN_81292794 分析被调用！
+[IOSTAT2] #0..#19 reader=848FC368 BC=1（写 2 前）；写入后分析进入
+[CPKANA3] #6..#9 busy=0（busy 保护生效，不再卡 1）
+```
+4) **新卡点**（m1166）：
+```
+[CRILOG] E2011022806:CPK Analyzer::Cannot possibly analyze the CPK File. This CPK is broken. (×3, n=1717)
+[BADMEM] guest va=0x0000006B unmapped block=0x8128F04E tid=0 stub=812B28A0   ← 泵在指针已失效时调用 F04E
+[IOPUMP-DONE] 第二次 state=7 size=00000000（FUN_8128F6C8 返回 0）
+```
+**分析**：
+- 读完成通知已打通（reader+0xBC=2），Analyzer case 4 进入 FUN_81292794
+- 但分析用的头数据缓冲（r2=0x84B1BC00，即 CPKANA 的 w3/w4）内容不是有效 CPK 头 → 需要确认：
+  - PREAD 2048 的目标缓冲到底写到了哪里（0x84B1BA00? 0x84B1BC00? 0x848E8EE8?）
+  - Load 完成后是否还需要把内部读缓冲（progress[1]）**拷贝到用户缓冲**（原 FUN_8128D716 完成路径的一部分），我们的 shim 只写了 size/status 没做拷贝
+  - 是否走了 decrypt/CRC 分支（F04E state 4 解密回调 [0x20]）
+NEXT：
+```
+① 在 PREAD 后 dump 0x84B1BC00/0x84B1BA00/0x848E8EE8 前 32 字节，查 "CPK " magic（0x204B5043）
+② 反编译 FUN_8128F6C8（返回 size?）与 FUN_8128F776（Load 主函数参数：dest/size 从哪来）
+③ 如果数据在内部缓冲而未拷贝：在 shim 中按 progress 对象里的 dest/size 字段执行 memcpy（用 guest 语义）
+④ 若需要 decrypt：检查 F04E state 4 条件（param_1[0x20] 非 0 时调用）
+⑤ 数据正确后：FUN_81292794 分析成功 → Analyzer state=0x1A → mount status=2 → data.cpk 挂载 → 文件索引 → title 素材
+```
+验证：`out80m_m1166iopump5.txt`、`out80m_m1165cpkal.txt`、`out80m_m1164iopump4.txt`、`out80m_m1163iopump3.txt`。 |
+| §18.4654 | The HLE I/O pump successfully unblocked the read-completion path: the CPK Analyzer has now entered its analysis function FUN_81292794 (first [CPKANAL] hit)! But the new blocker is that the analysis reports E2011022806:CPK Analyzer::Cannot possibly analyze the CPK File. This CPK is broken. (the header buffer content is wrong). '
+       'Progress (m1163->m1166): (1) I/O dispatch chain decoded: FUN_8128AEEE(param) worker loop body (if *(p+100)==1 -> FUN_8127BE36(*(p+0x80)); if ==0 -> FUN_8128AE8E()) never called; FUN_8128AE8E(param) pops one request from the queue and invokes its callback (FUN_8128B06C pops a request, (*puVar3)(puVar3[1]) calls the callback, return 0/1 -> FUN_8128B092 marks completion), normally only 4 calls (lr=8128AF8E); FUN_8128B06C locks and pops from ctx+0x5C queue (FUN_8128D178); FUN_8129019A another caller never called. '
+       '(2) HLE pump (P5D_IOPUMP=1): in the harness main loop, after the mount-wait block (0x81287A70/0x81287BBA) appears, every 1500 blocks: if the CPK Analyzer busy flag (0x84B1B984) is non-zero skip (avoid re-entering guest code in the middle of one analyzer logical call, which leaves the lock stuck); if it stays stuck 400 times force-clear to 0; otherwise call call_guest_cb2(s, FUN_8128D502, reader=0x848FC368) to pump the Load state machine, and when progress state==7 perform the completion action that FUN_8128D716 normally performs: size=FUN_8128F6C8(progress); reader+0x130=size; reader+0xBC=2. '
+       '(3) Pump works (m1163/m1164/m1166 evidence): [IOSTATE] state 1 -> 2 -> 3 -> 7 (no error, err=0), 24 F04E calls; [IOPUMP] drained=8 blk=30000 ctx=816A4F58, drained=1 blk=31500; [IOPUMP-DONE] state=7 size=848E8EE8 reader=848FC368 -> status=2 blk=31500; [CPKANAL] #0 r0=84B1B84C r1=84B1B858 r2=84B1BC00 r3=84B1B990 lr=81293CB8 (FUN_81292794 analysis called!); [IOSTAT2] #0..#19 reader=848FC368 BC=1 (before the write); [CPKANA3] #6..#9 busy=0 (busy guard works, no longer stuck at 1). '
+       '(4) New blocker (m1166): [CRILOG] E2011022806:CPK Analyzer::Cannot possibly analyze the CPK File. This CPK is broken. (x3, n=1717); [BADMEM] guest va=0x0000006B unmapped block=0x8128F04E tid=0 stub=812B28A0 (pump called F04E with a stale pointer); [IOPUMP-DONE] second time state=7 size=00000000 (FUN_8128F6C8 returns 0). '
+       'Analysis: the read-completion notification is now unblocked (reader+0xBC=2) and Analyzer case 4 enters FUN_81292794, but the header data buffer used by the analysis (r2=0x84B1BC00, the CPKANA w3/w4) is not a valid CPK header. Need to determine: where did the PREAD 2048 target buffer land (0x84B1BA00? 0x84B1BC00? 0x848E8EE8?); whether the Load completion still needs to copy the internal read buffer (progress[1]) into the user buffer (part of the normal FUN_8128D716 completion path that our shim only partially reproduced by writing size/status); whether the decrypt/CRC branch was taken (F04E state 4 decrypt callback [0x20]). '
+       'NEXT: (1) dump the first 32 bytes at 0x84B1BC00/0x84B1BA00/0x848E8EE8 after the PREAD and look for the CPK magic 0x204B5043; (2) decompile FUN_8128F6C8 (returns size?) and FUN_8128F776 (Load main function - where dest/size come from); (3) if the data sits in the internal buffer and was never copied, perform the memcpy in the shim using the dest/size fields in the progress object (guest semantics); (4) if decrypt is needed, check the F04E state 4 condition (param_1[0x20] non-zero -> decrypt callback); (5) with correct data: FUN_81292794 analysis succeeds -> Analyzer state=0x1A -> mount status=2 -> data.cpk -> file index -> title assets. Verification: out80m_m1166iopump5.txt, out80m_m1165cpkal.txt, out80m_m1164iopump4.txt, out80m_m1163iopump3.txt. |
 m1159（`out80m_m1159iostate2.txt`）IOSTATE/相关探针：
 ```
 [IOSTATE] #0 p=848FC390 state=00000001 err=00000000 fl68=00 fl6A=00 fl6B=00 fl6D=00 fl6E=00 fl6F=00 lr=8128D54E
@@ -500813,3 +500864,49 @@ FUN_8128F04E(*(p+0xB0)); uVar5=FUN_8128F738(*(p+0xB0)); switch(uVar5){case 3:0; 
 ANTI-FORGETTING ENTRY. Keywords: M1108 criFs async Load state machine only driven 2 steps; FUN_8128F04E called twice (state=1 init -> state=2 submit read, in-flight=1), no 3rd call; progress object 0x848FC390 state goes 1->2->3 but reader +0xBC stays 1; global I/O interface DAT_815401D4/D8 = 0 (not registered) but per-request vtable 0x81540460 (81294FDC stat, 81295016 open, 8129513F, 81295171, 8129517D, 81295227, 8129522F) works. m1159 evidence: [IOSTATE] #0 p=848FC390 state=1 err=0 fl6F=00 lr=8128D54E; #1 state=2 err=0 fl6F=01 lr=8128D54E; [IOPROG] #0 state=1 lr=8128DA54, #1 state=2 lr=8128D556, #2 state=3 lr=8128D556; [LOADST] x2 reader=848FC368 statusBC=1 prog=848FC390 lr=8128AEC4; [IOIFACE] IFACE_D4=0 IFACE_D8=0 lr=8128E496; [IO] OPEN app0:/data/vita.cpk size=2168403092 + PREAD off=0 size=2048; [MNTST] stage=4 status=1; [CRILOG]=0 [BADMEM]=0. Structures: progress object [0]=0x81540460 vtable, [1]=buffer, [3]=state (1 init, 2 submitted, 3 done-or-error, 4 decrypt-ready, 5 CRC unsupported, 6/7 finishing, 8 done/error), [4]=in-flight, [6]=error code, byte+0x68 error flag, byte+0x6F opened flag, [0x1E]/[0x1F] progress callback, [0x20] decrypt callback. FUN_8128F04E: case 1 open -> state 2 (fail -> 8); case 2 chunk -> FUN_8128CF78 submit read (success [4]=1; failure [6]=err +0x68=1 state=3); completion state 3 -> LAB_8128F3C4 close/callbacks -> 4/7/6/5/8. FUN_8128D502: if (*(p+0xBC)!=1) uVar8=2; if (FUN_8127BBF8(p+0xD0,1)==1) return; FUN_8128F04E(*(p+0xB0)); uVar5=FUN_8128F738(*(p+0xB0)); switch(uVar5){case 3:0; case 4:2}; called from FUN_8128AE8E (96B), [LOADST] lr=8128AEC4; FUN_8128AE8E reached from CPK analysis path FUN_81292794; Analyzer case 4 only enters analysis when FUN_8128E9BC(reader)==2. Analysis: first read submitted (F04E twice 1->2), 2048B header read really completed (PREAD), but completion processing needs a 3rd F04E call (state 2 polling FUN_8128CFB2/FUN_8128CFE0); F04E only called inside FUN_8128D502, which is called from FUN_8128AE8E, which is only triggered by the CPK analysis path; but CPK Analyzer case 4 requires reader +0xBC==2 before analysis -> circular wait. Normally an independent criFs I/O worker thread should pump; in our run it is not advancing (not scheduled or blocked on an HLE semaphore). The global interface DAT_815401D4/D8=0 is not the direct cause (default vtable 0x81540460 in use, stat/open/read all execute through HLE stubs normally). NEXT: xref FUN_8128AE8E/FUN_8128D502 other callers; check whether criFs created an I/O worker thread (HLE sceKernelCreateThread -> guest thread table) and whether it runs/blocks on an HLE semaphore (0x812B27A0 WaitSema etc); if missing, have the HLE periodically pump the load state (POSTMAIN/PERIODPUMP every N frames call FUN_8128F04E(progress) or FUN_8128D502(reader)); alternatively probe the 2nd F04E read-submit return value (FUN_8128CF78 failure -> state=3 + error flag); then state 4/7 -> +0xBC=2 -> analysis -> state=0x1A -> mount status=2 -> data.cpk -> file index -> title assets. Verification: out80m_m1159iostate2.txt, out80m_m1158iostate.txt, out80m_m1157ioiface.txt, ioop.txt, vtable.txt, criread2.txt.
 
 LOOKUP: M1108 criFs async Load state machine 2 steps only, FUN_8128F04E state 1->2 submit read, no 3rd call, progress 0x848FC390 [3] state 1->2->3, reader +0xBC stuck 1, DAT_815401D4/D8=0 global I/O interface not registered, per-request vtable 0x81540460 (81294FDC stat, 81295016 open, 8129513F...), FUN_8128D502 pump called from FUN_8128AE8E [LOADST] lr=8128AEC4, circular wait analyzer case4 needs +0xBC==2 before analysis which pumps the load, criFs I/O worker thread not advancing, next pump in HLE POSTMAIN/PERIODPUMP or find worker thread -> §18.4652 [relevant: SWAP locks], §18.4651 [relevant: analyzer], §18.4650 [relevant: batch_035]
+### 18.4654 PORT M1109: HLE I/O 泵打通读完成 → CPK Analyzer 首次进入分析 FUN_81292794；新卡点=分析报 "CPK is broken"（头缓冲内容不对）
+
+1) I/O 派发链：
+```
+FUN_8128AEEE(param)  worker 循环体（==1 → FUN_8127BE36；==0 → FUN_8128AE8E）—— 从未被调用
+FUN_8128AE8E(param)  取一个请求 → (*puVar3)(puVar3[1]) 调回调 → 返回 0/1 → FUN_8128B092 标记完成
+FUN_8128B06C         加锁从 ctx+0x5C 取请求（FUN_8128D178）
+FUN_8129019A         另一调用者 —— 从未被调用
+```
+2) HLE 泵（P5D_IOPUMP=1，挂载等待后每 1500 块）：
+```
+busy=0x84B1B984（Analyzer busy flag）非 0 → 跳过；连续 400 次仍卡 → 强制清 0
+否则 call_guest_cb2(FUN_8128D502, reader=0x848FC368)
+当 progress state==7：size=FUN_8128F6C8(progress); reader+0x130=size; reader+0xBC=2
+```
+3) 泵效果（m1163/1164/1166）：
+```
+[IOSTATE] state 1→2→3→7，err=0（24 次 F04E）
+[IOPUMP-DONE] state=7 size=848E8EE8 reader=848FC368 -> status=2 blk=31500
+[CPKANAL] #0 r0=84B1B84C r1=84B1B858 r2=84B1BC00 r3=84B1B990 lr=81293CB8  ← ★ FUN_81292794 被调用
+[IOSTAT2] BC=1（写 2 前）
+[CPKANA3] #6..#9 busy=0（busy 保护生效）
+```
+4) 新卡点（m1166）：
+```
+[CRILOG] E2011022806:CPK Analyzer::Cannot possibly analyze the CPK File. This CPK is broken. ×3
+[BADMEM] guest va=0x0000006B unmapped block=0x8128F04E（泵用失效指针调 F04E）
+[IOPUMP-DONE] 第二次 state=7 size=00000000（FUN_8128F6C8 返回 0）
+```
+5) 分析：
+- 读完成通知已打通（+0xBC=2），case 4 进入 FUN_81292794
+- 但分析用的头缓冲（r2=0x84B1BC00 = CPKANA w3/w4）内容不是有效 CPK 头
+- 需确认：PREAD 2048 目标缓冲落点；Load 完成是否还需把内部读缓冲（progress[1]）拷贝到用户缓冲（我们 shim 只写了 size/status）；是否走了 decrypt/CRC 分支（F04E state 4 回调 [0x20]）
+NEXT：
+```
+① PREAD 后 dump 0x84B1BC00/0x84B1BA00/0x848E8EE8 前 32 字节，查 "CPK " magic（0x204B5043）
+② 反编译 FUN_8128F6C8 / FUN_8128F776（Load 主函数，dest/size 来源）
+③ 若数据在内部缓冲未拷贝：shim 中按 progress 的 dest/size 执行 memcpy（guest 语义）
+④ 若需 decrypt：检查 F04E state 4 条件（param_1[0x20] 非 0 时调解密回调）
+⑤ 数据正确 → 分析成功 → Analyzer state=0x1A → mount status=2 → data.cpk → 文件索引 → title 素材
+```
+验证：`out80m_m1166iopump5.txt`、`out80m_m1165cpkal.txt`、`out80m_m1164iopump4.txt`、`out80m_m1163iopump3.txt`。
+
+ANTI-FORGETTING ENTRY. Keywords: M1109 HLE I/O pump unblocks read completion, CPK Analyzer enters FUN_81292794 analysis for the first time, new blocker E2011022806 CPK is broken (header buffer content wrong). I/O dispatch chain: FUN_8128AEEE worker loop body never called; FUN_8128AE8E pops one request and invokes its callback (FUN_8128B06C pops from ctx+0x5C queue via FUN_8128D178; return 0/1 -> FUN_8128B092 marks completion); FUN_8129019A never called. HLE pump P5D_IOPUMP=1: in main loop after mount-wait block 0x81287A70/0x81287BBA appears, every 1500 blocks; skip when CPK Analyzer busy flag 0x84B1B984 non-zero (avoid mid-call re-entry leaving the lock stuck), force-clear if stuck 400 times; else call_guest_cb2(FUN_8128D502, reader=0x848FC368); when progress state==7 do size=FUN_8128F6C8(progress), reader+0x130=size, reader+0xBC=2. Evidence: [IOSTATE] state 1->2->3->7 err=0 (24 F04E calls); [IOPUMP] drained=8 blk=30000 ctx=816A4F58, drained=1 blk=31500; [IOPUMP-DONE] state=7 size=848E8EE8 reader=848FC368 -> status=2 blk=31500; [CPKANAL] #0 r0=84B1B84C r1=84B1B858 r2=84B1BC00 r3=84B1B990 lr=81293CB8; [IOSTAT2] BC=1 before write; [CPKANA3] #6..#9 busy=0. New blocker m1166: [CRILOG] E2011022806:CPK Analyzer::Cannot possibly analyze the CPK File. This CPK is broken. x3 at n=1717; [BADMEM] guest va=0x0000006B unmapped block=0x8128F04E tid=0 stub=812B28A0; [IOPUMP-DONE] second time state=7 size=00000000. Analysis: read-completion notification unblocked (+0xBC=2) and analyzer case 4 enters FUN_81292794, but the header buffer used by analysis (r2=0x84B1BC00 = CPKANA w3/w4) is not a valid CPK header; need to determine where the PREAD 2048 target landed (0x84B1BA00? 0x84B1BC00? 0x848E8EE8?), whether the Load completion must copy the internal read buffer (progress[1]) into the user buffer (our shim wrote only size/status), and whether the decrypt/CRC branch was taken (F04E state 4 decrypt callback [0x20]). NEXT: dump 0x84B1BC00/0x84B1BA00/0x848E8EE8 first 32 bytes after PREAD and look for CPK magic 0x204B5043; decompile FUN_8128F6C8 (size?) and FUN_8128F776 (Load main, dest/size source); if data sits in internal buffer and was never copied, memcpy in the shim using the progress dest/size fields; if decrypt needed check F04E state 4 condition (param_1[0x20]); then analysis succeeds -> Analyzer state=0x1A -> mount status=2 -> data.cpk -> file index -> title assets. Verification: out80m_m1166iopump5.txt, out80m_m1165cpkal.txt, out80m_m1164iopump4.txt, out80m_m1163iopump3.txt.
+
+LOOKUP: M1109 HLE I/O pump P5D_IOPUMP, FUN_8128AE8E dispatcher, FUN_8128B06C queue pop, FUN_8128D502 pump reader=0x848FC368, progress state 1->2->3->7, IOPUMP-DONE status=2, FUN_81292794 analysis called, CPKANAL r2=84B1BC00, E2011022806 CPK is broken, BADMEM va=0x6B block 8128F04E, analyzer busy 0x84B1B984 guard, next dump 84B1BC00/84B1BA00/848E8EE8 CPK magic 204B5043 and check copy of internal buffer -> §18.4653 [relevant: load state machine], §18.4652 [relevant: SWAP locks], §18.4651 [relevant: analyzer]
