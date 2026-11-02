@@ -11,7 +11,7 @@ CPU 采用 **AOT 静态重编译**（原版 ARM/Thumb 代码一次性翻译为 x
 
 ---
 
-## 当前状态（2026-11-02，里程碑 **M1118**；系统层约 88%，端到端目标约 58–68%）
+## 当前状态（2026-11-02，里程碑 **M1123**；系统层约 89%，端到端目标约 60–70%）
 
 **一句话**：原版 eboot 已在 PC 上原生（AOT）跑起来，S0_LOGO 完整通过；
 **CRI FS 的 CPK 挂载/文件索引已完全打通**——`data.cpk`（10,555 文件）+ `vita.cpk`（531 文件）
@@ -48,6 +48,10 @@ CPU 采用 **AOT 静态重编译**（原版 ARM/Thumb 代码一次性翻译为 x
 当前进度 1079/2500 轮，时间预算充足；最大风险仍是 GXM 画面内容与真实视频/音频解码。
 
 ### 最近关键里程碑（M1093–M1115，2026-11-02）
+
+- **M1121（18.4666）**：卡点根因链闭合——游戏不发任何文件请求（[RQMGR]/[APOPEN]/[FHOPEN]=0），ACF 未注册导致 DSP Bus Setting 失败（`DAT_8153FB30+0x44==0`，DSP 名 `BusSet_xrd722v2`）
+- **M1122（18.4667）**：新增 **IOPUMP_WAIT**（阻塞 DelayThread 内泵 reader，解决嵌套 fiber spin 冻结 g_blkcnt_total）；确认声音初始化真实执行（SNDINIT→ACFREG→DSPSET），ACF 读取不走主机 IO
+- **M1123（18.4668）**：★★★ **ACF 注册成功（`[CRILOG]=0`）**：FIOSFILL **ACF_FILL** 从 vita.cpk 直服 `sound/common.acf`（5152B）；关键坑=第 5–8 参数是 out-param **指针**必须写穿；声音线程 `thSeqSndAdx2` 启动（pc=81242D24），boot 链越过 init sound；新卡点=HLE-BADMEM va=0x28 @ blk 81198BEE（sceFiberSwitch 路径）
 
 - **M1119（18.4664）**：挂载后卡点初判为 CRI AtomEx（音频）初始化重试；新增 IOPUMP pstate 7\|8 完成 shim（新 reader 848E9678 完成）
 - **M1120（18.4665）**：卡点再精化——5000us 轮询其实是 **Fios 工作线程空转**（`FUN_811F22B8`，pending 任务链表 `DAT_81539754+0xC` 为空）；AtomEx 初始化只调用一次、无重试（`[ATOMEXINIT] cfg=848561F8`、`[FINSPOOL] param1=36`）；下一目标=找出 title 加载任务应在何处入队

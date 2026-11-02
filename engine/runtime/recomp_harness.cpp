@@ -1179,6 +1179,45 @@ extern "C" uint32_t harness_fios_ptr(uint32_t hnd) { auto it = g_fakefile.find(h
 extern "C" uint32_t harness_fios_size(uint32_t hnd) { auto it = g_fakefile.find(hnd); return (it == g_fakefile.end()) ? 0u : it->second.second; }
 extern "C" void harness_fios_close(uint32_t hnd) { g_fakefile.erase(hnd); }
 
+// M1123 ACF_FILL: serve the CRI ACF file directly from the CPK so criAtomEx_RegisterAcfFile succeeds.
+// The guest ACF load path (FUN_812309A4) first stats the file (FUN_812881A2) and then submits a criFs
+// read; the read goes through the game-level request manager whose consumer task is not scheduled, so
+// no host PREAD ever happens and the ACF stays empty ->DAT_8153FB30+0x44==0 -> W2010110102/E2013081521.
+// This hook short-circuits FUN_812309A4: when P5D_FIOSFILL is on and the file exists in the CPK, it
+// allocates the guest buffer, copies the real file bytes and fills the 4 output params exactly like a
+// successful async read (param5=buffer, param6=bytes_read, param7=buffer+bytes, param8=read_size-bytes).
+extern "C" uint32_t harness_acf_fill(void* sp_) {
+  static int _env = -1;
+  if (_env < 0) { const char* _e = getenv("P5D_FIOSFILL"); _env = (_e && atoi(_e)) ? 1 : 0; }
+  if (!_env) return 0;
+  RecState* s = (RecState*)sp_;
+  const char* path = nullptr;
+  { uint8_t* _q = GP(s->r[1]); if (_q) path = (const char*)_q; }
+  if (!path || !*path) return 0;
+  fios_ensure_cpk();
+  std::string nm(path);
+  std::vector<uint8_t> data;
+  if (!cpk_read_any_impl(nm, data) || data.empty()) return 0;
+  uint32_t size = (uint32_t)data.size();
+  uint32_t aligned = (size + 0x7FFu) & ~0x7FFu;
+  uint32_t read_size = aligned + 8u;
+  uint32_t buf = hle_malloc(read_size + 0x100u);
+  if (!buf) return 0;
+  { uint8_t* _q = GP(buf); if (_q) std::memcpy(_q, data.data(), size); }
+  // AAPCS: args 5..8 live in the caller stack slots and are POINTERS to the caller locals
+  // (param_5..param_8 are out-parameters). Write through them, not over the slots.
+  uint32_t sp = s->r[13];
+  uint32_t a5 = guest_rd32(sp + 0u), a6 = guest_rd32(sp + 4u), a7 = guest_rd32(sp + 8u), a8 = guest_rd32(sp + 12u);
+  guest_wr32(a5, buf);
+  guest_wr32(a6, size);
+  guest_wr32(a7, buf + size);
+  guest_wr32(a8, read_size - size);
+  static int _n = 0;
+  if (_n++ < 20) { printf("[ACFFILL] path=[%s] size=%u buf=%08X read_size=%u sp=%08X outs:%08X %08X %08X %08X -> %08X %08X %08X %08X\n", path, size, buf, read_size, sp, a5,a6,a7,a8, guest_rd32(a5),guest_rd32(a6),guest_rd32(a7),guest_rd32(a8)); fflush(stdout); }
+  return 1;
+}
+
+
 static void pending_req_scan() {
   if (g_pending_reqs.empty()) return;
   for (auto it = g_pending_reqs.begin(); it != g_pending_reqs.end(); ) {

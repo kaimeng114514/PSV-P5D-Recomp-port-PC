@@ -1138,6 +1138,56 @@
 | M1120 | §18.4665: ★★★★★★★★ **卡点再精化：5000us 轮询 = Fios 工作线程空转循环，不是 AtomEx 重试**。`[DELAYWRAP] usec=5000 caller=811F2376` 稳定 → 反编译 `FUN_811F22B8`（194B）= **Fios worker 主循环**：`do { 取 DAT_81539754+0xC 待处理任务链表头；若非空且 +0xFC0==0 则逐个 FUN_811F0B82(任务) 处理并移入完成链；FUN_8120760C(5000); } while(true)`。当前**任务链表为空**（链表头=0）→ 工作线程纯空转；pc_ring 显示的 `8125DDAE/8125DDDA/8125DDF6`（FUN_8125DBCC 池初始化）是**陈旧记录**（线程 context runner 不更新 pc_ring）。另确认：AtomEx 初始化**只调用一次**（`[ATOMEXINIT] cfg=848561F8 p2=0 p3=0`、`[ACFPARSE]×3`、`[ATOMEX] cfg=84856128 p2=848D9500 p3=0x820D0`、`[FIOSPOOL] param1=36`→36 节点池），**不存在 AtomEx 重试**；`P5D_LOADPUMP=1` 实验未触发（g_wait_task 未设置，pc≠0x811E5EC6）**
 | M1121 | §18.4666: ★★★★★★★★ **卡点根因链闭合：游戏根本不发文件请求（[RQMGR]/[APOPEN]/[FHOPEN]=0）→ 卡在"init sound"步骤之前；AtomEx 的 DSP Bus Setting 校验 `FUN_8123EA10 → FUN_81263A66` 因 `DAT_8153FB30+0x44 == 0`（ACF 未注册）失败，报 `W2010110102:ACF file is not registered`；DSP 设置名 = `"BusSet_xrd722v2"`（文件 0x81305FE0）**
 | M1122 | §18.4667: ★★★★★★★★ **声音初始化路径确认真实执行（SNDINIT→ACFREG sound/common.acf→DSPSET BusSet_xrd722v2），但 ACF 读取不发主机 PREAD → ACF 注册失败 → DSP 设置失败**。新增 **IOPUMP_WAIT**（在 DelayThread 阻塞等待内泵 criFs reader，解决"嵌套 fiber spin 冻结 g_blkcnt_total → 主循环 IOPUMP 不触发"问题）；首版无门限泵动破坏 CPK 挂载（E2011022806 CPK broken，因 mount reader 需要 HDRFIX/TOCFIX 在前），改为 ≥100k 门限 + 动态 reader 扫描后挂载正常、等待泵成功（848FC5C0 pstate=7、848E9678 pstate=8），但 **ACF 仍注册失败**：`sound/common.acf` 的读取从未发出主机 IO PREAD**
+| M1123 | §18.4668: ★★★★★★★★★★ **ACF 注册成功！音频初始化错误全部清零（`[CRILOG]=0`）**。实现 **ACF_FILL**：在 `FUN_812309A4`（ACF 文件加载）入口用 FIOSFILL 从 vita.cpk 直服 `sound/common.acf`（5152B）。关键坑：第 5–8 个参数是**指向调用者局部变量的指针**（out-param），必须写穿指针而不是写栈槽（首版写栈槽导致 `E2015042302`/`E2010012613`/`E2010030613` 连锁报错）。修复后 `[ACFREG2] p1=84B967B0 p2=0x1420 p3=84B97BD0 p4=0x3E8` → `[CRILOG] 0`，声音线程 "thSeqSndAdx2" 开始运行（pc=81242D24），boot 链越过 init sound**
+m1198 证据（`m1198_acffill_key.txt`）：
+```
+[ACFFILL] path=[sound/common.acf] size=5152 buf=84B967B0 read_size=6152 sp=84856248
+          outs:84856258 8485625C 84856264 84856260 -> 84B967B0 00001420 84B97BD0 000003E8
+[ACFREG2] #0 p1=84B967B0 p2=00001420 p3=84B97BD0 p4=000003E8 lr=81230E6C   ← 正确传给 FUN_812305C6
+[CRILOG] 0   ★★★ 全部 CRI 错误消失（原 W2010110102/E2013081521/E2010012613/E2010030613/E2015042302 全清）
+[SNDINIT] #0 / [ACFREG] #0 仍正常
+[EXECSTART] #6 fib=848463A0 pc=81242D24 sp=848560F8 r0=848463A0 lr=848D9504
+[SEQ] #2..#60 nofn pc=81242D24      ← 声音线程（8124xxxx = CRI Atom Sound）开始运行
+[COUNT] present=0 begin_pass=0 draw=0   ← GXM 仍未出帧
+新错误：HLE-BADMEM va=00000028 blk=81198BEE stub=812B1BA0（sceFiberSwitch 路径读 null+0x28）
+```
+**vita.cpk 中 ACF 内容确认（新工具 `cpkcheck`/`acfdump`）**：
+```
+sound/common.acf in vita.cpk: size=5152, 以 "@UTF" 开头（外层 UTF 表 + 内嵌 @UTF 子表）
+字符串含: "ACF Format/PSP2 Ver.1.15.01 Build:"、"BusSet_xrd722v2"、"DspSetting"、"BusLink"、"AisacControlName"、
+          "XRD722"、"Note_common"、"Result_Score"、"Title_Menu" 等
+（data.cpk 无此文件；data.cpk 有 title/logo.bin 2101012B）
+```
+**ACF_FILL 实现（harness `harness_acf_fill`，在 `FUN_812309A4` 入口钩子调用）**：
+```c
+extern "C" uint32_t harness_acf_fill(void* sp_) {
+  if (!P5D_FIOSFILL) return 0;
+  RecState* s = (RecState*)sp_;
+  path = GP(s->r[1]);  if (!path) return 0;
+  fios_ensure_cpk(); if (!cpk_read_any_impl(path, data)) return 0;
+  size = data.size(); aligned = (size+0x7FF)&~0x7FF; read_size = aligned+8;
+  buf = hle_malloc(read_size+0x100); memcpy(GP(buf), data, size);
+  sp = s->r[13];
+  a5=guest_rd32(sp+0); a6=guest_rd32(sp+4); a7=guest_rd32(sp+8); a8=guest_rd32(sp+12);   // ★ 出参指针
+  guest_wr32(a5, buf); guest_wr32(a6, size); guest_wr32(a7, buf+size); guest_wr32(a8, read_size-size);
+  return 1;   // 钩子处: if (harness_acf_fill(s)) { s->r[0]=1; return s->r[14]; }
+}
+```
+**NEXT**：
+```
+① 修 HLE-BADMEM va=0x28 @ blk=81198BEE（stub 812B1BA0 sceFiberSwitch）：探针 81198BEA/81198BF6 上下文与 fiber 对象，
+   确认 guest 在 fiber 结构 +0x28 期望什么（HLE fiber 对象缺字段？）
+② 检查 ACF 成功后的 boot 链：app 主 fiber 仍在 811E5CDA 等待循环；找出它这一阶段等待的对象/事件
+③ 若 boot 链继续 → 应开始发 title/素材文件请求（[FHOPEN]/[RQMGR]）→ PREAD → 标题资源解析
+④ GXM：[COUNT] present=0 begin_pass=0 draw=0，渲染尚未开始（等标题/资源）
+```
+验证：`m1198_acffill_key.txt`、`m1197_acfdbg_key.txt`、`m1196_acffill_key.txt`、`cpkcheck`/`acfdump` 输出、`acfreg3.txt`、`acftbl.txt`。 |
+| §18.4668 | ACF registration succeeded and all audio-init errors are gone ([CRILOG]=0). Implemented ACF_FILL: at the FUN_812309A4 (ACF file load) entry, serve sound/common.acf (5152B) directly from vita.cpk via FIOSFILL. Key trap: params 5-8 are POINTERS to caller locals (out-params), so the values must be written through those pointers, not over the stack slots (the first version caused the E2015042302/E2010012613/E2010030613 chain). After the fix [ACFREG2] p1=84B967B0 p2=0x1420 p3=84B97BD0 p4=0x3E8 and [CRILOG]=0; the sound thread "thSeqSndAdx2" starts running (pc=81242D24) and the boot chain passes the init-sound step. '
+       'm1198 evidence: [ACFFILL] path=[sound/common.acf] size=5152 buf=84B967B0 read_size=6152 sp=84856248 outs:84856258 8485625C 84856264 84856260 -> 84B967B0 00001420 84B97BD0 000003E8; [ACFREG2] #0 p1=84B967B0 p2=00001420 p3=84B97BD0 p4=000003E8 lr=81230E6C; [CRILOG] 0 (all W2010110102/E2013081521/E2010012613/E2010030613/E2015042302 cleared); [SNDINIT]/[ACFREG] still normal; [EXECSTART] #6 fib=848463A0 pc=81242D24 sp=848560F8 r0=848463A0 lr=848D9504; [SEQ] #2..#60 nofn pc=81242D24 (sound thread 8124xxxx = CRI Atom Sound running); [COUNT] present=0 begin_pass=0 draw=0 (GXM still no frame); new error: HLE-BADMEM va=00000028 blk=81198BEE stub=812B1BA0 (sceFiberSwitch path reads null+0x28). '
+       'vita.cpk ACF content confirmed by new host tools cpkcheck/acfdump: sound/common.acf exists in vita.cpk with size=5152 and begins with @UTF (outer UTF table + nested @UTF sub-tables); strings include "ACF Format/PSP2 Ver.1.15.01 Build:", "BusSet_xrd722v2", "DspSetting", "BusLink", "AisacControlName", "XRD722", "Note_common", "Result_Score", "Title_Menu". data.cpk has no such file but contains title/logo.bin 2101012B. '
+       'ACF_FILL implementation (harness harness_acf_fill, called at the FUN_812309A4 entry hook): if (!P5D_FIOSFILL) return 0; s=(RecState*)sp_; path=GP(s->r[1]); fios_ensure_cpk(); cpk_read_any_impl(path,data); size=data.size(); aligned=(size+0x7FF)&~0x7FF; read_size=aligned+8; buf=hle_malloc(read_size+0x100); memcpy(GP(buf),data,size); sp=s->r[13]; a5..a8 = guest_rd32(sp+0..12) (out-param POINTERS); guest_wr32(a5,buf); guest_wr32(a6,size); guest_wr32(a7,buf+size); guest_wr32(a8,read_size-size); return 1; the batch hook does if (harness_acf_fill(s)) { s->r[0]=1; return s->r[14]; }. '
+       'NEXT: (1) fix HLE-BADMEM va=0x28 at blk=81198BEE (stub 812B1BA0 sceFiberSwitch): probe 81198BEA/81198BF6 context and the fiber object to see what the guest expects at fiber+0x28 (maybe the HLE fiber object lacks a field); (2) inspect the boot chain after ACF success: the app main fiber is still in the 811E5CDA wait loop - find the object/event it waits on at this stage; (3) if the boot chain continues it should start issuing title/asset file requests ([FHOPEN]/[RQMGR]) -> PREAD -> title resource parsing; (4) GXM: [COUNT] present=0 begin_pass=0 draw=0, rendering has not started (waiting for title/resources). '
+       'Verification: m1198_acffill_key.txt, m1197_acfdbg_key.txt, m1196_acffill_key.txt, cpkcheck/acfdump output, acfreg3.txt, acftbl.txt. |
 m1192/m1194/m1195 证据（`m1195_iopumpwait_key.txt` 等）：
 ```
 [SNDINIT] #0 called lr=81172EA8                ← 声音初始化真实执行
@@ -502069,3 +502119,41 @@ FUN_81153022（声音初始化）
 ANTI-FORGETTING ENTRY. Keywords: M1122 sound-init path really executes ([SNDINIT] -> [ACFREG] sound/common.acf -> [DSPSET] BusSet_xrd722v2) but the ACF read never issues a host PREAD -> ACF registration fails -> DSP setting fails. Added IOPUMP_WAIT: pump criFs readers from inside blocking DelayThread waits because nested fiber spins freeze g_blkcnt_total and the main-loop IOPUMP never fires; first ungated version broke the CPK mount (E2011022806 CPK broken) since mount readers need HDRFIX/TOCFIX before the completion shim; gated >=100k plus dynamic reader scan keeps mount normal and pumps (848FC5C0 pstate=7 blk=104829, 848E9678 pstate=8 blk=109568) but ACF still fails because sound/common.acf is never read from the host. Decompiled ACF chain: FUN_81153022 sound init -> "sound/common.acf" -> FUN_81230F54 -> FUN_81230DC8 criAtomEx_RegisterAcfFile -> FUN_812309A4 -> FUN_812881A2 game FS stat(ctx,path,&size) -> FUN_8128E394 criFs submit read -> spin while FUN_8128E9BC status==1 { FUN_81283C84(); FUN_8127C0E8(10); } else E2010052671 Can not open ACF file; then FUN_81234AA8("BusSet_xrd722v2") and SceLibKernel_C5C11EE7("thSeqSndAdx2",&LAB_811539f2,...) thread. IOPUMP_WAIT: gate g_blkcnt_total>=100000, every 256 calls dynamically scan 0x84600000..0x85200000 for progress signature 0x81540460 + reader+0xB0 back-pointer, pump status==1 readers via FUN_8128D502, shim pstate 7/8 (size=FUN_8128F6C8, reader+0x130, reader+0xBC=2). NEXT: serve ACF in FIOSFILL style - at FUN_812881A2 use HLE CpkReader to look up sound/common.acf size and return success; inject HLE data source at the read submit/completion (FUN_8128E394 or reader completion) writing the ACF bytes from data.cpk into guest memory; then ACF registered -> DSP passes -> AtomEx completes -> init-sound completes -> boot continues -> file requests/title loading. Verification: m1195_iopumpwait_key.txt, m1194_iopumpwait_key.txt, m1192_iopumpwait_key.txt, acfload.txt, acfload2.txt, acfreg2.txt, acfreg.txt.
 
 LOOKUP: M1122 sound init SNDINIT ACFREG sound/common.acf DSPSET BusSet_xrd722v2, IOPUMP_WAIT DelayThread pump nested spin frozen g_blkcnt_total, mount readers need HDRFIX/TOCFIX, gate 100000 dynamic scan progress 0x81540460, FUN_81230DC8 FUN_812309A4 FUN_812881A2 FUN_8128E394 spin FUN_8128E9BC, E2010052671 Can not open ACF file, thSeqSndAdx2 thread, next FIOSFILL serve ACF from data.cpk -> 18.4666 [relevant: ACF not registered], 18.4665 [relevant: Fios worker idle], 18.4664 [relevant: AtomEx]
+### 18.4668 PORT M1123: ACF 注册成功（FIOSFILL ACF_FILL）→ 音频错误清零、声音线程启动、boot 越过 init sound
+
+1) m1198 证据：
+```
+[ACFFILL] path=[sound/common.acf] size=5152 buf=84B967B0 read_size=6152
+          outs:84856258 8485625C 84856264 84856260 -> 84B967B0 00001420 84B97BD0 000003E8
+[ACFREG2] p1=84B967B0 p2=00001420 p3=84B97BD0 p4=000003E8   ← 正确传入 FUN_812305C6
+[CRILOG] 0   ★ 全部音频初始化错误消失
+[EXECSTART] #6 fib=848463A0 pc=81242D24 sp=848560F8      ← 声音线程开始执行
+[SEQ] #2..#60 pc=81242D24                                  ← CRI Atom Sound 运行中
+[COUNT] present=0 begin_pass=0 draw=0                      ← GXM 尚未出帧
+新问题：HLE-BADMEM va=00000028 blk=81198BEE stub=812B1BA0（sceFiberSwitch 路径）
+```
+2) 关键坑（首版失败原因）：
+```
+FUN_812309A4 的第 5–8 个参数是 out-param 指针（调用者局部变量地址），
+首版把 buf/size/buf+size/read_size-size 写到了"栈参数槽"（覆盖了指针本身）→ 调用者局部仍为 0
+→ FUN_812305C6(0,0,0,0) → FUN_81262CC0(0,0) → E2015042302 → E2010012613 → E2010030613 连锁
+修正：先读 sp+0..12 得到指针 a5..a8，再 guest_wr32(a5,buf)… 写穿指针
+```
+3) 资产确认（新工具 cpkcheck/acfdump）：
+```
+vita.cpk: sound/common.acf size=5152, 开头 "@UTF"（外层 UTF + 内嵌子表）
+字符串: "ACF Format/PSP2 Ver.1.15.01 Build:"、"BusSet_xrd722v2"、"DspSetting"、"BusLink" …
+data.cpk: 无 ACF；有 title/logo.bin (2101012B)
+```
+4) NEXT：
+```
+① HLE-BADMEM va=0x28 @ 81198BEE（sceFiberSwitch）：探针 fiber 对象 +0x28 期望字段
+② ACF 成功后 app 主 fiber 仍在 811E5CDA 等待循环——找出此阶段等待对象
+③ 期待：boot 继续 → title/素材文件请求（[FHOPEN]/[RQMGR]）→ PREAD → 标题资源
+④ GXM 出帧仍待资源加载
+```
+验证：`m1198_acffill_key.txt`、`m1197_acfdbg_key.txt`、`m1196_acffill_key.txt`、`cpkcheck`/`acfdump`、`acfreg3.txt`、`acftbl.txt`。
+
+ANTI-FORGETTING ENTRY. Keywords: M1123 ACF registration SUCCESS via FIOSFILL ACF_FILL, all audio-init CRILOGs cleared (CRILOG=0), sound thread thSeqSndAdx2 running at pc=81242D24, boot chain passes init-sound. Implemented harness_acf_fill called at FUN_812309A4 (ACF file load) entry: if P5D_FIOSFILL and path found in CPK (vita.cpk sound/common.acf size=5152), allocate guest buffer, copy file bytes, and fill the 4 out-params THROUGH THE POINTERS (args 5-8 are pointers to caller locals: a5=guest_rd32(sp+0).., guest_wr32(a5,buf), guest_wr32(a6,size), guest_wr32(a7,buf+size), guest_wr32(a8,read_size-size)), then return 1 to short-circuit. First version wrote over the stack argument slots instead of through the pointers -> caller locals stayed 0 -> FUN_812305C6(0,0,0,0) -> FUN_81262CC0(0,0) -> E2015042302/E2010012613/E2010030613 chain. m1198 evidence: [ACFFILL] size=5152 buf=84B967B0 read_size=6152; [ACFREG2] p1=84B967B0 p2=0x1420 p3=84B97BD0 p4=0x3E8; [CRILOG] 0; [EXECSTART] #6 pc=81242D24; [SEQ] pc=81242D24; [COUNT] present=0 begin_pass=0 draw=0; new HLE-BADMEM va=0x28 blk=81198BEE stub=812B1BA0 sceFiberSwitch. ACF content: @UTF outer table with nested sub-tables, strings "ACF Format/PSP2 Ver.1.15.01 Build:", "BusSet_xrd722v2", DspSetting, BusLink; data.cpk has title/logo.bin 2101012B. NEXT: fix the fiber-switch null+0x28 read (probe 81198BEA/81198BF6 and fiber object), find the app main fiber wait object at 811E5CDA after ACF success, then expect title/asset file requests ([FHOPEN]/[RQMGR]) -> PREAD -> title resources -> GXM first frame. Verification: m1198_acffill_key.txt, m1197_acfdbg_key.txt, m1196_acffill_key.txt, cpkcheck/acfdump, acfreg3.txt, acftbl.txt.
+
+LOOKUP: M1123 ACF registration success ACF_FILL sound/common.acf vita.cpk 5152, out-param pointers write-through args 5-8, CRILOG 0 audio errors cleared, thSeqSndAdx2 pc=81242D24, boot passes init sound, HLE-BADMEM va=0x28 blk=81198BEE sceFiberSwitch next, COUNT present=0 draw=0, cpkcheck acfdump tools, ACF Format/PSP2 Ver.1.15.01 BusSet_xrd722v2 -> 18.4667 [relevant: ACF read gap], 18.4666 [relevant: ACF not registered], 18.4665 [relevant: Fios worker]
