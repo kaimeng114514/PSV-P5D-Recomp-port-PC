@@ -1146,6 +1146,53 @@
 | M1128 | §18.4673: ★★★★★★★★★★ **找到并修复 fiber 劫持真正根因：AOT 函数边界截断导致 0x81242C3A..0x81242DD2（FUN_81241F46 尾部）未翻译，执行跳入未翻译地址 0x81242D24 → "no block" livelock**。用 gap-fill 管线生成 **batch_036**（38 blocks，覆盖 0x81242C3A..0x81242DD2），注册进 harness（ALL_FINDERS[37]、表分发 ternary、去重循环），`[TABLE] blocks=230290`（+38）；**fiber 劫持证据 [HUNT-EXEC]=0**；遗留新卡点：`[FIBER-EXEC] no block for pc=FFFFFFFD` ×9800（fiber 返回哨兵 0xFFFFFFFD 未被 fiber 执行循环处理，需按"回调返回"语义收尾）
 | M1129 | §18.4674: ★★★★★★★★★ **fiber 返回哨兵 0xFFFFFFFD 上下文完全定位**：`[FIBER-EXEC] no block for pc=FFFFFFFD (cur=848463A0) lr=81279C20 sp=84856050 r0=<heap>`，前驱块链 **81279BEE→81279C02→81279C0C→81279C1C（bl 812068F2）→812068F2（fiber 管理器）→812068D8/8120685A→812B1B70/812B1BA0（sceFiberSwitch HLE）**；哨兵在 fiber 切换往返后由恢复上下文带入。实验 A（把哨兵当"返回到 LR"：`s->r[15]=s->r[14]; continue`）只降低 livelock 日志量（[SENTRET]×20 后仍循环 81279BEE→81279C02→81279C0C→81279C1C），**未解锁帧循环**，已回退（保留诊断打印）
 | M1130 | §18.4675: ★★★★★★★★★★ **哨兵 0xFFFFFFFD 根因 = AOT 缺失间接调用目标 0x8122A9A8（又一函数边界遗漏）**：`[INDIRECT-MISS] reg3=8122A9A9 target=8122A9A8 block=81279C1C` → `id_reg()` 未找到块时返回 0xFFFFFFFD（harness 行 5186-5188）→ pc=FFFFFFFD→"no block" livelock。反汇编确认 0x8122A9A8 是合法 Thumb 函数（`push {r4,lr}`），位于 FUN_8122A7BC（end 0x8122A9A6）与 FUN_8122A9D0 之间的 0x28 字节缝隙，未收录函数边界。用同管线生成 **batch_037**（5 blocks，0x8122A9A8..0x8122A9D0）并注册（ALL_FINDERS[38]）→ `[TABLE] blocks=230291`；**运行结果显示 [INDIRECT-MISS]=0、[TBB-MISS]=0、[SENTINEL]=0、[FIBER-EXEC]=0（哨兵 livelock 消除）**，且执行进入 GXM 子系统（新探针 [ABIVFMT]×22,770 / [GXMABI]×4,008 / [GBACK]×400 / [ABIVARG]×120 / [VCNT]×120 首次触发），线程数 16→17、flags=3；新卡点：blk=811DFDC8 循环（hle_ring `812B2AE0@8127BE56` 事件标志 set / `812B1810@811539FE`）
+| M1131 | §18.4676: ★★★★★★★★★★ **batch_037 修复后执行大跨越：GXM 子系统完整初始化（27 个 GXM 函数），随后进入游戏内置 Huffman+LZ 解压子系统（FUN_811DF434 调度器 / FUN_811DF91A Huffman / FUN_811DFD94 LZ77），长跑在 1.5M 块触发 NESTED_UNTIL 截断后进入"仅泵线程、0 块执行"的假死状态**。反编译确认：`FUN_811DF434`（0x20 字节头；bit1→Huffman：`FUN_811DFB96`/`FUN_811DF91A` 建 256 项 Huffman 表；bit0→LZ77：`FUN_811DFD94` 字典回拷），是游戏资源解压器；`[FIBSW]` fpc 覆盖 811EFB3E→812B12A0（GXM）说明解压与 GXM 参数绑定交替推进
+m1216/m1217 证据（`m1216_gap2_key.txt`、`m1217_longgxm_key.txt`）：
+```
+（m1216 12M，NESTED_UNTIL=300k）
+[GXMABI] 27 个函数被调用：sceGxmInitialize/GetNotificationRegion/CreateContext/MapMemory×20/
+  MapVertexUsseMemory/MapFragmentUsseMemory/CreateRenderTarget×2/DepthStencilSurfaceInit×3/
+  SyncObjectCreate×3/ShaderPatcherCreate/ShaderPatcherRegisterProgram×121/CreateFragmentProgram×88/
+  CreateVertexProgram×19/TextureSetMag/Min/MipFilter/TextureSetUAddrMode/VAddrMode/
+  GetRenderTargetMemSize×2/GetPrecomputedDrawSize×2/PrecomputedDrawInit×2/SetParams×2/SetVertexStream×2/
+  ProgramFindParameterByName×3726/ProgramFindParameterBySemantic×1/DepthStencilSurfaceSetForceStoreMode×2
+  DepthStencilSurfaceSetForceLoadMode×1
+[ABIVFMT]×22770 / [ABIVARG]×120 / [GBACK]×400 / [VCNT]×120 / [SLOTW]×201  ← 顶点格式/绘制参数已活跃
+（m1217 长跑 80M，NESTED_UNTIL=1.5M）
+[FIBSW] #591 fpc=811EFB3E blk=1496023 / #592 fpc=811C3FB8 blk=1498023 / #593 fpc=812B12A0 lr=811F006E blk=1500000
+[GALLOC]×405（size=0x1C lr=81207748 / size=8 lr=811F00CC / lr=811EFCF6）
+最后 tail：[PUMP] #269200 … tid=40019000 pc=811732FC blocks=0 blk=1500000 fex=0 fib=848463A0  ← NESTED_UNTIL 截断后仅泵线程
+[WD] n=1500000 blk=81236D22 stall=78 / pcring: 811DFB14 811DFB18 811DFAFE 811DFB06 …（Huffman 表构建循环）
+[FRAMECB]/[UPD]/[POST]/[COUNT]=0（未到 BeginScene）；[IO]=6；[CRILOG]=0；[ACFFILL] size=5152
+```
+**反编译（资源解压子系统）**：
+```c
+FUN_811DF434(int* p):                        // 解压调度器
+  memcpy(hdr, *p, 0x20);                     // 0x20 字节头
+  if (hdr.flag == 0) memcpy(dst, *p+0x20, hdr.len);
+  else {
+    if (hdr.flag & 2) { x = FUN_811DFB96(src); dst2 = cb(alloc, x); FUN_811DFB7E(...); }  // Huffman
+    if (hdr.flag & 1) { FUN_811DFD94(&src_dst); }                                        // LZ77
+    if (hdr.flag & 2) cb(free, ...);
+  }
+FUN_811DF91A(src, dst):                      // Huffman：读 0x410 字节（256 项码长表），构建 256 项解码树（-1 哨兵）
+FUN_811DFD94(&src_dst):                      // LZ77：逐 token 复制/字典回拷（`*(dst+)=*(dst-dist)`）
+```
+**关键发现（长跑行为）**：长跑在 `P5D_NESTED_UNTIL=1500000` 截断后，混合调度器退回"仅泵线程"模式（[PUMP] blocks=0、fex=0），但截断前执行仍在 Huffman/LZ 解压与 GXM 参数绑定间推进（FIBSW fpc 交替 811EFB3E/811C3FB8/812B12A0）。说明**此处不是死锁，而是嵌套执行被我们自己的 NESTED_UNTIL 上限截断**。
+**NEXT**：
+```
+① 长跑改用 P5D_NESTED_UNTIL=200000000（或更大）+ 块预算 200M+，让 Huffman/LZ 解压跑完，观察是否进入 BeginScene/Present
+② 给解压器加进度探针（FUN_811DFD94/FUN_811DF91A 的输入长度与输出计数）确认解压速度/是否真卡死
+③ 关注 [FRAMECB]/[UPD]/[POST] 与 [COUNT] present；出现 BeginScene 即进入真正帧循环阶段
+④ 解压完成后预期 IO/资源请求增加（标题素材），继续记录 [FHOPEN]/[RQMGR]
+```
+验证：`m1217_longgxm_key.txt`、`m1216_gap2_key.txt`、`lzdec.txt`、`stall811d.txt`、`[TABLE] blocks=230291`。 |
+| §18.4676 | After the batch_037 fix the execution made a big jump: the GXM subsystem is fully initialized (27 GXM functions), then execution enters the game's built-in Huffman+LZ decompression subsystem (FUN_811DF434 dispatcher / FUN_811DF91A Huffman / FUN_811DFD94 LZ77), and the long run appears stuck only because NESTED_UNTIL=1.5M truncates nested execution (thread-pump-only mode with blocks=0). Decompiled: FUN_811DF434 (0x20-byte header; bit1 -> Huffman via FUN_811DFB96/FUN_811DF91A building 256-entry Huffman tables; bit0 -> LZ77 via FUN_811DFD94 dictionary back-copy) is the game asset decompressor; [FIBSW] fpc alternates 811EFB3E -> 811C3FB8 -> 812B12A0 (GXM), i.e. decompression and GXM parameter binding interleave. '
+       'm1216/m1217 evidence: (m1216 12M, NESTED_UNTIL=300k) 27 GXM functions called: sceGxmInitialize/GetNotificationRegion/CreateContext/MapMemory x20/MapVertexUsseMemory/MapFragmentUsseMemory/CreateRenderTarget x2/DepthStencilSurfaceInit x3/SyncObjectCreate x3/ShaderPatcherCreate/ShaderPatcherRegisterProgram x121/CreateFragmentProgram x88/CreateVertexProgram x19/TextureSetMag/Min/MipFilter/TextureSetUAddrMode/VAddrMode/GetRenderTargetMemSize x2/GetPrecomputedDrawSize x2/PrecomputedDrawInit x2/SetParams x2/SetVertexStream x2/ProgramFindParameterByName x3726/ProgramFindParameterBySemantic x1/DepthStencilSurfaceSetForceStoreMode x2/DepthStencilSurfaceSetForceLoadMode x1; [ABIVFMT] x22770 / [ABIVARG] x120 / [GBACK] x400 / [VCNT] x120 / [SLOTW] x201 (vertex formats/draw params active). (m1217 80M long run, NESTED_UNTIL=1.5M) [FIBSW] #591 fpc=811EFB3E blk=1496023 / #592 fpc=811C3FB8 blk=1498023 / #593 fpc=812B12A0 lr=811F006E blk=1500000; [GALLOC] x405 (size 0x1C lr=81207748 / size 8 lr=811F00CC / lr=811EFCF6); tail [PUMP] #269200 ... tid=40019000 pc=811732FC blocks=0 blk=1500000 fex=0 fib=848463A0 (after NESTED_UNTIL cutoff only threads are pumped); [WD] n=1500000 blk=81236D22 stall=78 pcring 811DFB14 811DFB18 811DFAFE 811DFB06 (Huffman table build loop); [FRAMECB]/[UPD]/[POST]/[COUNT]=0 (no BeginScene yet); [IO]=6; [CRILOG]=0; [ACFFILL] size=5152. '
+       'Decompiled resource decompressor: FUN_811DF434(int* p): memcpy(hdr,*p,0x20); if (hdr.flag==0) memcpy(dst,*p+0x20,hdr.len); else { if (flag&2) { x=FUN_811DFB96(src); dst2=cb(alloc,x); FUN_811DFB7E(...); } if (flag&1) FUN_811DFD94(&src_dst); if (flag&2) cb(free,...); } FUN_811DF91A(src,dst) reads 0x410 bytes (256 code-length table) and builds a 256-entry decode tree (-1 sentinels); FUN_811DFD94 does LZ77 token copy / dictionary back-copy. '
+       'Key finding: the long run hitting P5D_NESTED_UNTIL=1500000 switches the hybrid scheduler to thread-pump-only mode ([PUMP] blocks=0, fex=0), while before the cutoff execution still advances between Huffman/LZ decompression and GXM parameter binding (FIBSW fpc alternating 811EFB3E/811C3FB8/812B12A0) - so this is NOT a deadlock, it is our own NESTED_UNTIL cap truncating nested execution. '
+       'NEXT: (1) run with P5D_NESTED_UNTIL=200000000 (or larger) and a 200M+ block budget so Huffman/LZ decompression completes, and watch for BeginScene/Present; (2) add progress probes to the decompressor (input length and output counter for FUN_811DFD94/FUN_811DF91A) to confirm decompression speed / detect a real hang; (3) watch [FRAMECB]/[UPD]/[POST] and [COUNT] present - BeginScene marks the real frame loop; (4) after decompression expect more IO/resource requests (title assets), keep recording [FHOPEN]/[RQMGR]. '
+       'Verification: m1217_longgxm_key.txt, m1216_gap2_key.txt, lzdec.txt, stall811d.txt, [TABLE] blocks=230291. |
 m1215/m1216 证据（`m1215_sentC_key.txt`、`m1216_gap2_key.txt`）：
 ```
 [INDIRECT-MISS] reg3=8122A9A9 target=8122A9A8 block=81279C1C   ← 根因（id_reg 返回 0xFFFFFFFD）
@@ -502738,3 +502785,44 @@ _gen_tail2.py（_gen_tail.py 改 BOUNDS/OUTDIR=C:\dev\tmp\recomp_gap3）→ py -
 ANTI-FORGETTING ENTRY. Keywords: M1130 sentinel 0xFFFFFFFD root cause = missing AOT indirect-call target 0x8122A9A8; [INDIRECT-MISS] reg3=8122A9A9 target=8122A9A8 block=81279C1C; id_reg() returns 0xFFFFFFFD when gbn(target) is null (harness lines 5186-5188), so pc=FFFFFFFD -> no-block livelock. 0x8122A9A8 is a valid Thumb function (push {r4,lr}) in the 0x28-byte gap between FUN_8122A7BC (end 0x8122A9A6) and FUN_8122A9D0, missing from the function bounds (second AOT bounds omission). Fixed with the gap-fill pipeline: gap2_bounds.json [{"va":2166532520 (=0x8122A9A8),"size":40 (=0x28),"name":"FUN_8122A9A8_gap"}], _gen_tail2.py (copy of _gen_tail.py with BOUNDS/OUTDIR=C:\\dev\\tmp\\recomp_gap3), py -3 _gen_tail2.py 500 4 -> recomp_gap3/batch_000.cpp (10 defs/5 table entries/.o 4996B covering 0x8122A9A8..0x8122A9D0), rename to batch_037, harness registration FB(037)+externs+ALL_FINDERS[37]->[38]+ternary chains+for i<38+dedupe i=37, recompile+link exit=0. After the fix m1216: [INDIRECT-MISS]=0, [TBB-MISS]=0, [SENTINEL]=0, [FIBER-EXEC]=0 (sentinel livelock eliminated); [TABLE] blocks=230291 (+1); [ABIVFMT] 22770 / [GXMABI] 4008 / [GBACK] 400 / [ABIVARG] 120 / [VCNT] 120 fire for the first time (GXM subsystem active); threads 16->17, flags=3; new stall at blk=811DFDC8 (WD stall=57, hle_ring 812B2AE0@8127BE56 event-flag set / 812B1810@811539FE, pcring 811DFDE4 811DFDD4 811DFDEA 811DFDF6 811DFE08 ... 811DFDC8); [COUNT] present=0 begin_pass=0 draw=0; [IO]=6; [ACFFILL] size=5152; [CRILOG]=0. NEXT: analyze the 811DFDC8 loop (which event flag/thread it waits on and whether an HLE wake or thread scheduling is needed), inspect [ABIVFMT]/[GXMABI] for GXM init progress before BeginScene, goal GFD frame loop ([FRAMECB]/[UPD]/[POST], [COUNT] present) -> title asset requests; keep watching [INDIRECT-MISS]/[TBB-MISS] and fill batch_038+ with the same pipeline. Verification: m1216_gap2_key.txt, m1215_sentC_key.txt, gap2_bounds.json, _gen_tail2.py, batch_037.cpp, [TABLE] blocks=230291.
 
 LOOKUP: M1130 sentinel FFFFFFFD root cause missing AOT target 0x8122A9A8 INDIRECT-MISS id_reg returns FFFFFFFD lines 5186-5188 gap between FUN_8122A7BC end 8122A9A6 and FUN_8122A9D0, gap2_bounds.json _gen_tail2.py recomp_gap3 batch_037 5 blocks TABLE 230291 ALL_FINDERS 38, after fix INDIRECT-MISS 0 SENTINEL 0 FIBER-EXEC 0, ABIVFMT 22770 GXMABI 4008 GBACK 400 ABIVARG 120 VCNT 120 GXM subsystem active threads 17 flags 3, new stall blk 811DFDC8 hle_ring 812B2AE0@8127BE56 event flag 812B1810@811539FE, next analyze 811DFDC8 event wait GXM init progress frame loop, verification m1216_gap2_key.txt -> 18.4674 [relevant: sentinel localized], 18.4673 [relevant: batch_036 bounds gap], 18.4670 [relevant: GFD fiber]
+### 18.4676 PORT M1131: batch_037 后执行大跨越——GXM 完整初始化 + 进入内置 Huffman/LZ 解压；长跑"假死"=NESTED_UNTIL 截断
+
+1) GXM 完整初始化（m1216，27 个 GXM 函数被调用）：
+```
+sceGxmInitialize / GetNotificationRegion / CreateContext / MapMemory×20 / MapVertexUsseMemory /
+MapFragmentUsseMemory / CreateRenderTarget×2 / DepthStencilSurfaceInit×3 / SyncObjectCreate×3 /
+ShaderPatcherCreate / ShaderPatcherRegisterProgram×121 / CreateFragmentProgram×88 / CreateVertexProgram×19 /
+TextureSetMag/Min/MipFilter / TextureSetUAddrMode/VAddrMode / GetRenderTargetMemSize×2 /
+GetPrecomputedDrawSize×2 / PrecomputedDrawInit×2 / PrecomputedDrawSetParams×2 / SetVertexStream×2 /
+ProgramFindParameterByName×3726 / ProgramFindParameterBySemantic×1 / DepthStencilSurfaceSetForceStoreMode×2 /
+DepthStencilSurfaceSetForceLoadMode×1
+[ABIVFMT]×22770 / [ABIVARG]×120 / [GBACK]×400 / [VCNT]×120 / [SLOTW]×201
+```
+2) 内置资源解压子系统（反编译）：
+```
+FUN_811DF434（调度器）：读 0x20 字节头；flag&2 → Huffman（FUN_811DFB96 / FUN_811DF91A，0x410 字节码长表→256 项解码树）
+                        flag&1 → LZ77（FUN_811DFD94，字典回拷）
+                       else memcpy(dst, src+0x20, len)
+```
+3) 长跑（m1217，80M 预算 / NESTED_UNTIL=1.5M）：
+```
+[FIBSW] #591 fpc=811EFB3E blk=1496023 / #592 fpc=811C3FB8 blk=1498023 / #593 fpc=812B12A0 blk=1500000
+[GALLOC]×405（size=0x1C lr=81207748 / size=8 lr=811F00CC / lr=811EFCF6）
+tail: [PUMP] #269200 … tid=40019000 pc=811732FC blocks=0 blk=1500000 fex=0 fib=848463A0
+[WD] n=1500000 blk=81236D22 stall=78 / pcring: 811DFB14 811DFB18 811DFAFE 811DFB06（Huffman 表构建）
+[FRAMECB]/[UPD]/[POST]/[COUNT]=0；[IO]=6；[CRILOG]=0；[ACFFILL] size=5152
+```
+**结论**：不是死锁——是 `P5D_NESTED_UNTIL=1500000` 截断后混合调度器只泵线程（blocks=0、fex=0）；
+截断前执行在 **Huffman/LZ 解压 ↔ GXM 参数绑定** 间推进。
+4) NEXT：
+```
+① P5D_NESTED_UNTIL=200000000+、块预算 200M+ 重跑，让解压跑完 → 观察 BeginScene/Present
+② 解压器加进度探针（输入长度/输出计数）确认速度或真卡死
+③ 关注 [FRAMECB]/[UPD]/[POST] 与 [COUNT] present
+④ 解压后预期 IO/资源请求增加（标题素材），继续记录 [FHOPEN]/[RQMGR]
+```
+验证：`m1217_longgxm_key.txt`、`m1216_gap2_key.txt`、`lzdec.txt`、`stall811d.txt`、`[TABLE] blocks=230291`。
+
+ANTI-FORGETTING ENTRY. Keywords: M1131 after batch_037 the execution jumped into full GXM initialization (27 GXM functions: sceGxmInitialize/GetNotificationRegion/CreateContext/MapMemory x20/MapVertexUsseMemory/MapFragmentUsseMemory/CreateRenderTarget x2/DepthStencilSurfaceInit x3/SyncObjectCreate x3/ShaderPatcherCreate/RegisterProgram x121/CreateFragmentProgram x88/CreateVertexProgram x19/TextureSet filters/UAddrMode/VAddrMode/GetRenderTargetMemSize x2/GetPrecomputedDrawSize x2/PrecomputedDrawInit x2/SetParams x2/SetVertexStream x2/ProgramFindParameterByName x3726/ProgramFindParameterBySemantic x1/DepthStencilSurfaceSetForceStoreMode x2/SetForceLoadMode x1) and then the game's built-in Huffman+LZ decompressor. Decompiled FUN_811DF434 dispatcher: read 0x20-byte header; flag&2 -> Huffman via FUN_811DFB96/FUN_811DF91A (reads 0x410-byte code-length table, builds 256-entry decode tree); flag&1 -> LZ77 via FUN_811DFD94 (dictionary back-copy); else plain memcpy(dst,src+0x20,len). Caller chain FUN_811DF434 -> FUN_811DFD94 (LZ) and FUN_811DF91A (Huffman, loops 811DFAFE/811DFB06/811DFB14/811DFB18). m1217 long run (80M budget, P5D_NESTED_UNTIL=1500000): [FIBSW] #591 fpc=811EFB3E blk=1496023, #592 fpc=811C3FB8 blk=1498023, #593 fpc=812B12A0 blk=1500000; [GALLOC] x405 (size 0x1C lr=81207748 / size 8 lr=811F00CC / lr=811EFCF6); tail [PUMP] #269200 tid=40019000 pc=811732FC blocks=0 blk=1500000 fex=0 fib=848463A0 (after NESTED_UNTIL cutoff only threads pumped); [WD] n=1500000 blk=81236D22 stall=78 pcring Huffman loop; [FRAMECB]/[UPD]/[POST]/[COUNT]=0; [IO]=6; [CRILOG]=0; [ACFFILL] size=5152; m1216: [ABIVFMT] 22770 / [ABIVARG] 120 / [GBACK] 400 / [VCNT] 120 / [SLOTW] 201. Conclusion: NOT a deadlock - P5D_NESTED_UNTIL=1500000 truncates nested execution and the hybrid scheduler falls into thread-pump-only mode (blocks=0, fex=0); before the cutoff execution advances between Huffman/LZ decompression and GXM parameter binding. NEXT: rerun with P5D_NESTED_UNTIL=200000000+ and 200M+ block budget so decompression completes and watch BeginScene/Present; add progress probes to FUN_811DFD94/FUN_811DF91A (input length/output counter) to confirm speed; watch [FRAMECB]/[UPD]/[POST]/[COUNT] present; after decompression expect more IO/resource requests ([FHOPEN]/[RQMGR]). Verification: m1217_longgxm_key.txt, m1216_gap2_key.txt, lzdec.txt, stall811d.txt, [TABLE] blocks=230291.
+
+LOOKUP: M1131 GXM full initialization 27 functions ShaderPatcher 121 programs fragment 88 vertex 19 MapMemory 20 CreateRenderTarget 2 PrecomputedDraw ProgramFindParameterByName 3726, built-in Huffman+LZ decompressor FUN_811DF434 dispatcher 0x20 header flag2 Huffman FUN_811DFB96 FUN_811DF91A 0x410 table flag1 LZ77 FUN_811DFD94 back-copy, m1217 long run NESTED_UNTIL 1500000 cutoff thread-pump-only blocks=0 fex=0 not deadlock, FIBSW 591 fpc 811EFB3E 592 811C3FB8 593 812B12A0, GALLOC 405, WD stall 78 Huffman loop 811DFAFE 811DFB06, FRAMECB UPD POST COUNT 0, next NESTED_UNTIL 200000000 block budget 200M rerun watch BeginScene Present, decompressor progress probes, IO title assets -> 18.4675 [relevant: batch_037 sentinel fix], 18.4674 [relevant: sentinel localized], 18.4670 [relevant: GFD fiber]
