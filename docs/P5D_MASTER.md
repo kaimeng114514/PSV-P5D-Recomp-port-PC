@@ -1150,6 +1150,37 @@
 | M1132 | §18.4677: ★★★★★★★★★★ **解压容器格式完全解码（ELF 直读）+ 长跑 m1219 卡在 FUN_811DF91A 第二阶段的"选择扫描"死循环（811DFA0E↔811DFA3C）；线索指向该解压运行在非 fiber 栈（sp=8484EDD0）且 0x7420 栈帧/256×0x38 节点数组可能越界**。容器头：magic `0x474C4830`（bytes "0HLG"）/`0x47484D30`（"0MHG"），`[+8]=flags`（1=LZ77，3=Huffman+LZ）、`[+0xC]/[+0x10]`=尺寸字段；解压点位于**镜像内嵌数据**：`813E166C`（flag=1）与 `813E1ABC`（flag=3）；Huffman 阶段 payload 在 `src+0x20`，其头 0x410 表 + 输出长度 0x305B=12,379B（很小）。长跑（NESTED_UNTIL=300M，预算 400M）推进到 blk≈30.4M 后死循环：`[WD] pcring: 811DFA3C 811DFA0E 811DFA3C 811DFA0E … (3040 万块循环)`；该循环退出条件为"未使用节点计数(r8) 达到剩余计数(r9/sb=0x100)"，r8 仅在 `node[+0x440]==-1` 时自增 → 若 256 节点数组的 +0x440 标记不满足，则任何实现都会死循环 ⇒ 我们的节点数组/栈内容异常。T682A 尾巴显示该代码 `sp=8484EDD0`（heap/线程栈，非 fiber 栈 82EFFF28）、`r14=0x726F6C6F("olor" 文本数据)`。另：`[T682A]` 旧探针在长跑中产生 178 万行日志，已改为仅前 3 次触发（加速后续运行）
 | M1133 | §18.4678: ★★★★★★★★★ **Huffman 循环状态探针结果：健康起步（sb=0x100，r8=0..4，节点标记=-1）→ 后续某次迭代 sb 变为 0x11、r8 变成 fiber 相关地址（0x848463E7）、r7/r4 走出 0x3800 节点数组 → 最终 BADMEM va=0xB0000000（block=0x811DFA0E 循环越界崩溃）**。另一调用出现 sb=0xFF 健康递减（说明外层次数递减正常）。**移除 P5D_THRPUMP 后腐蚀依旧**（非线程泵导致）。新增探针：`[HUFFLOOP]`（811DFA0E 状态/节点标记采样）、`[HUFFBAD]`（r9!=0x100 即报）、`[HUFF]`/`[LZ]`/`[DECOMP]` 解压入口；`[T682A]` 旧探针已限流（前 3 次触发）
 | M1134 | §18.4679: ★★★★★★★★★ **HUFFSB/HUFFBAD2 边界探针：外层 sb 每次减 1（0x100→0xE9…）、内层每趟从 r8=0/r7=0/r4=sp 重新扫描 → 循环前半段完全健康；扫描会合法越过 256 节点（r7=0x101、r4=sp+0x3838≈84852608，此时 r8=0xFD 逼近 sb=0xFE）→ 节点表中节点数可能 >256（树 2N-1 节点/数组更大），0x3800 不是硬边界；真正的破坏发生在更多趟之后（sb 降到 0x11 时 r8=0x848463E7、r7/r4 大幅越界）→ BADMEM va=0xB0000000**。新增探针：`[HUFFSB]`（sb 变化 + 16 条 pc ring）、`[HUFFBAD2]`（r8>0x100 或 r4>sp+0x3800 时打印 40 条 pc ring + 16 条 HLE stub ring）；确认扫描前半程 ring 模式恒为 `811DFA0E→811DFA3C→811DFA4C→811DFA46→811DFA22→811DFA18`（选择排序内层），健康
+| M1135 | §18.4680: ★★★★★★★★★ **PASSSUM 每趟汇总证明 Huffman 选择排序前 239 趟完全健康（r8 恰好等于 sb、r4 每趟 +0x38、r7=0x100+趟数），卡死发生在第 240 趟（sb=0x11）的内层扫描**。PASSSUM 数据：#1 sb=0x100/r8=0x100/r7=0x100/r4=sp+0x3800；#239 sb=0x12/r8=0x12/r7=0x1EE/r4=sp+0x6BD0（仍在 0x7420 栈帧内，健康）；**第 240 趟（sb=0x11）的内层扫描不再收敛**（HUFFLOOP 采样 r8 变成 fiber 指针等）→ 最终 BADMEM 0xB0000000。结论：树构建状态在前 239 趟正确，故障点在"剩余 17 个节点"这一趟——扫描走到节点表/帧边界之外的脏数据，`node[+0x440] != -1` 使 r8 计数停止、循环永不退出
+m1224 证据（`m1224_passsum_key.txt`）：
+```
+[PASSSUM] #1   sb=00000100 r8=00000100 r7=00000100 r4=848525D0 sp=8484EDD0 ring: 811DFA62 811DFA44 811DFA3C 811DFA4C 811DFA46 811DFA22 811DFA18 811DFA0E …
+[PASSSUM] #2   sb=000000FF r8=000000FF r7=00000101 r4=84852608 …
+[PASSSUM] #3   sb=000000FE r8=000000FE r7=00000102 r4=84852640 …
+…
+[PASSSUM] #238 sb=00000013 r8=00000013 r7=000001ED r4=848559A8 …
+[PASSSUM] #239 sb=00000012 r8=00000012 r7=000001EE r4=848559E0 …     ← 最后一趟健康
+（之后无 #240；停在 sb=0x11 的内层扫描）
+[HUFFLOOP] n=200000 r9=00000011 r8=848463E7 r7=848612C6 r4=84E33E20  ← 第 240 趟内层失控
+[BADMEM] guest va=0xB0000000 unmapped block=0x811DFA0E tid=0 stub=812B1810
+```
+**分析**：
+- 前 239 趟：每趟结束 r8 精确等于 sb（扫描找到全部未用节点），r4 每趟只前进 1×0x38（r7=0x100+趟数），r4 最大到 sp+0x1EE*0x38=sp+0x6BD0 < 帧顶 0x7420 → **状态完全正确**；
+- 第 240 趟 sb=0x11（剩 17 个节点）：内层扫描不再收敛，r8 被脏数据污染（采样值 0x848463E7 等）、r4 一路走出节点表/栈帧 → BADMEM 0xB0000000；
+- 推断：第 240 趟扫描越过了节点表有效区（或帧内后续数组），读到 `node[+0x440] != -1` 的脏数据后 r8 不再增长、`while (sb > r8)` 永真；真实节点表容量/边界应与"趟数达到 sb=1"一致（若表 511 节点，r4 上限约 sp+0x6F38，第 255 趟附近正好触顶）——需确认第 240 趟 r4 起点的实际表边界
+**NEXT**：
+```
+① 加"第 240 趟内层采样"探针：当 sb==0x11 时，每 1000 次迭代打印（r4,r7,r8、[r4+0x440]、sp 相对偏移），前 200 条；
+   确认扫描从 r4=sp+0x6FC0 附近开始后第几个节点越过表尾（表尾=511*0x38 或 0x6F38）
+② 在 811DFA0E 用 r4 相对和 sb 判定"越过表尾"时打印 40 条 pc ring + HLE ring，确认是 guest 逻辑还是被 HLE 改写
+③ 反汇编/核对节点表真实容量（初始化循环步长 0x70×2 数组、0x38 扫描数组、frame 0x7420 的布局）
+④ 修复后解压完成 → BeginScene/帧循环
+```
+验证：`m1224_passsum_key.txt`、`m1223_boundary_key.txt`、`m1222_nothrpump_key.txt`、`lzdec_4676.txt`、`[TABLE] blocks=230291`。 |
+| §18.4680 | PASSSUM per-pass summary proves the Huffman selection sort is completely healthy for the first 239 passes (r8 exactly equals sb, r4 advances 0x38 per pass, r7=0x100+pass); the hang happens in pass 240 (sb=0x11) inner scan. PASSSUM data: #1 sb=0x100/r8=0x100/r7=0x100/r4=sp+0x3800; #239 sb=0x12/r8=0x12/r7=0x1EE/r4=sp+0x6BD0 (still inside the 0x7420 frame, healthy); pass 240 (sb=0x11) inner scan no longer converges (HUFFLOOP sampling shows r8 becoming a fiber pointer etc.) -> final BADMEM 0xB0000000. Conclusion: tree-build state is correct for the first 239 passes; the failure is exactly the pass with 17 nodes left - the scan runs into dirty data beyond the node table/frame boundary where node[+0x440] != -1 stops r8 from counting, so the loop never exits. '
+       'm1224 evidence: [PASSSUM] #1 sb=00000100 r8=00000100 r7=00000100 r4=848525D0 sp=8484EDD0 ring 811DFA62 811DFA44 811DFA3C 811DFA4C 811DFA46 811DFA22 811DFA18 811DFA0E; #2 sb=000000FF r8=000000FF r7=00000101 r4=84852608; #3 sb=000000FE r8=000000FE r7=00000102 r4=84852640; ... #238 sb=00000013 r8=00000013 r7=000001ED r4=848559A8; #239 sb=00000012 r8=00000012 r7=000001EE r4=848559E0 (last healthy pass, then no #240; stuck in sb=0x11 inner scan); [HUFFLOOP] n=200000 r9=00000011 r8=848463E7 r7=848612C6 r4=84E33E20 (pass 240 inner scan runs away); [BADMEM] va=0xB0000000 block=0x811DFA0E tid=0 stub=812B1810. '
+       'Analysis: for the first 239 passes each pass ends with r8 exactly equal to sb (the scan found all unused nodes), r4 advances only 1x0x38 per pass (r7=0x100+pass), max r4=sp+0x1EE*0x38=sp+0x6BD0 below the frame top 0x7420, so the state is completely correct. Pass 240 with sb=0x11 (17 nodes left): the inner scan no longer converges, r8 gets polluted by dirty data (sampled 0x848463E7 etc.) and r4 walks out of the node table/stack frame -> BADMEM 0xB0000000. Inference: pass 240 scan crosses the valid node-table region (or the arrays after it in the frame), reads dirty data where node[+0x440] != -1 so r8 stops growing and while (sb > r8) is always true; the real node-table capacity/boundary should match "passes run until sb=1" (if the table has 511 nodes, r4 limit is about sp+0x6F38 and the 255th pass would just hit the cap) - need to confirm the actual table boundary at the start of pass 240. '
+       'NEXT: (1) add a "pass 240 inner sampling" probe: when sb==0x11 print (r4, r7, r8, [r4+0x440], sp-relative offset) every 1000 iterations for the first 200 entries, to confirm from which node the scan crosses the table end after starting near r4=sp+0x6FC0 (table end = 511*0x38 or 0x6F38); (2) at 811DFA0E print a 40-entry pc ring + HLE ring when the r4 offset/sb check says the table end is crossed, to confirm whether guest logic or an HLE rewrite is responsible; (3) disassemble/verify the real node-table capacity (initialization loop stride 0x70x2 arrays, 0x38 scan array, 0x7420 frame layout); (4) after the fix decompression completes -> BeginScene/frame loop. '
+       'Verification: m1224_passsum_key.txt, m1223_boundary_key.txt, m1222_nothrpump_key.txt, lzdec_4676.txt, [TABLE] blocks=230291. |
 m1223 证据（`m1223_boundary_key.txt`）：
 ```
 [HUFF] #0 src=813E1ADC dst=85299BE0 lr=811DFB8A sp=848561F0
@@ -503055,3 +503086,39 @@ LOOKUP: M1133 Huffman loop HUFFLOOP HUFFBAD probes sb 0x100 0x11 r8 fiber pointe
 ANTI-FORGETTING ENTRY. Keywords: M1134 HUFFSB/HUFFBAD2 boundary probes - outer sb decrements by 1 per pass (0x100->0xE9) and inner scan restarts each pass from r8=0/r7=0/r4=sp, so the first half of the loop is healthy; the scan legitimately runs past 256 nodes (r7=0x101, r4=sp+0x3838=84852608 while r8=0xFD approaches sb=0xFE) so the node table has more than 256 nodes and 0x3800 is not a hard boundary; real corruption happens after many more passes (sb drops to 0x11, r8=0x848463E7 fiber object pointer, r7/r4 far out of bounds) -> BADMEM va=0xB0000000. New probes [HUFFSB] (sb change + 16-entry pc ring) and [HUFFBAD2] (r8>0x100 or r4>sp+0x3800 -> 40-entry pc ring + 16 HLE stub ring); healthy ring pattern is 811DFA0E->811DFA3C->811DFA4C->811DFA46->811DFA22->811DFA18. Evidence: [HUFF] #0 src=813E1ADC dst=85299BE0 lr=811DFB8A sp=848561F0; [HUFFSB] FFFFFFFF->00000100 r8=0 r7=0 r4=8484EDD0 ring 811DFA0E 811DFA08 811DF9FA 811DF9EC 811DF9A8; 00000100->000000FF r8=0 r7=0 r4=8484EDD0 ring 811DFA0E 811DFA08 811DF9FA 811DFA62 811DFA44 811DFA3C 811DFA4C 811DFA46 811DFA22 811DFA18; 24 healthy decrements to 0xE9; [HUFFBAD2] r9=000000FE r8=000000FD r7=00000101 r4=84852608 sp=8484EDD0 lr=0 ring 811DFA0E 811DFA3C 811DFA4C 811DFA46 811DFA22 811DFA18 (scan reached 257 nodes, still converging); [HUFFLOOP] n=200000 r9=00000011 r8=848463E7 r7=848612C6 r4=84E33E20 (later pass runs away); n=13000000 r9=00000011 r8=8484640B r7=854962C6 r4=AF9CBE20 lr=726F6C6F; [BADMEM] va=0xB0000000 block=0x811DFA0E tid=0 stub=812B1810. Analysis: outer sb decreases 1 per pass for 255 passes, inner scan restarts each pass (matches decompiled do{...}while(1<iVar13) / do{...}while(iVar11<iVar13)); inner scan can reach r7=0x101 with r4=sp+0x3838, i.e. it exceeds 256x0x38 (tree really has >=257 entries; the 0x7420 frame has room so r4 up to sp+0x38xx is legal) - so the 0x3800 threshold was too tight and the 5 HUFFBAD2 hits are legal near-convergence crossings, not the corruption point. Corruption after many healthy passes: when sb=0x11, r8=0x848463E7 (fiber object pointer) and r7/r4 run far out of bounds - some inner/outer transition polluted r8/r7/r4, or a scan walked past the whole stack frame into heap/other context and read garbage that skewed the r8 count (livelock + overrun). NEXT: follow sb 0xE9->0x11 over 200+ passes with HUFFSB recording r8 final/max r7 per pass to find the pass where max r7 exceeds array capacity; confirm real node-array capacity by disassembly (tree 2N-1=511; frame 0x7420 fits ~500 -> r4 limit about sp+0x6F80); add a per-pass summary probe at 811DFA62 (sb/r8/r7/sum) to find the first non-converging pass; dump the initial 256 node +0x440/+0x414/+0x448 values after tree build; after the fix decompression completes -> BeginScene/frame loop. Verification: m1223_boundary_key.txt, m1222_nothrpump_key.txt, m1221_huffbad_key.txt, lzdec_4676.txt, [TABLE] blocks=230291.
 
 LOOKUP: M1134 HUFFSB HUFFBAD2 probes outer sb decrement 0x100 0xE9 healthy inner rescan r8 0 r7 0 r4 sp, scan past 256 nodes r7 0x101 r4 sp+0x3838 tree 2N-1 511 0x7420 frame capacity limit sp+0x6F80, corruption later sb 0x11 r8 fiber pointer 848463E7 r7 r4 out of bounds BADMEM 0xB0000000 block 811DFA0E, healthy ring 811DFA0E 811DFA3C 811DFA4C 811DFA46 811DFA22 811DFA18, next follow passes record r8 final max r7 per-pass probe 811DFA62 dump node markers 0x440 0x414 0x448 -> 18.4678 [relevant: Huffman loop probe], 18.4677 [relevant: node array], 18.4676 [relevant: decompressor]
+### 18.4680 PORT M1135: PASSSUM——前 239 趟完全健康，卡死发生在第 240 趟（sb=0x11）内层扫描
+
+1) PASSSUM 数据（m1224）：
+```
+[PASSSUM] #1   sb=00000100 r8=00000100 r7=00000100 r4=848525D0 sp=8484EDD0
+[PASSSUM] #2   sb=000000FF r8=000000FF r7=00000101 r4=84852608
+[PASSSUM] #3   sb=000000FE r8=000000FE r7=00000102 r4=84852640
+…
+[PASSSUM] #238 sb=00000013 r8=00000013 r7=000001ED r4=848559A8
+[PASSSUM] #239 sb=00000012 r8=00000012 r7=000001EE r4=848559E0   ← 最后健康趟
+（之后无 #240：卡在 sb=0x11 的内层扫描）
+[HUFFLOOP] n=200000 r9=00000011 r8=848463E7 r7=848612C6 r4=84E33E20  ← 第 240 趟失控
+[BADMEM] guest va=0xB0000000 unmapped block=0x811DFA0E tid=0 stub=812B1810
+```
+2) 结论：
+```
+前 239 趟：r8 精确等于 sb（每趟找齐全部未用节点）、r4 每趟仅 +1×0x38（r7=0x100+趟数）、
+          r4 最大 sp+0x1EE*0x38=sp+0x6BD0 < 帧顶 0x7420 → 树构建状态完全正确
+第 240 趟：sb=0x11（剩 17 节点）时内层扫描不收敛，r8 被脏数据污染（采样 0x848463E7）、
+          r4 走出节点表/栈帧 → BADMEM 0xB0000000
+推断：第 240 趟扫描越过节点表有效区/帧内后续数组，读到 node[+0x440] != -1 的脏数据 →
+      r8 停止增长、while (sb > r8) 永真
+```
+3) NEXT：
+```
+① "第 240 趟内层采样"探针：sb==0x11 时每 1000 次迭代打印（r4,r7,r8,[r4+0x440]、sp 相对偏移）前 200 条；
+   确认扫描从 r4≈sp+0x6FC0 起第几个节点越过表尾（表尾 511×0x38=0x6F38）
+② 811DFA0E 在"越过表尾"时打印 40 条 pc ring + HLE ring，确认 guest 逻辑 vs HLE 改写
+③ 反汇编/核对节点表真实容量（初始化循环步长 0x70×2 数组、0x38 扫描数组、frame 0x7420 布局）
+④ 修复后解压完成 → BeginScene/帧循环
+```
+验证：`m1224_passsum_key.txt`、`m1223_boundary_key.txt`、`m1222_nothrpump_key.txt`、`lzdec_4676.txt`、`[TABLE] blocks=230291`。
+
+ANTI-FORGETTING ENTRY. Keywords: M1135 PASSSUM per-pass summary - Huffman selection sort completely healthy for first 239 passes (r8 exactly equals sb, r4 advances 0x38 per pass, r7=0x100+pass), hang starts in pass 240 with sb=0x11. Data: #1 sb=0x100 r8=0x100 r7=0x100 r4=848525D0 sp=8484EDD0; #2 sb=0xFF r8=0xFF r7=0x101 r4=84852608; #238 sb=0x13 r8=0x13 r7=0x1ED r4=848559A8; #239 sb=0x12 r8=0x12 r7=0x1EE r4=848559E0 (last healthy pass, no #240 after it); [HUFFLOOP] n=200000 r9=0x11 r8=848463E7 r7=848612C6 r4=84E33E20 (pass 240 inner scan runs away); [BADMEM] va=0xB0000000 block=0x811DFA0E tid=0 stub=812B1810. Analysis: for the first 239 passes each pass ends with r8 exactly equal to sb (scan found all unused nodes), r4 advances only 1x0x38 per pass (r7=0x100+pass), max r4=sp+0x1EE*0x38=sp+0x6BD0 below frame top 0x7420 => tree-build state is completely correct. Pass 240 (sb=0x11, 17 nodes left) inner scan no longer converges, r8 gets polluted (0x848463E7) and r4 walks out of the node table/stack frame -> BADMEM 0xB0000000. Inference: pass 240 scan crosses the valid node-table region (or arrays after it in the frame), reads dirty data where node[+0x440] != -1 so r8 stops growing and while (sb > r8) is always true; real table capacity/boundary should match passes running until sb=1 (if table has 511 nodes r4 limit about sp+0x6F38 and pass 255 would just hit it) - need to confirm actual table boundary at pass 240 start. NEXT: add pass-240 inner sampling probe (when sb==0x11 print r4/r7/r8/[r4+0x440]/sp-relative offset every 1000 iterations for first 200 entries) to confirm the crossing node near r4=sp+0x6FC0 (table end 511*0x38=0x6F38); print 40-entry pc ring + HLE ring at the crossing; disassemble/verify real node-table capacity (init loop stride 0x70x2 arrays, 0x38 scan array, 0x7420 frame layout); after the fix decompression completes -> BeginScene/frame loop. Verification: m1224_passsum_key.txt, m1223_boundary_key.txt, m1222_nothrpump_key.txt, lzdec_4676.txt, [TABLE] blocks=230291.
+
+LOOKUP: M1135 PASSSUM first 239 passes healthy r8 equals sb r4 +0x38 per pass r7 0x100+pass r4 848559E0 sp 8484EDD0, hang pass 240 sb 0x11 inner scan r8 848463E7 r7 848612C6 r4 84E33E20 BADMEM 0xB0000000 block 811DFA0E, tree-build state correct, node table capacity 511 nodes 511x0x38 0x6F38 frame 0x7420, next pass-240 inner sampling probe r4 r7 r8 node+0x440 crossing table end pc ring HLE ring, disassemble table layout init stride 0x70x2 arrays, fix then decompression -> BeginScene -> 18.4679 [relevant: boundary probes], 18.4678 [relevant: Huffman loop probes], 18.4677 [relevant: node array]
