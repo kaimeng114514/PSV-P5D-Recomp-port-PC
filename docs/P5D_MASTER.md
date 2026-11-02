@@ -1148,6 +1148,41 @@
 | M1130 | §18.4675: ★★★★★★★★★★ **哨兵 0xFFFFFFFD 根因 = AOT 缺失间接调用目标 0x8122A9A8（又一函数边界遗漏）**：`[INDIRECT-MISS] reg3=8122A9A9 target=8122A9A8 block=81279C1C` → `id_reg()` 未找到块时返回 0xFFFFFFFD（harness 行 5186-5188）→ pc=FFFFFFFD→"no block" livelock。反汇编确认 0x8122A9A8 是合法 Thumb 函数（`push {r4,lr}`），位于 FUN_8122A7BC（end 0x8122A9A6）与 FUN_8122A9D0 之间的 0x28 字节缝隙，未收录函数边界。用同管线生成 **batch_037**（5 blocks，0x8122A9A8..0x8122A9D0）并注册（ALL_FINDERS[38]）→ `[TABLE] blocks=230291`；**运行结果显示 [INDIRECT-MISS]=0、[TBB-MISS]=0、[SENTINEL]=0、[FIBER-EXEC]=0（哨兵 livelock 消除）**，且执行进入 GXM 子系统（新探针 [ABIVFMT]×22,770 / [GXMABI]×4,008 / [GBACK]×400 / [ABIVARG]×120 / [VCNT]×120 首次触发），线程数 16→17、flags=3；新卡点：blk=811DFDC8 循环（hle_ring `812B2AE0@8127BE56` 事件标志 set / `812B1810@811539FE`）
 | M1131 | §18.4676: ★★★★★★★★★★ **batch_037 修复后执行大跨越：GXM 子系统完整初始化（27 个 GXM 函数），随后进入游戏内置 Huffman+LZ 解压子系统（FUN_811DF434 调度器 / FUN_811DF91A Huffman / FUN_811DFD94 LZ77），长跑在 1.5M 块触发 NESTED_UNTIL 截断后进入"仅泵线程、0 块执行"的假死状态**。反编译确认：`FUN_811DF434`（0x20 字节头；bit1→Huffman：`FUN_811DFB96`/`FUN_811DF91A` 建 256 项 Huffman 表；bit0→LZ77：`FUN_811DFD94` 字典回拷），是游戏资源解压器；`[FIBSW]` fpc 覆盖 811EFB3E→812B12A0（GXM）说明解压与 GXM 参数绑定交替推进
 | M1132 | §18.4677: ★★★★★★★★★★ **解压容器格式完全解码（ELF 直读）+ 长跑 m1219 卡在 FUN_811DF91A 第二阶段的"选择扫描"死循环（811DFA0E↔811DFA3C）；线索指向该解压运行在非 fiber 栈（sp=8484EDD0）且 0x7420 栈帧/256×0x38 节点数组可能越界**。容器头：magic `0x474C4830`（bytes "0HLG"）/`0x47484D30`（"0MHG"），`[+8]=flags`（1=LZ77，3=Huffman+LZ）、`[+0xC]/[+0x10]`=尺寸字段；解压点位于**镜像内嵌数据**：`813E166C`（flag=1）与 `813E1ABC`（flag=3）；Huffman 阶段 payload 在 `src+0x20`，其头 0x410 表 + 输出长度 0x305B=12,379B（很小）。长跑（NESTED_UNTIL=300M，预算 400M）推进到 blk≈30.4M 后死循环：`[WD] pcring: 811DFA3C 811DFA0E 811DFA3C 811DFA0E … (3040 万块循环)`；该循环退出条件为"未使用节点计数(r8) 达到剩余计数(r9/sb=0x100)"，r8 仅在 `node[+0x440]==-1` 时自增 → 若 256 节点数组的 +0x440 标记不满足，则任何实现都会死循环 ⇒ 我们的节点数组/栈内容异常。T682A 尾巴显示该代码 `sp=8484EDD0`（heap/线程栈，非 fiber 栈 82EFFF28）、`r14=0x726F6C6F("olor" 文本数据)`。另：`[T682A]` 旧探针在长跑中产生 178 万行日志，已改为仅前 3 次触发（加速后续运行）
+| M1133 | §18.4678: ★★★★★★★★★ **Huffman 循环状态探针结果：健康起步（sb=0x100，r8=0..4，节点标记=-1）→ 后续某次迭代 sb 变为 0x11、r8 变成 fiber 相关地址（0x848463E7）、r7/r4 走出 0x3800 节点数组 → 最终 BADMEM va=0xB0000000（block=0x811DFA0E 循环越界崩溃）**。另一调用出现 sb=0xFF 健康递减（说明外层次数递减正常）。**移除 P5D_THRPUMP 后腐蚀依旧**（非线程泵导致）。新增探针：`[HUFFLOOP]`（811DFA0E 状态/节点标记采样）、`[HUFFBAD]`（r9!=0x100 即报）、`[HUFF]`/`[LZ]`/`[DECOMP]` 解压入口；`[T682A]` 旧探针已限流（前 3 次触发）
+m1220/m1221/m1222 证据（`m1220_huffloop_key.txt`、`m1221_huffbad_key.txt`、`m1222_nothrpump_key.txt`）：
+```
+[HUFF] #0 src=813E1ADC dst=85299BE0 lr=811DFB8A sp=848561F0
+[HUFFLOOP] n=1 r9(sb)=00000100 r8=00000000 r7=00000000 r4=8484EDD0 node0+440=FFFFFFFF node1+440=FFFFFFFF node2+440=FFFFFFFF
+[HUFFLOOP] n=2 r9=00000100 r8=00000001 r7=00000001 r4=8484EE08 …（健康递增）
+[HUFFLOOP] n=5 r9=00000100 r8=00000004 r7=00000004 r4=8484EEB0
+[HUFFLOOP] n=200000 r9=00000011 r8=848463E7 r7=848612C6 r4=84E33E20 node0+440=84E3385C …（状态已坏）
+[HUFFLOOP] n=400000 r9=00000011 r8=848463F5 r7=84892006 r4=858E2420 node*=00000000 lr=FF404040
+[HUFFLOOP] 最后 n=13000000 r9=00000011 r8=8484640B r7=854962C6 r4=AF9CBE20 lr=726F6C6F
+[HUFFBAD] #0 r9=000000FF r8=00000000 r7=00000000 r4=8484EDD0 sp=8484EDD0 lr=000003EB curfib=848463A0 thr=00000000
+[HUFFBAD] #4 r9=000000FF r8=00000003 r7=00000004 …（另一调用，sb=0xFF 递减、健康）
+[BADMEM] guest va=0xB0000000 unmapped block=0x811DFA0E tid=0 stub=812B1810
+        ctx: in_fex=1 in_fiber_exec=1 pumping2=0 cur=848463A0 blk=811DFA0E total=30444942 r5=84B8DF9C r7=854B2872 sp=8484EDD0 lr=726F6C6F
+        fe_ring: 811DFA3C/848463A0/8484EDD0 ↔ 811DFA0E/848463A0/8484EDD0（死循环后崩溃）
+（m1222 去掉 P5D_THRPUMP 后：HUFFLOOP/HUFFBAD/BADMEM 与 m1221 相同 → 排除线程泵作为腐蚀源）
+```
+**关键观察**：
+- 循环入口 sp=848561F0（HLE 声音线程栈区），prologue 后 sp=8484EDD0；节点数组 256×0x38=0x3800 位于 [sp, sp+0x3800)=[8484EDD0,848525D0)；**lr=848525D0 正是 sp+0x3800**（数组末尾/树根指针），说明结构布局正确；
+- 一个调用 sb=0xFF→递减、r8 正常递增（健康）；另一个调用 sb=0x11 且 r8 为 fiber 相关地址（0x848463E7=0x848463A0|0x47）→ **r8 被写成 fiber 对象指针**，随后循环无法收敛、r4 走出数组 → BADMEM 0xB0000000 崩溃；
+- 由于 `cmp sb,r8`（r9-r8 有符号 bgt）在 sb=0x11、r8=0x848463E7 时应为假（应退出），却继续执行 → **要么 r9/r8 在循环中途被再次改写，要么块 811DFA3C 的 AOT 语义与反汇编不符**（已核对 811DFA0E/18/22/3C/4C AOT 与反汇编一致；cond_gt/setf_sub 实现为标准 ARM 语义）。
+**NEXT**：
+```
+① 在 811DFA0E 增加"坏事件"探针：当 r8>0x100 或 r4>sp+0x3800 时打印完整 40 条 pc ring + 最近 HLE stub ring + fiber/thread 状态，
+   定位从健康到损坏的精确边界与前置块（判断是 guest 代码自身写坏，还是 HLE 回调/上下文切换改写 r8/r9）
+② 在 811DFA3C 打印每次循环的 sb/r8 差值前 40 次，与 HUFFBAD 调用交叉比对
+③ 检查该函数调用入口是否在 HLE 声音线程栈上（sp=848561F0）而其它 fiber 用 82EFxxxx 栈 → 若栈/上下文归属混乱需修正
+④ 修复后解压完成 → BeginScene/帧循环；随后用同一探针体系继续推进 GXM 绘制统计
+```
+验证：`m1222_nothrpump_key.txt`、`m1221_huffbad_key.txt`、`m1220_huffloop_key.txt`、`lzdec_4676.txt`、`[TABLE] blocks=230291`。 |
+| §18.4678 | Huffman-loop state probe results: healthy start (sb=0x100, r8=0..4, node markers -1) then at some later iteration sb becomes 0x11, r8 becomes a fiber-related address (0x848463E7), r7/r4 walk past the 0x3800 node array, and finally BADMEM va=0xB0000000 (block=0x811DFA0E loop overrun crash). Another invocation shows sb=0xFF decreasing healthily (outer-count decrement works). Removing P5D_THRPUMP does NOT change the corruption (not caused by the thread pump). New probes: [HUFFLOOP] (811DFA0E state/node-marker sampling), [HUFFBAD] (fires when r9!=0x100), [HUFF]/[LZ]/[DECOMP] decompressor entries; the legacy [T682A] probe was capped (first 3 triggers). '
+       'm1220/m1221/m1222 evidence: [HUFF] #0 src=813E1ADC dst=85299BE0 lr=811DFB8A sp=848561F0; [HUFFLOOP] n=1 r9=00000100 r8=00000000 r7=00000000 r4=8484EDD0 node0+440=FFFFFFFF node1+440=FFFFFFFF node2+440=FFFFFFFF; n=2 r9=00000100 r8=00000001 r7=00000001 r4=8484EE08; n=5 r9=00000100 r8=00000004 r7=00000004 r4=8484EEB0; n=200000 r9=00000011 r8=848463E7 r7=848612C6 r4=84E33E20 node0+440=84E3385C; n=400000 r9=00000011 r8=848463F5 r7=84892006 r4=858E2420 node*=00000000 lr=FF404040; last n=13000000 r9=00000011 r8=8484640B r7=854962C6 r4=AF9CBE20 lr=726F6C6F; [HUFFBAD] #0 r9=000000FF r8=00000000 r7=00000000 r4=8484EDD0 sp=8484EDD0 lr=000003EB curfib=848463A0 thr=00000000; [HUFFBAD] #4 r9=000000FF r8=00000003 r7=00000004 (another invocation, sb=0xFF decreasing, healthy); [BADMEM] guest va=0xB0000000 unmapped block=0x811DFA0E tid=0 stub=812B1810, ctx in_fex=1 in_fiber_exec=1 pumping2=0 cur=848463A0 blk=811DFA0E total=30444942 r5=84B8DF9C r7=854B2872 sp=8484EDD0 lr=726F6C6F, fe_ring 811DFA3C/848463A0/8484EDD0 <-> 811DFA0E/848463A0/8484EDD0; m1222 without P5D_THRPUMP: same HUFFLOOP/HUFFBAD/BADMEM => thread pump excluded as the corruption source. '
+       'Key observations: loop-entry sp=848561F0 (HLE sound-thread stack region), after prologue sp=8484EDD0; the node array 256x0x38=0x3800 occupies [sp, sp+0x3800)=[8484EDD0,848525D0) and lr=848525D0 equals sp+0x3800 (array end/tree-root pointer) so the layout is correct. One invocation has sb=0xFF decreasing and r8 incrementing normally (healthy); another has sb=0x11 and r8 holding a fiber-related address (0x848463E7=0x848463A0|0x47) -> r8 was written with a fiber object pointer, after which the loop cannot converge and r4 walks out of the array -> BADMEM 0xB0000000. Since cmp sb,r8 (r9-r8 signed bgt) should be false when sb=0x11 and r8=0x848463E7 (loop should exit) yet execution continues, either r9/r8 are overwritten again mid-loop or the AOT semantics of block 811DFA3C differ from the disassembly (811DFA0E/18/22/3C/4C AOT were checked to match the disassembly, and cond_gt/setf_sub implement standard ARM semantics). '
+       'NEXT: (1) add a "bad event" probe at 811DFA0E: when r8>0x100 or r4>sp+0x3800 print a full 40-entry pc ring + recent HLE stub ring + fiber/thread state to pinpoint the exact healthy->corrupt boundary and preceding blocks (guest self-write vs HLE callback/context switch rewriting r8/r9); (2) print the sb/r8 difference for the first 40 iterations at 811DFA3C and cross-check against the HUFFBAD invocations; (3) check whether this function invocation runs on the HLE sound-thread stack (sp=848561F0) while other fibers use 82EFxxxx stacks -> if stack/context ownership is mixed, fix it; (4) after the fix decompression completes -> BeginScene/frame loop; then keep using the same probe system to advance GXM draw statistics. '
+       'Verification: m1222_nothrpump_key.txt, m1221_huffbad_key.txt, m1220_huffloop_key.txt, lzdec_4676.txt, [TABLE] blocks=230291. |
 m1218/m1219 证据（`m1218_dec_key.txt`、`m1219_long2_key.txt`）：
 ```
 [DECOMP] #0 p=84856248 src=813E166C dst=8528D050 lr=811C4D0E   ← 镜像内嵌资源
@@ -502915,3 +502950,43 @@ Huffman payload @ src+0x20（813E1ADC）: 0x410 字节码长表 + 输出长度 [
 ANTI-FORGETTING ENTRY. Keywords: M1132 decompressor container format decoded + long-run livelock in FUN_811DF91A selection scan 811DFA0E<->811DFA3C. Container: magic 0x474C4830 ("0HLG") / 0x47484D30 ("0MHG"), [+8]=flags (1=LZ77, 3=Huffman+LZ), [+0xC]/[+0x10]=sizes; decompression sites are image-embedded data: 813E166C flag=1 (+0xC=0x480 +0x10=0x44D) and 813E1ABC flag=3 (+0xC=0x4080 +0x10=0x241C); Huffman payload at src+0x20 (813E1ADC) with 0x410-byte code-length table and output length 0x305B=12,379 bytes. m1219 long run (NESTED_UNTIL=300M, budget 400M) advanced to blk~30,380,000 then livelocked between 811DFA0E and 811DFA3C: [WD] pcring 811DFA3C 811DFA0E 811DFA3C 811DFA0E, [WD] loop=1 cnt=30379999/302124814/2097/0 total=30380000 blk=8127B370 fex=1; [T682A] 811DFA3C r0=848463A0 r14=726F6C6F sp=8484EDD0; [PUMP] #248600 blocks=0 blk=30388224; [FRAMECB]/[UPD]/[POST]=0; [IO]=6; [CRILOG]=0. Disassembly: 811DFA0E ldr.w r2,[r4,#0x440] / cmp -1 / bne 811DFA3C; 811DFA18 add.w r8,r8,#1 (only when node[+0x440]==-1); 811DFA3C adds r7,#1 / adds r4,#0x38 / cmp sb,r8 / bgt 811DFA0E; AOT blocks 811DFA0E/18/22/3C/4C verified to match (811DFA22 rsb r2,r6,r6,lsl #3 -> (r6<<3)-r6 correct). Loop = while (sb > r8) scan 256 nodes, r8 increments only for node[+0x440]==-1; sb=r9=0x100 from stack [sp+0x73E0] (AOT 811DF966 writes 0x100, 811DF9EC reads back correctly), so if node markers are wrong r8 never reaches 256 -> any implementation livelocks => our stack/node-array contents are wrong. The function has a 0x7420-byte stack frame and a 256x0x38=0x3800 node array on the stack; the observed sp=8484EDD0 is heap/thread stack (not fiber stack 82EFFF28) => suspect stack overflow or context switch overwriting the node array. [T682A] legacy probe produced 1.78M log lines and was capped to 3 trigger windows to speed up future runs. NEXT: add loop-count probes at 811DFA0E/811DFA3C printing r9/r8/r7/r4, [r4+0x440], first 4 nodes'' +0x440; inspect the decompression invocation context/stack (entry sp, g_cur_fiber, g_cur_thr; fiber stack vs thread stack) and grow the HLE thread stack (0x40000 -> 0x100000) or force decompression onto the fiber stack; if the node array is overwritten fix context save/restore; then decompression completes -> BeginScene/frame loop. Verification: m1219_long2_key.txt, m1218_dec_key.txt, lzdec_4676.txt, ELF header dumps, [TABLE] blocks=230291.
 
 LOOKUP: M1132 decompressor container 0HLG magic 0x474C4830 0MHG 0x47484D30 flags LZ77 Huffman+LZ sites 813E166C flag1 813E1ABC flag3 Huffman payload 813E1ADC 0x410 table output 0x305B 12379, long run m1219 NESTED_UNTIL 300M budget 400M blk 30.38M livelock 811DFA0E 811DFA3C selection scan node +0x440 r8 r9 sb 0x100 stack sp=8484EDD0 thread stack not fiber 0x7420 frame 256x0x38 array, AOT blocks verified matching rsb shift, T682A log capped 3 triggers, next loop probes r9 r8 r7 r4 node markers decompression context sp g_cur_fiber g_cur_thr grow thread stack 0x40000 0x100000 or force fiber stack -> 18.4676 [relevant: decompressor introduced], 18.4675 [relevant: batch_037], 18.4670 [relevant: fiber stack]
+### 18.4678 PORT M1133: Huffman 循环状态探针——健康起步后 sb/r8 被破坏，最终 BADMEM 0xB0000000
+
+1) 探针证据（m1220/m1221/m1222）：
+```
+[HUFF] #0 src=813E1ADC dst=85299BE0 lr=811DFB8A sp=848561F0
+[HUFFLOOP] n=1  r9(sb)=00000100 r8=00000000 r7=00000000 r4=8484EDD0 node0+440=FFFFFFFF …
+[HUFFLOOP] n=5  r9=00000100 r8=00000004 r7=00000004 r4=8484EEB0
+[HUFFLOOP] n=200000 r9=00000011 r8=848463E7 r7=848612C6 r4=84E33E20 node0+440=84E3385C ← 状态已坏
+[HUFFLOOP] n=13000000 r9=00000011 r8=8484640B r7=854962C6 r4=AF9CBE20 lr=726F6C6F
+[HUFFBAD] #0 r9=000000FF r8=0 r7=0 r4=8484EDD0 …（另一调用：sb=0xFF 递减、健康）
+[BADMEM] guest va=0xB0000000 unmapped block=0x811DFA0E tid=0 stub=812B1810
+         ctx: in_fex=1 in_fiber_exec=1 cur=848463A0 blk=811DFA0E total=30444942 sp=8484EDD0
+（m1222 去掉 P5D_THRPUMP：腐蚀与崩溃相同 → 排除线程泵）
+```
+2) 结构核对：
+```
+循环入口 sp=848561F0（HLE 声音线程栈区），prologue 后 sp=8484EDD0
+节点数组 [sp, sp+0x3800) = [8484EDD0,848525D0)，lr=848525D0 = 数组末尾/树根指针 → 布局正确
+```
+3) 异常：
+```
+健康调用：sb=0xFF 递减、r8 递增正常
+损坏调用：sb=0x11、r8=0x848463E7（=fiber 对象 0x848463A0|0x47）→ r8 被写成 fiber 指针
+          → 循环不收敛、r4 走出数组 → BADMEM 0xB0000000
+按理 sb=0x11 vs r8=0x848463E7 时 bgt 为假应退出，却继续 → r9/r8 被再次改写，或 811DFA3C 的 AOT 语义有偏差
+（已核对 811DFA0E/18/22/3C/4C 的 AOT 与反汇编一致；cond_gt/setf_sub 为标准 ARM 语义）
+```
+4) NEXT：
+```
+① 811DFA0E "坏事件"探针：r8>0x100 或 r4>sp+0x3800 时打印 40 条 pc ring + HLE stub ring + fiber/thread 状态，
+   定位健康→损坏的精确边界与前置块（guest 自写 vs HLE 回调/上下文切换改写 r8/r9）
+② 811DFA3C 前 40 次打印 sb/r8 差，交叉比对 HUFFBAD
+③ 检查该函数是否运行在 HLE 声音线程栈（sp=848561F0）而其它 fiber 用 82EFxxxx → 栈/上下文归属是否混乱
+④ 修复后解压完成 → BeginScene/帧循环
+```
+验证：`m1222_nothrpump_key.txt`、`m1221_huffbad_key.txt`、`m1220_huffloop_key.txt`、`lzdec_4676.txt`、`[TABLE] blocks=230291`。
+
+ANTI-FORGETTING ENTRY. Keywords: M1133 Huffman loop probe results - healthy start sb=0x100 r8=0..4 node markers -1, then state corruption sb=0x11 r8=848463E7 (fiber-related 848463A0|0x47) r7/r4 walk past the 0x3800 node array, final BADMEM va=0xB0000000 at block 811DFA0E (loop overrun crash). Another invocation shows sb=0xFF decreasing healthily (outer-count decrement works). Removing P5D_THRPUMP does not change the corruption (thread pump excluded). New probes: [HUFFLOOP] at 811DFA0E (r9/r8/r7/r4/node+0x440 sampling), [HUFFBAD] (fires when r9!=0x100), [HUFF]/[LZ]/[DECOMP]; legacy [T682A] capped to 3 triggers. Evidence: [HUFF] #0 src=813E1ADC dst=85299BE0 lr=811DFB8A sp=848561F0; [HUFFLOOP] n=1 r9=0x100 r8=0 r7=0 r4=8484EDD0 node0+440=FFFFFFFF; n=200000 r9=0x11 r8=848463E7 r7=848612C6 r4=84E33E20 node0+440=84E3385C; n=13000000 r9=0x11 r8=8484640B r7=854962C6 r4=AF9CBE20 lr=726F6C6F; [HUFFBAD] #0 r9=0xFF r8=0 r7=0 r4=8484EDD0 sp=8484EDD0 lr=0x3EB curfib=848463A0 thr=0; [BADMEM] va=0xB0000000 block=0x811DFA0E ctx in_fex=1 in_fiber_exec=1 cur=848463A0 total=30444942 sp=8484EDD0 lr=726F6C6F fe_ring 811DFA3C/811DFA0E. Layout check: loop-entry sp=848561F0 (HLE sound-thread stack region), after prologue sp=8484EDD0; node array [sp,sp+0x3800)=[8484EDD0,848525D0], lr=848525D0 = array end/tree-root pointer so layout is correct. Anomaly: healthy invocation sb=0xFF decreasing r8 incrementing; corrupted invocation sb=0x11 r8=fiber pointer 848463E7 -> r8 written with a fiber object pointer, loop cannot converge, r4 walks out of the array -> BADMEM 0xB0000000. Since signed bgt should be false for sb=0x11 vs r8=0x848463E7 yet the loop continues, either r9/r8 are rewritten again mid-loop or block 811DFA3C AOT semantics diverge (811DFA0E/18/22/3C/4C AOT verified to match disassembly; cond_gt/setf_sub are standard ARM semantics). NEXT: add a bad-event probe at 811DFA0E (when r8>0x100 or r4>sp+0x3800 print a 40-entry pc ring + HLE stub ring + fiber/thread state) to find the exact healthy->corrupt boundary and preceding blocks (guest self-write vs HLE callback/context switch rewriting r8/r9); print the sb/r8 difference for the first 40 iterations at 811DFA3C; check whether this function runs on the HLE sound-thread stack (sp=848561F0) while other fibers use 82EFxxxx (mixed stack/context ownership); after the fix decompression completes -> BeginScene/frame loop. Verification: m1222_nothrpump_key.txt, m1221_huffbad_key.txt, m1220_huffloop_key.txt, lzdec_4676.txt, [TABLE] blocks=230291.
+
+LOOKUP: M1133 Huffman loop HUFFLOOP HUFFBAD probes sb 0x100 0x11 r8 fiber pointer 848463E7 r4 node array 0x3800 walk BADMEM 0xB0000000 block 811DFA0E crash, healthy invocation sb 0xFF decreasing, THRPUMP removal no change excluded, entry sp=848561F0 HLE sound-thread stack, prologue sp=8484EDD0 array end 848525D0, AOT blocks verified cond_gt setf_sub standard, next bad-event probe pc ring HLE stub ring exact boundary, mixed stack/context ownership check, then BeginScene frame loop -> 18.4677 [relevant: decompressor + node array], 18.4676 [relevant: NESTED_UNTIL], 18.4673 [relevant: gap fix]
