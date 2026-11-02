@@ -1151,6 +1151,42 @@
 | M1133 | §18.4678: ★★★★★★★★★ **Huffman 循环状态探针结果：健康起步（sb=0x100，r8=0..4，节点标记=-1）→ 后续某次迭代 sb 变为 0x11、r8 变成 fiber 相关地址（0x848463E7）、r7/r4 走出 0x3800 节点数组 → 最终 BADMEM va=0xB0000000（block=0x811DFA0E 循环越界崩溃）**。另一调用出现 sb=0xFF 健康递减（说明外层次数递减正常）。**移除 P5D_THRPUMP 后腐蚀依旧**（非线程泵导致）。新增探针：`[HUFFLOOP]`（811DFA0E 状态/节点标记采样）、`[HUFFBAD]`（r9!=0x100 即报）、`[HUFF]`/`[LZ]`/`[DECOMP]` 解压入口；`[T682A]` 旧探针已限流（前 3 次触发）
 | M1134 | §18.4679: ★★★★★★★★★ **HUFFSB/HUFFBAD2 边界探针：外层 sb 每次减 1（0x100→0xE9…）、内层每趟从 r8=0/r7=0/r4=sp 重新扫描 → 循环前半段完全健康；扫描会合法越过 256 节点（r7=0x101、r4=sp+0x3838≈84852608，此时 r8=0xFD 逼近 sb=0xFE）→ 节点表中节点数可能 >256（树 2N-1 节点/数组更大），0x3800 不是硬边界；真正的破坏发生在更多趟之后（sb 降到 0x11 时 r8=0x848463E7、r7/r4 大幅越界）→ BADMEM va=0xB0000000**。新增探针：`[HUFFSB]`（sb 变化 + 16 条 pc ring）、`[HUFFBAD2]`（r8>0x100 或 r4>sp+0x3800 时打印 40 条 pc ring + 16 条 HLE stub ring）；确认扫描前半程 ring 模式恒为 `811DFA0E→811DFA3C→811DFA4C→811DFA46→811DFA22→811DFA18`（选择排序内层），健康
 | M1135 | §18.4680: ★★★★★★★★★ **PASSSUM 每趟汇总证明 Huffman 选择排序前 239 趟完全健康（r8 恰好等于 sb、r4 每趟 +0x38、r7=0x100+趟数），卡死发生在第 240 趟（sb=0x11）的内层扫描**。PASSSUM 数据：#1 sb=0x100/r8=0x100/r7=0x100/r4=sp+0x3800；#239 sb=0x12/r8=0x12/r7=0x1EE/r4=sp+0x6BD0（仍在 0x7420 栈帧内，健康）；**第 240 趟（sb=0x11）的内层扫描不再收敛**（HUFFLOOP 采样 r8 变成 fiber 指针等）→ 最终 BADMEM 0xB0000000。结论：树构建状态在前 239 趟正确，故障点在"剩余 17 个节点"这一趟——扫描走到节点表/帧边界之外的脏数据，`node[+0x440] != -1` 使 r8 计数停止、循环永不退出
+| M1136 | §18.4681: ★★★★★★★★★★★★ **Huffman 死循环根因找到并修复：`fiber_load` 的 r0 修补分支误伤"恢复的中途上下文"——`if (pc==0x81206BDC || c.r[0] < 0x80000000)` 会把任何 r0<0x80000000 的已保存上下文 r0 改写成 fiber 对象指针**。证据：`[FLOAD-BAD] fiber=848463A0 r0=00000000 r13=8484EDD0 r15=811DFA0E -> repair r0`（正是 huff 循环中途被 fiber 切换保存/恢复的上下文），修 r0=848463A0 后，趟重启 811DF9FA `r7=r0; r8=r7` → r7=r8=0x848463A0（有符号负数），`cmp sb,r8; bgt` 因 sb(0x11) > 负数恒真 → 内层扫描永不退出 → BADMEM 0xB0000000。R0CHG 探针证明 r0 在 ring `... 812068F2 811DFA3C → 812B1BA0(sceFiberSwitch@8120682A) → 811DFA0E` 后变为 fiber 指针。**修复**：r0 修补只在 start-stub（pc==0x81206BDC）或旧 start-arg bug（r0==2）时执行；恢复的中途上下文保留原 r0。**验证 m1228（NESTED_UNTIL=35M）**：`[FLOAD-BAD]=2`（仅两个 start stub）、`[DECOMP]=40 / [HUFF]=24 / [LZ]=39`（**40 个资源全部开始解压**）、`[PASSSUM]=420` 趟全部 r0=0 健康、`[BADMEM]=0`，流程推进到 `[NESTED-STOP] total=35000000 pc=811DFB18`（撞我们自己的 NESTED_UNTIL 上限=好现象）
+m1226/m1227/m1228 证据（`m1226_r0_key.txt`、`m1227_r0chg_key.txt`、`m1228_fix_key.txt`）：
+```
+[PASSSUM] #238 sb=00000013 r8=00000013 r7=000001ED r4=848559A8 r0=00000000
+[PASSSUM] #239 sb=00000012 r8=00000012 r7=000001EE r4=848559E0 r0=848463A0  ← r0 在最后一趟被污染
+[P240SAMP] it=1 r4=8484EDD0 off=0 r7=848463A0 r8=848463A0 mk=000001B2    ← 下一趟 r7=r8=r0=fiber
+[HUFFLOOP] n=200000 r9=00000011 r8=848463E7 r7=848612C6 r4=84E33E20       ← 有符号 bgt 恒真→死循环
+[R0CHG] r0=848463A0 sb=00000012 r8=00000005 r7=00000090 r4=84850D50
+        ring: 811DFA0E 812B1BA0 812068EA … 812068F2 811DFA3C 811DFA0E …
+  hle: 812B1BA0@8120682A 812B1B70@812067B6 …                               ← guest 调度器 sceFiberSwitch
+[FLOAD-BAD] fiber=848463A0 r0=00000000 r13=8484EDD0 r15=811DFA0E -> repair r0   ← 元凶
+（M1136 修复：fiber_load 只在 pc==0x81206BDC 或 r0==2 时修 r0）
+m1228 修复后：
+[FLOAD-BAD] 2（仅 84836300/848463A0 的 start stub）
+[DECOMP] #0..#39（src=813E166C/813E1ABC/813E3ED8/814D09C8/814CE8B4/…/81409694）
+[HUFF] 24 / [LZ] 39 / [PASSSUM] 420（全部 r0=0）
+[BADMEM] 0
+[NESTED-STOP] total=35000000 pc=811DFB18 cur=848463A0
+[COUNT] 未打印（运行未结束）；[FRAMECB]/[UPD]/[POST]=0
+```
+**分析**：
+- `fiber_load` 对**已存在** fiber 上下文只做 memcpy 恢复；但 3710 行的“修补”逻辑把任意 `c.r[0] < 0x80000000` 当作坏值改成 fiber 对象。huff 循环中途被 fiber 调度器切走时保存的上下文 r0 合法为 0，恢复后被改成 fiber → 循环重启变量被污染 → 死循环。
+- 修复后解压链全面展开（40 个 DECOMP、24 次 HUFF、39 次 LZ），说明**资源解压阶段已真正开始工作**；当前运行被 NESTED_UNTIL=35M 截断。
+**NEXT**：
+```
+① NESTED_UNTIL=300M、预算 400M 长跑（m1229 已启动），看解压阶段跑完后是否进入下一阶段（BeginScene/帧循环/标题资源请求）
+② 若仍被截断，继续提高上限或统计解压进度（DECOMP 计数/输入队列）
+③ 关注 [FRAMECB]/[UPD]/[POST]/[COUNT] present 与 [IO]/[FHOPEN] 变化
+④ 保持 [FLOAD-BAD] 监控（应只剩 2 条 start-stub）
+```
+验证：`m1228_fix_key.txt`、`m1227_r0chg_key.txt`、`m1226_r0_key.txt`、`recomp_harness_fiberload_4681.cpp`、`[TABLE] blocks=230291`。 |
+| §18.4681 | Root cause of the Huffman livelock found and fixed: fiber_load's r0 repair branch (if (pc==0x81206BDC || c.r[0] < 0x80000000)) rewrote r0 of ANY resumed context with r0<0x80000000 into the fiber object pointer. Evidence: [FLOAD-BAD] fiber=848463A0 r0=00000000 r13=8484EDD0 r15=811DFA0E -> repair r0 (exactly the mid-huffman-loop context saved/restored across a fiber switch); after r0 is repaired to 0x848463A0 the pass restart at 811DF9FA (r7=r0; r8=r7) makes r7=r8=0x848463A0 (negative as signed), and cmp sb,r8; bgt is always true because sb(0x11) > negative -> the inner scan never exits -> BADMEM 0xB0000000. The R0CHG probe proves r0 becomes the fiber pointer after the ring ... 812068F2 811DFA3C -> 812B1BA0 (sceFiberSwitch@8120682A) -> 811DFA0E. FIX: apply the r0 repair only for the start stub (pc==0x81206BDC) or the old start-arg bug (r0==2); resumed mid-execution contexts keep their saved r0. VERIFIED m1228 (NESTED_UNTIL=35M): [FLOAD-BAD]=2 (only the two start stubs), [DECOMP]=40 / [HUFF]=24 / [LZ]=39 (all 40 resources start decompressing), [PASSSUM]=420 passes all with r0=0 and healthy, [BADMEM]=0, and execution advances to [NESTED-STOP] total=35000000 pc=811DFB18 (hitting our own NESTED_UNTIL cap, a good sign). '
+       'm1226/m1227/m1228 evidence: [PASSSUM] #238 sb=0x13 r8=0x13 r7=0x1ED r4=848559A8 r0=00000000; #239 sb=0x12 r8=0x12 r7=0x1EE r4=848559E0 r0=848463A0 (r0 polluted in the last pass); [P240SAMP] it=1 r4=8484EDD0 off=0 r7=848463A0 r8=848463A0 mk=0x1B2 (next pass r7=r8=r0=fiber); [HUFFLOOP] n=200000 r9=0x11 r8=848463E7 r7=848612C6 r4=84E33E20 (signed bgt always true -> livelock); [R0CHG] r0=848463A0 sb=0x12 r8=5 r7=0x90 r4=84850D50 ring 811DFA0E 812B1BA0 812068EA ... 812068F2 811DFA3C 811DFA0E, hle 812B1BA0@8120682A 812B1B70@812067B6 (guest scheduler sceFiberSwitch); [FLOAD-BAD] fiber=848463A0 r0=00000000 r13=8484EDD0 r15=811DFA0E -> repair r0 (the culprit). After the fix (m1228): [FLOAD-BAD] 2 (only start stubs 84836300/848463A0), [DECOMP] #0..#39 (src 813E166C/813E1ABC/813E3ED8/814D09C8/814CE8B4/.../81409694), [HUFF] 24 / [LZ] 39 / [PASSSUM] 420 (all r0=0), [BADMEM] 0, [NESTED-STOP] total=35000000 pc=811DFB18 cur=848463A0; [COUNT] not printed; [FRAMECB]/[UPD]/[POST]=0. '
+       'Analysis: fiber_load only memcpy-restores an EXISTING fiber context, but the repair logic at line ~3710 treated any c.r[0] < 0x80000000 as bad and replaced it with the fiber object. The huffman loop context saved when the fiber was scheduled away legitimately had r0=0; after restore it became the fiber pointer -> the loop restart variables got polluted -> livelock. After the fix the decompression chain fully unfolds (40 DECOMP, 24 HUFF, 39 LZ), so the resource-decompression phase is really running now; the current run is truncated by NESTED_UNTIL=35M. '
+       'NEXT: (1) long run with NESTED_UNTIL=300M and budget 400M (m1229 started) to see whether the decompression phase completes and execution enters the next phase (BeginScene/frame loop/title resource requests); (2) if still truncated, raise the cap further or instrument decompression progress (DECOMP count/input queue); (3) watch [FRAMECB]/[UPD]/[POST]/[COUNT] present and [IO]/[FHOPEN] changes; (4) keep monitoring [FLOAD-BAD] (should stay at 2 start-stub entries). '
+       'Verification: m1228_fix_key.txt, m1227_r0chg_key.txt, m1226_r0_key.txt, recomp_harness_fiberload_4681.cpp, [TABLE] blocks=230291. |
 m1224 证据（`m1224_passsum_key.txt`）：
 ```
 [PASSSUM] #1   sb=00000100 r8=00000100 r7=00000100 r4=848525D0 sp=8484EDD0 ring: 811DFA62 811DFA44 811DFA3C 811DFA4C 811DFA46 811DFA22 811DFA18 811DFA0E …
@@ -503122,3 +503158,51 @@ LOOKUP: M1134 HUFFSB HUFFBAD2 probes outer sb decrement 0x100 0xE9 healthy inner
 ANTI-FORGETTING ENTRY. Keywords: M1135 PASSSUM per-pass summary - Huffman selection sort completely healthy for first 239 passes (r8 exactly equals sb, r4 advances 0x38 per pass, r7=0x100+pass), hang starts in pass 240 with sb=0x11. Data: #1 sb=0x100 r8=0x100 r7=0x100 r4=848525D0 sp=8484EDD0; #2 sb=0xFF r8=0xFF r7=0x101 r4=84852608; #238 sb=0x13 r8=0x13 r7=0x1ED r4=848559A8; #239 sb=0x12 r8=0x12 r7=0x1EE r4=848559E0 (last healthy pass, no #240 after it); [HUFFLOOP] n=200000 r9=0x11 r8=848463E7 r7=848612C6 r4=84E33E20 (pass 240 inner scan runs away); [BADMEM] va=0xB0000000 block=0x811DFA0E tid=0 stub=812B1810. Analysis: for the first 239 passes each pass ends with r8 exactly equal to sb (scan found all unused nodes), r4 advances only 1x0x38 per pass (r7=0x100+pass), max r4=sp+0x1EE*0x38=sp+0x6BD0 below frame top 0x7420 => tree-build state is completely correct. Pass 240 (sb=0x11, 17 nodes left) inner scan no longer converges, r8 gets polluted (0x848463E7) and r4 walks out of the node table/stack frame -> BADMEM 0xB0000000. Inference: pass 240 scan crosses the valid node-table region (or arrays after it in the frame), reads dirty data where node[+0x440] != -1 so r8 stops growing and while (sb > r8) is always true; real table capacity/boundary should match passes running until sb=1 (if table has 511 nodes r4 limit about sp+0x6F38 and pass 255 would just hit it) - need to confirm actual table boundary at pass 240 start. NEXT: add pass-240 inner sampling probe (when sb==0x11 print r4/r7/r8/[r4+0x440]/sp-relative offset every 1000 iterations for first 200 entries) to confirm the crossing node near r4=sp+0x6FC0 (table end 511*0x38=0x6F38); print 40-entry pc ring + HLE ring at the crossing; disassemble/verify real node-table capacity (init loop stride 0x70x2 arrays, 0x38 scan array, 0x7420 frame layout); after the fix decompression completes -> BeginScene/frame loop. Verification: m1224_passsum_key.txt, m1223_boundary_key.txt, m1222_nothrpump_key.txt, lzdec_4676.txt, [TABLE] blocks=230291.
 
 LOOKUP: M1135 PASSSUM first 239 passes healthy r8 equals sb r4 +0x38 per pass r7 0x100+pass r4 848559E0 sp 8484EDD0, hang pass 240 sb 0x11 inner scan r8 848463E7 r7 848612C6 r4 84E33E20 BADMEM 0xB0000000 block 811DFA0E, tree-build state correct, node table capacity 511 nodes 511x0x38 0x6F38 frame 0x7420, next pass-240 inner sampling probe r4 r7 r8 node+0x440 crossing table end pc ring HLE ring, disassemble table layout init stride 0x70x2 arrays, fix then decompression completes then BeginScene frame loop, verification m1224_passsum_key.txt -> 18.4679 [relevant: boundary probes], 18.4678 [relevant: Huffman loop probes], 18.4677 [relevant: node array]
+### 18.4681 PORT M1136: Huffman 死循环根因=fiber_load 的 r0 修补误伤中途上下文（已修复）
+
+1) 根因链（探针证据）：
+```
+[PASSSUM] #238 sb=0x13 r8=0x13 r7=0x1ED r4=848559A8 r0=00000000
+[PASSSUM] #239 sb=0x12 r8=0x12 r7=0x1EE r4=848559E0 r0=848463A0   ← r0 被污染
+[P240SAMP] it=1 r7=848463A0 r8=848463A0 mk=0x1B2                    ← 趟重启 r7=r8=r0=fiber
+[HUFFLOOP] n=200000 r9=0x11 r8=848463E7 r7=848612C6 r4=84E33E20    ← 有符号 bgt 恒真 → 死循环
+[R0CHG] r0=848463A0 ring: 811DFA0E 812B1BA0 812068EA … 812068F2 811DFA3C 811DFA0E
+        hle: 812B1BA0@8120682A 812B1B70@812067B6                     ← guest 调度器 sceFiberSwitch
+[FLOAD-BAD] fiber=848463A0 r0=00000000 r13=8484EDD0 r15=811DFA0E -> repair r0   ← 元凶
+```
+**机制**：huff 树构建循环中途，guest 调度器切走该 fiber；`fiber_save` 保存的上下文 r0 合法为 0；
+`fiber_load` 的修补分支 `if (pc==0x81206BDC || c.r[0] < 0x80000000) c.r[0]=fiber;` 把 r0 改成 fiber 对象
+→ 趟重启 811DF9FA `r7=r0; r8=r7` → r7=r8=0x848463A0（有符号负数）
+→ `cmp sb,r8; bgt`（sb=0x11 > 负数）恒真 → 内层扫描永不退出 → r4 走出栈帧 → BADMEM 0xB0000000。
+
+2) 修复（recomp_harness.cpp fiber_load）：
+```c
+// M1136 FIX: only repair r0 for the fiber START STUB (pc==0x81206BDC) or the old start-arg bug (r0==2).
+// Resumed mid-execution contexts keep their saved r0 (e.g. 0 in the Huffman tree-build loop at 811DFA0E).
+if ((c.r[15] & ~1u) == 0x81206BDCu || c.r[0] == 2u) {
+  printf("[FLOAD-BAD] ... -> repair r0 (start-stub/arg2 only)\n", ...);
+  c.r[0] = fiber;
+  if ((c.r[15] & ~1u) == 0x81206BDCu && c.r[13] == 0u) c.r[13] = 0xA0E00000u;
+}
+```
+3) 修复验证（m1228，NESTED_UNTIL=35M）：
+```
+[FLOAD-BAD] 2（仅 84836300/848463A0 的 start stub）
+[DECOMP] 40 / [HUFF] 24 / [LZ] 39（40 个内嵌资源全部开始解压）
+[PASSSUM] 420 趟（全部 r0=0、健康）
+[BADMEM] 0
+[NESTED-STOP] total=35000000 pc=811DFB18 cur=848463A0
+[FRAMECB]/[UPD]/[POST]/[COUNT]=0（仍在解压阶段，运行被 NESTED_UNTIL 截断）
+```
+4) NEXT：
+```
+① NESTED_UNTIL=300M、预算 400M 长跑（m1229 已启动）→ 看解压完成后的下一阶段
+② 若仍截断 → 继续提高上限/加解压进度统计
+③ 关注 [FRAMECB]/[UPD]/[POST]/[COUNT] present 与 [IO]/[FHOPEN]
+④ [FLOAD-BAD] 应保持 2 条（start stub）
+```
+验证：`m1228_fix_key.txt`、`m1227_r0chg_key.txt`、`m1226_r0_key.txt`、`recomp_harness_fiberload_4681.cpp`、`[TABLE] blocks=230291`。
+
+ANTI-FORGETTING ENTRY. Keywords: M1136 Huffman livelock root cause and fix - fiber_load r0 repair branch misfired on resumed mid-execution contexts. Old condition `if ((c.r[15]&~1)==0x81206BDC || c.r[0] < 0x80000000) { c.r[0]=fiber; }` rewrote r0 of ANY resumed context with r0<0x80000000 (e.g. saved r0=0 mid-huffman-loop) into the fiber object pointer 0x848463A0. Evidence: [FLOAD-BAD] fiber=848463A0 r0=00000000 r13=8484EDD0 r15=811DFA0E -> repair r0; [PASSSUM] #238 r0=0 then #239 r0=848463A0; [P240SAMP] it=1 r7=848463A0 r8=848463A0; [HUFFLOOP] n=200000 r9=0x11 r8=848463E7 r7=848612C6 r4=84E33E20; [R0CHG] r0=848463A0 ring 811DFA0E 812B1BA0 812068EA ... 812068F2 811DFA3C, hle 812B1BA0@8120682A (guest scheduler sceFiberSwitch). Mechanism: mid-pass fiber switch saves ctx with r0=0, fiber_load repairs r0=fiber, pass restart 811DF9FA sets r7=r0/r8=r7 -> r7=r8=0x848463A0 (negative signed), cmp sb,r8; bgt with sb=0x11 always true -> scan never exits -> r4 walks out of stack frame -> BADMEM 0xB0000000. FIX: repair r0 only when pc==0x81206BDC (start stub) or r0==2 (old start-arg bug); resumed contexts keep saved r0. VERIFIED m1228: [FLOAD-BAD]=2 (only start stubs 84836300/848463A0), [DECOMP]=40 / [HUFF]=24 / [LZ]=39 (all 40 embedded resources start decompressing), [PASSSUM]=420 all r0=0 healthy, [BADMEM]=0, [NESTED-STOP] total=35000000 pc=811DFB18 (hit our own NESTED_UNTIL cap). NEXT: long run NESTED_UNTIL=300M/budget 400M (m1229 started) to finish decompression and see the next phase (BeginScene/frame loop/title resources); raise cap or instrument decompression progress if still truncated; watch FRAMECB/UPD/POST/COUNT present and IO/FHOPEN; keep FLOAD-BAD at 2. Verification: m1228_fix_key.txt, m1227_r0chg_key.txt, m1226_r0_key.txt, recomp_harness_fiberload_4681.cpp, [TABLE] blocks=230291.
+
+LOOKUP: M1136 Huffman livelock root cause fiber_load r0 repair misfire resumed context, FLOAD-BAD fiber 848463A0 r0=0 r13=8484EDD0 r15=811DFA0E, PASSSUM 238 r0=0 239 r0=848463A0, P240SAMP r7=r8=848463A0, HUFFLOOP sb 0x11 signed bgt always true, R0CHG ring 812B1BA0@8120682A sceFiberSwitch guest scheduler, fix repair only pc 0x81206BDC or r0==2, m1228 FLOAD-BAD 2 DECOMP 40 HUFF 24 LZ 39 PASSSUM 420 BADMEM 0 NESTED-STOP 35M pc 811DFB18, next long run NESTED_UNTIL 300M budget 400M m1229 finish decompression BeginScene frame loop, verification m1228_fix_key.txt -> 18.4680 [relevant: PASSSUM], 18.4679 [relevant: boundary probes], 18.4678 [relevant: Huffman loop probes]

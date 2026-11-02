@@ -3707,9 +3707,14 @@ static void fiber_load(RecState* s, uint32_t fiber, uint32_t entry, uint32_t arg
   // destroyed frames and made pop-pc return garbage, e.g. 0x8120683A). The first-start stack is set below.
   if (g_fiber_dbg3++ < 8)
     printf("[FL2] fiber=%08X entry=%08X sp=%08X r0=%08X\n", fiber, c.r[15], c.r[13], c.r[0]);
-  if ((c.r[15] & ~1u) == 0x81206BDCu || c.r[0] < 0x80000000u) {
-    printf("[FLOAD-BAD] fiber=%08X r0=%08X r13=%08X r15=%08X -> repair r0\n", fiber, c.r[0], c.r[13], c.r[15]);
-    if (c.r[0] < 0x80000000u) c.r[0] = fiber;   // 18.3891: never restore a garbage fiber object pointer
+  // M1136 FIX: only repair r0 when the context is the fiber START STUB (pc==0x81206BDC) or the old
+  // start-arg bug case r0==2.  The old "r0 < 0x80000000" condition misfired on legitimate RESUMED
+  // contexts whose saved r0 is a small value (e.g. 0 in the Huffman tree-build loop at 811DFA0E),
+  // overwriting r0 with the fiber object pointer; the loop then restarted each pass with
+  // r7=r8=r0=fiber and `sb > r8` (signed) never became false -> livelock -> BADMEM 0xB0000000.
+  if ((c.r[15] & ~1u) == 0x81206BDCu || c.r[0] == 2u) {
+    printf("[FLOAD-BAD] fiber=%08X r0=%08X r13=%08X r15=%08X -> repair r0 (start-stub/arg2 only)\n", fiber, c.r[0], c.r[13], c.r[15]);
+    c.r[0] = fiber;
     if ((c.r[15] & ~1u) == 0x81206BDCu && c.r[13] == 0u) c.r[13] = 0xA0E00000u;
   }
   std::memcpy(s->r, c.r, sizeof(c.r)); s->apsr = c.apsr; ctxchk(7, fiber, s);
