@@ -3790,7 +3790,10 @@ static uint32_t fiber_exec_to_completion(RecState* s) {
                 uint32_t _u14be = ((_u14 & 0xFFu) << 24) | ((_u14 & 0xFF00u) << 8) | ((_u14 >> 8) & 0xFF00u) | ((_u14 >> 24) & 0xFFu);
                 if (_u4 == 0xFFFFFFFFu && _u14be != 0u && _u14be < 0x800u) {
                   uint32_t _ts = _u14be + 8u; uint32_t _flags = 0x000000FFu, _z = 0u;
-                  { uint8_t* _q=GP(0x84B1BC00u); if(_q) { std::memcpy(_q+0x04u,&_flags,4); std::memcpy(_q+0x08u,&_ts,4); std::memcpy(_q+0x0Cu,&_z,4); } }
+                  (void)_flags;
+                  // Keep +0x04 untouched: byte+4 is already 0xFF (skip CRI XOR) and the 0xFFFFFFFF marker may
+                  // select the 64-bit table layout used by the analyzer; only fix the table-size field at +0x08.
+                  { uint8_t* _q=GP(0x84B1BC00u); if(_q) { std::memcpy(_q+0x08u,&_ts,4); std::memcpy(_q+0x0Cu,&_z,4); } }
                   if (_hf++ < 8) { printf("[HDRFIX] 64bit CPK header -> standard: old+8=%08X utf_size(BE)=%08X table_size=%08X flags=FF blk=%u\n", _u4, _u14be, _ts, g_blkcnt_total); fflush(stdout); }
                 }
               } }

@@ -1128,6 +1128,53 @@
 | M1110 | §18.4655: ★★★★★★★ **缓冲 dump 证明 HLE 读数据 100% 正确（与真实 vita.cpk 前 64 字节逐字节一致），"CPK is broken" 的真正原因浮出水面：CPK Analyzer 在 +0x08 处读取的是"表大小"，而 vita.cpk 该字段=0x813F3494(文件大小) → 触发 `if (0x800 < uVar8+0x10) 返回错误 1（CPK broken）`；vita.cpk 的 +0x04=0xFFFFFFFF、+0x08..0x0F=64 位文件大小 0x813F3494，说明它是"64 位/加密变体 CPK"，正常流程应在 load state 4 调用解密回调 param_1[0x20] 处理后才能给 Analyzer 解析。我们泵的完成 shim 跳过了 state 4（因为 param_1[0x20]==0），所以 Analyzer 看到原始头 → 报 broken。**
 | M1111 | §18.4656: ★★★★★★★ **解密器注册链完全解码：progress 的 [0x20]/[0x21]（=reader+0xA8/+0xAC）由 FUN_8128EFF4(param1, cb, arg) 设置，数据来自 reader+0xF4/+0xF8（=reader+0xEC/+0xF0 的副本）；FUN_8128D716 在 blk 0x8128D9D0 无条件调用 FUN_8128EFF4(progress, reader+0xF4, reader+0xF8)。全对象写 watch（188 条 PROGWR）证明：reader+0xEC/+0xF0 在本运行中被 FUN_8128DEB4 初始化为 0，之后从未被置非零 → 游戏在本流程中从未给该 reader 注册解密器 → header 未解密 → Analyzer 报 broken。**
 | M1112 | §18.4657: ★★★★★★★ **HLE 头变换（HDRFIX）成功：把 64 位 CPK 头在内存中变换为标准头（+0x04=0xFF、+0x08=UTF表大小、+0x0C=0）后，Analyzer 的 `E2011022806:CPK is broken` 错误完全消失（CRILOG=0）！关键发现：CRI UTF 表字段是【大端序】（UTF+0x04 在内存中为 0x7A000000 → 大端 0x7A = 表大小-8）；变换后表大小=0x82。新卡点：分析继续推进后在 `blk 0x8129266E` 报 `BADMEM guest va=0x00000824`（某个小指针 0x820 未初始化）。**
+| M1113 | §18.4658: ★★★★★★★★★ **发现并修复 AOT 翻译器通用 bug：`LDRD rX,rY,[rX,#imm]`（基址寄存器=第一目标寄存器）被翻成"第一字读入 rX 后，第二字用被覆盖的新 rX 作基址"→ 读到错误地址。全库扫描命中 34 处（batch_000×7, batch_004×1, batch_005×1, batch_009×4, batch_018×2, batch_021×2, batch_023×15, batch_024×2），统一改为临时基址 `_ldrd_b`。修复后：BADMEM 归零、CPK 表读取解锁（新增 `PREAD off=2048 size=2048`）、游戏开始打开 `data.cpk`（第二个 CPK 挂载）！**
+m1174 证据（`out80m_m1174ldrd.txt`）：
+```
+[BADMEM] 0                                              ← BADMEM va=0x824 彻底消失
+[IO] OPEN 'app0:/data/vita.cpk' -> fd=16385 size=2168403092
+[IO] PREAD fd=16385 off=0    size=2048 got=2048          ← 头部
+[IO] PREAD fd=16385 off=2048 size=2048 got=2048          ← ★ 表数据第二块（分析推进）
+[IO] OPEN 'app0:/data/data.cpk' -> fd=16386 size=1913750232
+[IO] PREAD fd=16386 off=0 size=2048 got=2048             ← ★ 游戏开始挂载 data.cpk
+[HDRFIX] x3（vita.cpk 的 64 位头标准化的多次 load）
+[IOPUMP-DONE] x3（state=7 → status=2）
+[CRILOG] E06100301:Invalid IFF header (mismatched four_cc).  ×3   r2=40555446 ("@UTF" BE), r3=000077DD
+[CRILOG] E2009010913:CPK Analyzer::Need more memory. The heap user registrated is too small.%s ×3
+[MNTST] obj=84906480 stage=4 status=1（vita.cpk mount 仍在等待）
+[INDIRECT-MISS]=0  [HARNESS]=0
+```
+**Bug 详情（AOT 生成代码）**：
+```c
+// 错误（batch_023 原 blk_8129266E）：
+s->r[0] = rd32(s, s->r[0] + 0x20u + 0x0u);      // ldr r0,[r0,#0x20]
+s->r[1] = rd32(s, s->r[0] + 0x20u + 0x4u);      // ★ 应用原始 r0，但此处 r0 已被覆盖
+// 正确：
+{ uint32_t _ldrd_b = s->r[0];
+  s->r[0] = rd32(s, _ldrd_b + 0x20u + 0x0u);
+  s->r[1] = rd32(s, _ldrd_b + 0x20u + 0x4u); }
+```
+影响：任何 `LDRD` 且 Rn==Rt 的指令都会读到 `[错误指针+0x24]`——原 BADMEM 0x824 正是 `[0x84B1B878 内容=0x800] + 0x24`。
+**新卡点**：
+1. `E06100301:Invalid IFF header (mismatched four_cc)`（r2=0x40555446=大端"@UTF"，r3=0x77DD）—— CPK 表数据（offset 2048 起）被当 IFF/UTF 解析时 four_cc 不匹配：可能表数据是**加密的**（我们没解密），或 64 位 CPK 的表结构与 32 位不同
+2. `E2009010913:CPK Analyzer::Need more memory. The heap user registrated is too small.%s` —— CPK 分析需要更大的 user heap（criFs 用户堆）；我们 HLE 用户堆大小/分配返回值可能不足
+3. `MNTST` 仍 stage=4 status=1，但游戏已开始挂载 data.cpk（说明 vita.cpk 的 binder 流程有推进/或并行）
+**NEXT**：
+```
+① 查 CPK 表数据（vita.cpk offset 2048 起 2048B）内容：确认是否为加密（对比 data.cpk 同区域结构/ASCII four_cc）
+② 查 E2009010913 的触发点（user heap malloc 返回值）——可能需要在 HLE 增大 user heap 或修正 alloc 大小计算
+③ 若表数据加密：需要确定 64 位 CPK 的表加密方式（CRI decrypter 的下一步）
+④ IOPUMP 对新 reader：data.cpk 挂载会创建新 reader/对象，泵地址需从 binder/reader 动态获取（当前硬编码 0x848FC368）
+⑤ 继续：分析通过 → Analyzer state=0x1A → mount status=2 → data.cpk → 文件索引 → title 素材
+⑥ 回归：30 处 LDRD 修复可能影响其他路径，跑完整回归确认无新 BADMEM（本次 BADMEM=0、INDIRECT-MISS=0 已很好）
+```
+验证：`out80m_m1174ldrd.txt`、`_fix_ldrd_1131.py`、各 batch 备份。 |
+| §18.4658 | Found and fixed a general AOT-translator bug: LDRD rX,rY,[rX,#imm] (base register == first destination) was translated as "load first word into rX, then load second word using the overwritten new rX as base" -> reads from a wrong address. A full scan hit 34 occurrences (batch_000 x7, batch_004 x1, batch_005 x1, batch_009 x4, batch_018 x2, batch_021 x2, batch_023 x15, batch_024 x2), all rewritten with a temporary base _ldrd_b. After the fix: BADMEM is gone, CPK table reading unblocked (new PREAD off=2048 size=2048), and the game started opening data.cpk (the second CPK mount)! '
+       'm1174 evidence: [BADMEM] 0 (the BADMEM va=0x824 disappeared completely); [IO] OPEN app0:/data/vita.cpk size=2168403092; PREAD fd=16385 off=0 size=2048 got=2048 (header); PREAD fd=16385 off=2048 size=2048 got=2048 (second chunk of table data - analysis advanced); OPEN app0:/data/data.cpk size=1913750232; PREAD fd=16386 off=0 size=2048 got=2048 (the game started mounting data.cpk); [HDRFIX] x3 (vita.cpk 64-bit header normalization across multiple loads); [IOPUMP-DONE] x3 (state=7 -> status=2); [CRILOG] E06100301:Invalid IFF header (mismatched four_cc). x3 r2=40555446 (@UTF BE) r3=000077DD; [CRILOG] E2009010913:CPK Analyzer::Need more memory. The heap user registrated is too small.%s x3; [MNTST] obj=84906480 stage=4 status=1 (vita.cpk mount still waiting); [INDIRECT-MISS]=0 [HARNESS]=0. '
+       'Bug details (generated AOT code): wrong (batch_023 blk_8129266E): s->r[0] = rd32(s, s->r[0] + 0x20u + 0x0u); s->r[1] = rd32(s, s->r[0] + 0x20u + 0x4u); (should use the original r0 but r0 was already overwritten). Correct: { uint32_t _ldrd_b = s->r[0]; s->r[0] = rd32(s, _ldrd_b + 0x20u + 0x0u); s->r[1] = rd32(s, _ldrd_b + 0x20u + 0x4u); }. Impact: any LDRD with Rn==Rt reads [wrong pointer + 0x24] - the original BADMEM 0x824 was exactly [0x84B1B878 content = 0x800] + 0x24. '
+       'New blockers: (1) E06100301:Invalid IFF header (mismatched four_cc) (r2=0x40555446 big-endian @UTF, r3=0x77DD) - the CPK table data (from offset 2048) is parsed as IFF/UTF and the four_cc mismatches: the table data may be encrypted (we did not decrypt it), or the 64-bit CPK table structure differs from the 32-bit one; (2) E2009010913:CPK Analyzer::Need more memory. The heap user registrated is too small.%s - the CPK analysis needs a larger user heap (criFs user heap); our HLE user heap size/allocation return value may be insufficient; (3) MNTST still stage=4 status=1, but the game already started mounting data.cpk (so the vita.cpk binder flow advanced, or they are parallel). '
+       'NEXT: (1) inspect the CPK table data (vita.cpk offset 2048, 2048B): determine whether it is encrypted (compare with data.cpk structure/ASCII four_cc); (2) find where E2009010913 triggers (user heap malloc return value) - may need to enlarge the user heap in HLE or fix the allocation size computation; (3) if the table data is encrypted: determine the 64-bit CPK table encryption (next step after the CRI decrypter); (4) IOPUMP for new readers: the data.cpk mount creates a new reader/object, so the pump address must be taken dynamically from binder/reader (currently hardcoded 0x848FC368); (5) continue: analysis passes -> Analyzer state=0x1A -> mount status=2 -> data.cpk -> file index -> title assets; (6) regression: the 30+ LDRD fixes may affect other paths - run the full regression to confirm no new BADMEM (this run already has BADMEM=0 and INDIRECT-MISS=0). '
+       'Verification: out80m_m1174ldrd.txt, _fix_ldrd_1131.py, batch backups. |
 m1172 证据（`out80m_m1172hdrfix2.txt`）：
 ```
 [HDRCHK] m=204B5043 u4=FFFFFFFF u14=7A000000 blk=31500     ← UTF+4 内存值为 0x7A000000（大端 0x7A）
@@ -501190,3 +501237,45 @@ NEXT：
 ANTI-FORGETTING ENTRY. Keywords: M1112 HLE header transform HDRFIX works, CPK is broken error gone (CRILOG=0), CRI UTF table fields are BIG-ENDIAN (UTF+0x04 in memory = 0x7A000000 -> BE 0x7A = table size-8; data.cpk UTF+4 = 0x48030000 -> BE 0x348 = 0x350-8), transform: detect magic CPK && buf+4==0xFFFFFFFF && be(UTF_size) in (0,0x800), utf_be=bswap32(*(u32*)(buf+0x14)), table_size=utf_be+8=0x82, write buf+4=0x000000FF, buf+8=table_size, buf+0xC=0, keep magic and UTF; m1172 evidence: [HDRCHK] m=204B5043 u4=FFFFFFFF u14=7A000000 blk=31500; [HDRFIX] old+8=FFFFFFFF utf_size(BE)=0000007A table_size=00000082 flags=FF blk=31500; [CRILOG] 0 (previously x3); [CPKANAL] #0 r0=84B1B84C r1=84B1B858 r2=84B1BC00 r3=84B1B990 lr=81293CB8; new blocker [BADMEM] guest va=0x00000824 unmapped block=0x8129266E tid=0 stub=812B28A0 (small pointer 0x820 = 0x820+4); [MNTST] obj=84906480 stage=4 status=1; [IO] PREAD off=0 size=2048 got=2048 (only 1 PREAD so far). Background: vita.cpk 64-bit/variant CPK (+4=0xFFFFFFFF, +8=u64 file size 0x813F3494, +10=@UTF big-endian), data.cpk normal (+4=0xFF, +8=0x350 table size). NEXT: decompile function at 0x812925xx containing blk 0x8129266E to find where the 0x820 offset comes from; decompile FUN_812AFF10 (UTF parser) / FUN_812AEA4C/FUN_812AF434 chain and check whether extra reads are needed; check whether the analysis needs a 2nd PREAD (CPK table data) and why the read request was not issued; after fixing the BADMEM object fields -> analysis succeeds -> Analyzer state=0x1A -> mount status=2 -> data.cpk mounted -> file index -> title assets; if UTF 64-bit fields are needed, fill header fields per data.cpk comparison (UTF fields big-endian). Verification: out80m_m1172hdrfix2.txt, out80m_m1171hdrchk.txt, out80m_m1170hdrfix.txt, cpkana.txt.
 
 LOOKUP: M1112 HDRFIX 64-bit CPK header normalization, CRI UTF big-endian, utf_size BE 0x7A000000, table_size 0x82, buf+4=0xFF buf+8=table_size, CPK is broken gone CRILOG=0, BADMEM va=0x824 blk=0x8129266E, small pointer 0x820, only 1 PREAD, next decompile 0x812925xx / FUN_812AFF10 UTF parser and check 2nd PREAD -> §18.4656 [relevant: decryptor], §18.4655 [relevant: 64bit header], §18.4654 [relevant: pump]
+### 18.4658 PORT M1113: 修复 AOT 翻译器通用 bug LDRD（34 处）→ BADMEM 归零、CPK 表读取解锁、游戏开始挂载 data.cpk
+
+1) Bug：`ldrd rX,rY,[rX,#imm]` 翻译错误
+```c
+// 错误：第二个字用被覆盖后的新基址
+s->r[0] = rd32(s, s->r[0] + 0x20u + 0x0u);
+s->r[1] = rd32(s, s->r[0] + 0x20u + 0x4u);
+// 正确：保存临时基址
+{ uint32_t _ldrd_b = s->r[0];
+  s->r[0] = rd32(s, _ldrd_b + 0x20u + 0x0u);
+  s->r[1] = rd32(s, _ldrd_b + 0x20u + 0x4u); }
+```
+命中 34 处：batch_000×7 batch_004×1 batch_005×1 batch_009×4 batch_018×2 batch_021×2 batch_023×15 batch_024×2
+2) m1174 效果：
+```
+[BADMEM] 0                                    ← 消失（原 va=0x824，正是 [0x84B1B878 内容=0x800]+0x24）
+[IO] PREAD fd=16385 off=2048 size=2048 got=2048     ← ★ CPK 表数据第二块读取成功（分析推进）
+[IO] OPEN 'app0:/data/data.cpk' fd=16386 size=1913750232   ← ★ 游戏开始挂载 data.cpk
+[IO] PREAD fd=16386 off=0 size=2048 got=2048
+[HDRFIX]×3  [IOPUMP-DONE]×3
+[CRILOG] E06100301:Invalid IFF header (mismatched four_cc) ×3 (r2=40555446 @UTF BE, r3=0x77DD)
+[CRILOG] E2009010913:CPK Analyzer::Need more memory. The heap user registrated is too small.%s ×3
+[INDIRECT-MISS]=0  [HARNESS]=0
+```
+3) 新卡点：
+- CPK 表数据（offset 2048 起）被当 IFF/UTF 解析时 four_cc 不匹配 → 表数据可能加密或 64 位表结构不同
+- CPK 分析 user heap 不足（E2009010913）→ HLE user heap 大小/分配需修正
+- MNTST stage=4 status=1（vita.cpk 流程推进中或并行 data.cpk）
+NEXT：
+```
+① 检查 vita.cpk offset 2048 起 2048B 内容（是否加密/与 data.cpk 表结构对比）
+② 查 E2009010913 触发点（user heap malloc 返回值、分配大小计算）
+③ 若表加密：确定 64 位 CPK 表加密方式
+④ IOPUMP 动态获取新 reader（data.cpk 挂载会创建新 reader）
+⑤ 分析通过 → state=0x1A → mount status=2 → data.cpk → 文件索引 → title 素材
+⑥ 全量回归确认 LDRD 修复无副作用（BADMEM=0、INDIRECT-MISS=0 已达成）
+```
+验证：`out80m_m1174ldrd.txt`、`_fix_ldrd_1131.py`。
+
+ANTI-FORGETTING ENTRY. Keywords: M1113 AOT translator bug LDRD fixed (34 occurrences), LDRD rX,rY,[rX,#imm] base register overwritten before second word load -> wrong address; temp base _ldrd_b patch across batch_000 x7, batch_004 x1, batch_005 x1, batch_009 x4, batch_018 x2, batch_021 x2, batch_023 x15, batch_024 x2. After fix: BADMEM=0 (the 0x824 fault disappeared; it was exactly [0x84B1B878 content=0x800]+0x24), CPK table reading unblocked (new PREAD fd=16385 off=2048 size=2048 got=2048), the game started opening data.cpk (OPEN app0:/data/data.cpk fd=16386 size=1913750232 + PREAD off=0 size=2048). m1174 evidence: [BADMEM] 0; [IO] OPEN vita.cpk size=2168403092, PREAD off=0 2048, PREAD off=2048 2048, OPEN data.cpk size=1913750232, PREAD off=0 2048; [HDRFIX] x3; [IOPUMP-DONE] x3; [CRILOG] E06100301:Invalid IFF header (mismatched four_cc) x3 r2=40555446 (@UTF BE) r3=000077DD; [CRILOG] E2009010913:CPK Analyzer::Need more memory. The heap user registrated is too small.%s x3; [MNTST] obj=84906480 stage=4 status=1; [INDIRECT-MISS]=0 [HARNESS]=0. New blockers: CPK table data (offset 2048) parsed as IFF/UTF with mismatched four_cc -> table data may be encrypted, or the 64-bit CPK table structure differs from the 32-bit one; CPK analysis user heap too small (E2009010913) -> HLE user heap size/allocation needs fixing; MNTST still stage=4 status=1 (vita.cpk flow advancing or parallel data.cpk). NEXT: inspect vita.cpk offset 2048 for 2048B (encrypted? compare with data.cpk table structure); find where E2009010913 triggers (user heap malloc return, allocation size computation); if the table is encrypted determine the 64-bit CPK table encryption; make IOPUMP get the new reader dynamically (data.cpk mount creates a new reader); analysis passes -> state=0x1A -> mount status=2 -> data.cpk -> file index -> title assets; run full regression to confirm the LDRD fixes have no side effects (BADMEM=0 and INDIRECT-MISS=0 already achieved). Verification: out80m_m1174ldrd.txt, _fix_ldrd_1131.py.
+
+LOOKUP: M1113 LDRD translator bug fixed 34 occurrences, temp base _ldrd_b, BADMEM 0, PREAD off=2048 second chunk, OPEN data.cpk, HDRFIX x3, E06100301 Invalid IFF header mismatched four_cc 40555446, E2009010913 CPK Analyzer Need more memory user heap too small, MNTST stage=4 status=1, next inspect table data at 2048 and user heap size -> §18.4657 [relevant: HDRFIX], §18.4656 [relevant: decryptor], §18.4654 [relevant: pump]
