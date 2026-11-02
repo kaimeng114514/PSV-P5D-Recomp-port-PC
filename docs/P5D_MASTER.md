@@ -1134,6 +1134,41 @@
 | M1116 | §18.4661: ★★★★★★★★ **UTF 字段误读根因找到并修复：UTF 实例第 0 列的名称为空指针（列名偏移 0 被解析成 null），strcmp(null,key) 返回"相等" → 所有字段查找都返回第 0 列 index=0。修正 HLE strcmp 的空指针语义后：`[UTFVAL] r0=813EE800`（TocOffset）、`r0=00004C94`（TocSize）全部正确；**真实 TOC 读取成功：`PREAD fd=16385 off=2168383488(0x813EE800) size=19604 got=19604`**。遗留：TOC 加载后的 UTF 解析仍报 `E06100301:Invalid IFF header`（four_cc 不匹配，r3=0x77C3）与 `E2009010913:Need more memory`**
 | M1117 | §18.4662: ★★★★★★★★ **TOC 解析失败根因锁定：TOC 解析器把 TOC 缓冲当成"[0x10 段头][UTF]"，而 vita.cpk 的 TOC 区是裸 @UTF → 段头字段被误读（+4=0x00 触发 XOR 解密，滚动密钥 0x5F、每字节 *=0x15；大小字段误读为 0x36）→ 从 buffer+0x10 开始的 UTF 数据被就地 XOR 成乱码 → UTF retriever 在 buffer+0x10 读到乱码、报 four_cc 不匹配。已用 PREAD-DST 证明读入数据本身完全正确（buffer 0x84B1C800 = '@UTF'+0x4C94…），并拿到 XOR 算法原文**
 | M1118 | §18.4663: ★★★★★★★★★★ **CPK 挂载完全打通！`[FIOS] mounted data.cpk files=10555` / `mounted vita.cpk files=531`，`[CRILOG]=0`，标题素材名全部枚举（title/title_p5.bin、title.spr4、title.p3/logo.tga …），并选中第一项 'title/title_p5.bin'。三项 HLE 变换协同完成：TOCSZPATCH（64 位变体 TocSize +0x18）+ TOCPAD（EOF 短读零填充）+ TOCFIX（合成 "TOC " 段头并把 UTF 后移 +0x10，跳过误触发的 XOR）**
+| M1119 | §18.4664: ★★★★★★★★ **挂载后卡点定位为 CRI AtomEx（音频）初始化**：主 fiber 在 `FUN_812360C8`（"CRI AtomEx/VITA Ver.2.13.00 Build:Jan 30 2018 18:45:17"）路径上反复执行 Fios/AtomEx 池初始化 `FUN_8125DBCC`（0x44/0x24/0x1C 节点池）→ 轮询块 `8125DDAE/8125DDDA/8125DDF6` + `sceKernelDelayThread(5000)`（stub 812B2A50，lr=81207612）→ 典型的**重试循环**；`[ACF] total=0`（无 ACF 注册）、`FUN_812309A4`（ACB 注册，报 "ACF is not registered"/E2010031630）、guest 空指针读 `va=0x28`（blk 81230C2A）同属音频初始化链；挂载后**再也没有文件 PREAD** → 标题/ACF 数据读取根本没发生。另：挂载后新 reader 848E9678 状态=1/进度=8，应用 pstate 7|8 完成 shim 后置 status=2（但未解锁主卡点，说明它不是唯一等待项）**
+m1184/m1185 证据（`m1184_diag_key.txt`、`m1185_pstate8_key.txt`）：
+```
+[IOPUMP-READER] reader=848E9678 blk=153000 status=00000001 prog=848E96A0 pstate=00000003 size=848E8EE8
+[IOPUMP-STATE]  reader=848E9678 status=1 pstate=8（后续稳定在 8）
+[IOPUMP-SHIM]  reader=848E9678 pstate=8 size=848E8EE8 blk=153000 → [IOPUMP-DONE] ... -> status=2
+[FIOS] mounted data.cpk files=10555 / vita.cpk files=531
+[ACF] total=0
+[WAITP] va=812B2A50 lr=81207612 r0=00001388(5000us) fib=848463A0 ring: 8125DDAE 8125DDDA 8125DDF6 ×4（重复轮询）
+[WAITP] va=812B2880 lr=811732C2 r0=60014000 r1=1 r2=2（worker 等 event flag 60014000）
+[WAITP] va=812B2930 lr=8127BE1C r0=60017000 r1=1 r2=5（WaitEventFlagCB）
+[WAITP] va=812B27A0 lr=81207426 r0=50018000 r1=1（WaitSema）
+[WAITP] va=812B1BA0 lr=8120682A（FiberSwitch）
+[IO] 挂载后无任何 PREAD（挂载前 6 条：vita 头/TOC、data 头/TOC）
+[HLE-BADMEM] hle access va=00000028 blk=81230C2A stub=812B2AE0（guest 空指针读，音频初始化链）
+[DQPROC] #1..#60 d60=00000003 a8=816A0AC0 q0=812264B5（0x8122xxxx = CRI Atom 区域队列反复处理）
+```
+**关键反编译证据**：
+- `FUN_812360C8`（2308B）= **CRI AtomEx 初始化**：`DAT_8169e258 = "\nCRI AtomEx/VITA Ver.2.13.00 Build:Jan 30 2018 18:45:17"`；先 `FUN_81235a10(param_1,&local_74)` 解析 AtomEx 配置头，校验 `local_20 == 0x2130000`（版本）；失败路径直接返回；随后计算各段内存大小并调用 `FUN_8125DBCC`（Fios/AtomEx 池初始化：0x44 字节节点池、0x24 字节节点池、2×0x1C 字节节点池，全局 0x8153FA18/0x8153FA1C/0x8153FA38/0x8153FA3C…）
+- `FUN_8125DBCC` 唯一调用者 = `FUN_812360C8` @0x81236320
+- `[ACF] total=0`：ACF 未注册 → AtomEx 配置头无效 → 初始化失败 → 调用方 DelayThread(5000) 重试
+**NEXT**：
+```
+① 反编译 FUN_812360C8 的调用者（谁在 5000us 后重试）与其返回值处理；确认失败点（FUN_81235a10 解析失败？版本检查？内存大小？）
+② 跟踪 ACF 数据来源：ACF 应由 CPK 内 sound/*.acf 读取，但挂载后无 PREAD → 检查是否因音频初始化未完成而不发读请求，或 ACF 在 guest 内存中需 HLE 提供
+③ 检查 FUN_812309A4（ACB 注册）路径的 "ACF is not registered" 错误与 guest 空指针 va=0x28 的根因（缺失音频对象）
+④ 方案选项：a) 补全 AtomEx 初始化所需的 HLE（内存/回调/NGS 参数）；b) 若 ACF 必须从文件读取而读取路径被阻塞，用 IOPUMP 同类手段预取/注入 ACF；c) 临时跳过音频初始化（研究用开关）以验证标题资源加载继续进行
+⑤ 目标：AtomEx 初始化通过 → 继续 title 文件读取 → 标题资源解析 → GXM 首帧
+```
+验证：`m1184_diag_key.txt`、`m1185_pstate8_key.txt`、`out80m_m1185pstate8.txt`（全量）、`fiosinit.txt`、`stallfuncs.txt`、`fiosrefs.txt`。 |
+| §18.4664 | The post-mount blocker is identified as CRI AtomEx (audio) initialization: the main fiber repeatedly runs the Fios/AtomEx pool init FUN_8125DBCC (0x44/0x24/0x1C node pools) inside the FUN_812360C8 path ("CRI AtomEx/VITA Ver.2.13.00 Build:Jan 30 2018 18:45:17"), then polls blocks 8125DDAE/8125DDDA/8125DDF6 and calls sceKernelDelayThread(5000) (stub 812B2A50, lr=81207612) - a classic retry loop; [ACF] total=0 (no ACF registered), FUN_812309A4 (ACB register, "ACF is not registered"/E2010031630) and a guest null read va=0x28 (blk 81230C2A) all belong to the audio init chain; no file PREAD happens after mounting -> the title/ACF data reads never occur. Also: the post-mount reader 848E9678 had status=1/progress=8; the pstate 7|8 completion shim set status=2 (but did not unblock the main stall, so it is not the only wait item). '
+       'm1184/m1185 evidence: [IOPUMP-READER] reader=848E9678 blk=153000 status=00000001 prog=848E96A0 pstate=00000003 size=848E8EE8; [IOPUMP-STATE] reader=848E9678 status=1 pstate=8; [IOPUMP-SHIM] reader=848E9678 pstate=8 size=848E8EE8 blk=153000 -> [IOPUMP-DONE] -> status=2; [FIOS] mounted data.cpk files=10555 / vita.cpk files=531; [ACF] total=0; [WAITP] va=812B2A50 lr=81207612 r0=00001388 (5000us) fib=848463A0 ring: 8125DDAE 8125DDDA 8125DDF6 x4 (repeated polling); [WAITP] va=812B2880 lr=811732C2 r0=60014000 r1=1 r2=2 (worker waits event flag 60014000); [WAITP] va=812B2930 lr=8127BE1C r0=60017000 r1=1 r2=5 (WaitEventFlagCB); [WAITP] va=812B27A0 lr=81207426 r0=50018000 r1=1 (WaitSema); [WAITP] va=812B1BA0 lr=8120682A (FiberSwitch); [IO] no PREAD after mounting (6 before: vita header/TOC, data header/TOC); [HLE-BADMEM] hle access va=00000028 blk=81230C2A stub=812B2AE0 (guest null read, audio init chain); [DQPROC] #1..#60 d60=00000003 a8=816A0AC0 q0=812264B5 (0x8122xxxx = CRI Atom region queue processed repeatedly). '
+       'Key decompiled evidence: FUN_812360C8 (2308B) = CRI AtomEx init: DAT_8169e258 = "\\nCRI AtomEx/VITA Ver.2.13.00 Build:Jan 30 2018 18:45:17"; first FUN_81235a10(param_1,&local_74) parses the AtomEx config header, then validates local_20 == 0x2130000 (version); failure paths return early; it then computes segment memory sizes and calls FUN_8125DBCC (Fios/AtomEx pool init: 0x44-byte node pool, 0x24-byte pool, 2 x 0x1C-byte pools, globals 0x8153FA18/0x8153FA1C/0x8153FA38/0x8153FA3C...). FUN_8125DBCC has a single caller: FUN_812360C8 @0x81236320. [ACF] total=0: no ACF registered -> invalid AtomEx config header -> init fails -> caller retries after DelayThread(5000). '
+       'NEXT: (1) decompile the caller of FUN_812360C8 (who retries after 5000us) and its return-value handling; confirm the failure point (FUN_81235a10 parse failure? version check? memory sizes?); (2) trace the ACF data source: ACF should be read from the CPK (sound/*.acf) but there is no PREAD after mount -> check whether the read request is never issued because audio init is incomplete, or the ACF must be provided in guest memory by the HLE; (3) investigate the FUN_812309A4 (ACB register) "ACF is not registered" error and the guest null read va=0x28 root cause (missing audio object); (4) options: (a) complete the HLE needed by AtomEx init (memory/callbacks/NGS params); (b) if the ACF must be read from a file whose read path is blocked, prefetch/inject the ACF with an IOPUMP-like mechanism; (c) temporarily skip audio init (research-only switch) to verify that title asset loading continues; (5) goal: AtomEx init succeeds -> title file reads -> title resource parse -> GXM first frame. '
+       'Verification: m1184_diag_key.txt, m1185_pstate8_key.txt, out80m_m1185pstate8.txt (full), fiosinit.txt, stallfuncs.txt, fiosrefs.txt. |
 m1183 证据（`out80m_m1183tocsz.txt`，精简版 `m1183_tocsz_key.txt`）：
 ```
 [TOCSZPATCH] TocSize 0x4C94 -> 0x4CAC
@@ -501721,3 +501756,35 @@ TOCFIX   ：裸 @UTF TOC → memmove(dst+0x10,dst,n) + 写合成段头 "TOC "+0x
 ANTI-FORGETTING ENTRY. Keywords: M1118 CPK mount fully working - [FIOS] mounted data.cpk files=10555 and vita.cpk files=531, CRILOG=0, all title asset names enumerated, first entry title/title_p5.bin picked. Three HLE transforms: TOCSZPATCH (64-bit variant TocSize +0x18 at header UTF row buffer+0x54: 0x4C94->0x4CAC), TOCPAD (zero-fill TOC read past EOF and report full requested length), TOCFIX (for bare @UTF TOC reads: memmove(dst+0x10,dst,n) then synthetic header TOC +0xFF000000 +LE32(n)+0 so +4=0xFF skips the XOR; the UTF now sits at +0x10). m1183 evidence: [TOCSZPATCH] TocSize 0x4C94 -> 0x4CAC; [TOCPAD] dst=84B1C800 off=2168383488 req=19628 got=19604; [TOCFIX] n=19628 utfsz=00004C94 hdr=TOC size=00004CAC; [UTFRETR] #1 utf=84B1C810 len=00004C9C; [UTFRETR-BYTES] 84B1C810: 46545540 944C0000; [CPKANA] states 3,4,0x10,0x11,0x14,0x16; [CRILOG] 0; [IO] PREAD data.cpk off=2048 size=471576; [UTFRETR] #2 utf=84B21E10 len=0x350; #3 utf=84B23110 len=0x73208; [CPKRESULT] #1 TocOffset=0x800 TocSize=0x73218; [IOPUMP-READER] reader=848FC5C0; [FIOS] mounted; [CPKNAME] title/title_p5.bin etc; [ACF] total=0. New blocker after mount: wait/retry loop [WAITP] va=812B2A50 r0=0x1388 ring 8125DDAE 8125DDDA 8125DDF6 fib=848463A0; [WD] pcring 8127B85C ... 812B2A80; two fibers fib=84836300 pc=811E5CDA waiting and fib=848463A0 polling 8125DDAE~8125DDF6. NEXT: identify the object the 8125DDxx poll waits on and the 812B2A50 semantics, look for new criFs readers after mount, add HLE decryption if file data is AES/XOR encrypted, then read title/title_p5.bin and parse title resources/textures for the first GXM title frame. Verification: out80m_m1183tocsz.txt, m1183_tocsz_key.txt, m1183_tocsz_stderr_tail.txt.
 
 LOOKUP: M1118 CPK mount complete [FIOS] data.cpk 10555 vita.cpk 531, TOCSZPATCH 0x4C94 to 0x4CAC, TOCPAD zero-fill, TOCFIX synthetic TOC header shift UTF +0x10, [UTFRETR] 84B1C810 len 4C9C, [CPKANA] 3 4 0x10 0x11 0x14 0x16, CRILOG 0, title assets CPKNAME, title/title_p5.bin picked, ACF total=0, new wait loop 8125DDAE ring and 812B2A50 0x1388 -> 18.4662 [relevant: TOC XOR], 18.4661 [relevant: UTF fields], 18.4660 [relevant: real TOC]
+### 18.4664 PORT M1119: 挂载后卡点 = CRI AtomEx（音频）初始化重试循环；pstate=8 完成 shim 已加
+
+1) 挂载后新 reader 状态（m1184/m1185）：
+```
+[IOPUMP-READER] reader=848E9678 blk=153000 status=00000001 prog=848E96A0 pstate=00000003 size=848E8EE8
+[IOPUMP-STATE]  reader=848E9678 status=1 pstate=8（稳定）
+[IOPUMP-SHIM]  reader=848E9678 pstate=8 size=848E8EE8 → status=2（已补 pstate 7|8 完成 shim，未解锁主卡点）
+```
+2) 卡点签名（主 fiber 轮询 + 重试）：
+```
+[WAITP] va=812B2A50 lr=81207612 r0=00001388(5000us) fib=848463A0 ring: 8125DDAE 8125DDDA 8125DDF6 ×4
+[WAITP] va=812B2880 r0=60014000（worker 等 event flag）
+[WAITP] va=812B2930 r0=60017000 / va=812B27A0 r0=50018000 / va=812B1BA0（FiberSwitch）
+[ACF] total=0；挂载后无 PREAD；[HLE-BADMEM] va=0x28 blk=81230C2A（guest 空指针读）
+[DQPROC] #1..#60 d60=3 a8=816A0AC0 q0=812264B5（CRI Atom 区域队列）
+```
+3) 反编译定位：
+- `FUN_812360C8`（2308B）= **CRI AtomEx 初始化**（字符串 `CRI AtomEx/VITA Ver.2.13.00 Build:Jan 30 2018 18:45:17`）；先 `FUN_81235a10` 解析 AtomEx 配置头 → 校验版本 `0x2130000` → 计算内存 → 调 `FUN_8125DBCC`（Fios/AtomEx 池初始化，唯一调用者 @0x81236320）
+- `[ACF] total=0` = ACF 未注册 → 配置头无效 → 初始化失败 → 调用方 DelayThread(5000) 重试
+4) NEXT：
+```
+① 反编译 FUN_812360C8 调用者（重试方）与返回值处理，确认失败点
+② 追 ACF 数据来源（CPK 的 sound/*.acf；当前无读取请求）
+③ 查 FUN_812309A4（ACB 注册）"ACF is not registered" 与空指针 va=0x28 根因
+④ 选项：补 AtomEx HLE / 预取注入 ACF / 临时跳过音频初始化以验证标题资源继续加载
+⑤ 目标：AtomEx 通过 → title 读取 → 标题资源 → GXM 首帧
+```
+验证：`m1184_diag_key.txt`、`m1185_pstate8_key.txt`、`out80m_m1185pstate8.txt`、`fiosinit.txt`、`stallfuncs.txt`、`fiosrefs.txt`。
+
+ANTI-FORGETTING ENTRY. Keywords: M1119 post-mount blocker = CRI AtomEx audio init retry loop; main fiber runs FUN_812360C8 (CRI AtomEx/VITA Ver.2.13.00 Build:Jan 30 2018 18:45:17) -> FUN_8125DBCC Fios/AtomEx pool init (0x44/0x24/0x1C node pools) -> polling blocks 8125DDAE 8125DDDA 8125DDF6 + sceKernelDelayThread(5000) stub 812B2A50 lr=81207612; [ACF] total=0 no ACF registered; FUN_812309A4 ACB register "ACF is not registered" E2010031630; guest null read va=0x28 blk=81230C2A; no file PREAD after mount; reader 848E9678 status=1 pstate=8 -> pstate 7|8 shim -> status=2 but stall persists; waits: WaitEventFlag 60014000 (workers), WaitEventFlagCB 60017000, WaitSema 50018000, FiberSwitch; [DQPROC] d60=3 a8=816A0AC0 q0=812264B5 CRI Atom queue. FUN_812360C8 decompiled: DAT_8169e258 = CRI AtomEx/VITA Ver.2.13.00; FUN_81235a10 parses AtomEx config header; version check local_20 == 0x2130000; calls FUN_8125DBCC @0x81236320. NEXT: decompile caller of FUN_812360C8 (retry logic) and its return handling; trace ACF data source (sound/*.acf from CPK, no reads issued); investigate FUN_812309A4 ACF-not-registered and null va=0x28; options: complete AtomEx HLE, prefetch/inject ACF, or temporarily skip audio init to verify title asset loading; goal AtomEx init success -> title reads -> title resources -> GXM first frame. Verification: m1184_diag_key.txt, m1185_pstate8_key.txt, out80m_m1185pstate8.txt, fiosinit.txt, stallfuncs.txt, fiosrefs.txt.
+
+LOOKUP: M1119 post-mount stall CRI AtomEx init retry loop, FUN_812360C8 CRI AtomEx/VITA Ver.2.13.00, FUN_8125DBCC Fios/AtomEx pool init, polling 8125DDAE 8125DDDA 8125DDF6, DelayThread 5000 stub 812B2A50, ACF total=0, FUN_812309A4 ACB register ACF is not registered, null read va=0x28 blk=81230C2A, reader 848E9678 pstate=8 shim, no PREAD after mount, next AtomEx caller decompile and ACF source -> 18.4663 [relevant: mount complete], 18.4662 [relevant: TOC XOR], 18.4661 [relevant: UTF]

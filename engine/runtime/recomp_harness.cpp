@@ -3792,7 +3792,7 @@ static uint32_t fiber_exec_to_completion(RecState* s) {
             { uint8_t* _q = GP(_rd + 0xB0u); if (_q) std::memcpy(&_bk, _q, 4); }
             if (_bk != _a) continue;
             bool _dup = false; for (int _k = 0; _k < _n; ++_k) if (_ip_readers[_k] == _rd) { _dup = true; break; }
-            if (!_dup) { _ip_readers[_n++] = _rd; if (_ip_n < 20) { printf("[IOPUMP-READER] discovered reader=%08X blk=%u\n", _rd, g_blkcnt_total); fflush(stdout); } }
+            if (!_dup) { _ip_readers[_n++] = _rd; if (_ip_n < 20) { uint32_t _st=0,_pp=0,_ps=0,_sz=0; { uint8_t* _q=GP(_rd+0xBCu); if(_q) std::memcpy(&_st,_q,4); } { uint8_t* _q=GP(_rd+0xB0u); if(_q) std::memcpy(&_pp,_q,4); } if (_pp) { uint8_t* _q=GP(_pp+0xCu); if(_q) std::memcpy(&_ps,_q,4); } { uint8_t* _q=GP(_rd+0x130u); if(_q) std::memcpy(&_sz,_q,4); } printf("[IOPUMP-READER] discovered reader=%08X blk=%u status=%08X prog=%08X pstate=%08X size=%08X\n", _rd, g_blkcnt_total, _st,_pp,_ps,_sz); fflush(stdout); } }
           }
           _ip_reader_n = _n;
         }
@@ -3801,12 +3801,12 @@ static uint32_t fiber_exec_to_completion(RecState* s) {
           uint32_t _rd = _ip_readers[_ri];
           for (int _i = 0; _i < 4; ++_i) {
             uint32_t _stt = 0; { uint8_t* _q = GP(_rd + 0xBCu); if (_q) std::memcpy(&_stt, _q, 4); }
-            if (_stt != 1u) break;
+            if (_stt != 1u) { static int _sk[8]={0}; if (_ri<8 && _sk[_ri]++<3) { uint32_t _pp2=0,_ps2=0; { uint8_t* _q=GP(_rd+0xB0u); if(_q) std::memcpy(&_pp2,_q,4); } if(_pp2){uint8_t* _q=GP(_pp2+0xCu); if(_q) std::memcpy(&_ps2,_q,4);} printf("[IOPUMP-STATE] reader=%08X st=%08X prog=%08X pstate=%08X blk=%u\n", _rd,_stt,_pp2,_ps2,g_blkcnt_total); fflush(stdout);} break; }
             call_guest_cb2(s, 0x8128D502u, _rd, 0u, 300000);
             ++_cnt;
             uint32_t _prog = 0; { uint8_t* _q = GP(_rd + 0xB0u); if (_q) std::memcpy(&_prog, _q, 4); }
             uint32_t _pst = 0; if (_prog) { uint8_t* _q = GP(_prog + 0xCu); if (_q) std::memcpy(&_pst, _q, 4); }
-            if (_pst == 7u) {
+            if (_pst == 7u || _pst == 8u) {   // M1119: state 8 also means the load state machine finished (e.g. reader 848E9678 created after the CPK mount stays at pstate=8 with status=1); treat both as completion
               uint32_t _dst = g_last_pread_dst;
               if (_dst) {
                 uint32_t _magic = 0, _u4 = 0, _u14 = 0;
@@ -3838,6 +3838,7 @@ static uint32_t fiber_exec_to_completion(RecState* s) {
                 }
               }
               uint32_t _sz = call_guest_cb2(s, 0x8128F6C8u, _prog, 0u, 200000);
+              if (g_blkcnt_total < 400000u) { printf("[IOPUMP-SHIM] reader=%08X pstate=%u size=%08X blk=%u\n", _rd, _pst, _sz, g_blkcnt_total); fflush(stdout); }
               { uint8_t* _q = GP(_rd + 0x130u); if (_q) { uint32_t _v = _sz; std::memcpy(_q, &_v, 4); } }
               { uint8_t* _q = GP(_rd + 0xBCu); if (_q) { uint32_t _v = 2u; std::memcpy(_q, &_v, 4); } }
               if (_ip_n < 30) { printf("[IOPUMP-DONE] reader=%08X state=7 size=%08X -> status=2 blk=%u\n", _rd, _sz, g_blkcnt_total); fflush(stdout); }
