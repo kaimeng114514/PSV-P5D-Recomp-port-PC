@@ -1155,6 +1155,42 @@
 | M1137 | §18.4682: ★★★★★★★★ **M1136 修复后的长跑（m1229，NESTED_UNTIL=300M）验证解压链持续推进（[DECOMP]38 / [HUFF]22 / [LZ]37，[VFW] 顶点格式写入 n 达 44,180,000，[FLOAD-BAD]=2 仅 start stub，[BADMEM]=0），但最终卡在"fiber B 的保存上下文 pc 变成栈地址 0x84855A58"**：`[FIBER-EXEC] no block for pc=84855A58 (cur=848463A0) lr=84855A58 sp=8484EF28 blk=812B1B70` → no-block 路径只保存上下文返回；guest 调度器（GetSelf 812B1B70 → 812067A0 → … → Switch 812B1BA0@8120682A）每次都切到这个 pc 非法的 fiber → 无限无进展循环（g_blkcnt_total 冻结在 39,242,012、[PUMP] blocks=0）。证据：`[FEXEC-IN] n=39242012 cur=848463A0 pc=84855A58 r0=0 r7=5 r14=84855A58 r13=8484EF28`；`[FIBSW] #3571 fpc=811DFAFE flr=84855A58`（LR 已是栈地址值）；重复 `[SPOLL] pc=812068F2/812068C4 f80=1 g18=g1c=848463A0`；`[STALLTRACE] pc=812B1BA0 blk=812B1B70 fib=0 sp=82EFFE68 fex=0`。推断：某处 **pop/return 的返回地址从被破坏的栈帧读出**（pc=栈槽值），需在"fiber ctx 保存时 pc 非代码"处加探针抓最后的合法块与栈内容
 | M1138 | §18.4683: ★★★★★★★★★★★★ **重大突破：修复 GetSelf 的 fiber2 泵未保存/恢复调用者上下文 → 消除静默 no-block 死循环，执行首次进入帧循环并首次提交 GXM 绘制**。根因（NEXTBAD 探针抓到）：`sceFiberGetSelf`（812B1B70）HLE 中的周期性 fiber2 泵直接 `fiber_load(s, fiber2)` + `fiber_exec_to_completion(s)`，**没有 rc_save/rc_restore**：fiber_load 把调用者 s（含 r14）覆盖成 fiber2 的保存上下文（huffman 解码中途，r14=节点数组指针 84855E80/84855A58），而嵌套 exec 在 depth=2 立刻 [NESTED-REFUSED] 返回 0 不恢复 → GetSelf 返回 `s->r[14]`（数据指针）当作下一个 pc → 跳到栈/数据地址 → no-block 静默 livelock（m1230/1231 复现：`[NEXTBAD] from=812B1B70 nx=84855E80 lr=84855E80`、`[FIBER-EXEC] no block for pc=84855A58`）。修复：GetSelf 两处 fiber2 泵（一次性 + 周期 PUMP2）前后包 `rc_save(s)`/`rc_restore(s)`。验证 m1232：`[NEXTBAD]=0`、`[FIBER-EXEC]=0`、**【FRAMECB]=20 / [UPD]=20 / [POST]=20（帧循环首次运行）**、**[GXMABI] 首次出现 sceGxmSetVertexProgram/SetFragmentProgram/SetVertexStream/sceGxmDraw（首次绘制提交）**、[DECOMP]=48、[NESTED-STOP] 45M pc=811DFB14、[BADMEM]=0
 | M1139 | §18.4684: ★★★★★★★★ **M1138 修复后长跑首次进入 S0_LOGO 渲染路径（LOGO 状态机 5→8、LOGODRAW 80 次、场景构建 120 次、FLUSH frame 计数到 2），并确认 Vulkan 后端 present 成功（gxm_vk.o 的 [PRESENT] 探针：imgIdx=0 result=VK_SUCCESS）**。m1233（NESTED_UNTIL=300M）在 blk≈64.5M 时：`[LOGO] state=5→8`（状态机推进）、`[LOGODRAW] #80 arg=85BD6024`（8119351C 绘制入口被调用 80 次）、`[TRRET] #160`（811DB24E job trampoline）、`[SCBUILD] #100`（811C241E 场景构建）、`[SCENE] #120`（811C2964 场景对象 p=85BD52A0 st=1 head=0 cnt=0，已创建但尚无渲染条目）、`[FLUSH] #120 frame=2`（帧计数推进到 2）；`[NESTED-STOP]=0`、`[BADMEM]=0`、`[IO]=6`。Vulkan 证据：`gxm_vk.o` 含 `[PRESENT]` 探针，m1232 日志出现 `[PRESENT] #1 imgIdx=0 result=0(VK_SUCCESS)`（GXM→Vulkan 呈现路径打通）；但 harness 的 `[GXM-PRESENT]`（sceGxmDisplayQueueAddEntry 812B1720）=0、`[GFX]` begin/end/present 计数=0 → 游戏尚未提交 GXM 场景/显示队列
+| M1140 | §18.4685: ★★★★★★★ **m1233 长跑最终状态：S0_LOGO 状态机推进到 state=B(11)（LOGODRAW 80、FLUSH frame=2、场景构建 120 但 [SCENE] 仍空 cnt=0），随后在 blk≈66,494,954 发生全系统死锁**：g_blkcnt_total 冻结、[WD] stall=1（main fiber 848463A0 在 DelayThread 812B2A50@81207612 重试循环中）、线程泵空转（pumped=5,076,000，blocks=0，全部线程阻塞）、hle_ring 反复 `812B2A50@81207612`（DelayThread），pcring 显示 Fios/loader 轮询环：`81207344 → 812B2830@81207350(LockLwMutex) → 811E6374/811E6A4C/812B2270/811E6A52 → 811E638C/811E639A → 81207352 → 812B28A0@8120735C(UnlockLwMutex) → 811E63A0 → 812B2AD0(SignalSema) → 811E63A8 → 812B2880(WaitEventFlag)`，最后 curpc=812B2AE0(SetEventFlag)。IO 仍=6、[FHOPEN]=0 → **loader 等待的异步任务/IO 从未完成**（无新文件读取，游戏在 LOGO 状态 B 后等待加载/任务完成），HLE 作业队列/线程调度未完成该任务 → 死锁
+m1233 证据（`m1233_stall_key.txt`、`m1233_long4_key.txt`）：
+```
+[LOGO] #198/#199/#200 state=B task=85CE556C          ← LOGO 状态机到 B(11)，探针上限 200
+[LOGODRAW] 80 / [SCBUILD] 100 / [SCENE] 120（p=85BD52A0 st=1 head0F=0 head19=0 cnt=0，空场景）
+[FLUSH] #120 frame=2 / [GXM-PRESENT]=0 / [GFX] begin=end=present=0
+[PRESENT] #1 imgIdx=0 result=0(VK_SUCCESS)           ← Vulkan 呈现成功过一次
+[IO]=6 / [FHOPEN]=0 / [DECOMP]=48 / [PASSSUM]=420 / [BADMEM]=0
+（死锁点，最后一次 WD）
+[WD] n=66494954 blk=8120760C … hle_ring: 812B2A50@81207612 ×12
+[WD] pcring: 81207344 812B2830 81207350 811E6374 811E6A4C 812B2270 811E6A52 811E638C 811E639A 81207352 812B28A0 8120735C 811E63A0 812B2AD0 811E63A8 812B2880
+[WD] loop=1 cnt=66494953/2058783920/2462/0 total=66494954 blk=812B2A50 fib=848463A0 fex=1 ex=1 pump=0 curpc=812B2A50
+[WD] n=66494954 blk=812B2A50 fib=848463A0 thr=40017000 stall=1 hle_ring: 812B2A50@81207612 ×12
+[WD] loop=1 … blk=812B2AE0 fib=848463A0 fex=1 ex=1 curpc=812B2AE0（SetEventFlag）
+tail [PUMP] #5076200 … tid=40021000 pc=8127BE36 blocks=0 blk=66296862 fex=1 fib=848463A0
+```
+**HLE stub 语义对照**：`812B2A50=DelayThread`、`812B2A80=DelayThreadCB`、`812B2830=LockLwMutex`、`812B28A0=UnlockLwMutex`、`812B27A0=WaitSema`、`812B2AD0=SignalSema`、`812B2880=WaitEventFlag`、`812B2AE0=SetEventFlag`、`812B2AC0=CheckCallback`。pcring 的 `811E63xx` 段是 **Fios(criFs) 任务/loader** 的轮询循环。
+**分析**：
+- LOGO 状态机到 B(11) 后不再推进（探针上限 200 但 FLUSH 也停在 frame=2）→ 游戏进入"等待资源/任务"状态；
+- loader 在 Fios 任务环里 Lock/Unlock LwMutex + SignalSema + WaitEventFlag + DelayThread 轮询，但 **IO 计数仍是 6、没有任何新的 FHOPEN**：说明等待的不是真实文件 IO 完成，而是 **HLE 未完成的异步任务/作业**（例如任务队列项没有 worker 执行、或事件标志从未被 set）；
+- 线程泵空转（pumped 5M+，blocks=0）且所有线程阻塞 → 当前 HLE 线程/任务调度模型在这个等待点形成**系统性死锁**。
+**NEXT**：
+```
+① 在 WaitEventFlag(812B2880)/WaitSema(812B27A0)/SetEventFlag(812B2AE0)/SignalSema(812B2AD0)
+   加探针（blk>60M 后首次 N 次）：记录 obj/bits/wait mode、当前 fiber/thread、期望 setter
+② 检查 Fios 任务队列/作业系统：是否有任务项 pending 而无 worker；IOPUMP 在 nested exec 内是否 armed/被调用
+③ 若等待的是异步 IO：检查 IOPUMP 的 reader 发现范围与触发条件（g_blkcnt_total%1500、_ip_armed）
+④ 修复后继续跑到 SCENE 非空 / GXM BeginScene-Present
+```
+验证：`m1233_stall_key.txt`、`m1233_long4_key.txt`、`m1232_fix2_key.txt`、`recomp_harness_getselfpump_4683.cpp`、`[TABLE] blocks=230291`。 |
+| §18.4685 | m1233 long-run final state: the S0_LOGO state machine advances to state=B(11) (LOGODRAW 80, FLUSH frame=2, scene builds 120 but [SCENE] still empty cnt=0), then a whole-system deadlock occurs at blk~66,494,954: g_blkcnt_total freezes, [WD] stall=1 (main fiber 848463A0 in the DelayThread 812B2A50@81207612 retry loop), the thread pump idles (pumped=5,076,000, blocks=0, all threads blocked), hle_ring repeats 812B2A50@81207612 (DelayThread), and the pcring shows the Fios/loader poll loop: 81207344 -> 812B2830@81207350 (LockLwMutex) -> 811E6374/811E6A4C/812B2270/811E6A52 -> 811E638C/811E639A -> 81207352 -> 812B28A0@8120735C (UnlockLwMutex) -> 811E63A0 -> 812B2AD0 (SignalSema) -> 811E63A8 -> 812B2880 (WaitEventFlag), last curpc=812B2AE0 (SetEventFlag). IO is still 6 and [FHOPEN]=0 => the async task/IO the loader waits on never completes (no new file reads; the game waits for load/task completion after LOGO state B), and the HLE job queue/thread scheduling never completes that task -> deadlock. '
+       'm1233 evidence: [LOGO] #198/#199/#200 state=B task=85CE556C (probe cap 200); [LOGODRAW]=80 / [SCBUILD]=100 / [SCENE]=120 (p=85BD52A0 st=1 head0F=0 head19=0 cnt=0 empty scene); [FLUSH] #120 frame=2 / [GXM-PRESENT]=0 / [GFX] begin=end=present=0; [PRESENT] #1 imgIdx=0 result=0(VK_SUCCESS) (Vulkan present succeeded once); [IO]=6 / [FHOPEN]=0 / [DECOMP]=48 / [PASSSUM]=420 / [BADMEM]=0; (deadlock point, last WD) [WD] n=66494954 blk=8120760C hle_ring 812B2A50@81207612 x12; [WD] pcring 81207344 812B2830 81207350 811E6374 811E6A4C 812B2270 811E6A52 811E638C 811E639A 81207352 812B28A0 8120735C 811E63A0 812B2AD0 811E63A8 812B2880; [WD] loop=1 cnt=66494953/2058783920/2462/0 total=66494954 blk=812B2A50 fib=848463A0 fex=1 ex=1 pump=0 curpc=812B2A50; [WD] n=66494954 blk=812B2A50 fib=848463A0 thr=40017000 stall=1 hle_ring 812B2A50@81207612 x12; [WD] loop=1 blk=812B2AE0 curpc=812B2AE0 (SetEventFlag); tail [PUMP] #5076200 tid=40021000 pc=8127BE36 blocks=0 blk=66296862 fex=1 fib=848463A0. '
+       'HLE stub mapping: 812B2A50=DelayThread, 812B2A80=DelayThreadCB, 812B2830=LockLwMutex, 812B28A0=UnlockLwMutex, 812B27A0=WaitSema, 812B2AD0=SignalSema, 812B2880=WaitEventFlag, 812B2AE0=SetEventFlag, 812B2AC0=CheckCallback. The 811E63xx segment in the pcring is the Fios (criFs) task/loader poll loop. '
+       'Analysis: after LOGO state B(11) stops advancing (probe cap 200 but FLUSH also stops at frame=2) the game enters a wait-for-resource/task state; the loader polls in the Fios task loop with Lock/Unlock LwMutex + SignalSema + WaitEventFlag + DelayThread but the IO count stays 6 with no new FHOPEN, so it waits not on real file IO completion but on an HLE-unfinished async task/job (e.g. a task-queue entry with no worker, or an event flag never set); the thread pump idles (pumped 5M+, blocks=0) with all threads blocked -> a systematic deadlock of the current HLE thread/task scheduling model at this wait point. '
+       'NEXT: (1) add probes on WaitEventFlag(812B2880)/WaitSema(812B27A0)/SetEventFlag(812B2AE0)/SignalSema(812B2AD0) (first N calls after blk>60M) recording obj/bits/wait mode, current fiber/thread and the expected setter; (2) inspect the Fios task queue/job system: is there a pending task with no worker, and is IOPUMP armed/called inside nested exec; (3) if it waits on async IO, inspect the IOPUMP reader discovery range and trigger conditions (g_blkcnt_total%1500, _ip_armed); (4) after the fix run until SCENE non-empty / GXM BeginScene-Present. '
+       'Verification: m1233_stall_key.txt, m1233_long4_key.txt, m1232_fix2_key.txt, recomp_harness_getselfpump_4683.cpp, [TABLE] blocks=230291. |
 m1233 证据（`m1233_long4_key.txt`）：
 ```
 [LOGO] #42 state=5 task=85CE556C        → 最后一次 [LOGO] #132 state=8 task=85CE556C
@@ -503443,3 +503479,44 @@ Vulkan swapchain/present 已成功一次；游戏 GXM BeginScene/EndScene/Displa
 ANTI-FORGETTING ENTRY. Keywords: M1139 after the M1138 fix the long run enters the S0_LOGO render path for the first time and the Vulkan backend present is confirmed successful. m1233 (NESTED_UNTIL=300M) at blk~64.5M: [LOGO] state=5->8 (task=85CE556C), [LOGODRAW] 80 calls (entry 8119351C, arg=85BD6024 r1=85CE55BC r2=8119351D), [TRRET] 160 (811DB24E job trampoline, node=85CCC610), [SCBUILD] 100 (811C241E), [SCENE] 120 (811C2964 p=85BD52A0 st=1 head0F=0 head19=0 cnt=0 => scene created but empty), [FLUSH] 120 with frame counter reaching 2, sound thread active ([PUMP] tid=40021000 pc=8127B36A), [DECOMP]=48, [PASSSUM]=420, [BADMEM]=0, [NESTED-STOP]=0, [IO]=6, [FHOPEN]=0. Vulkan evidence: gxm_vk.o contains the [PRESENT] probe; m1232 log shows [PRESENT] #1 imgIdx=0 result=0(VK_SUCCESS) so the gxm_vk swapchain/present path works; but [GXM-PRESENT] (sceGxmDisplayQueueAddEntry 812B1720)=0 and [GFX] begin/end/present counters=0, so the game has not yet submitted a GXM scene/display queue. [FRAMECB]=20 / [UPD]=20 / [POST]=20 / [GXMABI]=4028 (including sceGxmDraw x1). Analysis: M1138's rc_save/rc_restore fix let execution pass initialization and enter the S0_LOGO render state machine (state 5->8, LOGODRAW 80, FLUSH frame 0->2); scene objects are created (st=1) but head/cnt=0 so the scene graph is empty (no render entries attached); Vulkan present succeeded once; game GXM BeginScene/EndScene/DisplayQueueAddEntry not yet called. NEXT: continue m1233 watching [SCENE] cnt>0, [FLUSH] frame growth, LOGODRAW->GXM submission; if the scene stays empty inspect the scene-manager head/entry list fields (HLE return/memory-object issue vs game logic wait); track when [GXM-PRESENT]/sceGxmBeginScene are called and align with the gxm_vk present count; after BeginScene/Present screenshot-verify pixels (clear/LOGO) -> S0_LOGO visible -> S1_TITLE. Verification: m1233_long4_key.txt, m1232_fix2_key.txt, recomp_harness_getselfpump_4683.cpp, gxm_vk.o, [TABLE] blocks=230291.
 
 LOOKUP: M1139 S0_LOGO render path first entry after M1138 fix, [LOGO] state 5 to 8 task 85CE556C, [LOGODRAW] 80 calls 8119351C arg 85BD6024, [TRRET] 160 811DB24E node 85CCC610, [SCBUILD] 100 811C241E, [SCENE] 120 811C2964 p 85BD52A0 st 1 head0F 0 head19 0 cnt 0 empty scene, [FLUSH] 120 frame 2, Vulkan [PRESENT] imgIdx 0 VK_SUCCESS gxm_vk.o, [GXM-PRESENT] 0 sceGxmDisplayQueueAddEntry 812B1720 not called, [GFX] begin end present 0, [FRAMECB] 20 UPD 20 POST 20 GXMABI 4028 sceGxmDraw 1, next scene cnt>0 flush frame growth GXM submission screenshot pixels S0_LOGO visible S1_TITLE -> 18.4683 [relevant: GetSelf pump fix], 18.4682 [relevant: previous stall], 18.4680 [relevant: PASSSUM]
+### 18.4685 PORT M1140: m1233 长跑：S0_LOGO 状态到 B(11) 后全系统死锁（loader/Fios 任务环等异步任务完成）
+
+1) 最终状态（m1233，NESTED_UNTIL=300M）：
+```
+[LOGO] #200 state=B task=85CE556C            ← S0_LOGO 状态机推进到 B(11)
+[LOGODRAW]=80 / [SCBUILD]=100 / [SCENE]=120（p=85BD52A0 st=1 head0F=0 head19=0 cnt=0，空场景）
+[FLUSH] #120 frame=2 / [GXM-PRESENT]=0 / [GFX] begin=end=present=0
+[PRESENT] #1 imgIdx=0 result=0(VK_SUCCESS)   ← Vulkan 呈现成功过一次
+[IO]=6 / [FHOPEN]=0 / [DECOMP]=48 / [PASSSUM]=420 / [BADMEM]=0
+（死锁点）
+[WD] loop=1 cnt=66494953/2058783920/2462/0 total=66494954 blk=812B2A50 fib=848463A0 fex=1 ex=1 curpc=812B2A50
+[WD] n=66494954 blk=812B2A50 thr=40017000 stall=1 hle_ring: 812B2A50@81207612 ×12（DelayThread 重试环）
+[WD] pcring: 81207344 812B2830 81207350 811E6374 811E6A4C 812B2270 811E6A52 811E638C 811E639A 81207352 812B28A0 8120735C 811E63A0 812B2AD0 811E63A8 812B2880
+tail [PUMP] #5076200 … blocks=0 blk=66296862（线程泵空转）
+```
+2) Stub 语义：
+```
+812B2A50 DelayThread / 812B2A80 DelayThreadCB / 812B2830 LockLwMutex / 812B28A0 UnlockLwMutex
+812B27A0 WaitSema / 812B2AD0 SignalSema / 812B2880 WaitEventFlag / 812B2AE0 SetEventFlag
+pcring 的 811E63xx 段 = Fios(criFs) 任务/loader 轮询环
+```
+3) 分析：
+```
+LOGO state=B 后停滞（FLUSH frame 停在 2）
+loader 在 Fios 任务环内 Lock/Unlock LwMutex + SignalSema + WaitEventFlag + DelayThread 轮询
+但 IO=6、FHOPEN=0 → 等待的不是真实文件 IO，而是 HLE 未完成的异步任务/作业
+线程泵空转、全部线程阻塞 → 当前 HLE 线程/任务调度模型在此等待点系统性死锁
+```
+4) NEXT：
+```
+① WaitEventFlag(812B2880)/WaitSema(812B27A0)/SetEventFlag(812B2AE0)/SignalSema(812B2AD0) 探针
+   （blk>60M 后首次 N 次）：记录 obj/bits/wait mode、fiber/thread、期望 setter
+② 检查 Fios 任务队列/作业系统：有无 pending 任务无 worker；IOPUMP 在 nested exec 内是否 armed/调用
+③ 若等待异步 IO：检查 IOPUMP reader 发现范围与触发条件（g_blkcnt_total%1500、_ip_armed）
+④ 修复后继续到 SCENE 非空 / GXM BeginScene-Present
+```
+验证：`m1233_stall_key.txt`、`m1233_long4_key.txt`、`m1232_fix2_key.txt`、`recomp_harness_getselfpump_4683.cpp`、`[TABLE] blocks=230291`。
+
+ANTI-FORGETTING ENTRY. Keywords: M1140 m1233 long run final state - S0_LOGO state machine reaches state=B(11) then whole-system deadlock at blk~66,494,954. Evidence: [LOGO] #200 state=B task=85CE556C (probe cap 200); LOGODRAW=80, SCBUILD=100, SCENE=120 (p=85BD52A0 st=1 head0F=0 head19=0 cnt=0 empty scene); FLUSH #120 frame=2; GXM-PRESENT=0; GFX begin=end=present=0; PRESENT #1 imgIdx=0 result=VK_SUCCESS (Vulkan present success once); IO=6, FHOPEN=0, DECOMP=48, PASSSUM=420, BADMEM=0. Deadlock point: [WD] loop=1 cnt=66494953/2058783920/2462/0 total=66494954 blk=812B2A50 fib=848463A0 fex=1 ex=1 curpc=812B2A50; [WD] n=66494954 blk=812B2A50 thr=40017000 stall=1 hle_ring 812B2A50@81207612 x12 (DelayThread retry loop); [WD] pcring 81207344 812B2830 81207350 811E6374 811E6A4C 812B2270 811E6A52 811E638C 811E639A 81207352 812B28A0 8120735C 811E63A0 812B2AD0 811E63A8 812B2880; [WD] loop=1 blk=812B2AE0 curpc=812B2AE0 (SetEventFlag); tail [PUMP] #5076200 tid=40021000 pc=8127BE36 blocks=0 blk=66296862 fex=1 fib=848463A0 (thread pump idles). HLE stub mapping: 812B2A50 DelayThread, 812B2A80 DelayThreadCB, 812B2830 LockLwMutex, 812B28A0 UnlockLwMutex, 812B27A0 WaitSema, 812B2AD0 SignalSema, 812B2880 WaitEventFlag, 812B2AE0 SetEventFlag, 812B2AC0 CheckCallback; the 811E63xx segment in pcring is the Fios (criFs) task/loader poll loop. Analysis: after LOGO state B(11) stops advancing (FLUSH frame stuck at 2) the game enters a wait-for-resource/task state; the loader polls the Fios task loop with Lock/Unlock LwMutex + SignalSema + WaitEventFlag + DelayThread but IO stays 6 and no new FHOPEN, so it waits not on real file IO but on an HLE-unfinished async task/job (e.g. a pending task-queue entry with no worker, or an event flag never set); the thread pump idles (pumped 5M+, blocks=0) with all threads blocked -> systematic deadlock of the current HLE thread/task scheduling model at this wait point. NEXT: add probes on WaitEventFlag(812B2880)/WaitSema(812B27A0)/SetEventFlag(812B2AE0)/SignalSema(812B2AD0) (first N calls after blk>60M) recording obj/bits/wait mode, current fiber/thread and expected setter; inspect the Fios task queue/job system (pending task with no worker, IOPUMP armed/called inside nested exec); if it waits on async IO inspect the IOPUMP reader discovery range and trigger conditions (g_blkcnt_total%1500, _ip_armed); after the fix run until SCENE non-empty / GXM BeginScene-Present. Verification: m1233_stall_key.txt, m1233_long4_key.txt, m1232_fix2_key.txt, recomp_harness_getselfpump_4683.cpp, [TABLE] blocks=230291.
+
+LOOKUP: M1140 S0_LOGO state B 11 then deadlock blk 66,494,954, [LOGO] 200 state B task 85CE556C, LOGODRAW 80 SCBUILD 100 SCENE 120 empty cnt 0, FLUSH frame 2, GXM-PRESENT 0 GFX begin end present 0, PRESENT 1 imgIdx 0 VK_SUCCESS, IO 6 FHOPEN 0, WD loop=1 cnt 66494953 total 66494954 blk 812B2A50 fib 848463A0 curpc 812B2A50, hle_ring 812B2A50@81207612 DelayThread retry, pcring 81207344 812B2830 81207350 811E6374 811E6A4C 812B2270 811E6A52 811E638C 811E639A 81207352 812B28A0 8120735C 811E63A0 812B2AD0 811E63A8 812B2880, curpc 812B2AE0 SetEventFlag, PUMP idle blocks=0, stub mapping LockLwMutex UnlockLwMutex WaitSema SignalSema WaitEventFlag SetEventFlag, Fios loader poll loop 811E63xx, next WaitEventFlag WaitSema probes obj bits setter Fios task queue job pending worker IOPUMP armed nested exec -> 18.4684 [relevant: S0_LOGO path], 18.4683 [relevant: GetSelf fix], 18.4682 [relevant: previous stall]
