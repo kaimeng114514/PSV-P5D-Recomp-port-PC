@@ -1121,6 +1121,75 @@
 | M1103 | §18.4648: ★★★★★★★★★ **E2009011903 检查完全解码 + 数值实测：`[CMPBUF2] r9=0259A67B r6=000001FF`（r9=所需 uVar6=39,430,267B≈39MB，r6=剩余可用=0x1FF），检查块 blk_8122485C（`r9<=r6` 才成功，否则落入 0x81224860 记录 E2009011903）。uVar6 来源 = `FUN_81226624(&local_78) + FUN_81254D24()`（FUN_81224160 内 @0x812248xx 附近），其中 FUN_81259F30→FUN_8125AC84（视频解码工作大小）+ (iVar3+4)*4+0x14；FUN_81254D24 在 `DAT_8153FC8C>0` 时返回 0x4E0。同时取得配置数据：`[ATOMCFG] cfg=84856088 words: 00000024 00000010 45160000 8485609C 00000004 00000003 41EFC28F 84856318 00000000 02120105 …`、`[SIZEFN] arg=8485609C …`、`[SIZERET] size=0002018F`（FUN_81223EF6 对 config[3]=0x8485609C 返回 0x2018F=Atom 侧预算）。⇒ 矛盾：Atom 预算 0x2018F 远小于 Mana 所需 0x259A67B+0x1FF 剩余，说明**Mana/视频解码大小计算依赖的配置字段有误（很可能是未正确初始化的视频配置结构 local_78 字段）**，导致解码器工作大小被算成 39MB。**
 | M1104 | §18.4649: ★★★★★★★★★★★★ **决定性突破：E2009011903 的 39MB 假大小来自 SceNgs（NGS 音频引擎）HLE 未开启！FUN_8125AC84 是语音/音效接口调度器（ASR/HCA-MX），其注册的接口函数 FUN_8125CFB6→FUN_8125C2F0 是 **CRI NGS 初始化**（"\nCRI NGS/VITA Ver.1.10.00 Build:Jan 30 2018 18:45:39\n"，调用 SceSysmodule_53099B7A/79A0160A(sysmodule=0xB)、SceNgs_ED14CF4A=sceNgsSystemInit、SceNgs_6CE8B36F、SceNgs_E9B572B7、SceNgs_477318C0、SceNgs_14EF65A0 等 NGS HLE stub）。此前所有运行都**没设 P5D_NGS=1**，NGS stub 全部返回 0/假值 → NGS 工作大小算错（-1 或 39MB）→ E2009011903 → cleanup finalize → binder 清 0。**开启 P5D_NGS=1 后：NGS 工作大小=0x1DEF0（正常）、`[CMPBUF2] r9=0001E5CC r6=0001E7CC`（检查通过）、`[E1903HIT] 0`、`[BINDWARN] 0`（binder 保持）、`[CRIFMT] 0`（ACB/ACF 错误消失）；游戏自身 CRI 初始化链完全打通。**新问题：n=181,619 处 `E2009072321:Cannot allocate memory.`（criFs user-heap 相关，字符串 0x8131AD18，附近有 E2009072322:The user-heap API is unset.）后原地循环（n 停在 181,670）。**
 | M1105 | §18.4650: ★★★★★★★★★★★ **CPK 装载打通关键一步：补块函数 0x8128A576（criFs user-heap 分配回调）后，`[INDIRECT-MISS] 0`、`[HARNESS] 0`、无 BADMEM/CRILOG；游戏自身 criFs 通过 HLE `sceIoOpen` **真正打开了 vita.cpk**（`[IO] OPEN 'app0:/data/vita.cpk' -> fd=16385 ...vita.cpk size=2168403092`）并 PREAD 读取（off=0 size=2048）；运行从 n=181,670 的卡死推进到 **n=4,600,000+（25 倍）**，当前在 binder 挂载等待循环（[FIOSX] at=81287BBA，已 54000+ 次等待、状态未变）。**
+| M1106 | §18.4651: ★★★★★★★★ **CPK 挂载卡点精确到"CPK Analyzer 状态机 state=4 但不推进"：新增 MNTST/CPKANA/CPKRET/CPKRES 探针实测——binder 对象 0x84906480 的 `stage=4 status=1` 永不变化；CPK Analyzer 结构 0x84B1B828 = `[0]=state(3→4) [1]=0x848FC368(reader对象) [3]=[4]=0x84B1BC00(工作缓冲)`；每次轮询 `FUN_81293BC4` 返回 0、`FUN_81293F7C` 返回 4（即 state 仍为 4）→ status 不变。state=4 分支需要 reader 状态（+0xBC）==2（FUN_8128E9BC 查询），但 IOSTAT 探针 0 次命中 → **FUN_81293BC4 在进入状态机前被 try-lock 挡住**（反编译首个操作：`iVar1 = FUN_8127BBF8(param_1+0x57,1); if (iVar1 != 0) { return 0; }`）。已确认 3 次 I/O 提交（[FIOSW] at=8128E394 r0=848FC368 r2=84B1BA00）与 1 次真实 PREAD 2048B（CPK 头），但读完成状态从未置 2。**
+m1153/m1154（`out80m_m1153cpkana.txt`/`out80m_m1154cpkana2.txt`）证据：
+```
+[MNTST] #0 obj=84906480 stage=00000004 status=00000001 r0=00000002 lr=81287C70   ← 永不变化
+[CPKANA2] #0 p=84B1B828 w: 00000003 848FC368 00000000 00000000 … lr=81293F04   ← 结构：[0]=state=3，[1]=reader/binder 0x848FC368
+[CPKANA2] #1 p=84B1B828 w: 00000004 848FC368 00000000 84B1BC00 84B1BC00 … lr=81287AEA  ← state=4，[3][4]=工作缓冲
+[CPKANA]  #0 p=84B1B828 state=00000003 lr=81293F04
+[CPKANA]  #1 p=84B1B828 state=00000004 lr=81287AEA
+[CPKRET]  ret=00000000 p=84B1B828 st=00000004   ← FUN_81293BC4 每次返回 0（未推进）
+[CPKRES]  res=00000004 p=84B1B828 st=00000004   ← FUN_81293F7C 返回 state=4（非 0x1A 成功、非 -1 失败）
+[FIOSW] #1-3 at=8128E394 n=1717 r0=848FC368 r1=0 r2=84B1BA00 r3=0   ← CPK 读请求提交 3 次
+[IO] OPEN 'app0:/data/vita.cpk' …  size=2168403092
+[IO] PREAD fd=16385 off=0 size=2048 got=2048                       ← 唯一实际读（CPK 头）
+[IOSTAT] 0 / [IOSUB] 0                                              ← FUN_8128E9BC / FUN_8128E394 未被调用
+[SEM] wait/signal obj=50018000 正常（guest 线程 0x40020000）
+[BADMEM]=0 [CRILOG]=0 [INDIRECT-MISS]=0
+```
+**FUN_81293BC4（CPK Analyzer 状态机）反编译关键路径**：
+```c
+void FUN_81293BC4(int *param_1) {
+  iVar3 = *param_1;                          // state
+  local_28 = 1;
+  iVar1 = FUN_8127BBF8(param_1 + 0x57, 1);   // ★ try-lock：失败则直接返回 0
+  if (iVar1 != 0) { uVar2 = 0; goto LAB_81293E0A; }
+  switch (iVar3) {
+  case 3:  // 分配 0x800 读缓冲 → FUN_81293674/FUN_812936EE，state=4
+  case 4:  // ★ 等待 CPK 头读完成：
+    if ((param_1[1] == 0) || (FUN_8128E9BC(param_1[1], &local_1C), local_1C != 2)) { local_28 = 0; break; }
+    iVar1 = FUN_81292794(param_1 + 9, param_1 + 0xC, param_1[4], param_1 + 0x5A);   // CPK 格式分析
+    if (iVar1 == 0) { … state = 0x1A（成功）… } …
+  }
+LAB_81293E0A: return uVar2;                 // 返回值 0 = 未完成/被锁
+}
+// FUN_8128E9BC(reader,&st): st = *(int*)(reader+0xBC)（2/3=完成；+0xD9 字节可将其归 0）
+```
+**FUN_81287A70（mount 轮询，stage 4 分支）**：
+```c
+uVar4 = *(uint *)(param_2 + 0x18);            // stage=4
+if (3 < uVar4 && status != 5) {
+  puVar5 = *(undefined4 **)(param_2 + 0x3C); puVar7 = puVar5 + 10;
+  do { iVar1 = FUN_81293BC4(puVar7); } while (iVar1 != 0);   // ★ 这里返回 0 即退出循环
+  iVar1 = FUN_81293F7C(puVar7);                              // 返回 state
+  if (iVar1 == 0x1A) { … *(param_2+0x20)=2（完成） }
+  else if (iVar1 == -1) { *(param_2+0x20)=6（失败） }
+  // 其它值 → status 保持 1（等待）
+}
+```
+**分析**：
+1. mount 卡在 stage 4，是因为 CPK Analyzer 状态机没有推进（state 停在 4，返回值恒 0）
+2. 状态机入口的 **try-lock `FUN_8127BBF8(param+0x57,1)`** 是关键嫌疑：若锁被占用（或我们的 HLE lwmutex 实现异常），每次调用直接返回 0，永远不进 case 4，也就永远不会调用 FUN_8128E9BC 查询读完成状态
+3. 已确认 CPK 头读取实际发生（PREAD 2048 字节成功），但 reader 状态（+0xBC）未置 2 —— 读提交路径 FUN_8128E394 被调用 3 次，说明请求已排队；缺的是完成通知
+4. 另一个 FUN_81293BC4 调用点 0x8128958E（不同函数）可能才是真正驱动状态机的线程
+5. **REA 工具已接入**：`rea` v6.5.0（npm 包 rea-agents），配置 `GHIDRA_INSTALL_DIR=C:\dev\ghidra` + `JAVA_HOME=C:\dev\jdk-21` 后 `rea doctor` 的 ghidra provider `available=true`（Ghidra 12.1.3）；`rea analyze C:\dev\p5d_build\p5d_true.elf`（elf/arm）成功；`rea decompile --procedure 0x81287a70` 返回 Ghidra 伪代码 + 证据封装（evidence_id/sha256/confidence/limitations），支持 --format json/md、--token-limit、--snapshot、--file-offset；其价值在**结构化证据与自动化**（非不同反编译器），本里程碑分析继续以运行时探针为主
+NEXT：
+```
+① 探针 FUN_8127BBF8 返回值（在 mount 路径上）：确认 try-lock 是否每次失败
+② 查锁 0x8153FF24/相关 lwmutex 在 HLE 层的实现（SEMREC "self-re-wait success (no decrement)" hack 是否破坏 try-lock/解锁语义）
+③ 查另一个 FUN_81293BC4 调用点 0x8128958E 所属函数（真正的 CPK 分析驱动线程？）是否在运行
+④ 读完成通知：FUN_8128E394 提交的请求由谁置 reader+0xBC=2（可能是 criFs I/O 线程，检查其是否被泵/被锁阻塞）
+⑤ 用 REA 的 rea function/inspect-native-api 获取 FUN_81293BC4/FUN_81287A70 的完整调用关系与证据，辅助定位
+⑥ 打通后：CPK 分析完成 state=0x1A → mount status=2 → binder 挂载成功 → data.cpk 挂载 → 文件索引 → title 素材
+```
+验证：`out80m_m1153cpkana.txt`、`out80m_m1154cpkana2.txt`、`cpkio.txt`、`cpkio2.txt`、`mountflow3.txt`、REA（rea analyze/decompile 输出）。 |
+| §18.4651 | CPK mount stuck point narrowed to 'the CPK Analyzer state machine is at state=4 but never advances': the new MNTST/CPKANA/CPKRET/CPKRES probes show the binder object 0x84906480 stays at stage=4 status=1 forever; the CPK Analyzer struct 0x84B1B828 = [0]=state (3->4) [1]=0x848FC368 (reader object) [3]=[4]=0x84B1BC00 (work buffers); each poll FUN_81293BC4 returns 0 and FUN_81293F7C returns 4 (state still 4) so the status never changes. The state=4 branch needs the reader status (at +0xBC) == 2 (queried via FUN_8128E9BC), but the IOSTAT probe hit 0 times -> FUN_81293BC4 is blocked by a try-lock BEFORE entering the state machine (decompile first op: iVar1 = FUN_8127BBF8(param_1+0x57,1); if (iVar1 != 0) { return 0; }). Three I/O submissions were confirmed ([FIOSW] at=8128E394 r0=848FC368 r2=84B1BA00) and one real PREAD of 2048B (CPK header), but the read-completion status was never set to 2. '
+       'Evidence: [MNTST] #0 obj=84906480 stage=00000004 status=00000001 r0=00000002 lr=81287C70 (never changes); [CPKANA2] #0 p=84B1B828 w: 00000003 848FC368 00000000 00000000 ... lr=81293F04; [CPKANA2] #1 p=84B1B828 w: 00000004 848FC368 00000000 84B1BC00 84B1BC00 ... lr=81287AEA; [CPKANA] #0 state=00000003 lr=81293F04, #1 state=00000004 lr=81287AEA; [CPKRET] ret=00000000 st=00000004 (x12); [CPKRES] res=00000004 st=00000004 (x12); [FIOSW] #1-3 at=8128E394 n=1717 r0=848FC368 r1=0 r2=84B1BA00 r3=0; [IO] OPEN app0:/data/vita.cpk size=2168403092 and PREAD fd=16385 off=0 size=2048 got=2048; [IOSTAT] 0 [IOSUB] 0; [SEM] wait/signal obj=50018000 normal (guest thread 0x40020000); [BADMEM]=0 [CRILOG]=0 [INDIRECT-MISS]=0. '
+       'FUN_81293BC4 (CPK Analyzer state machine) decompile: iVar3 = *param_1 (state); local_28 = 1; iVar1 = FUN_8127BBF8(param_1 + 0x57, 1) (try-lock; if iVar1 != 0 return 0); switch (iVar3) { case 3: allocate 0x800 read buffer -> FUN_81293674/FUN_812936EE, state=4; case 4: if ((param_1[1] == 0) || (FUN_8128E9BC(param_1[1], &local_1C), local_1C != 2)) { local_28 = 0; break; } iVar1 = FUN_81292794(param_1 + 9, param_1 + 0xC, param_1[4], param_1 + 0x5A) (CPK format analysis); if (iVar1 == 0) { ... state = 0x1A (success) ... } ... }. FUN_8128E9BC(reader,&st): st = *(int*)(reader+0xBC) (2/3 = complete; the +0xD9 byte can reset it to 0). FUN_81287A70 (mount poll, stage 4 branch): uVar4 = *(uint *)(param_2 + 0x18) (stage=4); if (3 < uVar4 && status != 5) { puVar5 = *(undefined4 **)(param_2 + 0x3C); puVar7 = puVar5 + 10; do { iVar1 = FUN_81293BC4(puVar7); } while (iVar1 != 0); iVar1 = FUN_81293F7C(puVar7); if (iVar1 == 0x1A) { *(param_2+0x20)=2 (complete) } else if (iVar1 == -1) { *(param_2+0x20)=6 (fail) } } (other values -> status stays 1). '
+       'Analysis: (1) the mount is at stage 4 because the CPK Analyzer state machine does not advance (state stuck at 4, return value always 0); (2) the try-lock FUN_8127BBF8(param+0x57,1) at the state machine entry is the prime suspect: if the lock is held (or our HLE lwmutex implementation misbehaves), every call returns 0 immediately and case 4 is never entered, so FUN_8128E9BC never queries the read-completion status; (3) the CPK header read really happened (PREAD 2048 bytes) and the read submission FUN_8128E394 was called 3 times, but the reader status at +0xBC was never set to 2 - the completion notification is missing; (4) the other FUN_81293BC4 call site 0x8128958E (in a different function) may be the real state-machine driver thread; (5) REA tooling integrated: rea v6.5.0 (npm package rea-agents), with GHIDRA_INSTALL_DIR=C:\\dev\\ghidra + JAVA_HOME=C:\\dev\\jdk-21 the ghidra provider is available=true (Ghidra 12.1.3); rea analyze C:\\dev\\p5d_build\\p5d_true.elf (elf/arm) succeeds; rea decompile --procedure 0x81287a70 returns Ghidra pseudocode wrapped in an evidence envelope (evidence_id/sha256/confidence/limitations) with --format json/md, --token-limit, --snapshot and --file-offset support; its value is structured evidence and automation (not a different decompiler), and this milestone still relies primarily on runtime probes. '
+       'NEXT: (1) probe the FUN_8127BBF8 return value on the mount path to confirm the try-lock always fails; (2) inspect the lock 0x8153FF24 / related lwmutex handling in the HLE layer (whether the SEMREC self-re-wait success (no decrement) hack breaks try-lock/unlock semantics); (3) inspect the other FUN_81293BC4 call site 0x8128958E (the real CPK analysis driver thread?) and whether it runs; (4) find who sets reader+0xBC=2 for the requests submitted by FUN_8128E394 (probably the criFs I/O thread - check whether it is pumped or blocked by a lock); (5) use REA rea function/inspect-native-api for the complete call relationships and evidence of FUN_81293BC4/FUN_81287A70; (6) once open: CPK analysis completes state=0x1A -> mount status=2 -> binder mount succeeds -> data.cpk mounts -> file index -> title assets. '
+       'Verification: out80m_m1153cpkana.txt, out80m_m1154cpkana2.txt, cpkio.txt, cpkio2.txt, mountflow3.txt, REA analyze/decompile outputs. |
 m1149（补块前）卡点：
 ```
 [FIBER-EXEC] no block for pc=FFFFFFFD ×多
@@ -500467,3 +500536,63 @@ max n=4,600,000+（此前卡死 181,670 → 25 倍）
 ANTI-FORGETTING ENTRY. Keywords: M1105 CPK loading key step - adding AOT blocks for the Ghidra-missed function 0x8128A576 (criFs user-heap malloc callback) made [INDIRECT-MISS] 0, [HARNESS] 0, no BADMEM/CRILOG; the game own criFs now opens vita.cpk through HLE sceIoOpen ([IO] OPEN 'app0:/data/vita.cpk' -> fd=16385 C:\\dev\\p5d_rom\\data\\vita.cpk size=2168403092) and PREADs it (off=0 size=2048 got=2048); the run advanced from the n=181,670 stall to n=4,600,000+ (25x), now in the binder mount wait loop ([FIOSX] at=81287BBA 54000+ waits, status r0=2 unchanged). m1149 before: [FIBER-EXEC] no block for pc=FFFFFFFD, [INDIRECT-MISS] reg2=8128A577 target=8128A576 block=81279B7A, [HARNESS] indirect miss at pc=81279B7A after 181670 blocks, [CRILOG] n=181619 E2009072321:Cannot allocate memory. then POSTMAIN stall. Function 0x8128A576 disasm (size 0x2C=44B): push {r4,r5,r6,lr}; movw r4,#0xFF24; movt r4,#0x8153 (0x8153FF24 criFs mutex); ldr r2,[r4]; adds r5,r0,#0; adds r6,r1,#0; adds r0,r2,#0; bl 0x81278C48 (lock); adds r0,r5,#0; adds r1,r6,#0; bl 0x81279B54 (user malloc(user,size)); ldr r1,[r4]; adds r4,r0,#0; adds r0,r1,#0; bl 0x81278C96 (unlock); adds r0,r4,#0; pop {r4,r5,r6,pc}. Ghidra missed it: function_bounds.json has no 0x8128A576 entry (previous FUN_8128A4B8 ends 0x8128A574, next FUN_8128A5C8 starts 0x8128A5C8). M1105 fill: miss_bounds2.json=[{"va":0x8128A576,"size":44,"name":"FUN_8128A576_miss"}]; _gen_miss_blocks3.py (copy of _gen_miss_blocks.py with BOUNDS=miss_bounds2.json OUTDIR=C:\\dev\\tmp\\recomp_miss2) -> recomp_miss2/batch_000.cpp (4 blocks) -> renamed batch_035.cpp (_000->_035; P() from batch_022) -> batch_035.o exit 0; harness registration FB(035), get_table_035/find_block_035 externs, ALL_FINDERS[36], build loop i<36, ternary get_table_035, dedupe i=35..0 -> harness exit 0; link exit 0 (exe 57,128,718B 10:15:52); [TABLE] blocks=230252 (+1). m1150 (P5D_NGS=1 + batch_035): [INDIRECT-MISS] 0 / [HARNESS] 0 / [BADMEM] 0 / [CRILOG] 0 / [CRIFMT] 0; [IO] OPEN app0:/data/vita.cpk -> fd=16385 size=2168403092; [IO] PREAD fd=16385 off=0 size=2048 got=2048; [FIOSX] #18000..#54000 at=81287BBA (binder mount wait, r0=2 unchanged); [WD] loop=2 ... 4591808/0 blk=81278C8E; max n=4,600,000+; [SCENE]0 [ABIBEGIN]0. CONCLUSION: 0x8128A576 = criFs user-heap malloc callback (lock+malloc+unlock); after the fill the indirect-jump gap is gone; the game own criFs opens and reads the real vita.cpk through HLE (CPK mount truly working); current wait point 81287BBA (54000+ waits, status r0=2 unchanged); no CRILOG/CRIFMT/ACB errors. NEXT: analyze FUN_81287BBA wait semantics (r0=2; where the completion flag is set); check CPK parse progress (raise HLE I/O log cap / log PREAD offsets); check whether the mount depends on a worker thread (PUMP on); check HLE sceIoPread semantics/offset; once mounted data.cpk mounts too -> guest file open index -> title assets -> [SCENE] views -> GXM. Verification: out80m_m1150b035.txt, m1149ngs.txt, miss_bounds2.json, batch_035.cpp, _gen_miss_blocks3.py.
 
 LOOKUP: M1105 missed function 0x8128A576 criFs user-heap malloc callback added as batch_035, INDIRECT-MISS gone, [IO] OPEN app0:/data/vita.cpk fd=16385 size=2168403092, [IO] PREAD off=0 size=2048, binder mount wait 81287BBA r0=2, max n=4,600,000 past stall 181,670, no BADMEM/CRILOG/CRIFMT, [TABLE] blocks=230252, exe 57,128,718B 10:15:52, miss_bounds2.json _gen_miss_blocks3.py batch_035.cpp, ALL_FINDERS[36], next analyze FUN_81287BBA wait and CPK parse progress -> §18.4649 [relevant: P5D_NGS breakthrough], §18.4648 [relevant: E2009011903], §18.4647 [relevant: binder truth]
+### 18.4651 PORT M1106: CPK 挂载卡点 = CPK Analyzer state=4 不推进（try-lock 挡住状态机入口）+ REA 工具接入
+
+1) m1153/m1154 探针实测：
+```
+[MNTST] #0 obj=84906480 stage=00000004 status=00000001 r0=00000002 lr=81287C70   ← 永不变化
+[CPKANA2] #0 p=84B1B828 w: 00000003 848FC368 00000000 00000000 … lr=81293F04
+[CPKANA2] #1 p=84B1B828 w: 00000004 848FC368 00000000 84B1BC00 84B1BC00 … lr=81287AEA
+[CPKRET]  ret=00000000 st=00000004（×12）        ← FUN_81293BC4 未推进
+[CPKRES]  res=00000004 st=00000004（×12）        ← state 仍 4（非 0x1A）
+[FIOSW] #1-3 at=8128E394 r0=848FC368 r2=84B1BA00 ← 读请求提交 3 次
+[IO] PREAD fd=16385 off=0 size=2048 got=2048     ← 已实际读到 CPK 头
+[IOSTAT] 0 / [IOSUB] 0                          ← FUN_8128E9BC 未被调用
+[BADMEM]=0 [CRILOG]=0 [INDIRECT-MISS]=0
+```
+2) 关键结构：
+```
+CPK Analyzer @0x84B1B828: [0]=state(3→4) [1]=0x848FC368(reader) [3]=[4]=0x84B1BC00(work buf)
+binder mount obj @0x84906480: +0x18=stage(4) +0x20=status(1)
+```
+3) 状态机反编译要点：
+```c
+FUN_81293BC4(param_1):
+  iVar1 = FUN_8127BBF8(param_1 + 0x57, 1);   // ★ try-lock；失败 → return 0（不进状态机）
+  switch (*param_1) {
+    case 3: 分配 0x800 缓冲、提交读 → state=4
+    case 4: if (param_1[1]==0 || (FUN_8128E9BC(param_1[1],&st), st!=2)) break;  // 等读完成
+            FUN_81292794(...) 分析 CPK；成功则 state=0x1A
+  }
+FUN_8128E9BC(reader,&st): st = *(int*)(reader+0xBC)   // 2/3=完成
+FUN_81287A70(mount stage4): do { r=FUN_81293BC4(p); } while (r!=0); r=FUN_81293F7C(p);
+                            r==0x1A → status=2；r==-1 → status=6；否则保持 1
+```
+4) 结论：
+- mount 卡在 stage 4 = CPK Analyzer 不推进（state 停 4、返回恒 0）
+- 首要嫌疑：状态机入口 try-lock `FUN_8127BBF8` 失败（或 HLE lwmutex 语义问题）→ 永不进入 case 4 → 永不查询读完成状态
+- CPK 头 PREAD 2048 实际发生，但 reader+0xBC 未置 2 → 完成通知缺失
+- 另一个调用点 0x8128958E 可能是真正的分析驱动线程
+5) REA 接入：
+```
+rea v6.5.0（npm rea-agents）
+env: GHIDRA_INSTALL_DIR=C:\dev\ghidra, JAVA_HOME=C:\dev\jdk-21
+rea doctor → ghidra provider available=true（Ghidra 12.1.3）
+rea analyze C:\dev\p5d_build\p5d_true.elf（elf/arm）→ analysis profile
+rea decompile --procedure 0x81287a70 → 伪代码 + 证据封装（evidence_id/sha256/confidence/limitations）
+支持 --format json/md、--token-limit、--snapshot、--file-offset
+```
+6) NEXT：
+```
+① 探针 FUN_8127BBF8 返回值（mount 路径上确认 try-lock 是否总失败）
+② 查 HLE lwmutex（SEMREC self-re-wait hack 是否破坏 try-lock/unlock）
+③ 查 0x8128958E 调用点所属函数（分析驱动线程）是否运行
+④ 找 reader+0xBC=2 的置位者（criFs I/O 线程是否被泵/被锁阻塞）
+⑤ 用 REA 获取 FUN_81293BC4/FUN_81287A70 调用关系证据
+⑥ 打通后：state=0x1A → mount status=2 → data.cpk → 文件索引 → title 素材
+```
+验证：`out80m_m1153cpkana.txt`、`out80m_m1154cpkana2.txt`、`cpkio.txt`、`cpkio2.txt`、`mountflow3.txt`。
+
+ANTI-FORGETTING ENTRY. Keywords: M1106 CPK mount stuck = CPK Analyzer state=4 not advancing (try-lock blocks the state machine entry); REA tool integrated. m1153/m1154 probes: [MNTST] #0 obj=84906480 stage=00000004 status=00000001 r0=00000002 lr=81287C70 (never changes); [CPKANA2] #0 p=84B1B828 w 00000003 848FC368 00000000 ... lr=81293F04; [CPKANA2] #1 w 00000004 848FC368 00000000 84B1BC00 84B1BC00 ... lr=81287AEA; [CPKANA] state 3 then 4; [CPKRET] ret=0 st=4 (x12); [CPKRES] res=4 st=4 (x12); [FIOSW] #1-3 at=8128E394 r0=848FC368 r1=0 r2=84B1BA00 r3=0; [IO] OPEN app0:/data/vita.cpk size=2168403092 + PREAD fd=16385 off=0 size=2048 got=2048; [IOSTAT] 0 [IOSUB] 0; [SEM] wait/signal obj=50018000 normal (thread 0x40020000); [BADMEM]=0 [CRILOG]=0. Structures: CPK Analyzer @0x84B1B828 [0]=state(3->4) [1]=0x848FC368(reader) [3]=[4]=0x84B1BC00(work buffers); binder mount obj @0x84906480 +0x18=stage(4) +0x20=status(1). FUN_81293BC4 decompile: iVar1 = FUN_8127BBF8(param_1+0x57,1) try-lock (if !=0 return 0); switch (*param_1) { case 3: alloc 0x800 buffer, submit read -> state=4; case 4: if (param_1[1]==0 || (FUN_8128E9BC(param_1[1],&st), st!=2)) break; FUN_81292794(...) analyze CPK; success -> state=0x1A }. FUN_8128E9BC(reader,&st): st = *(int*)(reader+0xBC) (2/3 = complete). FUN_81287A70 stage-4 branch: do { r=FUN_81293BC4(p); } while (r!=0); r=FUN_81293F7C(p); r==0x1A -> status=2, r==-1 -> status=6, else stays 1. Conclusion: mount is at stage 4 because the CPK Analyzer does not advance (state stuck at 4, return value always 0); prime suspect is the try-lock FUN_8127BBF8 at the state machine entry (or the HLE lwmutex semantics) so case 4 is never entered and FUN_8128E9BC never queries the read-completion status; the CPK header PREAD 2048 really happened but reader+0xBC was never set to 2 (completion notification missing); the other call site 0x8128958E may be the real analysis driver thread. REA tooling: rea v6.5.0 (npm rea-agents); env GHIDRA_INSTALL_DIR=C:\dev\ghidra + JAVA_HOME=C:\dev\jdk-21 -> rea doctor ghidra provider available=true (Ghidra 12.1.3); rea analyze C:\dev\p5d_build\p5d_true.elf (elf/arm) works; rea decompile --procedure 0x81287a70 returns pseudocode + evidence envelope (evidence_id/sha256/confidence/limitations); supports --format json/md, --token-limit, --snapshot, --file-offset. NEXT: probe FUN_8127BBF8 return value on the mount path; inspect the HLE lwmutex (SEMREC self-re-wait hack may break try-lock/unlock); inspect the 0x8128958E call site's owning function (analysis driver thread) and whether it runs; find who sets reader+0xBC=2 (criFs I/O thread pumped or blocked?); use REA rea function/inspect-native-api for call relationships; once open state=0x1A -> mount status=2 -> data.cpk -> file index -> title assets. Verification: out80m_m1153cpkana.txt, out80m_m1154cpkana2.txt, cpkio.txt, cpkio2.txt, mountflow3.txt.
+
+LOOKUP: M1106 CPK mount stuck CPK Analyzer state=4 try-lock FUN_8127BBF8 param+0x57, [MNTST] obj=84906480 stage=4 status=1, CPK Analyzer struct 0x84B1B828 [0]state [1]=0x848FC368 [3][4]=0x84B1BC00, [CPKRET] ret=0 [CPKRES] res=4, FUN_8128E9BC reader+0xBC status, [FIOSW] at=8128E394 r0=848FC368 r2=84B1BA00, [IO] PREAD 2048 CPK header, missing completion notification, other call site 0x8128958E, REA v6.5.0 integration GHIDRA_INSTALL_DIR JAVA_HOME rea doctor ghidra available, rea analyze p5d_true.elf elf/arm, rea decompile evidence envelope, next probe FUN_8127BBF8 and HLE lwmutex -> §18.4650 [relevant: batch_035], §18.4649 [relevant: NGS], §18.4647 [relevant: binder]
