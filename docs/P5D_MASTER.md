@@ -1152,6 +1152,39 @@
 | M1134 | §18.4679: ★★★★★★★★★ **HUFFSB/HUFFBAD2 边界探针：外层 sb 每次减 1（0x100→0xE9…）、内层每趟从 r8=0/r7=0/r4=sp 重新扫描 → 循环前半段完全健康；扫描会合法越过 256 节点（r7=0x101、r4=sp+0x3838≈84852608，此时 r8=0xFD 逼近 sb=0xFE）→ 节点表中节点数可能 >256（树 2N-1 节点/数组更大），0x3800 不是硬边界；真正的破坏发生在更多趟之后（sb 降到 0x11 时 r8=0x848463E7、r7/r4 大幅越界）→ BADMEM va=0xB0000000**。新增探针：`[HUFFSB]`（sb 变化 + 16 条 pc ring）、`[HUFFBAD2]`（r8>0x100 或 r4>sp+0x3800 时打印 40 条 pc ring + 16 条 HLE stub ring）；确认扫描前半程 ring 模式恒为 `811DFA0E→811DFA3C→811DFA4C→811DFA46→811DFA22→811DFA18`（选择排序内层），健康
 | M1135 | §18.4680: ★★★★★★★★★ **PASSSUM 每趟汇总证明 Huffman 选择排序前 239 趟完全健康（r8 恰好等于 sb、r4 每趟 +0x38、r7=0x100+趟数），卡死发生在第 240 趟（sb=0x11）的内层扫描**。PASSSUM 数据：#1 sb=0x100/r8=0x100/r7=0x100/r4=sp+0x3800；#239 sb=0x12/r8=0x12/r7=0x1EE/r4=sp+0x6BD0（仍在 0x7420 栈帧内，健康）；**第 240 趟（sb=0x11）的内层扫描不再收敛**（HUFFLOOP 采样 r8 变成 fiber 指针等）→ 最终 BADMEM 0xB0000000。结论：树构建状态在前 239 趟正确，故障点在"剩余 17 个节点"这一趟——扫描走到节点表/帧边界之外的脏数据，`node[+0x440] != -1` 使 r8 计数停止、循环永不退出
 | M1136 | §18.4681: ★★★★★★★★★★★★ **Huffman 死循环根因找到并修复：`fiber_load` 的 r0 修补分支误伤"恢复的中途上下文"——`if (pc==0x81206BDC || c.r[0] < 0x80000000)` 会把任何 r0<0x80000000 的已保存上下文 r0 改写成 fiber 对象指针**。证据：`[FLOAD-BAD] fiber=848463A0 r0=00000000 r13=8484EDD0 r15=811DFA0E -> repair r0`（正是 huff 循环中途被 fiber 切换保存/恢复的上下文），修 r0=848463A0 后，趟重启 811DF9FA `r7=r0; r8=r7` → r7=r8=0x848463A0（有符号负数），`cmp sb,r8; bgt` 因 sb(0x11) > 负数恒真 → 内层扫描永不退出 → BADMEM 0xB0000000。R0CHG 探针证明 r0 在 ring `... 812068F2 811DFA3C → 812B1BA0(sceFiberSwitch@8120682A) → 811DFA0E` 后变为 fiber 指针。**修复**：r0 修补只在 start-stub（pc==0x81206BDC）或旧 start-arg bug（r0==2）时执行；恢复的中途上下文保留原 r0。**验证 m1228（NESTED_UNTIL=35M）**：`[FLOAD-BAD]=2`（仅两个 start stub）、`[DECOMP]=40 / [HUFF]=24 / [LZ]=39`（**40 个资源全部开始解压**）、`[PASSSUM]=420` 趟全部 r0=0 健康、`[BADMEM]=0`，流程推进到 `[NESTED-STOP] total=35000000 pc=811DFB18`（撞我们自己的 NESTED_UNTIL 上限=好现象）
+| M1137 | §18.4682: ★★★★★★★★ **M1136 修复后的长跑（m1229，NESTED_UNTIL=300M）验证解压链持续推进（[DECOMP]38 / [HUFF]22 / [LZ]37，[VFW] 顶点格式写入 n 达 44,180,000，[FLOAD-BAD]=2 仅 start stub，[BADMEM]=0），但最终卡在"fiber B 的保存上下文 pc 变成栈地址 0x84855A58"**：`[FIBER-EXEC] no block for pc=84855A58 (cur=848463A0) lr=84855A58 sp=8484EF28 blk=812B1B70` → no-block 路径只保存上下文返回；guest 调度器（GetSelf 812B1B70 → 812067A0 → … → Switch 812B1BA0@8120682A）每次都切到这个 pc 非法的 fiber → 无限无进展循环（g_blkcnt_total 冻结在 39,242,012、[PUMP] blocks=0）。证据：`[FEXEC-IN] n=39242012 cur=848463A0 pc=84855A58 r0=0 r7=5 r14=84855A58 r13=8484EF28`；`[FIBSW] #3571 fpc=811DFAFE flr=84855A58`（LR 已是栈地址值）；重复 `[SPOLL] pc=812068F2/812068C4 f80=1 g18=g1c=848463A0`；`[STALLTRACE] pc=812B1BA0 blk=812B1B70 fib=0 sp=82EFFE68 fex=0`。推断：某处 **pop/return 的返回地址从被破坏的栈帧读出**（pc=栈槽值），需在"fiber ctx 保存时 pc 非代码"处加探针抓最后的合法块与栈内容
+m1229 证据（`m1229_long3_key.txt`）：
+```
+[DECOMP] 38 / [HUFF] 22 / [LZ] 37 / [PASSSUM] 420（全部 r0=0 健康）
+[FLOAD-BAD] 2（仅 84836300/848463A0 的 start stub）
+[BADMEM] 0
+[VFW] #1498000 at=81182742 n=44181058 late=0 fib=848463A0      ← 顶点格式写入推进到 4418 万
+[FRAMEDUMP] n=44180000 flags=00000003 t4=0 t8=0 ctr=0 pc=812067A0 blk=81198BF2 sp=84846380 fib=84836300 gxm(b/e/p)=0/0/0
+[FIBSW] #3999 n=1898 lr=8120682A fb=848463A0 fpc=811DFB14 flr=84855DD8 fr0=0 blk=9338023
+[FIBER-EXEC] no block for pc=84855A58 (cur=848463A0) lr=84855A58 sp=8484EF28 r0=0 blk=812B1B70
+[FEXEC-IN] n=39242012 cur=848463A0 pc=84855A58 r0=00000000 r7=00000005 r14=84855A58 r13=8484EF28
+[SPOLL] pc=812068F2 r5=848463A0 r0=0 lr=812068F2 f80=00000001 f94=0 g18=848463A0 g1c=848463A0 fib=0 fex=0 fl=2
+[STALLTRACE] n=39242012 pc=812B1BA0 blk=812B1B70 fib=00000000 loop=0 sp=82EFFE68 fex=0
+tail [PUMP] #965200 … blocks=0 blk=39242012 fex=1 fib=84836300
+[COUNT] 未打印（kill）；[FRAMECB]/[UPD]/[POST]=0；[IO]=6；[FHOPEN]=0
+```
+**分析**：
+- 切换确实发生（[FIB-XFER-FEX] 显示 B 的 tgtpc 从 81170C3E→8115DB9C→…→811DFAFE 解码循环推进；[FIB-UNBAL-FEX] 0）；
+- 但最终 B 的 ctx pc 变成 **84855A58（栈地址）**：0x8484EF28± 是 B 的 huff 解码栈帧；84855A58 是栈上某个值被当作 pc。`no block` 后 fiber exec 只 `fiber_save; break`，调度器再切回 B 仍非法 → 死循环；
+- 由于 0x84855A58 落在 heap 映射（GP 可映射）而非未映射区，不会触发 BADMEM，问题被"静默"，只能靠 no-block 检测。
+**NEXT**：
+```
+① fiber_save / 切换加载处加探针：当保存的 pc 无 AOT 块（gbn(pc)==nullptr）时打印 40 条 pc ring、g_cur_block、sp 及 [sp-0x40..sp+0x40] 栈字，抓"最后一个合法块 → 非法 pc"的瞬间
+② 重点检查 huff 解码完成路径（811DFB4E/811DFB7E 附近）与 FUN_811DF434 返回路径的 pop/return 序列，核对栈帧偏移与保存寄存器槽
+③ 若为栈帧被覆盖（节点数组 0x3800 与保存区重叠/越界），修正数组边界或栈大小
+④ 修复后继续长跑 → BeginScene/帧循环
+```
+验证：`m1229_long3_key.txt`、`m1228_fix_key.txt`、`recomp_harness_fiberload_4681.cpp`、`[TABLE] blocks=230291`。 |
+| §18.4682 | M1136-fixed long run (m1229, NESTED_UNTIL=300M) shows the decompression chain keeps progressing ([DECOMP] 38 / [HUFF] 22 / [LZ] 37, [VFW] vertex-format writes n up to 44,180,000, [FLOAD-BAD]=2 start stubs only, [BADMEM]=0), but finally stalls with fiber B's saved context pc becoming the stack address 0x84855A58: [FIBER-EXEC] no block for pc=84855A58 (cur=848463A0) lr=84855A58 sp=8484EF28 blk=812B1B70 -> the no-block path only saves the context and returns; the guest scheduler (GetSelf 812B1B70 -> 812067A0 -> ... -> Switch 812B1BA0@8120682A) then keeps switching to this fiber whose pc is invalid -> infinite no-progress loop (g_blkcnt_total frozen at 39,242,012, [PUMP] blocks=0). Evidence: [FEXEC-IN] n=39242012 cur=848463A0 pc=84855A58 r0=0 r7=5 r14=84855A58 r13=8484EF28; [FIBSW] #3571 fpc=811DFAFE flr=84855A58 (LR already a stack value); repeated [SPOLL] pc=812068F2/812068C4 f80=1 g18=g1c=848463A0; [STALLTRACE] pc=812B1BA0 blk=812B1B70 fib=0 sp=82EFFE68 fex=0. Inference: somewhere a pop/return address is read from a corrupted stack frame (pc = stack-slot value); need a probe at "fiber ctx saved with non-code pc" to catch the last valid block and stack contents. '
+       'm1229 evidence: [DECOMP] 38 / [HUFF] 22 / [LZ] 37 / [PASSSUM] 420 (all r0=0 healthy); [FLOAD-BAD] 2 (only start stubs 84836300/848463A0); [BADMEM] 0; [VFW] #1498000 at=81182742 n=44181058 late=0 fib=848463A0 (vertex format writes advance to 44.18M); [FRAMEDUMP] n=44180000 flags=3 t4=0 t8=0 ctr=0 pc=812067A0 blk=81198BF2 sp=84846380 fib=84836300 gxm(b/e/p)=0/0/0; [FIBSW] #3999 n=1898 lr=8120682A fb=848463A0 fpc=811DFB14 flr=84855DD8 fr0=0 blk=9338023; [FIBER-EXEC] no block for pc=84855A58 (cur=848463A0) lr=84855A58 sp=8484EF28 r0=0 blk=812B1B70; [FEXEC-IN] n=39242012 cur=848463A0 pc=84855A58 r0=0 r7=5 r14=84855A58 r13=8484EF28; [SPOLL] pc=812068F2 r5=848463A0 r0=0 lr=812068F2 f80=1 f94=0 g18=848463A0 g1c=848463A0 fib=0 fex=0 fl=2; [STALLTRACE] n=39242012 pc=812B1BA0 blk=812B1B70 fib=0 loop=0 sp=82EFFE68 fex=0; tail [PUMP] #965200 blocks=0 blk=39242012 fex=1 fib=84836300; [COUNT] not printed (killed); [FRAMECB]/[UPD]/[POST]=0; [IO]=6; [FHOPEN]=0. '
+       'Analysis: switches do happen ([FIB-XFER-FEX] shows B tgtpc advancing 81170C3E -> 8115DB9C -> ... -> 811DFAFE decode loop; [FIB-UNBAL-FEX] 0), but finally B ctx pc becomes the stack address 84855A58: 0x8484EF28 area is B huffman-decode stack frame, and 84855A58 is a stack value used as pc. After the no-block save the scheduler switches back to B whose pc is still invalid -> livelock. Since 0x84855A58 lies in the GP-mapped heap window rather than unmapped memory, no BADMEM fires - the problem is silent and only detectable via the no-block path. '
+       'NEXT: (1) add a probe in fiber_save / switch-load: when the saved pc has no AOT block (gbn(pc)==nullptr) print a 40-entry pc ring, g_cur_block, sp and the stack words [sp-0x40..sp+0x40] to catch the last valid block -> invalid pc transition; (2) inspect the huffman decode completion path (811DFB4E/811DFB7E area) and the FUN_811DF434 return path pop/return sequences, verifying frame offsets and saved-register slots; (3) if the frame is overwritten (node array 0x3800 overlapping the saved area/out of bounds), fix the array bounds or stack size; (4) after the fix continue the long run -> BeginScene/frame loop. '
+       'Verification: m1229_long3_key.txt, m1228_fix_key.txt, recomp_harness_fiberload_4681.cpp, [TABLE] blocks=230291. |
 m1226/m1227/m1228 证据（`m1226_r0_key.txt`、`m1227_r0chg_key.txt`、`m1228_fix_key.txt`）：
 ```
 [PASSSUM] #238 sb=00000013 r8=00000013 r7=000001ED r4=848559A8 r0=00000000
@@ -503206,3 +503239,42 @@ if ((c.r[15] & ~1u) == 0x81206BDCu || c.r[0] == 2u) {
 ANTI-FORGETTING ENTRY. Keywords: M1136 Huffman livelock root cause and fix - fiber_load r0 repair branch misfired on resumed mid-execution contexts. Old condition `if ((c.r[15]&~1)==0x81206BDC || c.r[0] < 0x80000000) { c.r[0]=fiber; }` rewrote r0 of ANY resumed context with r0<0x80000000 (e.g. saved r0=0 mid-huffman-loop) into the fiber object pointer 0x848463A0. Evidence: [FLOAD-BAD] fiber=848463A0 r0=00000000 r13=8484EDD0 r15=811DFA0E -> repair r0; [PASSSUM] #238 r0=0 then #239 r0=848463A0; [P240SAMP] it=1 r7=848463A0 r8=848463A0; [HUFFLOOP] n=200000 r9=0x11 r8=848463E7 r7=848612C6 r4=84E33E20; [R0CHG] r0=848463A0 ring 811DFA0E 812B1BA0 812068EA ... 812068F2 811DFA3C, hle 812B1BA0@8120682A (guest scheduler sceFiberSwitch). Mechanism: mid-pass fiber switch saves ctx with r0=0, fiber_load repairs r0=fiber, pass restart 811DF9FA sets r7=r0/r8=r7 -> r7=r8=0x848463A0 (negative signed), cmp sb,r8; bgt with sb=0x11 always true -> scan never exits -> r4 walks out of stack frame -> BADMEM 0xB0000000. FIX: repair r0 only when pc==0x81206BDC (start stub) or r0==2 (old start-arg bug); resumed contexts keep saved r0. VERIFIED m1228: [FLOAD-BAD]=2 (only start stubs 84836300/848463A0), [DECOMP]=40 / [HUFF]=24 / [LZ]=39 (all 40 embedded resources start decompressing), [PASSSUM]=420 all r0=0 healthy, [BADMEM]=0, [NESTED-STOP] total=35000000 pc=811DFB18 (hit our own NESTED_UNTIL cap). NEXT: long run NESTED_UNTIL=300M/budget 400M (m1229 started) to finish decompression and see the next phase (BeginScene/frame loop/title resources); raise cap or instrument decompression progress if still truncated; watch FRAMECB/UPD/POST/COUNT present and IO/FHOPEN; keep FLOAD-BAD at 2. Verification: m1228_fix_key.txt, m1227_r0chg_key.txt, m1226_r0_key.txt, recomp_harness_fiberload_4681.cpp, [TABLE] blocks=230291.
 
 LOOKUP: M1136 Huffman livelock root cause fiber_load r0 repair misfire resumed context, FLOAD-BAD fiber 848463A0 r0=0 r13=8484EDD0 r15=811DFA0E, PASSSUM 238 r0=0 239 r0=848463A0, P240SAMP r7=r8=848463A0, HUFFLOOP sb 0x11 signed bgt always true, R0CHG ring 812B1BA0@8120682A sceFiberSwitch guest scheduler, fix repair only pc 0x81206BDC or r0==2, m1228 FLOAD-BAD 2 DECOMP 40 HUFF 24 LZ 39 PASSSUM 420 BADMEM 0 NESTED-STOP 35M pc 811DFB18, next long run NESTED_UNTIL 300M budget 400M m1229 finish decompression BeginScene frame loop, verification m1228_fix_key.txt -> 18.4680 [relevant: PASSSUM], 18.4679 [relevant: boundary probes], 18.4678 [relevant: Huffman loop probes]
+### 18.4682 PORT M1137: M1136 修复后长跑验证解压链推进；新卡点=fiber B 上下文 pc 变成栈地址 0x84855A58
+
+1) 长跑进展（m1229，NESTED_UNTIL=300M）：
+```
+[DECOMP] 38 / [HUFF] 22 / [LZ] 37 / [PASSSUM] 420（全部 r0=0 健康）
+[FLOAD-BAD] 2（仅 start stub）/ [BADMEM] 0
+[VFW] #1498000 at=81182742 n=44181058 late=0 fib=848463A0        ← 顶点格式写入推进到 4418 万
+[FRAMEDUMP] n=44180000 flags=3 pc=812067A0 blk=81198BF2 sp=84846380 fib=84836300 gxm=0/0/0
+[FIBSW] #3999 n=1898 lr=8120682A fb=848463A0 fpc=811DFB14 flr=84855DD8 fr0=0 blk=9338023
+```
+2) 新卡点：
+```
+[FIBER-EXEC] no block for pc=84855A58 (cur=848463A0) lr=84855A58 sp=8484EF28 blk=812B1B70
+[FEXEC-IN] n=39242012 cur=848463A0 pc=84855A58 r0=0 r7=5 r14=84855A58 r13=8484EF28
+[SPOLL] pc=812068F2 r5=848463A0 r0=0 lr=812068F2 f80=1 g18=848463A0 g1c=848463A0 fib=0 fex=0 fl=2
+[STALLTRACE] n=39242012 pc=812B1BA0 blk=812B1B70 fib=0 loop=0 sp=82EFFE68 fex=0
+tail [PUMP] … blocks=0 blk=39242012 fex=1 fib=84836300
+[COUNT] 未打印（kill）；[FRAMECB]/[UPD]/[POST]=0；[IO]=6；[FHOPEN]=0
+```
+3) 分析：
+```
+切换确实发生（[FIB-XFER-FEX] B 的 tgtpc 81170C3E→…→811DFAFE 解码循环推进；[FIB-UNBAL-FEX]=0）
+但最终 B 的 ctx pc 变成 84855A58（栈地址）→ no-block 只保存返回 → 调度器反复切回非法 pc → 死循环
+0x84855A58 落在 GP 映射的 heap 窗口（非未映射）→ 不触发 BADMEM，问题静默
+推断：某处 pop/return 从被破坏的栈帧读出返回地址（pc=栈槽值）
+```
+4) NEXT：
+```
+① fiber_save/切换加载处探针：保存的 pc 无 AOT 块时打印 40 条 pc ring、g_cur_block、sp、
+   [sp-0x40..sp+0x40] 栈字 → 抓"最后合法块→非法 pc"瞬间
+② 检查 huff 解码完成路径（811DFB4E/811DFB7E 附近）与 FUN_811DF434 返回路径的 pop/return 序列
+③ 若栈帧被覆盖（节点数组 0x3800 与保存区重叠/越界）→ 修数组边界或栈大小
+④ 修复后继续长跑 → BeginScene/帧循环
+```
+验证：`m1229_long3_key.txt`、`m1228_fix_key.txt`、`recomp_harness_fiberload_4681.cpp`、`[TABLE] blocks=230291`。
+
+ANTI-FORGETTING ENTRY. Keywords: M1137 after the M1136 fiber_load r0 fix the long run m1229 (NESTED_UNTIL=300M) keeps progressing through decompression ([DECOMP] 38 / [HUFF] 22 / [LZ] 37, [PASSSUM] 420 all r0=0 healthy, [FLOAD-BAD]=2 start stubs only, [BADMEM]=0, [VFW] vertex format writes n=44,180,000) but finally stalls with fiber B context pc becoming the stack address 0x84855A58 (not code): [FIBER-EXEC] no block for pc=84855A58 (cur=848463A0) lr=84855A58 sp=8484EF28 blk=812B1B70; the no-block path only saves the context and returns; the guest scheduler (GetSelf 812B1B70 -> 812067A0 -> ... -> Switch 812B1BA0@8120682A) keeps switching to this fiber whose pc stays invalid -> infinite no-progress loop, g_blkcnt_total frozen at 39,242,012, [PUMP] blocks=0. Evidence: [FEXEC-IN] n=39242012 cur=848463A0 pc=84855A58 r0=0 r7=5 r14=84855A58 r13=8484EF28; [FIBSW] #3571 fpc=811DFAFE flr=84855A58 (LR already a stack value); repeated [SPOLL] pc=812068F2/812068C4 f80=1 g18=g1c=848463A0; [STALLTRACE] pc=812B1BA0 blk=812B1B70 fib=0 sp=82EFFE68 fex=0; [FIBSW] #3999 fpc=811DFB14 flr=84855DD8 blk=9338023; [FRAMEDUMP] n=44180000 pc=812067A0 blk=81198BF2 sp=84846380 fib=84836300; tail [PUMP] #965200 blocks=0 blk=39242012 fex=1 fib=84836300; [COUNT] not printed; [FRAMECB]/[UPD]/[POST]=0; [IO]=6; [FHOPEN]=0. Analysis: switches do happen (FIB-XFER-FEX shows B tgtpc advancing 81170C3E -> 8115DB9C -> ... -> 811DFAFE decode loop, FIB-UNBAL-FEX=0), but finally B ctx pc becomes 84855A58, a stack address (B huffman-decode frame around 0x8484EF28); a stack value is used as pc. Since 0x84855A58 lies in the GP-mapped heap window (not unmapped) BADMEM does not fire and the bug is silent. Inference: a pop/return address is read from a corrupted stack frame. NEXT: add a fiber_save/switch-load probe that when the saved pc has no AOT block prints a 40-entry pc ring, g_cur_block, sp and stack words [sp-0x40..sp+0x40] to catch the last valid block -> invalid pc transition; inspect the huffman decode completion path (811DFB4E/811DFB7E area) and the FUN_811DF434 return path pop/return sequences/frame offsets; if the frame is overwritten (node array 0x3800 overlapping the saved area/out of bounds) fix the array bounds or stack size; after the fix continue the long run -> BeginScene/frame loop. Verification: m1229_long3_key.txt, m1228_fix_key.txt, recomp_harness_fiberload_4681.cpp, [TABLE] blocks=230291.
+
+LOOKUP: M1137 M1136 fix long run m1229 decompression progress DECOMP 38 HUFF 22 LZ 37 PASSSUM 420 FLOAD-BAD 2 BADMEM 0 VFW n 44180000, stall fiber B ctx pc stack address 84855A58 FIBER-EXEC no block cur 848463A0 lr 84855A58 sp 8484EF28 blk 812B1B70, FEXEC-IN n 39242012, FIBSW 3571 fpc 811DFAFE flr 84855A58, SPOLL 812068F2 812068C4 f80 1 g18 g1c 848463A0, STALLTRACE 812B1BA0, PUMP blocks 0 blk 39242012, heap-mapped silent no BADMEM, inference corrupted stack-pop return, next fiber_save probe non-code pc ring stack words 811DFB4E 811DFB7E pop return frame offsets node array 0x3800 bounds, then BeginScene frame loop, verification m1229_long3_key.txt -> 18.4681 [relevant: M1136 r0 fix], 18.4680 [relevant: PASSSUM], 18.4679 [relevant: boundary probes]
