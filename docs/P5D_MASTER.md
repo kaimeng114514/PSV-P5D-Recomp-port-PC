@@ -1132,6 +1132,49 @@
 | M1114 | §18.4659: ★★★★★★★ **错误调用点全部定位：`E06100301:Invalid IFF header` 来自 `FUN_812B074C`（CRI UTF Retriever/VITA Ver.1.00.02）——它期望大端 `@UTF`（0x40555446）；`E2009010913:Need more memory` 来自 CPK 分析器 `FUN_812938C6` 区（blk 0x81293978）。根因数据：vita.cpk 的 0x800 处是 `CRID` 段（@UTF 在 0x820），而 data.cpk 的 0x800 处是 `TOC ` 段（@UTF 在 0x810）——**vita.cpk 是"带 ID 表(CRID)的 CPK 变体"，TOC 段头长度不同**，Analyzer 按 32 位 CPK 的 0x10 字节段头解析 → 解析位置错 0x10 → four_cc 不匹配。另安装了**通用动态 reader 泵**（扫描 progress 对象签名 0x81540460 + reader+0xB0 反向指针），但本次运行只发现 1 个 reader（data.cpk 的新 reader 尚未创建/未进入）**
 | M1115 | §18.4660: ★★★★★★★★ **CPK 头分析已成功（`[CPKRESULT] ret=00000000`），但解析出的字段全错（ContentOffset/TocOffset/TocSize/Align 全部=0x800）；同时用文件级分析**找到了 vita.cpk 真正的 TOC：在文件末尾 0x813EE800，大小 0x4C94（正好到 EOF），UTF 表内含文件条目（内容偏移 0x7A31E0、0x01E9A320、0x03B8C400 等）。头 UTF 行数据实际是 4 列 u64 大端：ContentOffset=0x800、TocOffset=0x813EE800、TocSize=0x4C94、Align=0 —— 说明 Analyzer 的 UTF 字段读取把每列都读成了第 1 列值（0x800）**
 | M1116 | §18.4661: ★★★★★★★★ **UTF 字段误读根因找到并修复：UTF 实例第 0 列的名称为空指针（列名偏移 0 被解析成 null），strcmp(null,key) 返回"相等" → 所有字段查找都返回第 0 列 index=0。修正 HLE strcmp 的空指针语义后：`[UTFVAL] r0=813EE800`（TocOffset）、`r0=00004C94`（TocSize）全部正确；**真实 TOC 读取成功：`PREAD fd=16385 off=2168383488(0x813EE800) size=19604 got=19604`**。遗留：TOC 加载后的 UTF 解析仍报 `E06100301:Invalid IFF header`（four_cc 不匹配，r3=0x77C3）与 `E2009010913:Need more memory`**
+| M1117 | §18.4662: ★★★★★★★★ **TOC 解析失败根因锁定：TOC 解析器把 TOC 缓冲当成"[0x10 段头][UTF]"，而 vita.cpk 的 TOC 区是裸 @UTF → 段头字段被误读（+4=0x00 触发 XOR 解密，滚动密钥 0x5F、每字节 *=0x15；大小字段误读为 0x36）→ 从 buffer+0x10 开始的 UTF 数据被就地 XOR 成乱码 → UTF retriever 在 buffer+0x10 读到乱码、报 four_cc 不匹配。已用 PREAD-DST 证明读入数据本身完全正确（buffer 0x84B1C800 = '@UTF'+0x4C94…），并拿到 XOR 算法原文**
+m1181 证据（`out80m_m1181utfretr.txt`）：
+```
+[PREAD-DST] dst=84B1C800: 46545540 944C0000 36000000 D82D0000 8C4C0000 00000000 16000600 13020000
+   → 内存字节 = 40 55 54 46 | 00 00 4C 94 | 00 00 00 36 | 00 00 2D D8 | … = 文件 @0x813EE800 完全一致 ✓
+[UTFRETR] #0 utf=84B1BC10 len=00000082  （CPK 头 UTF，@UTF @+0x10 ✓ 解析成功）
+[UTFRETR-BYTES] 84B1BC10: 46545540 7A000000 …  ✓
+[UTFRETR] #1 utf=84B1C810 len=00004C84  ← TOC 解析：指针 = TOC 缓冲(0x84B1C800)+0x10
+[UTFRETR-BYTES] 84B1C810: 3FEBCB5F C3775BAF C547EDFF F0157B4F F3E70BC5 03B7C1EF 13D3233F 7746BB8F
+   → buffer+0x10 变成乱码（文件原文应为 00 00 4C 8C 00 00 00 00 00 06 00 16 …）→ 被就地 XOR 破坏
+[CRILOG] E06100301:Invalid IFF header (mismatched four_cc)（r3=0x77C3）
+[CPKRESULT] ContentOffset=0x800 TocOffset=0x813EE800 TocSize=0x4C94 ✓（头解析已正确）
+[IO] OPEN vita.cpk → PREAD off=0 @2048 → PREAD off=2168383488 @19604（TOC 读取成功）
+```
+**XOR 算法原文（FUN_81292794 内，m1117 反编译 `cpkana_full.txt`）**：
+```c
+pbVar7 = (byte *)(param_3 + 0x10);          // 段头之后 = UTF 数据
+uVar8 = LE32(param_3 + 8);                  // 段大小字段（小端）
+if (param_3[4] == '\0') {                   // +4==0 → 触发 XOR 解码
+  bVar12 = 0x5f; uVar11 = 0;
+  do { bVar10 = *pbVar7 ^ bVar12; bVar12 = bVar12 * '\x15'; *pbVar7 = bVar10; pbVar7++; uVar11++; }
+  while (uVar11 < uVar8);
+}
+```
+- 对 CPK 头缓冲（0x84B1BC00）：+4=0xFF、+8=LE32(0x82) → 不 XOR ✓
+- 对 TOC 缓冲（0x84B1C800 = 裸 @UTF）：+4=字节0x00（@UTF 之后 size 字段首字节）→ **误触发 XOR**；+8 被误读为字节 00 00 00 36 → LE=0x36 → 从 +0x10 起 54 字节被 XOR 破坏 ✓（乱码范围吻合）
+**UTF 库调用者**（xref）：`FUN_81290FAA`（3 次）、`FUN_8129167C`（5 次）、`FUN_81290C2A`、`FUN_81292794`（CPK 分析器）、`FUN_812A56F8` 等；TOC 解析函数是其中之一（下一步反编译确认段头/XOR 逻辑）。
+**NEXT**：
+```
+① 反编译 FUN_8129167C / FUN_81290FAA / FUN_81290C2A：找 TOC 段头 four_cc 检查、大小字段、XOR 调用点（预期与 FUN_81292794 相同模式）
+② HLE 方案 A（首选）：PREAD 完成时识别"TOC 读取"（文件偏移接近 EOF 且数据以 @UTF 开头、size>0x1000）→ 在目标缓冲构造 TOC 段头：
+     +0: 'TOC '  +4: 0xFF000000  +8: LE32(UTF表大小+8)  +0xC: 0
+   并把 UTF 数据搬到 dst+0x10（需验证目标缓冲有 16 字节余量）
+③ 方案 B：预先对 TOC 数据做一次同样的滚动 XOR（若 Guest 的 XOR 偏移/长度可正确对应 → 两次 XOR 还原）。当前误读长度 0x36 不对应，需先修段头，所以方案 A 优先
+④ 成功后：TOC UTF 解析 → 文件索引 → mount status=2 → data.cpk（同样处理）→ title 素材
+```
+验证：`out80m_m1181utfretr.txt`、`cpkana_full.txt`、`toctu.txt`、`utfcallers.txt`。 |
+| §18.4662 | TOC parse failure root cause pinned down: the TOC parser treats the TOC buffer as [0x10-byte section header][UTF], but vita.cpk's TOC region is a bare @UTF, so the header fields are misread (+4=0x00 triggers the XOR decryption with rolling key 0x5F and key*=0x15 per byte; the size field is misread as 0x36), corrupting the UTF data starting at buffer+0x10 into garbage, so the UTF retriever reads garbage at buffer+0x10 and reports a four_cc mismatch. PREAD-DST proved the read data itself is fully correct (buffer 0x84B1C800 = @UTF + 0x4C94 ...), and the exact XOR algorithm was recovered. '
+       'm1181 evidence: [PREAD-DST] dst=84B1C800: 46545540 944C0000 36000000 D82D0000 8C4C0000 00000000 16000600 13020000 (memory bytes = 40 55 54 46 00 00 4C 94 00 00 00 36 00 00 2D D8 ... = file @0x813EE800 exactly); [UTFRETR] #0 utf=84B1BC10 len=00000082 (CPK header UTF, @UTF at +0x10, parsed OK); [UTFRETR-BYTES] 84B1BC10: 46545540 7A000000 ... OK; [UTFRETR] #1 utf=84B1C810 len=00004C84 (TOC parse pointer = TOC buffer 0x84B1C800 + 0x10); [UTFRETR-BYTES] 84B1C810: 3FEBCB5F C3775BAF C547EDFF F0157B4F F3E70BC5 03B7C1EF 13D3233F 7746BB8F (garbage; file bytes should be 00 00 4C 8C 00 00 00 00 00 06 00 16 ...) -> corrupted in place by XOR; [CRILOG] E06100301:Invalid IFF header (mismatched four_cc) (r3=0x77C3); [CPKRESULT] ContentOffset=0x800 TocOffset=0x813EE800 TocSize=0x4C94 (header parse already correct); [IO] OPEN vita.cpk -> PREAD off=0 @2048 -> PREAD off=2168383488 @19604 (TOC read success). '
+       'XOR algorithm source (FUN_81292794, decompiled into cpkana_full.txt): pbVar7 = (byte *)(param_3 + 0x10); uVar8 = LE32(param_3 + 8); if (param_3[4] == 0) { bVar12 = 0x5f; do { bVar10 = *pbVar7 ^ bVar12; bVar12 = bVar12 * 0x15; *pbVar7 = bVar10; pbVar7++; } while (++uVar11 < uVar8); }. For the CPK header buffer (0x84B1BC00): +4=0xFF, +8=LE32(0x82) -> no XOR; for the TOC buffer (0x84B1C800 = bare @UTF): +4=byte 0x00 (first byte of the @UTF size field) -> XOR triggered by mistake; +8 misread as 00 00 00 36 -> LE=0x36 -> 54 bytes from +0x10 XORed and corrupted (matches the garbage). '
+       'UTF library callers (xref): FUN_81290FAA (3 calls), FUN_8129167C (5 calls), FUN_81290C2A, FUN_81292794 (CPK analyzer), FUN_812A56F8 etc.; the TOC parser is one of them (next decompile to confirm section-header/XOR logic). '
+       'NEXT: (1) decompile FUN_8129167C / FUN_81290FAA / FUN_81290C2A to find the TOC section four_cc check, size field and XOR call site (expected to match the FUN_81292794 pattern); (2) HLE option A (preferred): after the PREAD completes, detect a TOC read (file offset near EOF and data begins with @UTF, size>0x1000) and construct a TOC section header in the destination buffer: +0 TOC , +4 0xFF000000, +8 LE32(UTF table size+8), +0xC 0; move the UTF data to dst+0x10 (verify 16 bytes of spare room in the destination buffer); (3) option B: pre-apply the same rolling XOR to the TOC data (two XORs cancel out) but the misread length 0x36 does not correspond, so fix the section header first, hence option A is preferred; (4) then: TOC UTF parse -> file index -> mount status=2 -> data.cpk (same handling) -> title assets. '
+       'Verification: out80m_m1181utfretr.txt, cpkana_full.txt, toctu.txt, utfcallers.txt. |
 m1180 证据（`out80m_m1180strcmpfix.txt`）：
 ```
 [STRCMP0] a=ContentOffset b=NULL -> 0        ← 第 0 列（空指针）只与 ContentOffset 相等
@@ -501556,3 +501599,36 @@ FUN_812AEA4C: strcmp(key, coldef->name) → 空指针时 HLE strcmp 返回 0（�
 ANTI-FORGETTING ENTRY. Keywords: M1116 UTF field misread root cause fixed - UTF instance column 0 has a null name pointer (name offset 0 parsed as null) so strcmp(null,key)=0 matched every key and every lookup returned column 0; HLE strcmp null-pointer semantics fix (null side == implicit first column name "ContentOffset"). m1180: [STRCMP0] a=ContentOffset b=NULL -> 0; [UTFHIT] idx=0/1/2/3 correct; [UTFVAL] r0=00000800 ContentOffset, r0=813EE800 TocOffset, r0=00004C94 TocSize; [CPKRESULT] p2 slots ContentOffset=0x800 TocOffset=0x813EE800 TocSize=0x4C94; [IO] PREAD fd=16385 off=2168383488 (0x813EE800) size=19604 got=19604 (real TOC read success); [UTFCOLS] utf=84B1C500 arr=84B1C700 cnt=4; [UTFCOL] #0 nameptr=00000000 #1=TocOffset #2=TocSize #3=Align; [UTFOBJ] p=84B1C500 w: 84B1C504 81294F4B 81294F8F 84B1B828 00000001 84B1BC18 0000007A 84B1BC64 84B1BC8A 84B1BC44 84B1BC64 00200004 00000001 84B1C700. Remaining: TOC inner UTF parse still E06100301:Invalid IFF header (four_cc mismatch r3=0x77C3) and E2009010913:Need more memory; MNTST stage=4 status=1. NEXT: probe FUN_812B074C entry (param_6 UTF pointer + first 16 bytes) to confirm the TOC parse offset; if offset issue normalize the TOC buffer in HLE after the TocOffset PREAD (TOC section header / move @UTF to +0x10); inspect nested tables (Files/Groups/Attrs offsets); then file index -> mount status=2 -> data.cpk -> title assets. Verification: out80m_m1180strcmpfix.txt, out80m_m1179utfcols.txt, utfname.txt, utfcol.txt, utfbuild.txt.
 
 LOOKUP: M1116 UTF column0 null name strcmp equality fix, HLE strcmp null semantics ContentOffset, UTFVAL TocOffset 813EE800 TocSize 4C94, PREAD off=2168383488 size=19604 real TOC read, UTFCOLS 84B1C500 arr 84B1C700, FUN_812AEA4C lookup, FUN_812AF434 getter, remaining IFF four_cc error on TOC inner UTF, next probe FUN_812B074C param_6 and normalize TOC buffer -> 18.4660 [relevant: real TOC found], 18.4659 [relevant: IFF error], 18.4657 [relevant: HDRFIX]
+### 18.4662 PORT M1117: TOC 解析失败根因＝裸 @UTF 被当成"[段头][UTF]"误触发 XOR 解密；读入数据本身完全正确
+
+1) m1181 探针：
+```
+[PREAD-DST] dst=84B1C800: 46545540 944C0000 36000000 D82D0000 …   ← 读入内存与文件 @0x813EE800 完全一致 ✓
+[UTFRETR] #0 utf=84B1BC10 len=00000082  ← CPK 头 UTF 解析成功
+[UTFRETR] #1 utf=84B1C810 len=00004C84  ← TOC 解析指针 = 缓冲+0x10
+[UTFRETR-BYTES] 84B1C810: 3FEBCB5F C3775BAF C547EDFF …        ← buffer+0x10 变成乱码！
+```
+2) 根因：TOC 解析器把 TOC 缓冲按 "[0x10 段头][UTF]" 处理：
+- 裸 @UTF 数据使 +4=0x00 → 触发 XOR 解密（滚动密钥 0x5F，每字节 *=0x15）
+- +8 被误读 = 0x36（LE）→ 从 +0x10 起 54 字节被 XOR 破坏 → UTF retriever 读到乱码 → four_cc 不匹配
+3) XOR 算法原文（FUN_81292794）：
+```c
+pbVar7 = param_3 + 0x10; uVar8 = LE32(param_3 + 8);
+if (param_3[4] == '\0') {
+  bVar12 = 0x5f;
+  do { *pbVar7 ^= bVar12; bVar12 *= 0x15; ++pbVar7; } while (++uVar11 < uVar8);
+}
+```
+4) UTF 库调用者（xref）：`FUN_81290FAA`×3、`FUN_8129167C`×5、`FUN_81290C2A`、`FUN_81292794`、`FUN_812A56F8` — TOC 解析是其中之一
+5) NEXT：
+```
+① 反编译 FUN_8129167C/FUN_81290FAA/FUN_81290C2A 找 TOC 段头 four_cc/大小/XOR 模式
+② HLE 方案A：PREAD 完成时识别 TOC 读取（offset 近 EOF、数据以 @UTF 开头、size>0x1000）
+   → 目标缓冲写 TOC 段头（'TOC ' + 0xFF000000 + LE32(表大小+8) + 0）并把 UTF 数据搬到 dst+0x10
+③ 验证缓冲 16 字节余量；成功后 TOC 解析 → 文件索引 → mount status=2 → data.cpk
+```
+验证：`out80m_m1181utfretr.txt`、`cpkana_full.txt`、`toctu.txt`、`utfcallers.txt`。
+
+ANTI-FORGETTING ENTRY. Keywords: M1117 TOC parse failure root cause - vita.cpk TOC region is a bare @UTF but the parser treats the TOC buffer as [0x10-byte section header][UTF]; raw @UTF makes byte+4=0x00 which triggers XOR decryption (rolling key 0x5F, key*=0x15 per byte) and the size field is misread as 0x36, so 54 bytes from buffer+0x10 are XORed into garbage and the UTF retriever reports four_cc mismatch. m1181: [PREAD-DST] dst=84B1C800: 46545540 944C0000 36000000 D82D0000 8C4C0000 00000000 16000600 13020000 (read data exactly matches file @0x813EE800); [UTFRETR] #0 utf=84B1BC10 len=00000082 OK; [UTFRETR] #1 utf=84B1C810 len=00004C84 (TOC buffer+0x10); [UTFRETR-BYTES] 84B1C810: 3FEBCB5F C3775BAF C547EDFF F0157B4F ... garbage; [CRILOG] E06100301 Invalid IFF header r3=0x77C3; [CPKRESULT] ContentOffset=0x800 TocOffset=0x813EE800 TocSize=0x4C94; [IO] PREAD off=2168383488 size=19604. XOR source in FUN_81292794: pbVar7 = param_3+0x10; uVar8 = LE32(param_3+8); if (param_3[4]==0) { key=0x5F; do { *p ^= key; key*=0x15; } while (++i < uVar8); } - header buffer +4=0xFF so no XOR, TOC buffer +4=0x00 so XOR triggered wrongly with misread size 0x36. UTF library callers: FUN_81290FAA, FUN_8129167C, FUN_81290C2A, FUN_81292794, FUN_812A56F8. NEXT: decompile FUN_8129167C/FUN_81290FAA/FUN_81290C2A to find TOC header four_cc/size/XOR logic; implement HLE TOC normalization after the PREAD (detect TOC read near EOF starting with @UTF, write TOC section header TOC +0xFF000000 +LE32(table size+8)+0 and move UTF to dst+0x10, verify 16 spare bytes); then TOC parse -> file index -> mount status=2 -> data.cpk. Verification: out80m_m1181utfretr.txt, cpkana_full.txt, toctu.txt, utfcallers.txt.
+
+LOOKUP: M1117 TOC bare @UTF treated as [header][UTF], XOR rolling 0x5F key*=0x15, misread size 0x36, buffer+0x10 garbage, UTFRETR 84B1C810 garbage, PREAD-DST 84B1C800 correct @UTF, CPU charset CPK header +4 0xFF no XOR, UTF library callers FUN_8129167C FUN_81290FAA FUN_81290C2A, next HLE TOC normalization with TOC header and shift UTF +0x10 -> 18.4661 [relevant: UTF fixes], 18.4660 [relevant: TOC location], 18.4657 [relevant: HDRFIX]
