@@ -918,6 +918,8 @@ static int g_big_n = 0;
 
 static uint32_t hle_canary_emulated_ret(RecState* s) { return s->r[0]; }
 static uint32_t g_hle_ring_va[128]; static uint32_t g_hle_ring_lr[128]; static int g_hle_ring_n=0;
+extern "C" uint32_t harness_hle_ring_va(int idx) { if (idx < 0 || idx >= 128) return 0u; return g_hle_ring_va[(g_hle_ring_n - 1 - idx) & 127]; }
+extern "C" uint32_t harness_hle_ring_lr(int idx) { if (idx < 0 || idx >= 128) return 0u; return g_hle_ring_lr[(g_hle_ring_n - 1 - idx) & 127]; }
 static int g_f2hle_n = 0; static uint32_t g_f2_first_pc = 0;
 static int g_fam_n = 0;
 static int g_assert_n = 0;
