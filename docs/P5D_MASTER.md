@@ -1117,6 +1117,52 @@
 | M1099 | §18.4644: ★★★★★★★ **解码了游戏自己的 CRI 初始化完整调用链，并定位 "Insufficient buffer size" 的来源：`FUN_81257318`（CRI Atom Sound 初始化，358B）→ `FUN_81224160`（CRI 系统初始化，3270B：内含 E2009072703 检查 @0x81224960 与 criFs_Initialize 调用 @0x81224638）→ `FUN_8128399E`（criFs_Initialize）。m1141 的 [FIOSX] 探针未命中 0x8128399E/0x81235F30/0x81224638，说明这些是纯 guest 调用（非 HLE 拦截点）。另发现 `W2008121610:The binder module is not initialized.`（binder 未初始化，来自 FUN_8128715E/812871D0/812859FA 等 binder 函数）——CPK 挂载失败的直接原因。**
 | M1100 | §18.4645: ★★★★★★★★★ **量化定位：游戏自身 CRI 初始化的 "Insufficient buffer size" 是 1 字节差——探针实测 `[CMPBUF] r1=00020190 r6=0002018F`（r1=local_98[0] 即 criFs 所需大小 0x20190；r6=param_4 即 Atom 侧提供的大小 0x2018F，**差 1 字节**！），`[ATOMINIT] cfg=84856088 buf=848E8E7C r2=00023FEF r3=00000090 lr=81236208`（FUN_81257318 入口：config/buffer/调用者来自 FUN_81235A10 区域）。⇒ 不是缺失步骤，而是**两侧 size 计算差 1**：criFs 需求比 Atom 预算多 1 字节。**
 | M1101 | §18.4646: ★★★★★★★★★ **1 字节差已通过 +0x200 安全余量绕过：`[CMPBUF] r1=00020190 r6=0002038F`（0x20190 ≤ 0x2038F ✓）、`[FIOSX] #1 at=8128399E n=1717 r0=84855FC8 r1=848E8E7C r2=00020190`（★ criFs_Initialize 真实被调用，config=0x84855FC8/buf=0x848E8E7C/size=0x20190）、`[INITRET] r0=00000000`（★ FUN_81224160 返回 0=成功）。失败点后移到下一层：`E2009011903:Insufficient buffer size.（×3，n=1717）`（另一个子模块 buffer 检查）与 `W2008121610:The binder module is not initialized.（n=1754）`（binder 仍未初始化）→ CPK 挂载仍失败。**
+| M1102 | §18.4647: ★★★★★★★★★ **binder 初始化真相：`criFsBinder_Initialize`（FUN_81284960）由 criFs_Initialize 内部调用（0x81283BAE），m1144 探针显示它**确实执行并成功**：`[BINDCALL] r0=00000020 r1=00000100 r2=84906328 r3=00002960`（num_binders=32, uVar6=0x100, work=0x84906328, size=0x2960，正好等于公式 param_2*param_1+param_1*0x48+0x60 = 0x2000+0x900+0x60=0x2960 ✓）、`[BINDRET] r0=00000020 flagFEF4=816A0BA0`（★ DAT_8153FEF4 被置为非 0 = binder 初始化成功）。**但随后又被清零**：`[BINDWARN] flagFEF4=00000000` at n=1754（CPK 挂载时的 FUN_812859FA 因此报 W2008121610）。⇒ 后续 2 次 Atom 初始化失败（`E2009011903:Insufficient buffer size.` ×3）触发 cleanup，其中调用 criFs 的 finalize 把 binder 模块也 finalize 了（清 DAT_8153FEF4）。**
+m1144（`out80m_m1144binder.txt`）证据：
+```
+[BINDCALL] r0=00000020 r1=00000100 r2=84906328 r3=00002960 r7=84855FC8 lr=81283BB2 flagFEF4=00000000
+[BINDINIT] r0=00000020 r1=00000100 r2=84906328 r3=00002960 lr=81283BB2
+[BINDRET]  r0=00000020 r1=0 r2=0 r3=0 flagFEF4=816A0BA0 lr=81278CC4   ← ★ binder 初始化成功（flag 非 0）
+[BINDWARN] flagFEF4=00000000 r4=813B0174 r0=0 lr=811820D6              ← ★ 之后被清零
+[FIOSX] #1-3 at=8128399E n=1717 r0=84855FC8 r1=848E8E7C r2=00020190    ← criFs_Initialize 被调用 3 次
+[CRILOG] n=1717 E2009011903:Insufficient buffer size.（×3）             ← 后 2 次 Atom 初始化失败（第 1 次成功）
+[CRILOG] n=1754 W2008121610:The binder module is not initialized.（×5）
+[CRIFMT] n=1754 E2010052671:Can not open ACF file (sound/common.acf)
+[BADMEM]=0
+```
+**criFsBinder_Initialize 反编译（`binderinit2.txt`）**：
+```c
+int FUN_81284960(int param_1,int param_2,int param_3,int param_4) {   // num_binders, uVar6, work, size
+  DAT_816A0B98 = "\nCriFsBinder/VITA Ver.1.02.70 Build:Jan 30 2018 18:44:44\n";
+  if (DAT_8153FEF4 != 0) { log "W2008071691:The binder module has already been initialized."; return DAT_8153FEF8; }
+  if (param_1 < 0) { log "W2008071601:The numder of binder must be larger or equal zero."; return 0; }
+  DAT_8153FF18 = FUN_81278B94(&DAT_816A0BF0,0x48); … DAT_8153FF1C/FF20/FF24 …
+  if (param_1 == 0) return 0;
+  if (param_4 < param_2*param_1 + param_1*0x48 + 0x60) { log "E2008071602:The designate work size is too small."; … return 0; }
+  DAT_81540134 = 1; … 建立 binder handle 池 …
+}
+// E2009011903 检查（FUN_81224160 @0x81224864）：else if (param_4 < (int)uVar6) { log "E2009011903:Insufficient buffer size."; … cleanup（含 finalize）… }
+```
+**分析**：
+1. binder 初始化路径完全正常，第一次 Atom/criFs 初始化成功（flag=0x816A0BA0）
+2. **失败在后续 2 次 Atom 初始化**（`E2009011903`）：另一处子缓冲需求 uVar6 大于剩余工作缓冲 → cleanup 触发 criFs finalize 链 → 把 binder 模块也 finalize（flag=0）
+3. ⇒ 下一步：定位 `E2009011903` 检查块的 `param_4` 与 `uVar6` 实际值（batch_018 中 0x81224864 附近块加探针），确认是"总缓冲不足"还是"1 字节差同类问题"；若为前者则需要让 Atom 配置更小或提供更大工作缓冲（游戏 caller 传入的 buffer 由 FUN_81235A10 分配）
+NEXT：
+```
+① batch_018 中定位 0x81224864 检查块 → 探针打印 param_4/uVar6/r? 
+② 判断差值：若只差少量 → 同类 +margin；若差很多 → 查明 Atom 配置（uVar6 来源）
+③ 修复后：3 次 Atom 初始化全部成功 → binder flag 保持非 0 → CPK 挂载成功
+④ 之后 ACB/ACF 打开成功 → title 素材读取 → [SCENE] 视图 → GXM → 画面
+备选：若第二次/第三次 Atom 初始化本质是"重复初始化"（应返回 already initialized 而不是失败），
+      可让 HLE 拦截 Atom init 的 already-initialized 检查以跳过重复 init
+```
+验证：`out80m_m1144binder.txt`、`binderinit2.txt`、`binderrefs2.txt`、`binderflag.txt`（无 store 命中，说明 flag 通过指针/结构写入）。 |
+| §18.4647 | The truth about binder initialization: criFsBinder_Initialize (FUN_81284960) is called from inside criFs_Initialize (0x81283BAE), and the m1144 probes show it DOES run and SUCCEED: [BINDCALL] r0=00000020 r1=00000100 r2=84906328 r3=00002960 (num_binders=32, uVar6=0x100, work=0x84906328, size=0x2960, which exactly matches the formula param_2*param_1+param_1*0x48+0x60 = 0x2000+0x900+0x60 = 0x2960), [BINDRET] r0=00000020 flagFEF4=816A0BA0 (DAT_8153FEF4 set non-zero = binder init success). BUT it is then cleared again: [BINDWARN] flagFEF4=00000000 at n=1754 (the CPK mount FUN_812859FA then reports W2008121610). So the following 2 Atom init calls fail (E2009011903:Insufficient buffer size. x3) and their cleanup calls the criFs finalize chain, which also finalizes the binder module (clearing DAT_8153FEF4). '
+       'm1144 evidence: [BINDCALL] r0=00000020 r1=00000100 r2=84906328 r3=00002960 r7=84855FC8 lr=81283BB2 flagFEF4=00000000; [BINDINIT] r0=00000020 r1=00000100 r2=84906328 r3=00002960 lr=81283BB2; [BINDRET] r0=00000020 r1=0 r2=0 r3=0 flagFEF4=816A0BA0 lr=81278CC4 (binder init success); [BINDWARN] flagFEF4=00000000 r4=813B0174 r0=0 lr=811820D6 (cleared afterwards); [FIOSX] #1-3 at=8128399E n=1717 r0=84855FC8 r1=848E8E7C r2=00020190 (criFs_Initialize called 3 times); [CRILOG] n=1717 E2009011903:Insufficient buffer size. (x3, the later 2 Atom init calls failed; the first succeeded); [CRILOG] n=1754 W2008121610:The binder module is not initialized. (x5); [CRIFMT] n=1754 E2010052671:Can not open ACF file (sound/common.acf); [BADMEM]=0. '
+       'criFsBinder_Initialize decompile (binderinit2.txt): int FUN_81284960(int param_1,int param_2,int param_3,int param_4) { DAT_816A0B98 = "\\nCriFsBinder/VITA Ver.1.02.70 Build:Jan 30 2018 18:44:44\\n"; if (DAT_8153FEF4 != 0) { log W2008071691 already initialized; return DAT_8153FEF8; } if (param_1 < 0) { log W2008071601; return 0; } DAT_8153FF18 = FUN_81278B94(&DAT_816A0BF0,0x48); DAT_8153FF1C/FF20/FF24 similarly; if (param_1 == 0) return 0; if (param_4 < param_2*param_1 + param_1*0x48 + 0x60) { log E2008071602 designate work size too small; cleanup; return 0; } DAT_81540134 = 1; build binder handle pool; }. The E2009011903 check (FUN_81224160 @0x81224864): else if (param_4 < (int)uVar6) { log E2009011903:Insufficient buffer size.; cleanup (includes finalize) }. '
+       'Analysis: (1) the binder init path is completely normal and the first Atom/criFs init succeeds (flag=0x816A0BA0); (2) the failure is in the following 2 Atom init calls (E2009011903): another sub-buffer requirement uVar6 exceeds the remaining work buffer -> cleanup triggers the criFs finalize chain -> binder module also finalized (flag=0); (3) next: locate the E2009011903 check block and probe the actual param_4/uVar6 values (add a probe near 0x81224864 in batch_018) to see whether it is a global buffer shortage or the same 1-byte-style problem; if shortage, make the Atom config smaller or provide a bigger work buffer (the buffer comes from FUN_81235A10). '
+       'NEXT: (1) locate the 0x81224864 check block in batch_018 and probe param_4/uVar6/r? ; (2) judge the difference: small -> same +margin approach; large -> investigate the uVar6 source (Atom config); (3) after the fix all 3 Atom inits succeed -> binder flag stays non-zero -> CPK mount succeeds; (4) then ACB/ACF opens succeed -> title assets -> [SCENE] views -> GXM -> picture. Fallback: if the 2nd/3rd Atom init are essentially repeated initialization (should return already-initialized rather than fail), HLE-intercept the Atom init already-initialized check to skip the repeated init. '
+       'Verification: out80m_m1144binder.txt, binderinit2.txt, binderrefs2.txt, binderflag.txt (no store hits, meaning the flag is written via pointer/structure). |
 m1143（`out80m_m1143margin.txt`）证据：
 ```
 [ATOMINIT] cfg=84856088 buf=848E8E7C r2=00023FEF r3=00000090 lr=81236208
@@ -500033,3 +500079,50 @@ s->r[14] = ...; return 0x81224160u;   /* bl */
 ANTI-FORGETTING ENTRY. Keywords: M1100/M1101 game's own CRI init Insufficient buffer size root cause = 1-byte difference between criFs required local_98[0]=0x20190 and Atom-provided param_4=0x2018F, measured by probes [CMPBUF] r1=00020190 r6=0002018F and [ATOMINIT] cfg=84856088 buf=848E8E7C r2=00023FEF r3=00000090 lr=81236208 at FUN_81257318 entry; probes injected into batch_018 blk_81224958 (CMPBUF) and batch_020 blk_81257318 (ATOMINIT); printf newline injection bug fixed with re.sub; M1101 patch: batch_020 blk_812573B0 adds s->r[3] += 0x200u before calling FUN_81224160 (margin) -> [CMPBUF] r1=00020190 r6=0002038F passes, [FIOSX] #1 at=8128399E n=1717 r0=84855FC8 r1=848E8E7C r2=00020190 (criFs_Initialize really called), [INITRET] r0=00000000 (FUN_81224160 success). New failure points: E2009011903:Insufficient buffer size. (x3 n=1717, another submodule check inside FUN_81224160's param_4 < uVar6 or FUN_81224E32 path) and W2008121610:The binder module is not initialized. (x5 n=1754, binder init not done) -> CPK mount still fails, ACB/ACF still fail. exe 57,121,735B 09:11:35, run out80m_m1143margin.txt. NEXT: locate the E2009011903 check block and probe/fix; locate the binder init entry (FUN_812859FA or binder module init) and probe; add margin at FUN_81224E68 call site too; verify CPK mount success -> ACB/ACF opens; then title assets -> scene views -> GXM -> picture. Fallback: fix the 1-byte computation source instead of margins.
 
 LOOKUP: M1100 M1101 CRI init 1 byte shortfall 0x20190 vs 0x2018F, [CMPBUF] probe blk_81224958, [ATOMINIT] blk_81257318, +0x200 margin batch_020 blk_812573B0 s->r[3] += 0x200u, [FIOSX] at=8128399E criFs_Initialize called config=84855FC8 buf=848E8E7C size=0x20190, [INITRET] r0=0 success, new E2009011903 Insufficient buffer size, W2008121610 binder module not initialized n=1754, exe 57,121,735B 09:11:35, out80m_m1143margin.txt, next find E2009011903 block and binder init entry -> §18.4644 [relevant: CRI init chain], §18.4643 [relevant: m1140 result], §18.4642 [relevant: no-forced experiment]
+### 18.4647 PORT M1102: binder 初始化实际成功（flag=0x816A0BA0）但被后续失败 init 的 finalize 清零
+
+1) m1144 探针证据：
+```
+[BINDCALL] r0=00000020 r1=00000100 r2=84906328 r3=00002960 r7=84855FC8 lr=81283BB2 flagFEF4=00000000
+[BINDINIT] r0=00000020 r1=00000100 r2=84906328 r3=00002960 lr=81283BB2
+[BINDRET]  r0=00000020 r1=0 r2=0 r3=0 flagFEF4=816A0BA0 lr=81278CC4   ← binder 初始化成功
+[BINDWARN] flagFEF4=00000000 r4=813B0174 r0=0 lr=811820D6             ← 之后被清零
+[FIOSX] #1-3 at=8128399E n=1717 r0=84855FC8 r1=848E8E7C r2=00020190   ← criFs_Initialize 调用 3 次
+[CRILOG] n=1717 E2009011903:Insufficient buffer size.（×3）            ← 后 2 次 Atom init 失败（第 1 次成功）
+[CRILOG] n=1754 W2008121610:The binder module is not initialized.（×5）
+[BADMEM]=0
+```
+2) criFsBinder_Initialize（FUN_81284960）：
+```c
+int FUN_81284960(int param_1,int param_2,int param_3,int param_4) {
+  DAT_816A0B98 = "\nCriFsBinder/VITA Ver.1.02.70 Build:Jan 30 2018 18:44:44\n";
+  if (DAT_8153FEF4 != 0) { "W2008071691 already initialized"; return DAT_8153FEF8; }
+  if (param_1 < 0) { "W2008071601"; return 0; }
+  DAT_8153FF18 = FUN_81278B94(&DAT_816A0BF0,0x48); … FF1C/FF20/FF24 …
+  if (param_1 == 0) return 0;
+  if (param_4 < param_2*param_1 + param_1*0x48 + 0x60) { "E2008071602 work size too small"; cleanup; return 0; }
+  DAT_81540134 = 1; … 建立 binder handle 池 …
+}
+// 实测 size=0x2960 恰好 = 0x100*0x20 + 0x20*0x48 + 0x60 ✓ → 成功
+```
+3) E2009011903 检查（FUN_81224160 @0x81224864）：
+```c
+else if (param_4 < (int)uVar6) { log "E2009011903:Insufficient buffer size."; … cleanup（含 finalize）… }
+```
+4) 分析：
+- binder 初始化路径正常，第 1 次 Atom/criFs 初始化成功（flag=0x816A0BA0）
+- 后续 2 次 Atom 初始化失败（E2009011903）→ cleanup 触发 criFs finalize → binder flag 被清零
+- 下一步：定位 0x81224864 检查块探针 param_4/uVar6 实际值
+5) NEXT：
+```
+① 定位 0x81224864 块 → 探针 param_4/uVar6
+② 差值小 → +margin；差值大 → 查 uVar6（Atom 配置）来源
+③ 3 次 init 全成功 → binder flag 保持 → CPK 挂载成功 → ACB/ACF 可读
+④ title 素材 → 场景视图 → GXM → 画面
+备选：若后 2 次是重复 init（应 already-initialized 而非失败），HLE 拦截跳过
+```
+验证：`out80m_m1144binder.txt`、`binderinit2.txt`、`binderrefs2.txt`、`binderflag.txt`。
+
+ANTI-FORGETTING ENTRY. Keywords: M1102 binder init truth - criFsBinder_Initialize (FUN_81284960) called from criFs_Initialize at 0x81283BAE actually runs and SUCCEEDS: [BINDCALL] r0=00000020 r1=00000100 r2=84906328 r3=00002960 (num_binders=32, uVar6=0x100, work=0x84906328, size=0x2960 = 0x100*0x20+0x20*0x48+0x60 exactly), [BINDRET] r0=00000020 flagFEF4=816A0BA0 (DAT_8153FEF4 set non-zero). But it is later cleared: [BINDWARN] flagFEF4=00000000 at n=1754 (CPK mount FUN_812859FA reports W2008121610). The following 2 Atom init calls fail with E2009011903:Insufficient buffer size. (x3 at n=1717) and their cleanup runs the criFs finalize chain which also finalizes binder (flag cleared). m1144 also: [FIOSX] #1-3 at=8128399E n=1717 r0=84855FC8 r1=848E8E7C r2=00020190 (criFs_Initialize 3 calls); [CRIFMT] n=1754 E2010052671:Can not open ACF file (sound/common.acf); [BADMEM]=0. E2009011903 check is in FUN_81224160 @0x81224864: else if (param_4 < (int)uVar6) { log E2009011903:Insufficient buffer size.; … cleanup (includes finalize) … }. NEXT: locate the 0x81224864 check block in batch_018 and probe param_4/uVar6 actual values; if the difference is small use the same +margin approach, if large investigate the uVar6 source (Atom config); after all 3 Atom inits succeed the binder flag stays non-zero -> CPK mount succeeds -> ACB/ACF readable -> title assets -> scene views -> GXM -> picture. Fallback: if the 2nd/3rd Atom init are repeated initialization (should return already-initialized instead of failing), HLE-intercept the Atom init already-initialized check to skip.
+
+LOOKUP: M1102 binder init success flag 0x816A0BA0 then cleared, criFsBinder_Initialize FUN_81284960 @0x81283BAE, [BINDCALL] r0=0x20 r1=0x100 r2=84906328 r3=0x2960, [BINDRET] flagFEF4=816A0BA0, [BINDWARN] flagFEF4=0 n=1754, E2009011903 Insufficient buffer size x3 n=1717 @0x81224864 check param_4 vs uVar6, 3x criFs_Initialize at n=1717, next probe 0x81224864 block -> §18.4646 [relevant: margin fix], §18.4645 [relevant: 1-byte diff], §18.4644 [relevant: CRI init chain]
