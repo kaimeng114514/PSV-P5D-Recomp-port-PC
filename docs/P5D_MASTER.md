@@ -1123,6 +1123,68 @@
 | M1105 | §18.4650: ★★★★★★★★★★★ **CPK 装载打通关键一步：补块函数 0x8128A576（criFs user-heap 分配回调）后，`[INDIRECT-MISS] 0`、`[HARNESS] 0`、无 BADMEM/CRILOG；游戏自身 criFs 通过 HLE `sceIoOpen` **真正打开了 vita.cpk**（`[IO] OPEN 'app0:/data/vita.cpk' -> fd=16385 ...vita.cpk size=2168403092`）并 PREAD 读取（off=0 size=2048）；运行从 n=181,670 的卡死推进到 **n=4,600,000+（25 倍）**，当前在 binder 挂载等待循环（[FIOSX] at=81287BBA，已 54000+ 次等待、状态未变）。**
 | M1106 | §18.4651: ★★★★★★★★ **CPK 挂载卡点精确到"CPK Analyzer 状态机 state=4 但不推进"：新增 MNTST/CPKANA/CPKRET/CPKRES 探针实测——binder 对象 0x84906480 的 `stage=4 status=1` 永不变化；CPK Analyzer 结构 0x84B1B828 = `[0]=state(3→4) [1]=0x848FC368(reader对象) [3]=[4]=0x84B1BC00(工作缓冲)`；每次轮询 `FUN_81293BC4` 返回 0、`FUN_81293F7C` 返回 4（即 state 仍为 4）→ status 不变。state=4 分支需要 reader 状态（+0xBC）==2（FUN_8128E9BC 查询），但 IOSTAT 探针 0 次命中 → **FUN_81293BC4 在进入状态机前被 try-lock 挡住**（反编译首个操作：`iVar1 = FUN_8127BBF8(param_1+0x57,1); if (iVar1 != 0) { return 0; }`）。已确认 3 次 I/O 提交（[FIOSW] at=8128E394 r0=848FC368 r2=84B1BA00）与 1 次真实 PREAD 2048B（CPK 头），但读完成状态从未置 2。**
 | M1107 | §18.4652: ★★★★★★★ **锁不是卡点——SWAP 原子操作探针显示所有相关锁 acquire/release 成对正常（CPK Analyzer busy 0x84B1B984、binder mount lock 0x849064AC、reader I/O 对象锁 0x848FC424/0x848FC434 均正常）；真正卡点是 reader 状态 +0xBC 永远没有从 1(loading) 变到 2/3(完成)。另修复一个重要探针基础设施 bug：batch_022 因缺少 `harness_cur_fiber2` 声明编译失败但链接仍复用旧 .o，导致此前 IOSTAT/IOSUB/SWAP 探针"神秘不命中"。**
+| M1108 | §18.4653: ★★★★★★★★ **CPK 首次读的加载状态机只被驱动了 2 步就停：FUN_8128F04E（criFs 异步 Load 状态机）实测只被调用 2 次（state=1 初始化 → state=2 提交读、in-flight 置 1），之后没有第 3 次调用；progress 对象状态 1→2→3，但 reader +0xBC 仍停在 1(loading)，完成处理永远不发生。同时确认：全局 I/O 接口指针 DAT_815401D4/D8 = 0（未注册），但实际读路径用每请求 vtable（progress 对象 [0]=0x81540460，guest 函数指针 81294FDC=stat/81295016=open/8129513F…）。**
+m1159（`out80m_m1159iostate2.txt`）IOSTATE/相关探针：
+```
+[IOSTATE] #0 p=848FC390 state=00000001 err=00000000 fl68=00 fl6A=00 fl6B=00 fl6D=00 fl6E=00 fl6F=00 lr=8128D54E
+[IOSTATE] #1 p=848FC390 state=00000002 err=00000000 fl68=00 fl6A=00 fl6B=00 fl6D=00 fl6E=00 fl6F=01 lr=8128D54E
+[IOPROG]  #0 p=848FC390 w: 81540460 00000000 00000000 00000001 … lr=8128DA54   ← state 1
+[IOPROG]  #1 p=848FC390 w: 81540460 848E8EE8 00000000 00000002 … lr=8128D556   ← state 2
+[IOPROG]  #2 p=848FC390 w: 81540460 848E8EE8 00000000 00000003 … lr=8128D556   ← state 3
+[LOADST]  #0/#1 reader=848FC368 statusBC=00000001 prog=848FC390 b0=848FC390 d0=00000000 lr=8128AEC4
+[IOIFACE] #0 reader=848FC368 IFACE_D4=00000000 IFACE_D8=00000000 statusBC=00000000 … lr=8128E496
+[IO] OPEN 'app0:/data/vita.cpk' … size=2168403092
+[IO] PREAD fd=16385 off=0 size=2048 got=2048
+[MNTST] #0 obj=84906480 stage=4 status=1   ← mount 仍卡
+[CRILOG]=0 [BADMEM]=0
+```
+**关键结构与反编译**：
+```
+progress 对象 @0x848FC390（FUN_8128E03E 初始化）：
+  [0] = 0x81540460（I/O 默认 vtable：81294FDC stat / 81295016 open / 8129513F / 81295171 / 8129517D / 81295227 / 8129522F …）
+  [1] = 读缓冲（后为 0x848E8EE8）
+  [3] = 状态（1=init, 2=submitted, 3=done-or-error, 4=decrypt-ready, 5=CRC-unsupported, 6/7=finishing, 8=done/error）
+  [4] = in-flight 标志；param_1[6]=错误码；char +0x68=错误标志；char +0x6F=opened 标志
+  [0x1E]/[0x1F] = 进度回调/回调参数；[0x20] = 解密回调
+FUN_8128F04E(param_1)（异步 load 状态机，1656B）：
+  case 1: 打开文件（FUN_8128CED6/FUN_8128CF1A），成功→state=2；失败→state=8
+  case 2 (LAB_8128f176): 计算 chunk → FUN_8128CF78 提交读 → 成功则 [4]=1、state 保持 2；
+                          失败则 [6]=err、+0x68=1、state=3
+  读完成后（uVar8==0 → state=3 → LAB_8128f3c4）：关闭文件/回调/进入 4(decrypt)/7(完成)/6/5(CRC 不支持)/8
+FUN_8128F738(p) = *(p+0xC)（状态查询）；FUN_8128F74A(p) = *(p+0x10)
+FUN_8128D502(p)（Load 状态推进）:
+  if (*(p+0xBC)!=1) uVar8=2;              // 非 loading → 视为完成
+  if (FUN_8127BBF8(p+0xD0,1)==1) return;  // 进度锁忙
+  FUN_8128F04E(*(p+0xB0)); uVar5=FUN_8128F738(*(p+0xB0));   // ★ 驱动一步 + 查询状态
+  switch(uVar5) { case 3: uVar8=0; case 4: uVar8=2; … }
+FUN_8128D502 的调用者 = FUN_8128AE8E（96B）；LOADST lr=8128AEC4
+FUN_8128AE8E → 由 CPK 分析路径 FUN_81292794 方向调用（分析成功才继续）
+CPK Analyzer case 4：只有 FUN_8128E9BC(reader)==2 才进入 FUN_81292794 分析
+```
+**⇒ 死锁/推进链分析**：
+1. 首次读在 mount 阶段提交：FUN_8128E394 → FUN_8128E03E 初始化 → FUN_8128D716 Load → FUN_8128F04E 被调用两次（state 1→2，提交读，in-flight=1）
+2. 真实 2048B 头读已完成（PREAD 成功），但**完成处理需要再调用 FUN_8128F04E（state 2 分支轮询 FUN_8128CFB2/FUN_8128CFE0）**
+3. FUN_8128F04E 只在 FUN_8128D502 内被调用；FUN_8128D502 由 FUN_8128AE8E 调用，而该链只在 CPK 分析路径（FUN_81292794）里被触发
+4. CPK Analyzer case 4 又要求 reader 状态（+0xBC）==2 才开始分析 → **循环等待**：状态 2 需要分析路径泵，分析路径需要状态 2
+5. 正常情况下，应有独立的 criFs I/O 工作线程推进；我们的运行里该线程没有在推进（可能未被调度/阻塞在 HLE 信号量）
+**⇒ 结论**：
+- 全局 I/O 接口 DAT_815401D4/D8=0 不是直接原因（默认 vtable 0x81540460 在工作，且 stat/open/read 都通过 HLE stub 正常执行）
+- 根因是 **criFs 异步 Load 状态机的完成阶段没有被任何线程泵**（只走了 2 步）
+**NEXT**：
+```
+① 找应有驱动：xref FUN_8128AE8E/FUN_8128D502 的其他调用者；查 criFs 是否创建 I/O 工作线程（HLE sceKernelCreateThread → guest 线程表）
+② 检查该线程是否在运行（PUMP 日志/线程表；是否阻塞在 HLE 信号量/事件，尤其 0x812B27A0 WaitSema 等）
+③ 若线程缺失：HLE 在初次读提交后，周期性调用加载泵（例如 POSTMAIN/PERIODPUMP 时每 N 帧调用 FUN_8128F04E(progress) 或 FUN_8128D502(reader)）
+④ 备选：核对第 2 次 F04E 提交读的返回值（若 FUN_8128CF78 返回错误→state=3+错误标志；需探针 post-call err）
+⑤ 打通后：state→4/7 → reader+0xBC=2 → Analyzer case 4 → 分析 CPK → state=0x1A → mount status=2 → data.cpk → 文件索引 → title 素材
+```
+验证：`out80m_m1159iostate2.txt`、`out80m_m1158iostate.txt`、`out80m_m1157ioiface.txt`、`ioop.txt`、`vtable.txt`、`criread2.txt`、`criinit2.txt`。 |
+| §18.4653 | The load state machine for the first CPK read is only driven 2 steps: FUN_8128F04E (criFs async Load state machine) was invoked exactly twice in the run (state=1 init -> state=2 submit read, in-flight flag set to 1), after which there is no 3rd call; the progress object state goes 1->2->3 but the reader +0xBC stays at 1 (loading) so the completion processing never happens. Also confirmed: the global I/O interface pointers DAT_815401D4/D8 = 0 (not registered), but the actual read path uses a per-request vtable (progress object [0] = 0x81540460, guest function pointers 81294FDC=stat / 81295016=open / 8129513F...). '
+       'm1159 evidence: [IOSTATE] #0 p=848FC390 state=00000001 err=00000000 fl68=00 fl6A=00 fl6B=00 fl6D=00 fl6E=00 fl6F=00 lr=8128D54E; [IOSTATE] #1 p=848FC390 state=00000002 err=00000000 fl68=00 fl6A=00 fl6B=00 fl6D=00 fl6E=00 fl6F=01 lr=8128D54E; [IOPROG] #0 p=848FC390 w: 81540460 00000000 00000000 00000001 ... lr=8128DA54 (state 1); #1 w: 81540460 848E8EE8 00000000 00000002 ... lr=8128D556 (state 2); #2 w: 81540460 848E8EE8 00000000 00000003 ... lr=8128D556 (state 3); [LOADST] #0/#1 reader=848FC368 statusBC=00000001 prog=848FC390 b0=848FC390 d0=00000000 lr=8128AEC4; [IOIFACE] #0 reader=848FC368 IFACE_D4=00000000 IFACE_D8=00000000 statusBC=00000000 ... lr=8128E496; [IO] OPEN app0:/data/vita.cpk size=2168403092 and PREAD fd=16385 off=0 size=2048 got=2048; [MNTST] #0 obj=84906480 stage=4 status=1; [CRILOG]=0 [BADMEM]=0. '
+       'Key structures/decompile: progress object @0x848FC390 (initialized by FUN_8128E03E): [0]=0x81540460 (default I/O vtable: 81294FDC stat / 81295016 open / 8129513F / 81295171 / 8129517D / 81295227 / 8129522F ...), [1]=read buffer (later 0x848E8EE8), [3]=state (1=init, 2=submitted, 3=done-or-error, 4=decrypt-ready, 5=CRC-unsupported, 6/7=finishing, 8=done/error), [4]=in-flight flag, param_1[6]=error code, byte +0x68=error flag, byte +0x6F=opened flag, [0x1E]/[0x1F]=progress callback/arg, [0x20]=decrypt callback. FUN_8128F04E (async load state machine, 1656B): case 1 opens the file (FUN_8128CED6/FUN_8128CF1A), success -> state=2, failure -> state=8; case 2 (LAB_8128f176) computes the chunk -> FUN_8128CF78 submit read -> success sets [4]=1 and keeps state 2, failure sets [6]=err, +0x68=1, state=3; completion (uVar8==0 -> state=3 -> LAB_8128f3c4) closes the file/callbacks and moves to 4(decrypt)/7(done)/6/5(CRC unsupported)/8. FUN_8128F738(p) = *(p+0xC) (state query); FUN_8128F74A(p) = *(p+0x10). FUN_8128D502(p) (Load state advance): if (*(p+0xBC)!=1) uVar8=2 (treated complete); if (FUN_8127BBF8(p+0xD0,1)==1) return (progress lock busy); FUN_8128F04E(*(p+0xB0)); uVar5=FUN_8128F738(*(p+0xB0)); switch(uVar5) { case 3: uVar8=0; case 4: uVar8=2; }. FUN_8128D502 is called from FUN_8128AE8E (96B); [LOADST] lr=8128AEC4. FUN_8128AE8E is reached from the CPK analysis path (FUN_81292794 direction). CPK Analyzer case 4 only enters FUN_81292794 analysis when FUN_8128E9BC(reader)==2. '
+       'Analysis: (1) the first read is submitted during mount: FUN_8128E394 -> FUN_8128E03E init -> FUN_8128D716 Load -> FUN_8128F04E called twice (state 1->2, read submitted, in-flight=1); (2) the real 2048B header read completed (PREAD succeeded) but the completion processing requires another FUN_8128F04E call (state 2 branch polling FUN_8128CFB2/FUN_8128CFE0); (3) FUN_8128F04E is only called inside FUN_8128D502, which is called from FUN_8128AE8E, and that chain is only triggered from the CPK analysis path (FUN_81292794); (4) CPK Analyzer case 4 requires reader status (+0xBC)==2 before starting the analysis -> circular wait: status 2 requires the analysis path to pump, and the analysis path requires status 2; (5) normally an independent criFs I/O worker thread should do the pumping; in our run that thread is not advancing (possibly not scheduled or blocked on an HLE semaphore). CONCLUSION: the global I/O interface DAT_815401D4/D8=0 is not the direct cause (default vtable 0x81540460 is in use and stat/open/read all execute through the HLE stubs normally); the root cause is that the criFs async Load state machine completion phase is never pumped by any thread (only 2 steps ran). '
+       'NEXT: (1) find the intended driver: xref FUN_8128AE8E/FUN_8128D502 other callers; check whether criFs created an I/O worker thread (HLE sceKernelCreateThread -> guest thread table); (2) check whether that thread runs (PUMP logs/thread table; blocked on an HLE semaphore/event, especially 0x812B27A0 WaitSema); (3) if the thread is missing, have the HLE periodically pump the load state (e.g., every N frames in POSTMAIN/PERIODPUMP call FUN_8128F04E(progress) or FUN_8128D502(reader)); (4) alternatively probe the 2nd F04E call\'s read-submit return value (if FUN_8128CF78 failed -> state=3 + error flag; need a post-call err probe); (5) once open: state->4/7 -> reader+0xBC=2 -> Analyzer case 4 -> CPK analysis -> state=0x1A -> mount status=2 -> data.cpk -> file index -> title assets. '
+       'Verification: out80m_m1159iostate2.txt, out80m_m1158iostate.txt, out80m_m1157ioiface.txt, ioop.txt, vtable.txt, criread2.txt, criinit2.txt. |
 m1156（`out80m_m1156swap2.txt`）SWAP 实测（60 条，节选）：
 ```
 [SWAP] #0  addr=84B1B984 new=1 old=0 lr=81293BE8   ← CPK Analyzer busy flag 获取（state3 通过）
@@ -500701,3 +500763,53 @@ FUN_8128E9BC(读状态查询): st = *(int*)(reader+0xBC)（2/3=完成；+0xD9 �
 ANTI-FORGETTING ENTRY. Keywords: M1107 locks NOT the blocker - SWAP atomic probes show all locks paired normal (CPK Analyzer busy 0x84B1B984, binder mount lock 0x849064AC, reader I/O object locks 0x848FC424/0x848FC434), real blocker = reader status +0xBC never transitions from 1(loading) to 2/3(completed); also fixed a probe infrastructure bug: batch_022 failed to compile (harness_cur_fiber2 undeclared) but link reused the stale .o, so earlier IOSTAT/IOSUB/SWAP 0-hit results were artifacts. m1156 SWAP evidence: #0 addr=84B1B984 new=1 old=0 lr=81293BE8 (Analyzer busy acquire on state-3 pass); #1 addr=848FC434 new=1 old=0 lr=8128E400 (read I/O object lock); #2 addr=848FC424 new=0 old=0 lr=8128E102; #3 addr=848FC434 new=0 old=1 lr=8128E43A (release paired); #4 addr=848FC434 new=1 old=0 lr=8128D73A; #5 addr=848FC424 new=0 old=0 lr=8128D928; #6 addr=848FC424 new=1 old=0 lr=8128DA92; #7 addr=848FC434 new=0 old=1 lr=8128DAA2; #8 addr=84B1B984 new=0 old=1 lr=81293E08 (Analyzer busy release); #9 addr=849064AC new=1 old=0 lr=81287A86 (binder mount lock acquire); #10 addr=84B1B984 new=1 old=0 lr=81293BE8 (repeated paired acquire/release every poll); #11 addr=84B1B984 new=0 old=1 lr=81293E08; #12 addr=849064AC new=0 old=1 lr=81287BB4 (mount lock release paired); #14/#15 #18/#19 addr=84B1B984 1/0 (stable, no deadlock/leak). [CPKANA3] #0..#9 p=84B1B828 st=00000004 busy=00000000 w3=84B1BC00 w4=84B1BC00 - state machine entered every poll with busy=0 but state stays 4. criFs read path decompile: FUN_8128E394 (read submit): if ((param_1==0)||(param_3==0)||...) return -2; iVar1 = FUN_8127BBF8(param_1+0xCC,1); if (iVar1==1) { E2008071787; return -4; } iVar1 = FUN_8128E03E(param_1,param_2,param_3,0xFFFFFFFF,0); FUN_8127BBF8(param_1+0xCC,0); if (iVar1==0) { ... FUN_8128D716(...) schedule read }. FUN_8128E03E: if (*(int*)(param_1+0xBC)==1) { log E2008071780:Can not execute this function while loading.; return -1; } *(param_1+0xB4)=0; *(param_1+0xB8)=0; *(param_1+0xC0)=0xFFFFFFFF; ... *(int*)(param_1+0xFC)=param_2; *(param_1+0x100)=0; uVar1 = FUN_8128F966(*(param_1+4), *(param_1+8), param_3); *(param_1+0x104)=uVar1; ... FUN_8127BBF8(param_1+0xBC,0); *(param_1+0xD9)=0; *(param_1+0xD4)=0. FUN_8128E9BC: st = *(int*)(reader+0xBC) (2/3=complete; +0xD9 set -> 0). Analysis: try-lock deadlock ruled out; the Analyzer runs case 4 every poll but state stays 4 meaning the FUN_8128E9BC(reader) status is not 2 (likely 1/loading) so the analysis is never entered and state=0x1A never set; the only actual I/O is PREAD 2048 (CPK header), the read request was submitted but reader +0xBC never goes 1->2/3 - the read-completion notification is missing; completion should be set by the criFs I/O thread/asynchronous callback, suspect the thread is not pumped or the HLE semaphore/event at completion never fires. NEXT: find the +0xBC=2/3 completion path (xref/search) and probe the write site; check the criFs I/O thread (guest thread list, pumped, blocked on HLE semaphore?); verify the HLE stubs called inside FUN_8128D716/FUN_8128E03E one by one; then reader+0xBC=2 -> analysis -> state=0x1A -> mount status=2 -> data.cpk -> file index -> title assets; REA tooling (M1106) can help with xref. Verification: out80m_m1156swap2.txt, out80m_m1155swap.txt, criread.txt, cpkio.txt, mountflow3.txt.
 
 LOOKUP: M1107 locks not blocker SWAP probes paired, reader status +0xBC stuck 1 loading, CPK Analyzer busy 0x84B1B984, binder mount lock 0x849064AC, reader I/O locks 0x848FC424 0x848FC434, FUN_8128E394 read submit +0xCC lock, FUN_8128E03E read init +0xBC=0 +0xD9 +0xD4, FUN_8128E9BC status query, FUN_8128D716 schedule read, batch_022 harness_cur_fiber2 compile bug stale .o, next find +0xBC=2 completion path and criFs I/O thread pumping -> §18.4651 [relevant: CPK Analyzer state stuck], §18.4650 [relevant: batch_035], §18.4649 [relevant: NGS]
+### 18.4653 PORT M1108: criFs 异步 Load 状态机只走了 2 步就停（完成阶段无人泵）；全局 I/O 接口指针=0 但默认 vtable 正常
+
+1) m1159 实测：
+```
+[IOSTATE] #0 p=848FC390 state=00000001 err=0 flags 0 lr=8128D54E   ← 初始化
+[IOSTATE] #1 p=848FC390 state=00000002 err=0 fl6F=01 lr=8128D54E  ← 提交读（in-flight）
+[IOPROG] #0 state=1 (lr=8128DA54)  #1 state=2  #2 state=3 (lr=8128D556)
+[LOADST]  2 次：reader=848FC368 statusBC=1 prog=848FC390 b0=848FC390 lr=8128AEC4
+[IOIFACE] IFACE_D4=0 IFACE_D8=0 statusBC=0 lr=8128E496      ← 全局接口未注册
+[IO] OPEN vita.cpk size=2168403092；PREAD off=0 size=2048 got=2048
+[MNTST] obj=84906480 stage=4 status=1                        ← mount 仍卡
+```
+2) 关键结构（progress @0x848FC390）：
+```
+[0]=0x81540460 默认 I/O vtable（81294FDC stat / 81295016 open / 8129513F / 81295171 / 8129517D / 81295227 / 8129522F …）
+[1]=读缓冲(0x848E8EE8) [3]=状态 1..8 [4]=in-flight [6]=错误码
+char+0x68=错误标志 char+0x6F=opened 标志 [0x1E]/[0x1F]=进度回调 [0x20]=解密回调
+```
+3) FUN_8128F04E（异步 Load 状态机）：
+```
+case 1: 打开文件 → state=2（失败→8）
+case 2: 计算 chunk → FUN_8128CF78 提交读（成功 [4]=1；失败 [6]=err、+0x68=1、state=3）
+读完成 → state=3 → LAB_8128F3C4：关闭/回调 → 4(decrypt)/7(done)/6/5(CRC 不支持)/8
+```
+4) FUN_8128D502（Load 推进器）：
+```
+if (*(p+0xBC)!=1) uVar8=2;   if (FUN_8127BBF8(p+0xD0,1)==1) return;
+FUN_8128F04E(*(p+0xB0)); uVar5=FUN_8128F738(*(p+0xB0)); switch(uVar5){case 3:0; case 4:2; …}
+调用者 FUN_8128AE8E ← 来自 CPK 分析路径（FUN_81292794 方向）
+```
+5) 分析（循环等待）：
+- 首读已提交（F04E 2 次：state 1→2），2048B 头读真实完成（PREAD 成功）
+- 完成处理需要第 3 次 F04E（state 2 轮询 FUN_8128CFB2/FUN_8128CFE0）
+- 但 F04E 只在 FUN_8128D502 里调用；D502 只由 FUN_8128AE8E 调用；该链只在 CPK 分析路径触发
+- CPK Analyzer case 4 又要求 reader+0xBC==2 才开始分析 → **循环等待**
+- 正常应有独立 criFs I/O 工作线程；我们的运行中该线程未推进（未调度/阻塞在 HLE 信号量）
+- 全局接口 DAT_815401D4/D8=0 不是直接原因（默认 vtable 0x81540460 在用，stat/open/read 都走 HLE stub 正常）
+6) NEXT：
+```
+① xref FUN_8128AE8E/FUN_8128D502 其他调用者；查 criFs 是否创建 I/O 工作线程
+② 该线程是否运行/阻塞在 HLE 信号量（0x812B27A0 WaitSema 等）
+③ 若缺失：HLE 周期性泵加载状态（POSTMAIN/PERIODPUMP 每 N 帧调 F04E/D502）
+④ 或探针第 2 次 F04E 的读提交返回值（FUN_8128CF78 失败→state=3+错误）
+⑤ 打通：state 4/7 → +0xBC=2 → 分析 → state=0x1A → mount status=2 → data.cpk → 文件索引 → title 素材
+```
+验证：`out80m_m1159iostate2.txt`、`out80m_m1158iostate.txt`、`out80m_m1157ioiface.txt`、`ioop.txt`、`vtable.txt`、`criread2.txt`。
+
+ANTI-FORGETTING ENTRY. Keywords: M1108 criFs async Load state machine only driven 2 steps; FUN_8128F04E called twice (state=1 init -> state=2 submit read, in-flight=1), no 3rd call; progress object 0x848FC390 state goes 1->2->3 but reader +0xBC stays 1; global I/O interface DAT_815401D4/D8 = 0 (not registered) but per-request vtable 0x81540460 (81294FDC stat, 81295016 open, 8129513F, 81295171, 8129517D, 81295227, 8129522F) works. m1159 evidence: [IOSTATE] #0 p=848FC390 state=1 err=0 fl6F=00 lr=8128D54E; #1 state=2 err=0 fl6F=01 lr=8128D54E; [IOPROG] #0 state=1 lr=8128DA54, #1 state=2 lr=8128D556, #2 state=3 lr=8128D556; [LOADST] x2 reader=848FC368 statusBC=1 prog=848FC390 lr=8128AEC4; [IOIFACE] IFACE_D4=0 IFACE_D8=0 lr=8128E496; [IO] OPEN app0:/data/vita.cpk size=2168403092 + PREAD off=0 size=2048; [MNTST] stage=4 status=1; [CRILOG]=0 [BADMEM]=0. Structures: progress object [0]=0x81540460 vtable, [1]=buffer, [3]=state (1 init, 2 submitted, 3 done-or-error, 4 decrypt-ready, 5 CRC unsupported, 6/7 finishing, 8 done/error), [4]=in-flight, [6]=error code, byte+0x68 error flag, byte+0x6F opened flag, [0x1E]/[0x1F] progress callback, [0x20] decrypt callback. FUN_8128F04E: case 1 open -> state 2 (fail -> 8); case 2 chunk -> FUN_8128CF78 submit read (success [4]=1; failure [6]=err +0x68=1 state=3); completion state 3 -> LAB_8128F3C4 close/callbacks -> 4/7/6/5/8. FUN_8128D502: if (*(p+0xBC)!=1) uVar8=2; if (FUN_8127BBF8(p+0xD0,1)==1) return; FUN_8128F04E(*(p+0xB0)); uVar5=FUN_8128F738(*(p+0xB0)); switch(uVar5){case 3:0; case 4:2}; called from FUN_8128AE8E (96B), [LOADST] lr=8128AEC4; FUN_8128AE8E reached from CPK analysis path FUN_81292794; Analyzer case 4 only enters analysis when FUN_8128E9BC(reader)==2. Analysis: first read submitted (F04E twice 1->2), 2048B header read really completed (PREAD), but completion processing needs a 3rd F04E call (state 2 polling FUN_8128CFB2/FUN_8128CFE0); F04E only called inside FUN_8128D502, which is called from FUN_8128AE8E, which is only triggered by the CPK analysis path; but CPK Analyzer case 4 requires reader +0xBC==2 before analysis -> circular wait. Normally an independent criFs I/O worker thread should pump; in our run it is not advancing (not scheduled or blocked on an HLE semaphore). The global interface DAT_815401D4/D8=0 is not the direct cause (default vtable 0x81540460 in use, stat/open/read all execute through HLE stubs normally). NEXT: xref FUN_8128AE8E/FUN_8128D502 other callers; check whether criFs created an I/O worker thread (HLE sceKernelCreateThread -> guest thread table) and whether it runs/blocks on an HLE semaphore (0x812B27A0 WaitSema etc); if missing, have the HLE periodically pump the load state (POSTMAIN/PERIODPUMP every N frames call FUN_8128F04E(progress) or FUN_8128D502(reader)); alternatively probe the 2nd F04E read-submit return value (FUN_8128CF78 failure -> state=3 + error flag); then state 4/7 -> +0xBC=2 -> analysis -> state=0x1A -> mount status=2 -> data.cpk -> file index -> title assets. Verification: out80m_m1159iostate2.txt, out80m_m1158iostate.txt, out80m_m1157ioiface.txt, ioop.txt, vtable.txt, criread2.txt.
+
+LOOKUP: M1108 criFs async Load state machine 2 steps only, FUN_8128F04E state 1->2 submit read, no 3rd call, progress 0x848FC390 [3] state 1->2->3, reader +0xBC stuck 1, DAT_815401D4/D8=0 global I/O interface not registered, per-request vtable 0x81540460 (81294FDC stat, 81295016 open, 8129513F...), FUN_8128D502 pump called from FUN_8128AE8E [LOADST] lr=8128AEC4, circular wait analyzer case4 needs +0xBC==2 before analysis which pumps the load, criFs I/O worker thread not advancing, next pump in HLE POSTMAIN/PERIODPUMP or find worker thread -> §18.4652 [relevant: SWAP locks], §18.4651 [relevant: analyzer], §18.4650 [relevant: batch_035]
