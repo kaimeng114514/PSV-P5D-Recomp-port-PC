@@ -3378,6 +3378,7 @@ extern "C" uint32_t hle_call(uint32_t stub_va, RecState* s) {
       { uint32_t _tok = g_cur_thr ? g_cur_thr : (0xF0000000u | (g_cur_fiber & 0xFFFFFFu)); g_sema_owner[obj] = _tok; g_sema_owner_lr[obj] = s->r[14]; }
       if (g_thr_log_n++ < 80) printf("[SEM] signal obj=%08X count=%u cur_thr=%08X lr=%08X\n", obj, g_sema[obj], g_cur_thr, s->r[14]);
       if (g_sig2_n++ < 60) { printf("[SIG2] obj=%08X count=%u thr=%08X lr=%08X\n", obj, g_sema[obj], g_cur_thr, s->r[14]); fflush(stdout); }
+      if (g_blkcnt_total > 60000000u) { static int _s60=0; if (_s60++ < 40) { printf("[SIG60] obj=%08X count=%u lr=%08X blk=%08X fib=%08X\n", obj, g_sema[obj], s->r[14], g_cur_block, g_cur_fiber); fflush(stdout);} }
       { bool _xfer = false;
         for (auto& kv : g_thr) if (kv.second.waiting && kv.second.wait_obj == obj) {
           if (kv.second.wait_mode == 0x5E4Au) {   // 18.4473 M928: sema waiter - transfer the token (it does not decrement on resume)
@@ -3418,7 +3419,9 @@ extern "C" uint32_t hle_call(uint32_t stub_va, RecState* s) {
         r0 = 0;
       } else if (g_cur_thr) { g_thr_blocked = 1; g_thr_wait_obj = obj; g_thr_wait_bits = bits; g_thr_wait_mode = mode; r0 = 0; }
       else { if (outp) { uint8_t* p = GP(outp); if (p) std::memcpy(p, &cur, 4); }
-        { static int _mf=0; if (_mf++ < 60) { printf("[EFWAIT] main obj=%08X bits=%08X mode=%X cur=%08X lr=%08X blk=%08X n=%u\n", obj, bits, mode, cur, s->r[14], g_cur_block, g_blkcnt_total); fflush(stdout); } } r0 = 0; }
+        { static int _mf=0; if (_mf++ < 60) { printf("[EFWAIT] main obj=%08X bits=%08X mode=%X cur=%08X lr=%08X blk=%08X n=%u\n", obj, bits, mode, cur, s->r[14], g_cur_block, g_blkcnt_total); fflush(stdout); } }
+        if (g_blkcnt_total > 60000000u) { static int _e60=0; if (_e60++ < 40) { printf("[EVW60] obj=%08X bits=%08X mode=%X cur=%08X lr=%08X blk=%08X fib=%08X n=%u\n", obj, bits, mode, cur, s->r[14], g_cur_block, g_cur_fiber, g_blkcnt_total); fflush(stdout);} }
+        r0 = 0; }
       break; }
     case 0x812B2AE0u: {                                               // sceKernelSetEventFlag
       if (g_main_n >= 59000000u) { static int _se_n=0; if (_se_n++ < 200) { printf("[SETEF57] obj=%08X bits=%08X pc=%08X fib=%08X\n", s->r[0], s->r[1], g_cur_block, g_cur_fiber); fflush(stdout); } }
@@ -3426,6 +3429,7 @@ extern "C" uint32_t hle_call(uint32_t stub_va, RecState* s) {
       g_eflag[obj] |= bits;
       if (g_thr_log_n++ < 80) printf("[EVT] set obj=%08X bits=%08X cur_thr=%08X lr=%08X\n", obj, bits, g_cur_thr, s->r[14]);
       if (g_evt2_n++ < 60) { printf("[EVT2] set obj=%08X bits=%08X thr=%08X lr=%08X\n", obj, bits, g_cur_thr, s->r[14]); fflush(stdout); }
+      if (g_blkcnt_total > 60000000u) { static int _t60=0; if (_t60++ < 40) { printf("[SET60] obj=%08X bits=%08X lr=%08X blk=%08X fib=%08X\n", obj, bits, s->r[14], g_cur_block, g_cur_fiber); fflush(stdout);} }
       { uint32_t cur2 = g_eflag[obj];
         for (auto& kv : g_thr) if (kv.second.waiting && kv.second.wait_obj == obj) {
           bool _or = (kv.second.wait_mode & 1u) != 0u;

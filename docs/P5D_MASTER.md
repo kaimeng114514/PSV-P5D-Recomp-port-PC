@@ -1156,6 +1156,59 @@
 | M1138 | §18.4683: ★★★★★★★★★★★★ **重大突破：修复 GetSelf 的 fiber2 泵未保存/恢复调用者上下文 → 消除静默 no-block 死循环，执行首次进入帧循环并首次提交 GXM 绘制**。根因（NEXTBAD 探针抓到）：`sceFiberGetSelf`（812B1B70）HLE 中的周期性 fiber2 泵直接 `fiber_load(s, fiber2)` + `fiber_exec_to_completion(s)`，**没有 rc_save/rc_restore**：fiber_load 把调用者 s（含 r14）覆盖成 fiber2 的保存上下文（huffman 解码中途，r14=节点数组指针 84855E80/84855A58），而嵌套 exec 在 depth=2 立刻 [NESTED-REFUSED] 返回 0 不恢复 → GetSelf 返回 `s->r[14]`（数据指针）当作下一个 pc → 跳到栈/数据地址 → no-block 静默 livelock（m1230/1231 复现：`[NEXTBAD] from=812B1B70 nx=84855E80 lr=84855E80`、`[FIBER-EXEC] no block for pc=84855A58`）。修复：GetSelf 两处 fiber2 泵（一次性 + 周期 PUMP2）前后包 `rc_save(s)`/`rc_restore(s)`。验证 m1232：`[NEXTBAD]=0`、`[FIBER-EXEC]=0`、**【FRAMECB]=20 / [UPD]=20 / [POST]=20（帧循环首次运行）**、**[GXMABI] 首次出现 sceGxmSetVertexProgram/SetFragmentProgram/SetVertexStream/sceGxmDraw（首次绘制提交）**、[DECOMP]=48、[NESTED-STOP] 45M pc=811DFB14、[BADMEM]=0
 | M1139 | §18.4684: ★★★★★★★★ **M1138 修复后长跑首次进入 S0_LOGO 渲染路径（LOGO 状态机 5→8、LOGODRAW 80 次、场景构建 120 次、FLUSH frame 计数到 2），并确认 Vulkan 后端 present 成功（gxm_vk.o 的 [PRESENT] 探针：imgIdx=0 result=VK_SUCCESS）**。m1233（NESTED_UNTIL=300M）在 blk≈64.5M 时：`[LOGO] state=5→8`（状态机推进）、`[LOGODRAW] #80 arg=85BD6024`（8119351C 绘制入口被调用 80 次）、`[TRRET] #160`（811DB24E job trampoline）、`[SCBUILD] #100`（811C241E 场景构建）、`[SCENE] #120`（811C2964 场景对象 p=85BD52A0 st=1 head=0 cnt=0，已创建但尚无渲染条目）、`[FLUSH] #120 frame=2`（帧计数推进到 2）；`[NESTED-STOP]=0`、`[BADMEM]=0`、`[IO]=6`。Vulkan 证据：`gxm_vk.o` 含 `[PRESENT]` 探针，m1232 日志出现 `[PRESENT] #1 imgIdx=0 result=0(VK_SUCCESS)`（GXM→Vulkan 呈现路径打通）；但 harness 的 `[GXM-PRESENT]`（sceGxmDisplayQueueAddEntry 812B1720）=0、`[GFX]` begin/end/present 计数=0 → 游戏尚未提交 GXM 场景/显示队列
 | M1140 | §18.4685: ★★★★★★★ **m1233 长跑最终状态：S0_LOGO 状态机推进到 state=B(11)（LOGODRAW 80、FLUSH frame=2、场景构建 120 但 [SCENE] 仍空 cnt=0），随后在 blk≈66,494,954 发生全系统死锁**：g_blkcnt_total 冻结、[WD] stall=1（main fiber 848463A0 在 DelayThread 812B2A50@81207612 重试循环中）、线程泵空转（pumped=5,076,000，blocks=0，全部线程阻塞）、hle_ring 反复 `812B2A50@81207612`（DelayThread），pcring 显示 Fios/loader 轮询环：`81207344 → 812B2830@81207350(LockLwMutex) → 811E6374/811E6A4C/812B2270/811E6A52 → 811E638C/811E639A → 81207352 → 812B28A0@8120735C(UnlockLwMutex) → 811E63A0 → 812B2AD0(SignalSema) → 811E63A8 → 812B2880(WaitEventFlag)`，最后 curpc=812B2AE0(SetEventFlag)。IO 仍=6、[FHOPEN]=0 → **loader 等待的异步任务/IO 从未完成**（无新文件读取，游戏在 LOGO 状态 B 后等待加载/任务完成），HLE 作业队列/线程调度未完成该任务 → 死锁
+| M1141 | §18.4686: ★★★★★★★★ **首次把帧真正写到 Vulkan 交换链并存成 BMP（960×544：p5d_swap_0.bmp / p5d_swap_1.bmp / p5d_disp_1.bmp / p5d_rt_first.bmp），但像素全黑（RGB extrema 全 0，[SHOTSTAT] max=0 mean=0.00）**；同时确认 ABI 桥接管线细节：首次 sceGxmDraw 选中真实 SPIR-V 管线（`gxp_vert_0001.gxp.spv` + `gxp_frag_0165.gxp.spv`，rc=0）、上传测试三角形（stride128/3 verts）、设置 identity uniform、初始化 960×544 stride=1024 的颜色表面 ×3（8CF00000/8D300000/8D700000）与 224×68/960×544 小表面，[SUBMIT]×121 提交命令缓冲、[ENQ]×100、[PROC]×141 作业系统活跃、[TMX]×81 纹理创建。LOGO 状态 B(11) 时游戏 worker 线程（tid=40020000 entry=8120767D）在 811830F4 轮询作业状态（DelayThread 0x7530），GFD 帧/作业链等待完成；[GXM-PRESENT]=0（sceGxmDisplayQueueAddEntry 未被调用）、场景 cnt=0（空）。结论：呈现/截图链路已打通，**黑屏原因=游戏 LOGO 绘制走 precomputed draw（顶点/流/USSE 数据未翻译成 vkCmdDraw，实际没有可见光栅化）**，下一步实现 precomputed draw→Vulkan 翻译并验证像素非黑
+m1233 证据（`m1233_abi_key.txt`、`m1233_long4_key.txt`，截图文件在 `C:\dev\tmp\recomp_split\`）：
+```
+[# Vulkan/呈现]
+[INFO] === Vulkan Backend Init with Window ===
+[INFO] Vulkan: Creating Win32 window (960x544)...
+[INFO] Screenshot image created (960x544)
+[ABISWAP] saved p5d_swap_0.bmp rc=0 n=2399
+[ABISWAP] saved p5d_swap_1.bmp rc=0 n=2399
+[ABIRT] disp=0 saved p5d_disp_0.bmp cd=8CF00000 rc=-1 n=2399
+[ABIRT] disp=1 saved p5d_disp_1.bmp cd=8D300000 rc=0 n=2399
+[SHOTSTAT] frame=0 max=0 mean=0.00 file=p5d_swap_0.bmp      ← 全黑
+[SHOTSTAT] frame=1 max=0 mean=0.00 file=p5d_swap_1.bmp
+（PIL 实测：p5d_swap_0/1、p5d_disp_1、p5d_rt_first 均 960x544 RGB extrema=((0,0),(0,0),(0,0))）
+[# ABI 桥接]
+[ABIPIPE] v=gxp_vert_0001.gxp.spv f=gxp_frag_0165.gxp.spv rc=0 n=2399
+[ABITRI] upload_vertex_stream rc=0 (stride128,3 verts) n=2399
+[ABIUNI] identity vertex uniforms set n=2399
+[ABICS] init surf=816CBC74 fmt=0 type=0 scale=1 osz=0 w=960 h=544 stride=1024 data=8CF00000 sane=1
+[ABICS] init surf=816CBCC4 … data=8D300000 sane=1
+[ABICS] init surf=816CBD14 … data=8D700000 sane=1
+[ABICS] init surf=85315AF8 … w=224 h=68 stride=224 data=95600000 sane=1
+[ABICS] init surf=85315DB8 … w=960 h=544 stride=960 data=97600000 sane=1
+[ABICAP] PrecomputedFragmentStateInit frag=1 r1=8540EA80 r2=8F950D80 …
+[ABIVFMT] obj=8540C000 attrN=1 streamN=1 … attr0 stream=0 off=0 fmt=9 comps=3 / strm0 stride=12
+[ABIVFMT] obj=8540C080 attrN=2 … attr0 fmt=9 comps=3, attr1 fmt=8 comps=3 / strm0 stride=30
+[ABIVARG] obj=8540C000 r2=84856114 stk0=848560F0 … gpr2=1 n=1826
+[SUBMIT] #1 cmd=… imgIdx=0 result=0(VK_SUCCESS) / [SUBMIT] #120 type=2 builder=848563D0
+[ENQ] q(r7)=84857A7C node(r6)=84897DD4 head=00000000   [PROC] runner fa5c a0=84617C40 …
+[TMX] arch->entry=9A1090B8 … texobj=85CE573C / gxm_tex_create r0=9A209840 …
+[# 状态]
+[LOGO] 201（state=B(11)）  [LOGODRAW]=80  [SCENE]=120（cnt=0）  [FLUSH]=120（frame=2）
+[GXM-PRESENT]=0  [GFX] begin=end=present=0  [IO]=6  [FHOPEN]=0
+[WD] 线程 tid=40020000 entry=8120767D ctxpc=811830F4（作业状态轮询，DelayThread 0x7530）
+```
+**分析**：
+- Vulkan 后端已完整初始化（窗口 960×544、swapchain、截图），**present 与截图链路真实工作**（rc=0/VK_SUCCESS）；
+- 但颜色表面内容全黑：当前桥接只在 `sceGxmDraw` 且 SPIR-V 管线可用时上传"测试三角形"；游戏的 LOGO 绘制使用 **Precomputed draw**（[ABICAP] Precomputed*StateInit、[ABIVFMT]/[ABIVARG] 捕获到顶点格式与参数），这些 draw 没有转成真正的 vkCmdDraw/vkCmdDrawIndexed，所以光栅化没有内容；
+- LOGO 状态 B 的等待来自 GFD 作业链（worker 轮询作业状态），与渲染/音频任务完成相关，需与 precomputed draw 翻译一起推进。
+**NEXT**：
+```
+① 实现 precomputed draw → Vulkan：把 [ABIVFMT] 捕获的 attr/stream（fmt/comps/stride）与顶点缓冲（USSE 内存→host）翻译成 vkCmdDraw/vkCmdDrawIndexed，
+   使用已选中的 gxp_vert_0001/gxp_frag_0165 SPIR-V 管线；先做一个"全屏彩条/LOGO 位置三角形"验证管线能出像素
+② 用 BMP extrema 作为验收标准（>0 即首帧可见），保存 p5d_swap_*.bmp 对比
+③ 并行：分析 LOGO state B 的作业等待（worker 40020000 @811830F4 + 作业队列 [PROC]/[ENQ]），确认是视频/音频任务还是渲染任务未完成
+④ 首帧可见后再推进 S0_LOGO 时长/淡出 → S1_TITLE 资源加载（[IO]/[FHOPEN] 应开始增长）
+```
+验证：`m1233_abi_key.txt`、`m1233_long4_key.txt`、`p5d_swap_0.bmp`/`p5d_swap_1.bmp`/`p5d_disp_1.bmp`/`p5d_rt_first.bmp`（960×544，当前全黑）、`recomp_harness_getselfpump_4683.cpp`、`[TABLE] blocks=230291`。 |
+| §18.4686 | First frames actually written to the Vulkan swapchain and saved as BMPs (960x544: p5d_swap_0.bmp / p5d_swap_1.bmp / p5d_disp_1.bmp / p5d_rt_first.bmp), but the pixels are completely black (RGB extrema all 0; [SHOTSTAT] max=0 mean=0.00). ABI bridge details confirmed: the first sceGxmDraw selects a real SPIR-V pipeline (gxp_vert_0001.gxp.spv + gxp_frag_0165.gxp.spv, rc=0), uploads a stride128/3-vert test triangle, sets identity uniforms, initializes three 960x544 stride=1024 color surfaces (8CF00000/8D300000/8D700000) plus 224x68/960x544 small surfaces; [SUBMIT]x121 command buffers, [ENQ]x100, [PROC]x141 (job system active), [TMX]x81 texture creations. At LOGO state B(11) the game worker thread (tid=40020000 entry=8120767D) polls a job status at 811830F4 via DelayThread 0x7530 while the GFD frame/job chain waits; [GXM-PRESENT]=0 (sceGxmDisplayQueueAddEntry not called), scene cnt=0. Conclusion: the present/screenshot chain works; the black screen is because the game LOGO drawing uses precomputed draws (vertex/stream/USSE data not translated into vkCmdDraw, so nothing is rasterized); next implement precomputed-draw->Vulkan translation and verify non-black pixels. '
+       'm1233 evidence: [INFO] Vulkan Backend Init with Window / Creating Win32 window (960x544) / Screenshot image created (960x544); [ABISWAP] saved p5d_swap_0.bmp rc=0 n=2399, saved p5d_swap_1.bmp rc=0 n=2399; [ABIRT] disp=0 saved p5d_disp_0.bmp cd=8CF00000 rc=-1, disp=1 saved p5d_disp_1.bmp cd=8D300000 rc=0; [SHOTSTAT] frame=0 max=0 mean=0.00 file=p5d_swap_0.bmp, frame=1 max=0 mean=0.00 file=p5d_swap_1.bmp; PIL check: p5d_swap_0/1, p5d_disp_1, p5d_rt_first are 960x544 RGB extrema ((0,0),(0,0),(0,0)). ABI: [ABIPIPE] v=gxp_vert_0001.gxp.spv f=gxp_frag_0165.gxp.spv rc=0 n=2399; [ABITRI] upload_vertex_stream rc=0 (stride128,3 verts); [ABIUNI] identity vertex uniforms set; [ABICS] init surf=816CBC74 fmt=0 type=0 scale=1 osz=0 w=960 h=544 stride=1024 data=8CF00000 sane=1 (also 816CBCC4/8D300000, 816CBD14/8D700000, 85315AF8 w=224 h=68 stride=224 data=95600000, 85315DB8 w=960 h=544 stride=960 data=97600000); [ABICAP] PrecomputedFragmentStateInit frag=1 r1=8540EA80 r2=8F950D80 etc.; [ABIVFMT] obj=8540C000 attr0 stream=0 off=0 fmt=9 comps=3 strm0 stride=12, obj=8540C080 attr0 fmt=9 comps=3 attr1 fmt=8 comps=3 strm0 stride=30; [ABIVARG] obj=8540C000 r2=84856114 stk0=848560F0 gpr2=1 n=1826; [SUBMIT] #1 cmd imgIdx=0 result=0(VK_SUCCESS), #120 type=2 builder=848563D0; [ENQ] q(r7)=84857A7C node(r6)=84897DD4 head=0; [PROC] runner fa5c a0=84617C40; [TMX] arch->entry=9A1090B8 texobj=85CE573C, gxm_tex_create r0=9A209840. Status: [LOGO] 201 state=B(11), [LOGODRAW]=80, [SCENE]=120 (cnt=0), [FLUSH]=120 (frame=2), [GXM-PRESENT]=0, [GFX] begin=end=present=0, [IO]=6, [FHOPEN]=0, [WD] thread tid=40020000 entry=8120767D ctxpc=811830F4 (job status polling, DelayThread 0x7530). '
+       'Analysis: the Vulkan backend is fully initialized (window 960x544, swapchain, screenshots) and the present/screenshot chain really works (rc=0/VK_SUCCESS); the color surface content is all black because the bridge currently only uploads a test triangle for sceGxmDraw when SPIR-V pipelines are available, while the game LOGO drawing uses Precomputed draws (captured by [ABICAP] Precomputed*StateInit and [ABIVFMT]/[ABIVARG]) which are not translated into real vkCmdDraw/vkCmdDrawIndexed, so nothing is rasterized. The LOGO state B wait comes from the GFD job chain (worker polling job status), related to render/audio task completion and needs to advance together with the precomputed-draw translation. '
+       'NEXT: (1) implement precomputed draw -> Vulkan: translate the captured vertex format (attr/stream fmt/comps/stride) and vertex buffer (USSE memory to host) into vkCmdDraw/vkCmdDrawIndexed using the selected gxp_vert_0001/gxp_frag_0165 SPIR-V pipelines; first validate the pipeline with a full-screen color bar/LOGO-position triangle; (2) acceptance via BMP extrema (>0 = first visible frame), save p5d_swap_*.bmp for comparison; (3) in parallel analyze the LOGO state B job wait (worker 40020000 @811830F4 + [PROC]/[ENQ] job queue) to determine whether it is a video/audio task or render task that never completes; (4) after the first visible frame, advance S0_LOGO timing/fade -> S1_TITLE asset loading ([IO]/[FHOPEN] should start growing). '
+       'Verification: m1233_abi_key.txt, m1233_long4_key.txt, p5d_swap_0.bmp/p5d_swap_1.bmp/p5d_disp_1.bmp/p5d_rt_first.bmp (960x544, currently black), recomp_harness_getselfpump_4683.cpp, [TABLE] blocks=230291. |
 m1233 证据（`m1233_stall_key.txt`、`m1233_long4_key.txt`）：
 ```
 [LOGO] #198/#199/#200 state=B task=85CE556C          ← LOGO 状态机到 B(11)，探针上限 200
@@ -503520,3 +503573,58 @@ loader 在 Fios 任务环内 Lock/Unlock LwMutex + SignalSema + WaitEventFlag + 
 ANTI-FORGETTING ENTRY. Keywords: M1140 m1233 long run final state - S0_LOGO state machine reaches state=B(11) then whole-system deadlock at blk~66,494,954. Evidence: [LOGO] #200 state=B task=85CE556C (probe cap 200); LOGODRAW=80, SCBUILD=100, SCENE=120 (p=85BD52A0 st=1 head0F=0 head19=0 cnt=0 empty scene); FLUSH #120 frame=2; GXM-PRESENT=0; GFX begin=end=present=0; PRESENT #1 imgIdx=0 result=VK_SUCCESS (Vulkan present success once); IO=6, FHOPEN=0, DECOMP=48, PASSSUM=420, BADMEM=0. Deadlock point: [WD] loop=1 cnt=66494953/2058783920/2462/0 total=66494954 blk=812B2A50 fib=848463A0 fex=1 ex=1 curpc=812B2A50; [WD] n=66494954 blk=812B2A50 thr=40017000 stall=1 hle_ring 812B2A50@81207612 x12 (DelayThread retry loop); [WD] pcring 81207344 812B2830 81207350 811E6374 811E6A4C 812B2270 811E6A52 811E638C 811E639A 81207352 812B28A0 8120735C 811E63A0 812B2AD0 811E63A8 812B2880; [WD] loop=1 blk=812B2AE0 curpc=812B2AE0 (SetEventFlag); tail [PUMP] #5076200 tid=40021000 pc=8127BE36 blocks=0 blk=66296862 fex=1 fib=848463A0 (thread pump idles). HLE stub mapping: 812B2A50 DelayThread, 812B2A80 DelayThreadCB, 812B2830 LockLwMutex, 812B28A0 UnlockLwMutex, 812B27A0 WaitSema, 812B2AD0 SignalSema, 812B2880 WaitEventFlag, 812B2AE0 SetEventFlag, 812B2AC0 CheckCallback; the 811E63xx segment in pcring is the Fios (criFs) task/loader poll loop. Analysis: after LOGO state B(11) stops advancing (FLUSH frame stuck at 2) the game enters a wait-for-resource/task state; the loader polls the Fios task loop with Lock/Unlock LwMutex + SignalSema + WaitEventFlag + DelayThread but IO stays 6 and no new FHOPEN, so it waits not on real file IO but on an HLE-unfinished async task/job (e.g. a pending task-queue entry with no worker, or an event flag never set); the thread pump idles (pumped 5M+, blocks=0) with all threads blocked -> systematic deadlock of the current HLE thread/task scheduling model at this wait point. NEXT: add probes on WaitEventFlag(812B2880)/WaitSema(812B27A0)/SetEventFlag(812B2AE0)/SignalSema(812B2AD0) (first N calls after blk>60M) recording obj/bits/wait mode, current fiber/thread and expected setter; inspect the Fios task queue/job system (pending task with no worker, IOPUMP armed/called inside nested exec); if it waits on async IO inspect the IOPUMP reader discovery range and trigger conditions (g_blkcnt_total%1500, _ip_armed); after the fix run until SCENE non-empty / GXM BeginScene-Present. Verification: m1233_stall_key.txt, m1233_long4_key.txt, m1232_fix2_key.txt, recomp_harness_getselfpump_4683.cpp, [TABLE] blocks=230291.
 
 LOOKUP: M1140 S0_LOGO state B 11 then deadlock blk 66,494,954, [LOGO] 200 state B task 85CE556C, LOGODRAW 80 SCBUILD 100 SCENE 120 empty cnt 0, FLUSH frame 2, GXM-PRESENT 0 GFX begin end present 0, PRESENT 1 imgIdx 0 VK_SUCCESS, IO 6 FHOPEN 0, WD loop=1 cnt 66494953 total 66494954 blk 812B2A50 fib 848463A0 curpc 812B2A50, hle_ring 812B2A50@81207612 DelayThread retry, pcring 81207344 812B2830 81207350 811E6374 811E6A4C 812B2270 811E6A52 811E638C 811E639A 81207352 812B28A0 8120735C 811E63A0 812B2AD0 811E63A8 812B2880, curpc 812B2AE0 SetEventFlag, PUMP idle blocks=0, stub mapping LockLwMutex UnlockLwMutex WaitSema SignalSema WaitEventFlag SetEventFlag, Fios loader poll loop 811E63xx, next WaitEventFlag WaitSema probes obj bits setter Fios task queue job pending worker IOPUMP armed nested exec -> 18.4684 [relevant: S0_LOGO path], 18.4683 [relevant: GetSelf fix], 18.4682 [relevant: previous stall]
+### 18.4686 PORT M1141: 首帧写入 Vulkan 交换链并存成 BMP（960×544）——但全黑；黑屏原因=precomputed draw 未翻译成 vkCmdDraw
+
+1) 呈现/截图链路（真实工作）：
+```
+[INFO] === Vulkan Backend Init with Window ===
+[INFO] Vulkan: Creating Win32 window (960x544)...
+[INFO] Screenshot image created (960x544)
+[ABISWAP] saved p5d_swap_0.bmp rc=0 n=2399
+[ABISWAP] saved p5d_swap_1.bmp rc=0 n=2399
+[ABIRT] disp=0 saved p5d_disp_0.bmp cd=8CF00000 rc=-1
+[ABIRT] disp=1 saved p5d_disp_1.bmp cd=8D300000 rc=0
+[SHOTSTAT] frame=0 max=0 mean=0.00 file=p5d_swap_0.bmp
+[SHOTSTAT] frame=1 max=0 mean=0.00 file=p5d_swap_1.bmp
+PIL 实测：p5d_swap_0/1、p5d_disp_1、p5d_rt_first 均 960×544，RGB extrema=((0,0),(0,0),(0,0)) → 全黑
+```
+2) ABI 桥接细节：
+```
+[ABIPIPE] v=gxp_vert_0001.gxp.spv f=gxp_frag_0165.gxp.spv rc=0 n=2399   ← 真实 SPIR-V 管线已选中
+[ABITRI] upload_vertex_stream rc=0 (stride128,3 verts) n=2399
+[ABIUNI] identity vertex uniforms set n=2399
+[ABICS] init surf=816CBC74 … w=960 h=544 stride=1024 data=8CF00000 sane=1（×3：8CF00000/8D300000/8D700000）
+[ABICS] init surf=85315AF8 w=224 h=68 stride=224 data=95600000 / surf=85315DB8 w=960 h=544 stride=960 data=97600000
+[ABICAP] PrecomputedFragmentStateInit frag=1 r1=8540EA80 r2=8F950D80（多个 Precomputed*StateInit）
+[ABIVFMT] obj=8540C000 attr0 fmt=9 comps=3 strm0 stride=12 / obj=8540C080 attr0 fmt=9 attr1 fmt=8 strm0 stride=30
+[ABIVARG] obj=8540C000 r2=84856114 stk0=848560F0 gpr2=1 n=1826
+[SUBMIT] #1 cmd=… imgIdx=0 result=0(VK_SUCCESS) / #120 type=2 builder=848563D0
+[ENQ] q=84857A7C node=84897DD4 / [PROC] runner fa5c a0=84617C40 / [TMX] texobj=85CE573C
+```
+3) 状态：
+```
+[LOGO] 201（state=B(11)）  [LOGODRAW]=80  [SCENE]=120（cnt=0）  [FLUSH]=120（frame=2）
+[GXM-PRESENT]=0  [GFX] begin=end=present=0  [IO]=6  [FHOPEN]=0
+[WD] tid=40020000 entry=8120767D ctxpc=811830F4（GFD 作业状态轮询，DelayThread 0x7530）
+```
+4) 分析：
+```
+Vulkan 后端完整初始化、present/截图链路真实工作
+颜色表面全黑：当前只在 sceGxmDraw+SPIR-V 可用时上传测试三角形；
+游戏 LOGO 绘制用 Precomputed draw（[ABICAP]/[ABIVFMT]/[ABIVARG] 已捕获顶点格式/参数），
+未翻译成 vkCmdDraw → 无光栅化内容
+LOGO state B 等待来自 GFD 作业链（worker 轮询作业状态），与渲染/音频任务完成相关
+```
+5) NEXT：
+```
+① precomputed draw → Vulkan：attr/stream(fmt/comps/stride)+USSE 顶点缓冲 → vkCmdDraw/vkCmdDrawIndexed，
+   使用 gxp_vert_0001/gxp_frag_0165；先跑全屏彩条/LOGO 位置三角形验证管线出像素
+② 验收：BMP extrema>0（首帧可见），对比 p5d_swap_*.bmp
+③ 并行分析 LOGO state B 作业等待（worker 40020000 @811830F4 + [PROC]/[ENQ]）
+④ 首帧可见 → S0_LOGO 时长/淡出 → S1_TITLE 资源加载（[IO]/[FHOPEN] 增长）
+```
+验证：`m1233_abi_key.txt`、`m1233_long4_key.txt`、`p5d_swap_0.bmp`/`p5d_swap_1.bmp`/`p5d_disp_1.bmp`/`p5d_rt_first.bmp`、`recomp_harness_getselfpump_4683.cpp`、`[TABLE] blocks=230291`。
+
+ANTI-FORGETTING ENTRY. Keywords: M1141 first frames written to the Vulkan swapchain and saved as 960x544 BMPs (p5d_swap_0.bmp, p5d_swap_1.bmp, p5d_disp_1.bmp, p5d_rt_first.bmp) but fully black (RGB extrema all 0, SHOTSTAT max=0 mean=0.00). Present/screenshot chain works: Vulkan Backend Init with Window, Creating Win32 window (960x544), Screenshot image created, ABISWAP saved p5d_swap_0 rc=0 n=2399, p5d_swap_1 rc=0, ABIRT disp=0 cd=8CF00000 rc=-1, disp=1 cd=8D300000 rc=0. ABI bridge: ABIPIPE v=gxp_vert_0001.gxp.spv f=gxp_frag_0165.gxp.spv rc=0 n=2399; ABITRI upload_vertex_stream rc=0 (stride128,3 verts); ABIUNI identity vertex uniforms; ABICS surfaces 960x544 stride=1024 data=8CF00000/8D300000/8D700000 sane=1 plus 224x68 stride=224 95600000 and 960x544 stride=960 97600000; ABICAP PrecomputedFragmentStateInit frag=1 r1=8540EA80 r2=8F950D80; ABIVFMT obj=8540C000 attr0 fmt=9 comps=3 strm0 stride=12, obj=8540C080 attr0 fmt=9 attr1 fmt=8 stride=30; ABIVARG obj=8540C000 r2=84856114 gpr2=1 n=1826; SUBMIT #1 imgIdx=0 VK_SUCCESS, #120 type=2 builder=848563D0; ENQ q=84857A7C node=84897DD4; PROC runner fa5c a0=84617C40; TMX texobj=85CE573C. Status: LOGO 201 state=B(11), LOGODRAW=80, SCENE=120 cnt=0, FLUSH=120 frame=2, GXM-PRESENT=0, GFX begin=end=present=0, IO=6, FHOPEN=0, WD thread tid=40020000 entry=8120767D ctxpc=811830F4 polling job status via DelayThread 0x7530. Analysis: the Vulkan backend is fully initialized and the present/screenshot chain really works; the black screen is because the game LOGO drawing uses Precomputed draws (captured vertex format/params) that are not translated into vkCmdDraw, while the bridge currently only uploads a test triangle for sceGxmDraw; the LOGO state B wait comes from the GFD job chain (worker polling job status). NEXT: implement precomputed draw -> Vulkan (attr/stream fmt/comps/stride + USSE vertex buffer -> vkCmdDraw/vkCmdDrawIndexed with gxp_vert_0001/gxp_frag_0165; first validate pipeline with a full-screen color bar/LOGO-position triangle); acceptance via BMP extrema>0; in parallel analyze the LOGO state B job wait (worker 40020000 @811830F4 + PROC/ENQ); after first visible frame advance S0_LOGO timing/fade -> S1_TITLE asset loading. Verification: m1233_abi_key.txt, m1233_long4_key.txt, p5d_swap_0.bmp/p5d_swap_1.bmp/p5d_disp_1.bmp/p5d_rt_first.bmp, recomp_harness_getselfpump_4683.cpp, [TABLE] blocks=230291.
+
+LOOKUP: M1141 first frames Vulkan swapchain BMP 960x544 black RGB extrema 0 SHOTSTAT max 0, present screenshot chain works Vulkan Backend Init Win32 window 960x544, ABISWAP p5d_swap_0/1 rc 0 n 2399, ABIRT disp 0 cd 8CF00000 rc -1 disp 1 cd 8D300000 rc 0, ABIPIPE v gxp_vert_0001.gxp.spv f gxp_frag_0165.gxp.spv rc 0, ABITRI stride128 3 verts, ABIUNI identity uniforms, ABICS surfaces 8CF00000 8D300000 8D700000 224x68 95600000 960x544 97600000, ABICAP PrecomputedFragmentStateInit, ABIVFMT obj 8540C000 attr0 fmt9 comps3 stride12, obj 8540C080 attr1 fmt8 stride30, ABIVARG gpr2 1 n 1826, SUBMIT 121 ENQ 100 PROC 141 TMX 81, LOGO state B 11 LOGODRAW 80 SCENE 120 cnt0 FLUSH frame2, GXM-PRESENT 0 GFX begin end present 0, worker thread 40020000 entry 8120767D ctxpc 811830F4 job poll, next precomputed draw to vkCmdDraw USSE vertex buffer gxp pipelines full-screen color bar BMP extrema acceptance, LOGO state B job wait PROC ENQ, then S1_TITLE IO FHOPEN -> 18.4685 [relevant: deadlock analysis], 18.4684 [relevant: S0_LOGO], 18.4683 [relevant: GetSelf fix]
