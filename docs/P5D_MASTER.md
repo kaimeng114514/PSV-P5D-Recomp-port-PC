@@ -1147,6 +1147,48 @@
 | M1129 | §18.4674: ★★★★★★★★★ **fiber 返回哨兵 0xFFFFFFFD 上下文完全定位**：`[FIBER-EXEC] no block for pc=FFFFFFFD (cur=848463A0) lr=81279C20 sp=84856050 r0=<heap>`，前驱块链 **81279BEE→81279C02→81279C0C→81279C1C（bl 812068F2）→812068F2（fiber 管理器）→812068D8/8120685A→812B1B70/812B1BA0（sceFiberSwitch HLE）**；哨兵在 fiber 切换往返后由恢复上下文带入。实验 A（把哨兵当"返回到 LR"：`s->r[15]=s->r[14]; continue`）只降低 livelock 日志量（[SENTRET]×20 后仍循环 81279BEE→81279C02→81279C0C→81279C1C），**未解锁帧循环**，已回退（保留诊断打印）
 | M1130 | §18.4675: ★★★★★★★★★★ **哨兵 0xFFFFFFFD 根因 = AOT 缺失间接调用目标 0x8122A9A8（又一函数边界遗漏）**：`[INDIRECT-MISS] reg3=8122A9A9 target=8122A9A8 block=81279C1C` → `id_reg()` 未找到块时返回 0xFFFFFFFD（harness 行 5186-5188）→ pc=FFFFFFFD→"no block" livelock。反汇编确认 0x8122A9A8 是合法 Thumb 函数（`push {r4,lr}`），位于 FUN_8122A7BC（end 0x8122A9A6）与 FUN_8122A9D0 之间的 0x28 字节缝隙，未收录函数边界。用同管线生成 **batch_037**（5 blocks，0x8122A9A8..0x8122A9D0）并注册（ALL_FINDERS[38]）→ `[TABLE] blocks=230291`；**运行结果显示 [INDIRECT-MISS]=0、[TBB-MISS]=0、[SENTINEL]=0、[FIBER-EXEC]=0（哨兵 livelock 消除）**，且执行进入 GXM 子系统（新探针 [ABIVFMT]×22,770 / [GXMABI]×4,008 / [GBACK]×400 / [ABIVARG]×120 / [VCNT]×120 首次触发），线程数 16→17、flags=3；新卡点：blk=811DFDC8 循环（hle_ring `812B2AE0@8127BE56` 事件标志 set / `812B1810@811539FE`）
 | M1131 | §18.4676: ★★★★★★★★★★ **batch_037 修复后执行大跨越：GXM 子系统完整初始化（27 个 GXM 函数），随后进入游戏内置 Huffman+LZ 解压子系统（FUN_811DF434 调度器 / FUN_811DF91A Huffman / FUN_811DFD94 LZ77），长跑在 1.5M 块触发 NESTED_UNTIL 截断后进入"仅泵线程、0 块执行"的假死状态**。反编译确认：`FUN_811DF434`（0x20 字节头；bit1→Huffman：`FUN_811DFB96`/`FUN_811DF91A` 建 256 项 Huffman 表；bit0→LZ77：`FUN_811DFD94` 字典回拷），是游戏资源解压器；`[FIBSW]` fpc 覆盖 811EFB3E→812B12A0（GXM）说明解压与 GXM 参数绑定交替推进
+| M1132 | §18.4677: ★★★★★★★★★★ **解压容器格式完全解码（ELF 直读）+ 长跑 m1219 卡在 FUN_811DF91A 第二阶段的"选择扫描"死循环（811DFA0E↔811DFA3C）；线索指向该解压运行在非 fiber 栈（sp=8484EDD0）且 0x7420 栈帧/256×0x38 节点数组可能越界**。容器头：magic `0x474C4830`（bytes "0HLG"）/`0x47484D30`（"0MHG"），`[+8]=flags`（1=LZ77，3=Huffman+LZ）、`[+0xC]/[+0x10]`=尺寸字段；解压点位于**镜像内嵌数据**：`813E166C`（flag=1）与 `813E1ABC`（flag=3）；Huffman 阶段 payload 在 `src+0x20`，其头 0x410 表 + 输出长度 0x305B=12,379B（很小）。长跑（NESTED_UNTIL=300M，预算 400M）推进到 blk≈30.4M 后死循环：`[WD] pcring: 811DFA3C 811DFA0E 811DFA3C 811DFA0E … (3040 万块循环)`；该循环退出条件为"未使用节点计数(r8) 达到剩余计数(r9/sb=0x100)"，r8 仅在 `node[+0x440]==-1` 时自增 → 若 256 节点数组的 +0x440 标记不满足，则任何实现都会死循环 ⇒ 我们的节点数组/栈内容异常。T682A 尾巴显示该代码 `sp=8484EDD0`（heap/线程栈，非 fiber 栈 82EFFF28）、`r14=0x726F6C6F("olor" 文本数据)`。另：`[T682A]` 旧探针在长跑中产生 178 万行日志，已改为仅前 3 次触发（加速后续运行）
+m1218/m1219 证据（`m1218_dec_key.txt`、`m1219_long2_key.txt`）：
+```
+[DECOMP] #0 p=84856248 src=813E166C dst=8528D050 lr=811C4D0E   ← 镜像内嵌资源
+[DECOMP] #1 p=84856248 src=813E1ABC dst=85295B60 lr=811C4D52
+[HUFF] #0 src=813E1ADC(=src+0x20) dst=85299BE0 lr=811DFB8A
+[LZ]   #0 p=848561F8 lr=811DF4A8
+ELF 直读头部：
+  813E166C: 30484C47 03000801 01000000 80040000 4D040000 …  (magic 0HLG, +8 flag=1, +0xC=0x480, +0x10=0x44D)
+  813E1ABC: 30484C47 03000801 03000000 80400000 1C240000 …  (+8 flag=3, +0xC=0x4080, +0x10=0x241C)
+  813E1ADC: 304D4847 03000801 5B300000 FC230000 21000000 …  (Huffman 头: +8=0x305B=12379 输出长度, +0x410=首数据字节 04)
+（m1219 长跑末尾）
+[WD] pcring: 811DFA3C 811DFA0E 811DFA3C 811DFA0E …（3040 万块后死循环）
+[WD] loop=1 cnt=30379999/302124814/2097/0 total=30380000 blk=8127B370 fex=1
+[T682A] … 811DFA3C r0=848463A0 r14=726F6C6F sp=8484EDD0
+[PUMP] #248600 … blocks=0 blk=30388224 fex=1 fib=848463A0
+[COUNT] 未打印（运行被 kill/超时）；[FRAMECB]/[UPD]/[POST]=0；[IO]=6；[CRILOG]=0
+反汇编循环（811DFA08-811DFA44）：
+  811DFA08 adds r5,r1,#0 / mov r4,sp / mov r6,r5
+  811DFA0E ldr.w r2,[r4,#0x440] / cmp r2,#-1 / bne 811DFA3C
+  811DFA18 add.w r8,r8,#1 / cmp r6,#-1 / beq 811DFA38 / rsb r2,r6,r6,lsl #3 / ldr lr,[r4,#0x414] / …
+  811DFA3C adds r7,#1 / adds r4,#0x38 / cmp sb,r8 / bgt 811DFA0E
+（AOT 块逐条核对：811DFA0E/18/22/3C/4C 与反汇编语义一致；811DFA22 `rsb r2,r6,r6,lsl #3` 翻译为 (r6<<3)-r6 ✓）
+```
+**关键推断**：
+- 循环语义：`while (sb > r8) { 扫描 256 个节点；若 node[+0x440]==-1 则 r8++ }`，sb=r9=0x100 来自栈 [sp+0x73E0]（AOT 块 811DF966 正确写入 0x100、811DF9EC 正确读回）；若节点数组标记异常 → r8 永不达到 256 → 死循环；
+- 该函数栈帧 **0x7420 字节**（0x7000+0x3fc），节点数组 256×0x38=0x3800，均建在**栈上**；`sp=8484EDD0` 是 heap 区（非 fiber 的 82EFFF28）→ 该解压可能运行在 **HLE 线程栈**（t.stack=base+0x3F000，如 8485xxxx 附近）或栈已切换/被挤压 → 0x7420 帧与 0x3800 数组在 64KB 线程栈内虽然理论上够，但若嵌套调用链更深就会溢出/覆盖，导致节点标记异常；
+- 另注意 `r14=0x726F6C6F`："olor" 文本数据落在 lr 槽，提示该函数内部大量使用寄存器保存数据（反汇编确用 lr 存数据，正常），但结合节点标记异常仍需确认真实内存内容。
+**NEXT**：
+```
+① 在 811DFA0E/811DFA3C 注入循环计数探针（打印 r9/r8/r7/r4、[r4+0x440]、前 4 个节点 +0x440 值），确认节点数组实际内容与 sb
+② 查该解压调用时的上下文/栈：打印入口 sp、g_cur_fiber、g_cur_thr、以及 sp 是否在 fiber 栈 [82EF..]/线程栈 [84..] 内；
+   若线程栈不足 → 增大 HLE 线程栈（0x40000 → 0x100000）或让解压强制在 fiber 栈执行
+③ 若节点数组被其它调用覆盖 → 修上下文保存/恢复（参考 M1129-M1131 的 fiber/线程交互）
+④ 修复后解压应完成 → 继续到 BeginScene/帧循环；同时保持 [T682A] 日志限制（已改前 3 次触发）
+```
+验证：`m1219_long2_key.txt`、`m1218_dec_key.txt`、`lzdec_4676.txt`、ELF 头部 dump（本里程碑脚本输出）、`[TABLE] blocks=230291`。 |
+| §18.4677 | Decompressor container format fully decoded (read directly from the ELF) + long run m1219 stuck in the "selection scan" infinite loop (811DFA0E<->811DFA3C) of FUN_811DF91A phase 2; clues point to the decompression running on a non-fiber stack (sp=8484EDD0) where the 0x7420 stack frame / 256x0x38 node array may overflow. Container header: magic 0x474C4830 (bytes "0HLG") / 0x47484D30 ("0MHG"), [+8]=flags (1=LZ77, 3=Huffman+LZ), [+0xC]/[+0x10]=size fields; decompression sites are image-embedded data: 813E166C (flag=1) and 813E1ABC (flag=3); the Huffman payload is at src+0x20 with a 0x410 table and output length 0x305B=12,379 bytes (tiny). Long run (NESTED_UNTIL=300M, budget 400M) advanced to blk~30.4M then livelocked: [WD] pcring 811DFA3C 811DFA0E 811DFA3C 811DFA0E (30.4M-block loop); the loop exits only when the unused-node counter (r8) reaches the remaining count (r9/sb=0x100), and r8 increments only when node[+0x440]==-1, so if the 256-node array markers are wrong ANY implementation livelocks => our node array/stack contents are wrong. The T682A tail shows this code with sp=8484EDD0 (heap/thread stack, not the fiber stack 82EFFF28) and r14=0x726F6C6F ("olor" text data). Also the legacy [T682A] probe produced 1.78M log lines in the long run and was capped to 3 trigger windows to speed up future runs. '
+       'm1218/m1219 evidence: [DECOMP] #0 p=84856248 src=813E166C dst=8528D050 lr=811C4D0E, #1 src=813E1ABC dst=85295B60 lr=811C4D52; [HUFF] #0 src=813E1ADC (=src+0x20) dst=85299BE0 lr=811DFB8A; [LZ] #0 p=848561F8 lr=811DF4A8. ELF header dumps: 813E166C: 30484C47 03000801 01000000 80040000 4D040000 (magic 0HLG, +8 flag=1, +0xC=0x480, +0x10=0x44D); 813E1ABC: 30484C47 03000801 03000000 80400000 1C240000 (+8 flag=3, +0xC=0x4080, +0x10=0x241C); 813E1ADC: 304D4847 03000801 5B300000 FC230000 21000000 (Huffman header: +8=0x305B=12379 output length, +0x410=first data byte 04). m1219 tail: [WD] pcring 811DFA3C 811DFA0E 811DFA3C 811DFA0E (livelock after 30.4M blocks); [WD] loop=1 cnt=30379999/302124814/2097/0 total=30380000 blk=8127B370 fex=1; [T682A] 811DFA3C r0=848463A0 r14=726F6C6F sp=8484EDD0; [PUMP] #248600 blocks=0 blk=30388224 fex=1 fib=848463A0; [COUNT] not printed (run killed); [FRAMECB]/[UPD]/[POST]=0; [IO]=6; [CRILOG]=0. Disassembly of the loop (811DFA08-811DFA44): 811DFA08 adds r5,r1,#0 / mov r4,sp / mov r6,r5; 811DFA0E ldr.w r2,[r4,#0x440] / cmp r2,#-1 / bne 811DFA3C; 811DFA18 add.w r8,r8,#1 / cmp r6,#-1 / beq 811DFA38 / rsb r2,r6,r6,lsl #3 / ldr lr,[r4,#0x414]; 811DFA3C adds r7,#1 / adds r4,#0x38 / cmp sb,r8 / bgt 811DFA0E. AOT blocks checked line by line: 811DFA0E/18/22/3C/4C match the disassembly; 811DFA22 rsb r2,r6,r6,lsl #3 is translated as (r6<<3)-r6 correctly. '
+       'Key inference: loop semantics = while (sb > r8) { scan 256 nodes; if node[+0x440]==-1 then r8++ }, sb=r9=0x100 from stack [sp+0x73E0] (AOT block 811DF966 writes 0x100 and 811DF9EC reads it back correctly); if the node-array markers are wrong, r8 never reaches 256 -> infinite loop. This function has a 0x7420-byte stack frame (0x7000+0x3fc) and a 256x0x38=0x3800 node array built on the stack; sp=8484EDD0 is heap (not the fiber stack 82EFFF28), so the decompression likely runs on the HLE thread stack (t.stack=base+0x3F000, e.g. 8485xxxx) or the stack has been switched/squeezed - a 0x7420 frame plus 0x3800 array fits in a 64KB thread stack in theory, but deeper nesting would overflow/overwrite and corrupt the node markers. Note r14=0x726F6C6F ("olor") sits in the lr slot; the disassembly does use lr to hold data (normal), but with the node-marker anomaly the real memory contents still need confirmation. '
+       'NEXT: (1) add loop-count probes at 811DFA0E/811DFA3C printing r9/r8/r7/r4, [r4+0x440] and the first 4 nodes'' +0x440 values to confirm the node array contents vs sb; (2) inspect the decompression invocation context/stack: print entry sp, g_cur_fiber, g_cur_thr and whether sp is inside the fiber stack [82EF..] or thread stack [84..]; if the thread stack is too small grow the HLE thread stack (0x40000 -> 0x100000) or force decompression onto the fiber stack; (3) if the node array is overwritten by another call, fix context save/restore (cf. M1129-M1131 fiber/thread interaction); (4) after the fix decompression should complete -> continue to BeginScene/frame loop; keep the [T682A] log cap (now first 3 triggers). '
+       'Verification: m1219_long2_key.txt, m1218_dec_key.txt, lzdec_4676.txt, ELF header dumps (this milestone scripts output), [TABLE] blocks=230291. |
 m1216/m1217 证据（`m1216_gap2_key.txt`、`m1217_longgxm_key.txt`）：
 ```
 （m1216 12M，NESTED_UNTIL=300k）
@@ -502826,3 +502868,50 @@ tail: [PUMP] #269200 … tid=40019000 pc=811732FC blocks=0 blk=1500000 fex=0 fib
 ANTI-FORGETTING ENTRY. Keywords: M1131 after batch_037 the execution jumped into full GXM initialization (27 GXM functions: sceGxmInitialize/GetNotificationRegion/CreateContext/MapMemory x20/MapVertexUsseMemory/MapFragmentUsseMemory/CreateRenderTarget x2/DepthStencilSurfaceInit x3/SyncObjectCreate x3/ShaderPatcherCreate/RegisterProgram x121/CreateFragmentProgram x88/CreateVertexProgram x19/TextureSet filters/UAddrMode/VAddrMode/GetRenderTargetMemSize x2/GetPrecomputedDrawSize x2/PrecomputedDrawInit x2/SetParams x2/SetVertexStream x2/ProgramFindParameterByName x3726/ProgramFindParameterBySemantic x1/DepthStencilSurfaceSetForceStoreMode x2/SetForceLoadMode x1) and then the game's built-in Huffman+LZ decompressor. Decompiled FUN_811DF434 dispatcher: read 0x20-byte header; flag&2 -> Huffman via FUN_811DFB96/FUN_811DF91A (reads 0x410-byte code-length table, builds 256-entry decode tree); flag&1 -> LZ77 via FUN_811DFD94 (dictionary back-copy); else plain memcpy(dst,src+0x20,len). Caller chain FUN_811DF434 -> FUN_811DFD94 (LZ) and FUN_811DF91A (Huffman, loops 811DFAFE/811DFB06/811DFB14/811DFB18). m1217 long run (80M budget, P5D_NESTED_UNTIL=1500000): [FIBSW] #591 fpc=811EFB3E blk=1496023, #592 fpc=811C3FB8 blk=1498023, #593 fpc=812B12A0 blk=1500000; [GALLOC] x405 (size 0x1C lr=81207748 / size 8 lr=811F00CC / lr=811EFCF6); tail [PUMP] #269200 tid=40019000 pc=811732FC blocks=0 blk=1500000 fex=0 fib=848463A0 (after NESTED_UNTIL cutoff only threads pumped); [WD] n=1500000 blk=81236D22 stall=78 pcring Huffman loop; [FRAMECB]/[UPD]/[POST]/[COUNT]=0; [IO]=6; [CRILOG]=0; [ACFFILL] size=5152; m1216: [ABIVFMT] 22770 / [ABIVARG] 120 / [GBACK] 400 / [VCNT] 120 / [SLOTW] 201. Conclusion: NOT a deadlock - P5D_NESTED_UNTIL=1500000 truncates nested execution and the hybrid scheduler falls into thread-pump-only mode (blocks=0, fex=0); before the cutoff execution advances between Huffman/LZ decompression and GXM parameter binding. NEXT: rerun with P5D_NESTED_UNTIL=200000000+ and 200M+ block budget so decompression completes and watch BeginScene/Present; add progress probes to FUN_811DFD94/FUN_811DF91A (input length/output counter) to confirm speed; watch [FRAMECB]/[UPD]/[POST]/[COUNT] present; after decompression expect more IO/resource requests ([FHOPEN]/[RQMGR]). Verification: m1217_longgxm_key.txt, m1216_gap2_key.txt, lzdec.txt, stall811d.txt, [TABLE] blocks=230291.
 
 LOOKUP: M1131 GXM full initialization 27 functions ShaderPatcher 121 programs fragment 88 vertex 19 MapMemory 20 CreateRenderTarget 2 PrecomputedDraw ProgramFindParameterByName 3726, built-in Huffman+LZ decompressor FUN_811DF434 dispatcher 0x20 header flag2 Huffman FUN_811DFB96 FUN_811DF91A 0x410 table flag1 LZ77 FUN_811DFD94 back-copy, m1217 long run NESTED_UNTIL 1500000 cutoff thread-pump-only blocks=0 fex=0 not deadlock, FIBSW 591 fpc 811EFB3E 592 811C3FB8 593 812B12A0, GALLOC 405, WD stall 78 Huffman loop 811DFAFE 811DFB06, FRAMECB UPD POST COUNT 0, next NESTED_UNTIL 200000000 block budget 200M rerun watch BeginScene Present, decompressor progress probes, IO title assets -> 18.4675 [relevant: batch_037 sentinel fix], 18.4674 [relevant: sentinel localized], 18.4670 [relevant: GFD fiber]
+### 18.4677 PORT M1132: 解压容器格式解码 + 长跑卡在 FUN_811DF91A 选择扫描死循环（栈/节点数组异常线索）
+
+1) 容器格式（ELF 直读）：
+```
+magic: 0x474C4830 = bytes "0HLG"（另见 0x47484D30 = "0MHG"）
+头字段: [+4]=0x01080003, [+8]=flags（1=LZ77, 3=Huffman+LZ）, [+0xC]/[+0x10]=尺寸
+解压点（镜像内嵌数据）:
+  813E166C: flag=1, +0xC=0x480, +0x10=0x44D
+  813E1ABC: flag=3, +0xC=0x4080, +0x10=0x241C
+Huffman payload @ src+0x20（813E1ADC）: 0x410 字节码长表 + 输出长度 [+8]=0x305B(12,379B)
+```
+2) m1219 长跑（NESTED_UNTIL=300M，预算 400M）：
+```
+推进到 blk≈30,380,000 后：
+[WD] pcring: 811DFA3C 811DFA0E 811DFA3C 811DFA0E …（死循环）
+[WD] loop=1 cnt=30379999/302124814/2097/0 total=30380000 blk=8127B370 fex=1
+[T682A] 811DFA3C r0=848463A0 r14=726F6C6F sp=8484EDD0
+[PUMP] #248600 blocks=0 blk=30388224 fex=1 fib=848463A0
+[FRAMECB]/[UPD]/[POST]=0；[IO]=6；[CRILOG]=0
+```
+3) 循环语义（反汇编 811DFA08-811DFA44 + AOT 逐块核对一致）：
+```
+811DFA0E ldr.w r2,[r4,#0x440] / cmp #-1 / bne 811DFA3C
+811DFA18 add.w r8,r8,#1（仅当 node[+0x440]==-1）
+811DFA3C adds r7,#1 / adds r4,#0x38 / cmp sb,r8 / bgt 811DFA0E
+⇒ while (sb > r8) 扫描 256 节点；sb=r9=0x100 来自栈 [sp+0x73E0]
+   若节点 +0x440 标记异常 → r8 永不达 256 → 任何实现都死循环 ⇒ 我们的栈/节点数组内容错
+函数栈帧 0x7420 字节，节点数组 256×0x38=0x3800 建在栈上；运行 sp=8484EDD0 属 heap/线程栈
+（非 fiber 栈 82EFFF28）→ 怀疑栈溢出/上下文切换导致节点数组被覆盖
+```
+4) 其他：
+```
+[T682A] 旧探针在长跑产生 178 万行日志 → 已改为仅前 3 次触发（加速后续运行）
+```
+5) NEXT：
+```
+① 811DFA0E/811DFA3C 注入循环计数探针（r9/r8/r7/r4、[r4+0x440]、前 4 节点 +0x440）
+② 查解压调用上下文/栈（入口 sp、g_cur_fiber、g_cur_thr；是否在 fiber/线程栈内）；
+   线程栈不足则增大（0x40000→0x100000）或强制解压走 fiber 栈
+③ 若节点数组被覆盖 → 修上下文保存/恢复
+④ 修复后解压完成 → BeginScene/帧循环
+```
+验证：`m1219_long2_key.txt`、`m1218_dec_key.txt`、`lzdec_4676.txt`、ELF 头部 dump、`[TABLE] blocks=230291`。
+
+ANTI-FORGETTING ENTRY. Keywords: M1132 decompressor container format decoded + long-run livelock in FUN_811DF91A selection scan 811DFA0E<->811DFA3C. Container: magic 0x474C4830 ("0HLG") / 0x47484D30 ("0MHG"), [+8]=flags (1=LZ77, 3=Huffman+LZ), [+0xC]/[+0x10]=sizes; decompression sites are image-embedded data: 813E166C flag=1 (+0xC=0x480 +0x10=0x44D) and 813E1ABC flag=3 (+0xC=0x4080 +0x10=0x241C); Huffman payload at src+0x20 (813E1ADC) with 0x410-byte code-length table and output length 0x305B=12,379 bytes. m1219 long run (NESTED_UNTIL=300M, budget 400M) advanced to blk~30,380,000 then livelocked between 811DFA0E and 811DFA3C: [WD] pcring 811DFA3C 811DFA0E 811DFA3C 811DFA0E, [WD] loop=1 cnt=30379999/302124814/2097/0 total=30380000 blk=8127B370 fex=1; [T682A] 811DFA3C r0=848463A0 r14=726F6C6F sp=8484EDD0; [PUMP] #248600 blocks=0 blk=30388224; [FRAMECB]/[UPD]/[POST]=0; [IO]=6; [CRILOG]=0. Disassembly: 811DFA0E ldr.w r2,[r4,#0x440] / cmp -1 / bne 811DFA3C; 811DFA18 add.w r8,r8,#1 (only when node[+0x440]==-1); 811DFA3C adds r7,#1 / adds r4,#0x38 / cmp sb,r8 / bgt 811DFA0E; AOT blocks 811DFA0E/18/22/3C/4C verified to match (811DFA22 rsb r2,r6,r6,lsl #3 -> (r6<<3)-r6 correct). Loop = while (sb > r8) scan 256 nodes, r8 increments only for node[+0x440]==-1; sb=r9=0x100 from stack [sp+0x73E0] (AOT 811DF966 writes 0x100, 811DF9EC reads back correctly), so if node markers are wrong r8 never reaches 256 -> any implementation livelocks => our stack/node-array contents are wrong. The function has a 0x7420-byte stack frame and a 256x0x38=0x3800 node array on the stack; the observed sp=8484EDD0 is heap/thread stack (not fiber stack 82EFFF28) => suspect stack overflow or context switch overwriting the node array. [T682A] legacy probe produced 1.78M log lines and was capped to 3 trigger windows to speed up future runs. NEXT: add loop-count probes at 811DFA0E/811DFA3C printing r9/r8/r7/r4, [r4+0x440], first 4 nodes'' +0x440; inspect the decompression invocation context/stack (entry sp, g_cur_fiber, g_cur_thr; fiber stack vs thread stack) and grow the HLE thread stack (0x40000 -> 0x100000) or force decompression onto the fiber stack; if the node array is overwritten fix context save/restore; then decompression completes -> BeginScene/frame loop. Verification: m1219_long2_key.txt, m1218_dec_key.txt, lzdec_4676.txt, ELF header dumps, [TABLE] blocks=230291.
+
+LOOKUP: M1132 decompressor container 0HLG magic 0x474C4830 0MHG 0x47484D30 flags LZ77 Huffman+LZ sites 813E166C flag1 813E1ABC flag3 Huffman payload 813E1ADC 0x410 table output 0x305B 12379, long run m1219 NESTED_UNTIL 300M budget 400M blk 30.38M livelock 811DFA0E 811DFA3C selection scan node +0x440 r8 r9 sb 0x100 stack sp=8484EDD0 thread stack not fiber 0x7420 frame 256x0x38 array, AOT blocks verified matching rsb shift, T682A log capped 3 triggers, next loop probes r9 r8 r7 r4 node markers decompression context sp g_cur_fiber g_cur_thr grow thread stack 0x40000 0x100000 or force fiber stack -> 18.4676 [relevant: decompressor introduced], 18.4675 [relevant: batch_037], 18.4670 [relevant: fiber stack]

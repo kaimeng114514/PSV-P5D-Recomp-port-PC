@@ -4071,7 +4071,7 @@ static uint32_t fiber_exec_to_completion(RecState* s) {
     if (pc == 0x8120681Cu) ++g_c_681c;
     if (pc == 0x81206820u) ++g_c_6820;
     if (pc == 0x81206822u) ++g_c_6822;
-    if (pc == 0x8120682Au) { g_t2_on = 1; g_t2_n = 0; }
+    if (pc == 0x8120682Au) { static int _t2trig = 0; if (_t2trig++ < 3) { g_t2_on = 1; g_t2_n = 0; } else g_t2_on = 0; }
     if (g_t2_on && g_t2_n < 120) { ++g_t2_n; printf("[T682A] %08X r0=%08X r14=%08X sp=%08X\n", pc, s->r[0], s->r[14], s->r[13]); }
     if (pc == 0x81198BEAu) ++g_c_bea;
     if (pc == 0x811E5CDAu) ++g_c_5cda;
