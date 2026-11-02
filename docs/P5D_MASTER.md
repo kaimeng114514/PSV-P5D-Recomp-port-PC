@@ -1110,6 +1110,40 @@
 | M1092 | §18.4637: ★★★★★★★★★★★★ **blx LR 修复验证成功！错位返回链彻底消失：`[CB9276] lr=8115850C`、`[MOVCB-ENT] lr=8115850C`、`[MOVCB-EPI]` 保存槽 = 0x8115850C（正确）、`[ACFC-SAFE]=0`。运行首次稳定越过 64,278,346（WD 显示 64,278,999），并进入**全新阶段：CRI 文件系统加载**（CRILOG/FIOSW 首次出现）。新崩溃是"下游"问题：`criFsLoader_Create has been called before the library initialization` → BADMEM va=0x30 @0x81299570（criFs 加载器）。⇒ **movie 阶段正式通关，进入标题资源加载！** 下一层是 criFs 库初始化 HLE。**
 | M1093 | §18.4638: ★★★★★★★★ **criFs 层根因定位：`criFsLoader_Create`（FUN_8128DE06）检查 `DAT_815401B8`（loader 库初始化标志），为 0 时报 "called before the library initialization" 并返回 -1；而 `DAT_815401B8` 由 **FUN_8128D2BA（CriFsLoader_Initialize）** 设置——且该函数**正是从 FUN_8128399E（criFs_Initialize）内部 0x81283B56 调用的**。⇒ 我们 HLE 在 n=5000 强制的 criFs_Initialize 理论上会同时初始化 loader，但 m1136 里游戏在 n=1717 就已经报 "criFsLoader_Create 在库初始化前调用"（早于强制初始化），说明**初始化时序/状态在后续被破坏或从未生效**。M1093 加 `[CRIFST]` 状态探针（FECC/B8/C8/CC/D0）并在 n=61M 触发第二次 criFs_Initialize（P5D_CRIFSHLE2_AT），验证后重新初始化能否让 criFsLoader_Create 成功、崩溃后移。**
 | M1094 | §18.4639: ★★★★★★★★★ **找到 criFs_Initialize 无效的两个技术原因并修复：(1) `call_guest_cb2` 的内层调度循环遇到 **HLE stub** 时直接 `break`（主循环有 hle_call 回退，嵌套调用没有）——criFs_Initialize 内部任何 HLE 调用都会导致其中途退出；(2) `call_guest_cb2` 只设置 r0/r1，不设置 **r2**，而 criFs_Initialize(param_1=work, param_2, param_3) 的参数 3 是工作缓冲大小——r2 为垃圾值会走 else 分支并报 "E2009071603:Insufficient buffer size."，随后 finalize 把 FECC 清 0。m1137 `[CRIFST] criFsInitFECC=00000000 loaderB8=00000000` 正是"初始化失败并被回滚"的确证。M1094 修复：嵌套循环加 HLE 回退 + 新增 `call_guest_cb3(r0,r1,r2)`，强制 criFs_Initialize 与 CRIFSHLE2 都用 cb3(0,0,0) 调用。**
+| M1095 | §18.4640: ★★★★★★★★★★★★ **criFs 初始化修复验证成功，运行进入全新稳态：首次稳定越过全部旧崩溃点（n=69.2M，旧崩溃 64.28M），帧计数 ctr=446（此前最高 221），**标题页场景对象首次创建（[SCENE] p=85A8EA70 / 85A8F190，不再是 logo 的 859BF220/859BF940）**，CRI loader 活跃（[FIOSW] 带 loader 句柄 84D8EA68/84D8ECC0），真实 movie 文件成功打开（[IO] OPEN 'movie/c_p5d000.usm' size=54,432,288）。下一层：CRI 资源读取（ACB 音频等）与场景视图/GXM 绘制。**
+m1138（`out80m_m1138crifs3.txt`）关键证据：
+```
+[CRIFST] criFsInitFECC=00000001 loaderB8=00000001 poolC8=84D8EA00 poolCC=84D91000 D0=00000100
+        ↑ ★ criFs 真正初始化成功（此前全 0）
+[CRIFSHLE] criFs_Initialize(NULL,0,0) -> 00000000 n=5000 binit_after=816A0BA0
+[CRIFSHLE2] criFs_Initialize(NULL,0,0) -> FFFFFFFF n=61000000   ← 预期（"called twice"，FECC 已=1，无害）
+[IO] OPEN 'movie/c_p5d000.usm' -> fd=16385 …vita_extracted\movie\c_p5d000.usm size=54432288  ← ★ 真实文件成功服务
+[FIOSW] #5 at=8128E394 n=59667744 r0=84D8EA68 r1=0 r2=84856078 r3=0    ← ★ CRI loader 句柄工作
+[SCENE] p=85A8EA70 st=1 head0F=0 …  /  p=85A8F190 …                    ← ★ 新场景对象（标题页）
+[CRILOG] at=81279486 … msg=E2010052670:Can not open ACB file. (path = %s)  ← 音频容器未服务（下一层）
+FRAMEDUMP 最后 n=69205000 ctr=446 pc=81236D4A blk=8122CD90 fib=848463A0 gxm(b/e/p)=0/0/0
+[BADMEM]=0  [ACFC-SAFE]=0  [INDIRECT-MISS] 仅 1 条早期无害记录
+```
+**对比 m1136（criFs 未修）**：n 最高 64,275,000（0x811EFFD6/0x81299570 崩溃）；m1138 已到 69,205,000 且继续运行（CPU 1394s，无崩溃）。**帧数 221 → 446 翻倍。**
+**分析**：
+1. criFs_Initialize 修复（M1094：嵌套调用 HLE 回退 + call_guest_cb3 r2=0）真正生效：FECC/loaderB8/池指针全部就绪
+2. 游戏不再在 movie 完成后崩溃，而是**进入标题页初始化**：创建全新场景对象 85A8EA70/85A8F190（对应标题页 appGx 场景）
+3. CRI 文件系统已能工作（movie 文件真实读取成功）；音频 ACB 文件打开失败——这些资源路径可能不在我们服务的目录/CPK 映射中
+4. 仍未出现：每帧 GXM 绘制（gxm b/e/p=0/0/0）、场景视图（head0F=0）、[VIEWADD]/[CTX*]/[B6B12]/[ADA] 全 0
+NEXT：
+```
+① 查 ACB/title 资源的失败路径：在 CRILOG/loader 打开处打印真实路径字符串（r2 或结构字段）
+② 对照 data.cpk / vita_extracted 目录内容，补全 FIOS/criFs 路径映射（或从 CPK 直接提供）
+③ 观察 [SCENE] 新对象是否随后出现视图注册（head0F 非空）→ FUN_811C2964 → B6B12/ADA
+④ 若资源到位：2D 上下文/视图 → array2 → 每帧 SceGxmDraw/BeginScene → 画面
+⑤ 记录 criFs 修复里程碑（运行稳定性大幅提升）
+```
+验证：`out80m_m1138crifs3.txt`、`out80m_m1136blxfix.txt`、`recomp_harness.cpp`（M1094 修复）。 |
+| §18.4640 | The criFs initialization fix is verified and the run entered a completely new steady state: it stably passed all old crash points for the first time (n=69.2M vs the old crash at 64.28M), the frame counter reached ctr=446 (previous max 221), the TITLE-PAGE SCENE OBJECTS were created for the first time ([SCENE] p=85A8EA70 / 85A8F190 instead of the logo's 859BF220/859BF940), the CRI loader is active ([FIOSW] with loader handles 84D8EA68/84D8ECC0), and a real movie file was opened successfully ([IO] OPEN 'movie/c_p5d000.usm' size=54,432,288). "
+       "m1138 evidence: [CRIFST] criFsInitFECC=00000001 loaderB8=00000001 poolC8=84D8EA00 poolCC=84D91000 D0=00000100 (criFs truly initialized, previously all zero); [CRIFSHLE] criFs_Initialize(NULL,0,0) -> 00000000 n=5000 binit_after=816A0BA0; [CRIFSHLE2] criFs_Initialize(NULL,0,0) -> FFFFFFFF n=61000000 (expected 'called twice', FECC=1, harmless); [IO] OPEN 'movie/c_p5d000.usm' -> fd=16385 ...vita_extracted\\movie\\c_p5d000.usm size=54432288 (real file served); [FIOSW] #5 at=8128E394 n=59667744 r0=84D8EA68 r1=0 r2=84856078 r3=0 (CRI loader handle working); [SCENE] p=85A8EA70 st=1 head0F=0 / p=85A8F190 (new title-page scene objects); [CRILOG] at=81279486 msg=E2010052670:Can not open ACB file. (path = %s) (audio containers not served yet - next layer); FRAMEDUMP last n=69205000 ctr=446 pc=81236D4A blk=8122CD90 fib=848463A0 gxm(b/e/p)=0/0/0; [BADMEM]=0 [ACFC-SAFE]=0 [INDIRECT-MISS] only 1 early harmless entry. "
+       "Compared with m1136 (criFs not fixed): max n 64,275,000 with crashes at 0x811EFFD6/0x81299570; m1138 already at 69,205,000 and still running (CPU 1394s, no crash); frame count 221 -> 446 doubled. "
+       "Analysis: (1) the criFs_Initialize fix (M1094: nested-call HLE fallback + call_guest_cb3 r2=0) really works - FECC/loaderB8/pools are all ready; (2) the game no longer crashes after the movie but enters title-page initialization creating brand-new scene objects 85A8EA70/85A8F190; (3) the CRI filesystem works (movie file read successfully); the ACB audio file opens fail because those resource paths are not in our served directory/CPK mapping; (4) still absent: per-frame GXM draws (gxm b/e/p=0/0/0), scene views (head0F=0), [VIEWADD]/[CTX*]/[B6B12]/[ADA] all zero. "
+       "NEXT: (1) print the real failing ACB/title resource paths at the CRILOG/loader open (r2 or struct fields); (2) compare with data.cpk / vita_extracted contents and complete the FIOS/criFs path mapping (or serve directly from the CPK); (3) watch whether the new [SCENE] objects get view registrations (head0F non-empty) -> FUN_811C2964 -> B6B12/ADA; (4) once assets are in place: 2D context/views -> array2 -> per-frame SceGxmDraw/BeginScene -> picture; (5) record the criFs fix milestone (much better run stability). |
 m1137（`out80m_m1137crifs.txt`）证据：
 ```
 [CRIFST] criFsInitFECC=00000000 loaderB8=00000000 poolC8=00000000 poolCC=00000000 D0=00000000
@@ -499442,3 +499476,39 @@ NEXT：
 ANTI-FORGETTING ENTRY. Keywords: M1094 criFs_Initialize ineffective for two reasons - (1) call_guest_cb2's inner dispatch loop breaks immediately on any HLE stub (main loop has hle_call fallback, nested calls did not), so any HLE call inside criFs_Initialize aborts it midway; (2) call_guest_cb2 sets only r0/r1 not r2, and criFs_Initialize(param_1=work, param_2, param_3) uses param_3 as work-buffer size - a garbage r2 takes the else branch, logs E2009071603:Insufficient buffer size., then finalize clears FECC. m1137 [CRIFST] criFsInitFECC=00000000 loaderB8=00000000 poolC8=00000000 poolCC=00000000 D0=00000000 proves init failed and was rolled back; [CRIFSHLE] criFs_Initialize(NULL,0,0) -> 00000000 n=5000 binit_after=00000000. criFs_Initialize FUN_8128399E flow: if (param_1 == NULL) default config {0,0x10,0x10,2,0x10,0,0x10,0x10,0x100,0x2740100}, param_1=&config; FUN_812836FC version check; if (DAT_8153FECC != 0) 'called twice' return -1; DAT_8153FECC = 1; FUN_81283784(param_1,&local_68); if (local_68<0) FUN_812838ba finalize; if (param_2==0 && param_3==0) default work buffer path via FUN_81279b54(&DAT_816a0b80) and param_3=local_68; else if (param_3 < local_68) log E2009071603:Insufficient buffer size and finalize; later FUN_8128FFAE / FUN_8128A728 (loader init reaches FUN_8128D2BA). M1094 fix: (1) nested dispatch loops (2 identical patterns in call_guest_cb/call_guest_cb2/call_guest_cb3) get an HLE fallback: BlockFn fn = gbn(pc); if (!fn) { uint32_t _hp = hle_call(pc, s); if (_hp == 0xFFFFFFFFu || _hp == 0u || _hp >= 0xFFFFFF00u) break; pc = _hp; continue; } (2) new call_guest_cb3(RecState* s, uint32_t entry, uint32_t a0, uint32_t a1, uint32_t a2, int maxblocks) sets r0/r1/r2; (3) forced init now call_guest_cb3(&s, 0x8128399Eu, 0u, 0u, 0u, 4000000) = criFs_Initialize(NULL,0,0). Build: harness exit 0; exe relink exit 0 (57,119,944B 08:02:08). Verification run out80m_m1138crifs3.txt started. EXPECTED: [CRIFST] FECC=1 loaderB8=1 poolC8/CC non-zero -> criFs truly initialized; after the movie criFsLoader_Create succeeds -> title asset loading (FIOS/CRI reads). NEXT: read m1138 [CRIFST]/[CRIFSHLE]/[CRIFSHLE2] whether FECC/B8/C8/CC/D0 are non-zero; if successful watch whether the movie-after crash at 0x81299570 is gone and FIOSFILL opens new title files; if still crashing check the later criFs stage with pc-ring; then 2D context/views -> array2 -> GXM -> picture; record the criFs init fix.
 
 LOOKUP: M1094 criFs_Initialize ineffective due to nested call_guest_cb2 breaking on HLE stubs and not setting r2, fixed with hle_call fallback in nested loops plus call_guest_cb3(r0,r1,r2), forced call_guest_cb3(&s, 0x8128399Eu, 0u,0u,0u,4000000), [CRIFST] FECC/B8/C8/CC/D0 all zero in m1137, E2009071603 Insufficient buffer size, FUN_8128399E default config {0,0x10,0x10,2,0x10,0,0x10,0x10,0x100,0x2740100}, FUN_812838BA finalize clears DAT_8153FECC, exe 57,119,944B 08:02:08, out80m_m1138crifs3.txt, next check FECC=1 loaderB8=1 and movie-after crash gone -> §18.4638 [relevant: criFs chain], §18.4637 [relevant: movie passed], §18.4636 [relevant: blx fix]
+### 18.4640 PORT M1095: criFs 初始化修复验证成功——稳定越过全部旧崩溃点（n=69.2M），帧数翻倍（ctr=446），标题页场景对象首次创建
+
+1) m1138 关键证据：
+```
+[CRIFST] criFsInitFECC=00000001 loaderB8=00000001 poolC8=84D8EA00 poolCC=84D91000 D0=00000100  ← ★ 初始化成功
+[CRIFSHLE] criFs_Initialize(NULL,0,0) -> 00000000 n=5000 binit_after=816A0BA0
+[CRIFSHLE2] criFs_Initialize(NULL,0,0) -> FFFFFFFF n=61000000    ← 预期（called twice）
+[IO] OPEN 'movie/c_p5d000.usm' -> fd=16385 ...vita_extracted\movie\c_p5d000.usm size=54432288  ← ★ 真实文件
+[FIOSW] #5 at=8128E394 n=59667744 r0=84D8EA68 …                  ← CRI loader 句柄工作
+[SCENE] p=85A8EA70 st=1 head0F=0 … / p=85A8F190 …                ← ★ 标题页新场景对象
+[CRILOG] at=81279486 msg=E2010052670:Can not open ACB file. (path = %s)  ← 音频容器缺（下一层）
+FRAMEDUMP 最后 n=69205000 ctr=446 pc=81236D4A blk=8122CD90 fib=848463A0 gxm(b/e/p)=0/0/0
+[BADMEM]=0 [ACFC-SAFE]=0
+```
+2) 与 m1136 对比：
+- m1136：最高 n=64,275,000，随即 0x811EFFD6/0x81299570 崩溃
+- m1138：n=69,205,000 且仍在运行（CPU 1394s，无崩溃）→ **越过全部旧崩溃点**
+- 帧数：ctr 221 → **446**
+3) 分析：
+- criFs_Initialize 修复（M1094）真正生效：FECC=1/loaderB8=1/池指针就绪
+- 游戏进入**标题页初始化**（创建全新场景对象 85A8EA70/85A8F190）
+- CRI FS 工作（movie 文件真实读取成功）；ACB 音频文件打开失败（路径映射未覆盖）
+- 仍无每帧 GXM 绘制（gxm b/e/p=0/0/0）、无场景视图（head0F=0）、无 VIEWADD/CTX/B6B12/ADA
+4) NEXT：
+```
+① 打印失败的 ACB/title 资源真实路径
+② 对照 data.cpk / vita_extracted 补全路径映射
+③ 观察新 [SCENE] 对象是否出现视图注册（head0F 非空）→ FUN_811C2964 → B6B12/ADA
+④ 资源到位 → 2D 上下文/视图 → array2 → 每帧 SceGxmDraw/BeginScene → 画面
+⑤ 记录 criFs 修复里程碑
+```
+验证：`out80m_m1138crifs3.txt`、`out80m_m1136blxfix.txt`。
+
+ANTI-FORGETTING ENTRY. Keywords: M1095 criFs init fix verified - run entered a new steady state: first time stably passing all old crash points (n=69.2M vs old crash 64.28M), frame counter ctr=446 (previous max 221), TITLE-PAGE SCENE OBJECTS created for the first time ([SCENE] p=85A8EA70 / p=85A8F190 instead of logo scenes 859BF220/859BF940), CRI loader active ([FIOSW] with loader handles 84D8EA68/84D8ECC0), real movie file opened successfully ([IO] OPEN 'movie/c_p5d000.usm' size=54,432,288). m1138 evidence: [CRIFST] criFsInitFECC=00000001 loaderB8=00000001 poolC8=84D8EA00 poolCC=84D91000 D0=00000100; [CRIFSHLE] criFs_Initialize(NULL,0,0) -> 0 n=5000 binit_after=816A0BA0; [CRIFSHLE2] criFs_Initialize(NULL,0,0) -> FFFFFFFF n=61000000 (expected called twice); [IO] OPEN 'movie/c_p5d000.usm' -> fd=16385 ...vita_extracted\\movie\\c_p5d000.usm size=54432288; [FIOSW] #5 at=8128E394 n=59667744 r0=84D8EA68 r1=0 r2=84856078 r3=0; [SCENE] p=85A8EA70 st=1 head0F=0 / p=85A8F190; [CRILOG] at=81279486 E2010052670:Can not open ACB file. (path = %s); FRAMEDUMP last n=69205000 ctr=446 pc=81236D4A blk=8122CD90 fib=848463A0 gxm(b/e/p)=0/0/0; [BADMEM]=0 [ACFC-SAFE]=0 [INDIRECT-MISS] only 1 early harmless. Compared with m1136 (max n 64,275,000 with crashes at 0x811EFFD6/0x81299570): m1138 already n=69,205,000 and still running (CPU 1394s, no crash); frames 221 -> 446 doubled. Analysis: (1) the M1094 criFs_Initialize fix (nested-call HLE fallback + call_guest_cb3 r2=0) really works - FECC/loaderB8/pools ready; (2) game no longer crashes after the movie but enters title-page initialization creating new scene objects 85A8EA70/85A8F190; (3) CRI filesystem works (movie file read successfully); ACB audio opens fail because those paths are not in our served directory/CPK mapping; (4) still absent: per-frame GXM draws (gxm b/e/p=0/0/0), scene views (head0F=0), [VIEWADD]/[CTX*]/[B6B12]/[ADA] all zero. NEXT: print the real failing ACB/title paths at the CRILOG/loader open; compare data.cpk / vita_extracted and complete FIOS/criFs path mapping; watch whether the new [SCENE] objects get view registrations (head0F non-empty) -> FUN_811C2964 -> B6B12/ADA; once assets in place 2D context/views -> array2 -> per-frame SceGxmDraw/BeginScene -> picture; record the criFs fix milestone.
+
+LOOKUP: M1095 criFs init verified, n=69.2M passed old 64.28M crash, ctr=446 frames, title-page scene objects 85A8EA70 85A8F190 created, [CRIFST] FECC=1 loaderB8=1 poolC8=84D8EA00 poolCC=84D91000 D0=0x100, [IO] OPEN movie/c_p5d000.usm size 54,432,288, [FIOSW] r0=84D8EA68 loader handles, ACB file open fail E2010052670, no per-frame GXM (gxm b/e/p=0/0/0), scene head0F=0, VIEWADD/CTX7FB0/B6B12/ADA all zero, next print failing paths and complete path mapping then views/GXM -> §18.4639 [relevant: criFs fix], §18.4638 [relevant: criFs chain], §18.4637 [relevant: movie passed], §18.4636 [relevant: blx fix]
