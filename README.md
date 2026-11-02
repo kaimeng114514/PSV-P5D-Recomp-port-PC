@@ -30,56 +30,6 @@ CPU 采用 **AOT 静态重编译**（原版 ARM/Thumb 代码一次性翻译为 x
 | 场景链 S0→S4→RESULT | S0 ✅ / S1 进行中 | S0_LOGO 完整通过；S1_TITLE 资源加载（CPK 挂载→文件索引→title 素材）进行中；S2–S4 未到达 |
 | 单 exe 打包 / 移动端 | ~40% / 0% | 目前是单一 Windows 可执行 `recomp_harness.exe`（AOT+HLE 开发态）；正式打包/移动端未开始 |
 
-### 距离目标还有多远（诚实评估）
-
-| 关口 | 状态 | 剩余工作 | 粗略轮数 |
-|---|---|---|---|
-| CPK 挂载 + 文件索引 | **80%** | UTF 字段读取修正 → TOC 解析 → data.cpk 同样处理 | 5–10 |
-| criFs 流式读取 / 资源加载 | 70% | 文件索引建立后验证 title 素材真实读取 | ~10 |
-| GXM 真实画面（纹理/uniform/几何/ShaderPatcher） | 60% | **黑屏修复**、纹理上传、uniform 数据、顶点格式校验、真实管线选择 | 30–60 |
-| S1 标题画面（对象/动画/音效触发） | ~40% | 依赖上面两项 + 标题状态机 | 20–40 |
-| S2 MENU / S3 SELECT / S4 GAME / RESULT | 10–20% | 每个场景 20–50 轮（复用引擎能力） | 80–150 |
-| 音频（SceNgs/ACB 解码输出） | ~15% | ACF/ACB 加载、NGS 连接、真实输出 | 20–40 |
-| 输入 / 视频真解码 | 10–15% | Pad/Touch 接通；USM/AVC 硬解或软件解码 | 10–30 |
-| 单 exe 打包 / 移动端 | 40% / 0% | 发布形态、缓存、跨平台 | 10–20 |
-
-综合判断：**"第一帧真实标题画面"约还需 50–90 轮**（按当前每轮 1–2 个里程碑的节奏）；
-**完整 S0→RESULT 全流程**约还需 **200–400 轮**（主要不确定性在 GXM 渲染正确性与音频/输入接通）。
-当前进度 1079/2500 轮，时间预算充足；最大风险仍是 GXM 画面内容与真实视频/音频解码。
-
-### 最近关键里程碑（M1093–M1115，2026-11-02）
-
-- **M1121（18.4666）**：卡点根因链闭合——游戏不发任何文件请求（[RQMGR]/[APOPEN]/[FHOPEN]=0），ACF 未注册导致 DSP Bus Setting 失败（`DAT_8153FB30+0x44==0`，DSP 名 `BusSet_xrd722v2`）
-- **M1122（18.4667）**：新增 **IOPUMP_WAIT**（阻塞 DelayThread 内泵 reader，解决嵌套 fiber spin 冻结 g_blkcnt_total）；确认声音初始化真实执行（SNDINIT→ACFREG→DSPSET），ACF 读取不走主机 IO
-- **M1123（18.4668）**：★★★ **ACF 注册成功（`[CRILOG]=0`）**：FIOSFILL **ACF_FILL** 从 vita.cpk 直服 `sound/common.acf`（5152B）；关键坑=第 5–8 参数是 out-param **指针**必须写穿；声音线程 `thSeqSndAdx2` 启动（pc=81242D24），boot 链越过 init sound；新卡点=HLE-BADMEM va=0x28 @ blk 81198BEE（sceFiberSwitch 路径）
-
-- **M1119（18.4664）**：挂载后卡点初判为 CRI AtomEx（音频）初始化重试；新增 IOPUMP pstate 7\|8 完成 shim（新 reader 848E9678 完成）
-- **M1120（18.4665）**：卡点再精化——5000us 轮询其实是 **Fios 工作线程空转**（`FUN_811F22B8`，pending 任务链表 `DAT_81539754+0xC` 为空）；AtomEx 初始化只调用一次、无重试（`[ATOMEXINIT] cfg=848561F8`、`[FINSPOOL] param1=36`）；下一目标=找出 title 加载任务应在何处入队
-
-- **M1116（18.4661）**：UTF 字段误读根因——第 0 列名指针为空导致 `strcmp(null,key)==0`、所有字段读成 0x800；HLE strcmp 空指针语义修正（空指针=隐含 `"ContentOffset"`）→ TocOffset/TocSize 正确解析
-- **M1117（18.4662）**：TOC 解析失败根因——vita.cpk TOC 是裸 `@UTF`，被当成 `[0x10 段头][UTF]` → `+4=0x00` 误触发 XOR（滚动密钥 0x5F、`*=0x15`）把 UTF 数据就地破坏
-- **M1118（18.4663）**：★★★ **CPK 挂载完全打通**：TOCSZPATCH + TOCPAD + TOCFIX 三变换 → 分析器状态 3→4→0x10→0x11→0x14→0x16，`[FIOS] mounted data.cpk files=10555`、`mounted vita.cpk files=531`，标题素材枚举、选中 `title/title_p5.bin`；新卡点=标题文件异步加载轮询（`8125DDAE~8125DDF6`、等待参数 0x1388）
-
-- **M1093–M1098**：`P5D_CRIFSHLE` 之外的 **游戏自身 criFs 初始化链**跑通；binder 初始化、CRI FS 保持、file I/O 走真实 HLE
-- **M1104（18.4649）**：**`P5D_NGS=1` 成为必需项**——SceNgs HLE 缺失导致 NGS work size 返回 -1/39MB，触发 `E2009011903:Insufficient buffer size`，进而阻断后续流程
-- **M1105（18.4650）**：用 `batch_035` 补入 Ghidra 漏掉的函数 **`0x8128A576`**（criFs user-heap malloc 回调）→ `[INDIRECT-MISS]=0`，游戏开始打开真实 `vita.cpk`（`OPEN/PREAD` 2048B），运行从 n=181,670 推进到 12,600,000+
-- **M1106–M1108（18.4651–53）**：CPK 挂载卡点逐层定位——Analyzer 结构 `0x84B1B828`（`[0]=state [1]=reader [3][4]=缓冲`）；**锁不是卡点**（SWAP 原子探针证明所有锁成对）；真正卡点=**reader 状态 `+0xBC` 停在 1(loading)**，Load 状态机只被驱动 2 步
-- **M1109（18.4654）**：**HLE I/O 泵 `P5D_IOPUMP=1` 打通读完成**——直接泵 `FUN_8128D502(reader=0x848FC368)`，Load 状态机 1→2→3→7，完成 shim 置 `status=2`；**CPK Analyzer 首次进入分析 `FUN_81292794`**
-- **M1110（18.4655）**：缓冲 dump 证明 **HLE 读数据与真实 vita.cpk 100% 一致**；vita.cpk 是 **64 位头/变体 CPK**（`+0x08`=u64 文件大小、`+0x10`=`@UTF`）；需要解密/头变换
-- **M1111（18.4656）**：解密器注册链解码——`progress[0x20]/[0x21]` 来自 `FUN_8128EFF4(progress, reader+0xF4, reader+0xF8)`；全对象写 watch 证明游戏**从未注册解密器**（`reader+0xEC/0xF0=0`）
-- **M1112（18.4657）**：**HDRFIX 头变换成功**——64 位 CPK 头在内存中标准化为 32 位布局（`+0x04=0xFF`、`+0x08=UTF 表大小`、`+0x0C=0`），`E2011022806:CPK is broken` 错误**完全消失**（CRILOG=0）；发现 **CRI UTF 表字段是大端序**
-- **M1113（18.4658）**：**修复 AOT 翻译器通用 bug `LDRD rX,rY,[rX,#imm]`（34 处）**——第二字误用被覆盖的基址；修复后 **BADMEM 归零**、CPK 表读取解锁（`PREAD off=2048`）、游戏开始挂载 `data.cpk`
-- **M1114（18.4659）**：错误调用点全部定位——IFF 错误来自 `FUN_812B074C`（CRI UTF Retriever/VITA，期望大端 `@UTF`）；内存错误来自 CPK 分析器 `FUN_812938C6`；同时安装**通用动态 reader 泵**（扫描 `progress[0]=0x81540460` 签名）
-- **M1115（18.4660）**：**CPK 头分析成功（`[CPKRESULT] ret=0`）**；但解析字段全读成 0x800（64-bit 列变体被误读）；文件级分析找到**真实 TOC = 0x813EE800，大小 0x4C94（正好到 EOF）**，头 UTF 行真实值 `ContentOffset=0x800 / TocOffset=0x813EE800 / TocSize=0x4C94 / Align=0`
-
-### 当前阻塞（明确、可执行）
-
-1. **Fios 任务未入队（当前卡点，M1120）**：5000us 轮询 = Fios worker 空转循环 `FUN_811F22B8`（pending 链表 `DAT_81539754+0xC` 为空）；AtomEx 初始化已一次性完成（无重试），说明卡点不在音频初始化，而在**标题加载任务应入队而未入队**
-   - 下一步：探针 Fios 管理器（+0xC/+0x14/+0x18/+0xFBC/+0xFC0）、xref `FUN_811F0B82` 处理器与 fios 提交 API，找出 title 加载任务应在何处入队；检查 app 主 fiber 真实等待点（8127BC14/81283D62/8128E9DE = criFs 区）
-2. **之后**：TOC 加载 → 文件索引 → `mount status=2` → data.cpk 挂载（同样处理）→ title 素材读取
-3. **GXM 画面仍黑**（M940–945 遗留）：纹理全 dummy、uniform 全零、几何数据未校验；需补纹理上传/uniform/顶点通路与 ShaderPatcher
-4. **音频/输入/视频**：ACF/ACB 加载与 NGS 输出、Pad/Touch 输入流、真实 AVC 解码
-
 ## 最新标准运行环境（开发调试用，全部默认关闭）
 
 ```powershell
