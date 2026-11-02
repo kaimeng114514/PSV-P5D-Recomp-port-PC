@@ -1114,6 +1114,74 @@
 | M1096 | §18.4641: ★★★★★★★ **找到 CRI 资源读取失败的时序根因，并发现两个新线索：(1) CPK 挂载函数 `FUN_811820B6` 在 **n=1717** 就被调用（挂载 vita.cpk + data.cpk：FUN_81286EC4=criFsBinder 挂载、FUN_81287BBA 等待、FUN_8128853E 绑定），但我们的 HLE 强制 criFs_Initialize 在 **n=5000** 才执行——挂载早于库初始化，必然失败，导致后续 sound/*.acb、sound/common.acf 全部打不开；(2) 把初始化提前到 n=1000（m1139）又太早：游戏自己的 CRI allocator 设置流程还没走完，出现 `E2009072402:Can not change allocator. Allocated memory is still active.`（×多次），随后 BADMEM va=0x38 @0x8127B37A 崩溃（n=15524）。⇒ 需要精确的初始化时机，或者**让游戏自己的初始化流程完成**（boot 流程经过多轮修复后可能已能自然走到 CRI 初始化）。**
 | M1097 | §18.4642: ★★★★★★★ **关键实验 m1140：完全不设 P5D_CRIFSHLE（去掉 HLE 强制初始化），让游戏自己的 boot 流程完成 criFs 初始化与 CPK 挂载。基于 M1096 的新线索（allocator 错误信息证明游戏自身 CRI 初始化在 n=1717 附近运行；且经过 M1068~M1095 修复后 boot 流程已大幅健康化）。**
 | M1098 | §18.4643: ★★★★★★★ **m1140（不设 P5D_CRIFSHLE）早期结果：游戏自己的 boot 在 n=1717 调用 CPK 挂载（[FIOSX] at=811820B6 / 81286EC4）并**自己调用 criFs_Initialize**，但初始化失败：`E2009072703:Insufficient buffer size.`（说明游戏传入的工作缓冲大小 < criFs 计算所需 local_68）→ CPK 挂载失败 → `E2010052671:Can not open ACF file (sound/common.acf)`、`E2013081521:"BusSet_xrd722v2" is invalid DSP Bus Setting`。⇒ 游戏自身初始化路径存在但**参数不足**：需要查明游戏传给 criFs_Initialize 的 (config, work, size) 从哪来、为何 size 不够。M1098 扩展 [FIOSX] 探针到 0x8128399E（criFs_Initialize 入口）与 0x81235F30/0x81224638（两个调用点），打印 r0-r3 参数。**
+| M1099 | §18.4644: ★★★★★★★ **解码了游戏自己的 CRI 初始化完整调用链，并定位 "Insufficient buffer size" 的来源：`FUN_81257318`（CRI Atom Sound 初始化，358B）→ `FUN_81224160`（CRI 系统初始化，3270B：内含 E2009072703 检查 @0x81224960 与 criFs_Initialize 调用 @0x81224638）→ `FUN_8128399E`（criFs_Initialize）。m1141 的 [FIOSX] 探针未命中 0x8128399E/0x81235F30/0x81224638，说明这些是纯 guest 调用（非 HLE 拦截点）。另发现 `W2008121610:The binder module is not initialized.`（binder 未初始化，来自 FUN_8128715E/812871D0/812859FA 等 binder 函数）——CPK 挂载失败的直接原因。**
+**m1141（`out80m_m1141criinit.txt`，无强制初始化）证据**：
+```
+[CRILOG] n=1717 msg=E2009072703:Insufficient buffer size.（×3，来自 FUN_81224160 @0x81224960）
+[CRILOG] n=1717 msg=W2008121610:The binder module is not initialized.（×4）
+[CRIFMT] n=1717 fmt=E2010052671:Can not open ACF file. (path = %s) arg2=sound/common.acf
+[CRIFMT] n=1717 fmt=E2013081521:"%s" is invalid DSP Bus Setting. arg2=BusSet_xrd722v2
+[FIOSX] 只命中 811820B6/81286EC4（CPK 挂载），未命中 8128399E/81235F30/81224638（纯 guest 调用）
+max n=38,030,000（运行正常，无 BADMEM）
+```
+**FUN_81257318（CRI Atom Sound 初始化）反编译（`criinit3.txt`）**：
+```c
+void FUN_81257318(int *param_1, int param_2) {          // param_1=config, param_2=work buffer
+  DAT_8169E6E8 = "\nCRI Atom Sound/VITA Ver.1.54.06 Build:Jan 30 2018 18:45:35\n";
+  piVar4 = param_1;
+  if (param_1 == NULL) { local_40[] = {0x20, 0x20, 0x45160000, 0, 4}; piVar4 = local_40; }
+  iVar2 = *piVar4; iVar5 = piVar4[1];
+  iVar1 = FUN_81223EF6(piVar4[3]);                        // ★ 计算所需大小（依赖 config[3]）
+  iVar6 = *param_1; iVar8 = param_1[1];
+  iVar7 = iVar6 + 1;
+  SceLibc_6DC1F0D8(param_2, 0, iVar2*0x1B4 + iVar1 + iVar5*8 + 0x90);   // 清零工作缓冲
+  iVar1 = FUN_81224FB0();                                 // 是否已初始化
+  if (iVar1 == 0) {
+    iVar1 = FUN_81223EF6(param_1[3]);
+    FUN_81224160(param_1[3], 0, param_2, iVar1);          // ★ CRI 系统初始化（buffer, 大小=iVar1）
+    DAT_8153F988 = 1; param_2 += iVar1;
+  } else log("W2010062701:Atom library has already been initialized.");
+  … FUN_81257E60/FUN_81275404/FUN_81256FA0/FUN_81258044（各子模块初始化，使用后续缓冲）…
+  DAT_8153F984 = 1; FUN_81258110(param_1[2]);
+}
+```
+**FUN_81224160 关键片段（`criinit2.txt`）**：
+```c
+  else {
+    if (param_4 < local_98[0]) {                          // ★ 检查 buffer 大小
+      FUN_81278F96(0,"E2009072703:Insufficient buffer size.");   // @0x81224960
+      … 失败清理 …
+    }
+    param_4 = param_4 - local_98[0];
+    iVar2 = param_3 + local_98[0]; iVar4 = param_3;
+  }
+  DAT_8153F280 = iVar1;
+  iVar4 = FUN_8128399E(local_68 + 6, iVar4, local_98[0]); // ★ criFs_Initialize(config, buffer, size) @0x81224638
+  if (iVar4 != 0) { … "E2012051832:Atom library needs to be finalized after Mana library." … }
+```
+**⇒ 分析**：
+1. 游戏自己的初始化链存在且完整（Atom → CRI → criFs），需要 **(config, work buffer, buffer size)** 三者匹配
+2. "Insufficient buffer size" = 传入 `param_4`（来自 `FUN_81223EF6(config[3])`）小于 `local_98[0]`（FUN_81224160 内部计算的 criFs 需求）
+3. binder 未初始化（W2008121610）→ CPK 挂载直接失败
+4. **可能根因**：`FUN_81223EF6(config[3])` 或 `local_98[0]` 依赖某种运行时计算（如对齐/内存量），我们的 HLE 内存层（可用内存大小/分配返回值）可能导致两边不一致；或 config[3] 来自一个我们未正确提供的配置
+**⇒ NEXT**：
+```
+① 在 FUN_81224160 的 0x81224960 检查块加探针：打印 param_4、local_98[0]、config 指针及字段
+   （找到该块所在 batch，加 extern "C" 钩子打印 r0-r7）
+② 在 FUN_81257318 的 FUN_81223EF6 调用前后打印：config[3] 值、iVar1 返回值、SceLibc memset 大小
+③ 对比得出哪一侧数值不对（可能只需在 HLE 层修正某个返回值，让两侧一致）
+④ 若 config 来自游戏文件（CPK 读取）：确认该文件是否可读（可能需要先用 FIOSFILL 提供）
+⑤ 修复后：游戏自身初始化成功 → binder 初始化 → CPK 挂载成功 → ACB/ACF/title 素材读取
+备选：HLE 拦截 FUN_81224160 的 buffer 检查（不推荐，除非确认是纯 HLE 数值问题）
+```
+验证：`out80m_m1141criinit.txt`、`criinit2.txt`、`criinit3.txt`、`binder_refs.txt`、`criinit_refs.txt`。 |
+| §18.4644 | Decoded the game's own complete CRI initialization call chain and located the source of 'Insufficient buffer size': FUN_81257318 (CRI Atom Sound init, 358B) -> FUN_81224160 (CRI system init, 3270B: contains the E2009072703 check at 0x81224960 and the criFs_Initialize call at 0x81224638) -> FUN_8128399E (criFs_Initialize). The m1141 [FIOSX] probe did NOT hit 0x8128399E/0x81235F30/0x81224638, so those are plain guest calls (not HLE interception points). Also found W2008121610:The binder module is not initialized. (binder not initialized, from FUN_8128715E/812871D0/812859FA etc.) - the direct cause of the CPK mount failure. '
+       'm1141 (no forced init) evidence: [CRILOG] n=1717 E2009072703:Insufficient buffer size. (x3, from FUN_81224160 @0x81224960); [CRILOG] n=1717 W2008121610:The binder module is not initialized. (x4); [CRIFMT] n=1717 E2010052671:Can not open ACF file (path = sound/common.acf); [CRIFMT] n=1717 E2013081521:\"%s\" is invalid DSP Bus Setting (BusSet_xrd722v2); [FIOSX] only hit 811820B6/81286EC4 (CPK mount), did not hit 8128399E/81235F30/81224638 (plain guest calls); max n=38,030,000 (running normally, no BADMEM). '
+       'FUN_81257318 (CRI Atom Sound init) decompile: void FUN_81257318(int *param_1, int param_2) { DAT_8169E6E8 = \"\\nCRI Atom Sound/VITA Ver.1.54.06 Build:Jan 30 2018 18:45:35\\n\"; piVar4=param_1; if (param_1==NULL) { local_40[]={0x20,0x20,0x45160000,0,4}; piVar4=local_40; } iVar2=*piVar4; iVar5=piVar4[1]; iVar1=FUN_81223EF6(piVar4[3]); iVar6=*param_1; iVar8=param_1[1]; iVar7=iVar6+1; SceLibc_6DC1F0D8(param_2,0,iVar2*0x1B4+iVar1+iVar5*8+0x90); iVar1=FUN_81224FB0(); if (iVar1==0) { iVar1=FUN_81223EF6(param_1[3]); FUN_81224160(param_1[3],0,param_2,iVar1); DAT_8153F988=1; param_2+=iVar1; } else log W2010062701 Atom library has already been initialized; FUN_81257E60/FUN_81275404/FUN_81256FA0/FUN_81258044 submodule inits; DAT_8153F984=1; FUN_81258110(param_1[2]); }. '
+       'FUN_81224160 key fragment: else { if (param_4 < local_98[0]) { FUN_81278F96(0,\"E2009072703:Insufficient buffer size.\"); /* @0x81224960 */ ...fail cleanup... } param_4 = param_4 - local_98[0]; iVar2 = param_3 + local_98[0]; iVar4 = param_3; } DAT_8153F280 = iVar1; iVar4 = FUN_8128399E(local_68 + 6, iVar4, local_98[0]); /* criFs_Initialize(config, buffer, size) @0x81224638 */ if (iVar4 != 0) { log \"E2012051832:Atom library needs to be finalized after Mana library.\" ... }. '
+       'Analysis: (1) the game own init chain exists and is complete (Atom -> CRI -> criFs) requiring (config, work buffer, buffer size) to match; (2) Insufficient buffer size = param_4 (from FUN_81223EF6(config[3])) is smaller than local_98[0] (the criFs requirement computed inside FUN_81224160); (3) binder not initialized (W2008121610) -> CPK mount fails directly; (4) possible root cause: FUN_81223EF6(config[3]) or local_98[0] depends on some runtime computation (alignment/available memory) and our HLE memory layer (available memory size/allocation return values) may cause the two sides to disagree, or config[3] comes from a configuration we do not provide correctly. '
+       'NEXT: (1) add a probe at the 0x81224960 check block in FUN_81224160 printing param_4, local_98[0], config pointer and fields (find the block in its batch, add an extern \"C\" hook printing r0-r7); (2) print config[3], the FUN_81223EF6 return value and the SceLibc memset size before/after the FUN_81223EF6 call in FUN_81257318; (3) compare which side is wrong (maybe only some HLE return value must be corrected to make both sides agree); (4) if config comes from a game file (CPK read), confirm the file is readable (may need FIOSFILL to provide it first); (5) after the fix the game own init succeeds -> binder init -> CPK mount succeeds -> ACB/ACF/title assets read. Fallback: HLE-intercept the FUN_81224160 buffer check (not recommended unless confirmed to be a pure HLE numeric issue). '
+       'Verification: out80m_m1141criinit.txt, criinit2.txt, criinit3.txt, binder_refs.txt, criinit_refs.txt. |
 m1140（`out80m_m1140noforced.txt`，无强制初始化）证据：
 ```
 [FIOSX] #1 at=811820B6 n=1717 …   ← CPK 挂载被调用
@@ -499783,3 +499851,63 @@ NEXT：
 ANTI-FORGETTING ENTRY. Keywords: M1098 m1140 no forced init early result - the game's own boot at n=1717 calls the CPK mount ([FIOSX] at=811820B6 / 81286EC4) and also calls criFs_Initialize itself, but that init FAILS with E2009072703:Insufficient buffer size. (the work-buffer size the game passes is smaller than the required local_68) -> CPK mount fails -> E2010052671:Can not open ACF file (sound/common.acf) and E2013081521:\"BusSet_xrd722v2\" is invalid DSP Bus Setting; [CRILOG] n=1717 E2011102800:Reference counter has been already 0. and E10062220/E10062222; [FIOS] mounted data.cpk files=10555 / vita.cpk files=531 (host-side only); [BADMEM]=0. Analysis: the game's own init path exists but has insufficient parameters; forced init n=5000 is too late (mount already failed), forced init n=1000 is too early (conflicts with the game's own criFs_SetAllocator: E2009072402/2404); the correct fix may be to make the game's own criFs_Initialize succeed with a sufficient buffer - find where its config/work buffer come from and if they come from an init step we skipped, complete that step. M1098 probe extended the [FIOSX] address filter to: if (_a0 == 0x811820B6u || _a0 == 0x81286EC4u || _a0 == 0x81287BBAu || _a0 == 0x81286B7Eu || _a0 == 0x8128399Eu || _a0 == 0x81235F30u || _a0 == 0x81224638u) { printf(\"[FIOSX] #%d at=%08X n=%u late=%d r0=%08X r1=%08X r2=%08X r3=%08X fib=%08X\\n\", ...); }. Build: harness exit 0; exe 57,119,944B 08:50:24; run out80m_m1141criinit.txt started (no CRIFSHLE). NEXT: read m1141 [FIOSX] at=8128399E / 81235F30 / 81224638 (criFs_Initialize entry r0 config, r1, r2 work size; call-site r0-r3); read the config fields (+0 type, +4 numLoaders, +8 etc.) to compute the local_68 requirement and compare with the passed size; find the work buffer allocation source (if HLE malloc, check whether the returned block size matches the request - maybe we allocate but record a wrong size so the passed size is too small); fix by providing a correct work buffer so the game's own init succeeds; then CPK mount succeeds -> ACB/ACF/title assets -> [SCENE] views -> GXM draws. Fallback: HLE init before the game calls it (n<1717, default config works) but first understand the SetAllocator conflict (E2009072402).
 
 LOOKUP: M1098 game's own criFs_Initialize fails Insufficient buffer size at n=1717, m1140 no forced init, [FIOSX] at=811820B6 81286EC4, E2009072703, E2010052671 Can not open ACF file sound/common.acf, E2013081521 BusSet_xrd722v2 invalid DSP Bus Setting, forced init n=5000 too late n=1000 too early allocator conflict E2009072402, extended FIOSX probe to 0x8128399E 0x81235F30 0x81224638, exe 57,119,944B 08:50:24, out80m_m1141criinit.txt, next read config/work size and provide sufficient buffer -> §18.4642 [relevant: m1140 experiment], §18.4641 [relevant: timing root cause], §18.4639 [relevant: criFs init fix]
+### 18.4644 PORT M1099: 解码游戏自身 CRI 初始化链（FUN_81257318→FUN_81224160→criFs_Initialize）与 Insufficient buffer 来源
+
+1) m1141（无强制初始化）证据：
+```
+[CRILOG] n=1717 msg=E2009072703:Insufficient buffer size.（×3，FUN_81224160 @0x81224960）
+[CRILOG] n=1717 msg=W2008121610:The binder module is not initialized.（×4）
+[CRIFMT] n=1717 fmt=E2010052671:Can not open ACF file. (path = sound/common.acf)
+[CRIFMT] n=1717 fmt=E2013081521:"%s" is invalid DSP Bus Setting. (BusSet_xrd722v2)
+[FIOSX] 未命中 8128399E/81235F30/81224638（纯 guest 调用，非 HLE 拦截点）
+max n=38,030,000（运行正常，无 BADMEM）
+```
+2) FUN_81257318（CRI Atom Sound 初始化）：
+```c
+void FUN_81257318(int *param_1, int param_2) {
+  DAT_8169E6E8 = "\nCRI Atom Sound/VITA Ver.1.54.06 Build:Jan 30 2018 18:45:35\n";
+  piVar4 = param_1;
+  if (param_1 == NULL) { local_40[] = {0x20,0x20,0x45160000,0,4}; piVar4 = local_40; }
+  iVar2 = *piVar4; iVar5 = piVar4[1];
+  iVar1 = FUN_81223EF6(piVar4[3]);                        // 所需大小（依赖 config[3]）
+  SceLibc_6DC1F0D8(param_2, 0, iVar2*0x1B4 + iVar1 + iVar5*8 + 0x90);
+  iVar1 = FUN_81224FB0();
+  if (iVar1 == 0) {
+    iVar1 = FUN_81223EF6(param_1[3]);
+    FUN_81224160(param_1[3], 0, param_2, iVar1);          // ★ buffer + 大小
+    DAT_8153F988 = 1; param_2 += iVar1;
+  } else log("W2010062701:Atom library has already been initialized.");
+  … 子模块初始化（FUN_81257E60/FUN_81275404/FUN_81256FA0/FUN_81258044）…
+  DAT_8153F984 = 1; FUN_81258110(param_1[2]);
+}
+```
+3) FUN_81224160 关键：
+```c
+  else {
+    if (param_4 < local_98[0]) {                          // ★ buffer 大小检查
+      FUN_81278F96(0,"E2009072703:Insufficient buffer size.");   // @0x81224960
+      … 失败清理 …
+    }
+    param_4 -= local_98[0]; iVar2 = param_3 + local_98[0]; iVar4 = param_3;
+  }
+  iVar4 = FUN_8128399E(local_68 + 6, iVar4, local_98[0]); // criFs_Initialize @0x81224638
+```
+4) 分析：
+- 游戏自身初始化链完整（Atom→CRI→criFs），要求 (config, buffer, size) 匹配
+- "Insufficient buffer size" = param_4（FUN_81223EF6(config[3]) 结果）< local_98[0]（FUN_81224160 内部 criFs 需求）
+- binder 未初始化（W2008121610）→ CPK 挂载直接失败
+- 可能根因：两侧数值依赖运行时计算（对齐/内存量），HLE 内存层可能导致不一致；或 config[3] 来自未正确提供的配置
+5) NEXT：
+```
+① 0x81224960 块加探针：param_4 / local_98[0] / config 字段
+② FUN_81257318 的 FUN_81223EF6 前后打印：config[3]、返回值、memset 大小
+③ 对比定位哪侧数值错误
+④ 若 config 来自文件 → 确认可读（可能需要 FIOSFILL）
+⑤ 修复后：游戏自身初始化成功 → binder → CPK 挂载 → 素材读取
+备选：HLE 拦截 buffer 检查（不推荐）
+```
+验证：`out80m_m1141criinit.txt`、`criinit2.txt`、`criinit3.txt`、`binder_refs.txt`、`criinit_refs.txt`。
+
+ANTI-FORGETTING ENTRY. Keywords: M1099 decoded the game's own complete CRI init chain and located Insufficient buffer size: FUN_81257318 (CRI Atom Sound init) -> FUN_81224160 (CRI system init, contains E2009072703 check @0x81224960 and criFs_Initialize call @0x81224638) -> FUN_8128399E (criFs_Initialize); the m1141 [FIOSX] probe did NOT hit 0x8128399E/0x81235F30/0x81224638 (plain guest calls, not HLE interception points); also found W2008121610:The binder module is not initialized. (from FUN_8128715E/812871D0/812859FA etc.) as the direct cause of CPK mount failure. m1141 evidence: [CRILOG] n=1717 E2009072703:Insufficient buffer size. (x3, FUN_81224160 @0x81224960); [CRILOG] n=1717 W2008121610:The binder module is not initialized. (x4); [CRIFMT] n=1717 E2010052671:Can not open ACF file (path = sound/common.acf); [CRIFMT] n=1717 E2013081521:\"%s\" is invalid DSP Bus Setting (BusSet_xrd722v2); [FIOSX] only 811820B6/81286EC4; max n=38,030,000 no BADMEM. FUN_81257318 decompile: void FUN_81257318(int *param_1, int param_2) { DAT_8169E6E8 = \"\\nCRI Atom Sound/VITA Ver.1.54.06 Build:Jan 30 2018 18:45:35\\n\"; piVar4=param_1; if (param_1==NULL) { local_40[]={0x20,0x20,0x45160000,0,4}; piVar4=local_40; } iVar2=*piVar4; iVar5=piVar4[1]; iVar1=FUN_81223EF6(piVar4[3]); SceLibc_6DC1F0D8(param_2,0,iVar2*0x1B4+iVar1+iVar5*8+0x90); iVar1=FUN_81224FB0(); if (iVar1==0) { iVar1=FUN_81223EF6(param_1[3]); FUN_81224160(param_1[3],0,param_2,iVar1); DAT_8153F988=1; param_2+=iVar1; } else log W2010062701; submodule inits FUN_81257E60/FUN_81275404/FUN_81256FA0/FUN_81258044; DAT_8153F984=1; FUN_81258110(param_1[2]); }. FUN_81224160 key: else { if (param_4 < local_98[0]) { FUN_81278F96(0,\"E2009072703:Insufficient buffer size.\"); /* @0x81224960 */ ...cleanup... } param_4 -= local_98[0]; iVar2 = param_3 + local_98[0]; iVar4 = param_3; } iVar4 = FUN_8128399E(local_68 + 6, iVar4, local_98[0]); /* @0x81224638 */ if (iVar4 != 0) { log E2012051832:Atom library needs to be finalized after Mana library. }. Analysis: the game own init chain is complete (Atom -> CRI -> criFs) requiring (config, buffer, size) to match; Insufficient buffer size = param_4 (FUN_81223EF6(config[3])) < local_98[0] (criFs requirement computed inside FUN_81224160); binder not initialized -> CPK mount fails; possible root cause is a HLE memory-layer numeric mismatch (alignment/available memory) or config[3] from a config we do not provide. NEXT: (1) add a probe at the 0x81224960 check block printing param_4, local_98[0], config pointer and fields (find the block in its batch, add an extern \"C\" hook); (2) print config[3], the FUN_81223EF6 return and the SceLibc memset size in FUN_81257318; (3) compare which side is wrong; (4) if config comes from a game file confirm it is readable (FIOSFILL may be needed); (5) after the fix the game own init succeeds -> binder init -> CPK mount -> assets read. Fallback: HLE-intercept the buffer check (not recommended).
+
+LOOKUP: M1099 CRI init chain FUN_81257318 FUN_81224160 FUN_8128399E, E2009072703 Insufficient buffer size @0x81224960, criFs_Initialize call @0x81224638, W2008121610 binder module not initialized, FUN_81223EF6 required size FUN_81224FB0 already init, config[3], m1141 no forced init max n=38,030,000, next probe 0x81224960 param_4 local_98[0] and FUN_81223EF6 return values -> §18.4643 [relevant: m1140 result], §18.4642 [relevant: no-forced experiment], §18.4641 [relevant: CPK mount timing]
