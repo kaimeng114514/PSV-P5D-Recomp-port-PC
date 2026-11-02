@@ -3104,7 +3104,28 @@ extern "C" uint32_t hle_call(uint32_t stub_va, RecState* s) {
       uint32_t size = s->r[2]; uint8_t* dst = GP(s->r[1]); size_t n = 0;
       if (dst && size) { if (hh.isMem) { if (off < (int64_t)hh.mem.size()) { size_t avail = (size_t)((int64_t)hh.mem.size() - off); n = size < avail ? size : avail; std::memcpy(dst, hh.mem.data() + off, n); } }
         else if (hh.fp) { _fseeki64(hh.fp, off, SEEK_SET); n = std::fread(dst, 1, size, hh.fp); } }
+      // M1118 TOCPAD: TOC-like reads may extend 0x18 bytes past EOF (synthetic header/table growth).
+      if (n < size && n > 0x1000u && dst && dst[0] == 0x40 && dst[1] == 0x55 && dst[2] == 0x54 && dst[3] == 0x46) {
+        std::memset(dst + n, 0, size - n);
+        if (g_io_pn < 40) { printf("[TOCPAD] dst=%08X off=%lld req=%u got=%zu -> zero-padded\n", s->r[1], (long long)off, size, n); fflush(stdout); }
+        n = size;
+      }
       hh.pos = off + (int64_t)n; r0 = (uint32_t)n; g_last_pread_dst = s->r[1];
+      // M1118 TOCFIX: the CPK TOC section parser treats the read buffer as [0x10-byte section
+      // header][UTF table] (four_cc at +0, XOR flag at +4, LE32 size at +8). vita.cpk's TOC region
+      // is a bare @UTF table (no header), so byte+4==0 wrongly triggers the rolling-XOR decoder and
+      // corrupts the UTF data. Build a synthetic TOC section header and shift the UTF table to +0x10.
+      if (dst && n > 0x1000u && dst[0] == 0x40 && dst[1] == 0x55 && dst[2] == 0x54 && dst[3] == 0x46) {
+        uint32_t _utfsz = ((uint32_t)dst[4] << 24) | ((uint32_t)dst[5] << 16) | ((uint32_t)dst[6] << 8) | (uint32_t)dst[7];
+        std::memmove(dst + 0x10, dst, n);
+        dst[0] = 0x54; dst[1] = 0x4F; dst[2] = 0x43; dst[3] = 0x20;   // "TOC "
+        dst[4] = 0xFF; dst[5] = 0; dst[6] = 0; dst[7] = 0;             // no-XOR flag
+        uint32_t _sz = (uint32_t)n;                                    // section size (LE)
+        dst[8] = (uint8_t)(_sz & 0xFF); dst[9] = (uint8_t)((_sz >> 8) & 0xFF);
+        dst[10] = (uint8_t)((_sz >> 16) & 0xFF); dst[11] = (uint8_t)((_sz >> 24) & 0xFF);
+        dst[12] = 0; dst[13] = 0; dst[14] = 0; dst[15] = 0;
+        if (g_io_pn < 40) { printf("[TOCFIX] dst=%08X n=%zu utfsz=%08X hdr=TOC size=%08X\n", s->r[1], n, _utfsz, _sz); fflush(stdout); }
+      }
       if (g_io_pn++ < 20) { printf("[IO] PREAD fd=%u off=%lld size=%u got=%zu\n", s->r[0], (long long)off, size, n); fflush(stdout); }
       { static int _pd=0; if (_pd++ < 6) { uint32_t _dst = s->r[1]; uint8_t* _d = GP(_dst); printf("[PREAD-DST] dst=%08X:", _dst); if (_d) for (int _i=0;_i<8;++_i){ uint32_t _v=0; std::memcpy(&_v,_d+_i*4,4); printf(" %08X",_v);} printf("\n"); fflush(stdout); } }
       break; }
@@ -3797,6 +3818,23 @@ static uint32_t fiber_exec_to_completion(RecState* s) {
                   uint32_t _ts = _u14be + 8u, _z = 0u;
                   { uint8_t* _q = GP(_dst); if (_q) { std::memcpy(_q + 0x08u, &_ts, 4); std::memcpy(_q + 0x0Cu, &_z, 4); } }
                   if (_ip_n < 20) { printf("[HDRFIX] dst=%08X utf_size(BE)=%08X table_size=%08X blk=%u\n", _dst, _u14be, _ts, g_blkcnt_total); fflush(stdout); }
+                // M1118 TOCSZPATCH: 64-bit CPK variant (original +4==0xFFFFFFFF): the TOC region is a bare
+                // @UTF table without the 0x10-byte section header the analyzer always expects. Grow the parsed
+                // TocSize by 0x18 so the TOC read covers [synthetic header][full table] (0x10 + size + 8).
+                // Header UTF row layout: 4 x u64 BE at buffer+0x44: ContentOffset@0x44, TocOffset@0x4C,
+                // TocSize@0x54, Align@0x5C.
+                { uint32_t _dm4 = 0; { uint8_t* _q = GP(_dst + 4u); if (_q) std::memcpy(&_dm4, _q, 4); }
+                  if (_dm4 == 0xFFFFFFFFu) {
+                    uint8_t* _row = GP(_dst + 0x54u);
+                    if (_row) {
+                      uint64_t _old = ((uint64_t)_row[0]<<56)|((uint64_t)_row[1]<<48)|((uint64_t)_row[2]<<40)|((uint64_t)_row[3]<<32)
+                                    |((uint64_t)_row[4]<<24)|((uint64_t)_row[5]<<16)|((uint64_t)_row[6]<<8)|(uint64_t)_row[7];
+                      uint64_t _new = _old + 0x18u;
+                      _row[0]=(uint8_t)(_new>>56); _row[1]=(uint8_t)(_new>>48); _row[2]=(uint8_t)(_new>>40); _row[3]=(uint8_t)(_new>>32);
+                      _row[4]=(uint8_t)(_new>>24); _row[5]=(uint8_t)(_new>>16); _row[6]=(uint8_t)(_new>>8); _row[7]=(uint8_t)_new;
+                      if (_ip_n < 20) { printf("[TOCSZPATCH] TocSize 0x%llX -> 0x%llX\n", (unsigned long long)_old, (unsigned long long)_new); fflush(stdout); }
+                    }
+                  } }
                 }
               }
               uint32_t _sz = call_guest_cb2(s, 0x8128F6C8u, _prog, 0u, 200000);

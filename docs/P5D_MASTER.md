@@ -1133,6 +1133,58 @@
 | M1115 | §18.4660: ★★★★★★★★ **CPK 头分析已成功（`[CPKRESULT] ret=00000000`），但解析出的字段全错（ContentOffset/TocOffset/TocSize/Align 全部=0x800）；同时用文件级分析**找到了 vita.cpk 真正的 TOC：在文件末尾 0x813EE800，大小 0x4C94（正好到 EOF），UTF 表内含文件条目（内容偏移 0x7A31E0、0x01E9A320、0x03B8C400 等）。头 UTF 行数据实际是 4 列 u64 大端：ContentOffset=0x800、TocOffset=0x813EE800、TocSize=0x4C94、Align=0 —— 说明 Analyzer 的 UTF 字段读取把每列都读成了第 1 列值（0x800）**
 | M1116 | §18.4661: ★★★★★★★★ **UTF 字段误读根因找到并修复：UTF 实例第 0 列的名称为空指针（列名偏移 0 被解析成 null），strcmp(null,key) 返回"相等" → 所有字段查找都返回第 0 列 index=0。修正 HLE strcmp 的空指针语义后：`[UTFVAL] r0=813EE800`（TocOffset）、`r0=00004C94`（TocSize）全部正确；**真实 TOC 读取成功：`PREAD fd=16385 off=2168383488(0x813EE800) size=19604 got=19604`**。遗留：TOC 加载后的 UTF 解析仍报 `E06100301:Invalid IFF header`（four_cc 不匹配，r3=0x77C3）与 `E2009010913:Need more memory`**
 | M1117 | §18.4662: ★★★★★★★★ **TOC 解析失败根因锁定：TOC 解析器把 TOC 缓冲当成"[0x10 段头][UTF]"，而 vita.cpk 的 TOC 区是裸 @UTF → 段头字段被误读（+4=0x00 触发 XOR 解密，滚动密钥 0x5F、每字节 *=0x15；大小字段误读为 0x36）→ 从 buffer+0x10 开始的 UTF 数据被就地 XOR 成乱码 → UTF retriever 在 buffer+0x10 读到乱码、报 four_cc 不匹配。已用 PREAD-DST 证明读入数据本身完全正确（buffer 0x84B1C800 = '@UTF'+0x4C94…），并拿到 XOR 算法原文**
+| M1118 | §18.4663: ★★★★★★★★★★ **CPK 挂载完全打通！`[FIOS] mounted data.cpk files=10555` / `mounted vita.cpk files=531`，`[CRILOG]=0`，标题素材名全部枚举（title/title_p5.bin、title.spr4、title.p3/logo.tga …），并选中第一项 'title/title_p5.bin'。三项 HLE 变换协同完成：TOCSZPATCH（64 位变体 TocSize +0x18）+ TOCPAD（EOF 短读零填充）+ TOCFIX（合成 "TOC " 段头并把 UTF 后移 +0x10，跳过误触发的 XOR）**
+m1183 证据（`out80m_m1183tocsz.txt`，精简版 `m1183_tocsz_key.txt`）：
+```
+[TOCSZPATCH] TocSize 0x4C94 -> 0x4CAC
+[TOCPAD] dst=84B1C800 off=2168383488 req=19628 got=19604 -> zero-padded
+[TOCFIX] dst=84B1C800 n=19628 utfsz=00004C94 hdr=TOC size=00004CAC
+[UTFRETR] #1 utf=84B1C810 len=00004C9C  ✓ TOC UTF 头通过 size 检查
+[UTFRETR-BYTES] 84B1C810: 46545540 944C0000 …  ✓ 正确 @UTF（不再被 XOR 破坏）
+[IO] PREAD vita.cpk off=2168383488 size=19628 got=19628（含零填充）
+[CPKANA] state: 3 → 4 → 0x10 → 0x11 → 0x14 → 0x16   ★ 分析器状态机全部推进
+[IO] OPEN app0:/data/data.cpk fd=16386 size=1913750232
+[IO] PREAD data.cpk off=2048 size=471576 got=471576（data.cpk TOC 标准 "TOC " 头，自动通过）
+[UTFRETR] #2 utf=84B21E10 len=00000350（data.cpk 头 UTF）
+[UTFRETR] #3 utf=84B23110 len=00073208（data.cpk TOC UTF）
+[CPKRESULT] #1 p2 slots: TocOffset=0x800, TocSize=0x73218 ✓
+[CRILOG] 0 ★ 全部 CRI 错误消失
+[IOPUMP-READER] discovered reader=848FC5C0（第二个 reader，data.cpk）
+[IOPUMP-DONE] reader=848FC368/848FC5C0 state=7 -> status=2
+[FIOS] mounted data.cpk files=10555
+[FIOS] mounted vita.cpk files=531        ★★★ 两个 CPK 挂载成功、文件索引建立
+[CPKNAME] title/title_p5.bin / title/title_p3.bin / title/title.spr4 / title/title.bin
+[CPKNAME] title/p5/title.spr6 / title/p3/onpu_04.tga / onpu_01.tga / logo_mask.tga / logo.tga
+[CPKNAME] title/p3/effect_07.tga … effect_01.tga / circle.tga / title/logo.bin / title/c_title_p3.bin
+[CPKNAME] staff/staff_p5d.bin / staff/c_staff_p5d.bin / sound/lip/e210080.arc …
+[ACF] total=0（CRI Atom ACF 仍为 0，音频后续）
+[CPKNAME] picked first entry: 'title/title_p5.bin' (total 10555)
+```
+**三项 HLE 变换（本里程碑核心）**：
+1. **TOCSZPATCH**：64 位 CPK 变体（原 `buffer+4==0xFFFFFFFF`）的头 UTF 行（buffer+0x44 起 4×u64 BE：ContentOffset@0x44 / TocOffset@0x4C / TocSize@0x54 / Align@0x5C）把 TocSize +0x18（0x4C94→0x4CAC）：覆盖 [合成 0x10 段头][UTF 表 size+8]
+2. **TOCPAD**：TOC 读取越过 EOF 0x18 字节时零填充尾部并返回完整请求长度
+3. **TOCFIX**：读入数据以 `@UTF` 开头（TOC 变体裸表）时：`memmove(dst+0x10, dst, n)`，写合成段头 `"TOC " + 0xFF000000 + LE32(n) + 0` → 段头 +4=0xFF 不触发 XOR、UTF 位于 +0x10；data.cpk 的 TOC 本身以 "TOC " 开头不会被变换（自动走标准路径）
+**新卡点（挂载后）**：标题文件选中后游戏进入等待/重试循环：
+```
+[WAITP] va=812B2A50 r0=00001388(5000) ring: 8125DDAE 8125DDDA 8125DDF6 ×N  fib=848463A0
+[WD] pcring: 8127B85C 8127B36A 8127B370 8127BB28 8127BE36 8127BE4E 812B2AE0 8127BE56 8127BB2E 8127B374 8127B860 81283C8A 81230C2A 8127C0E8 8127C0F4 812B2A80
+两 fiber：fib=84836300 pc=811E5CDA r0=2（等待）；fib=848463A0 在 8125DDAE~8125DDF6 轮询
+```
+⇒ 疑似 title 文件异步加载/状态轮询未完成（需要继续用 IOPUMP 泵新 reader 或补 HLE 语义）；`[ACF] total=0` 音频仍空。
+**NEXT**：
+```
+① 定位 8125DDxx 轮询的等待对象（event/sema/flag 地址）与 812B2A50 语义（0x1388 参数）
+② 检查挂载后是否出现新的 criFs reader（现只发现 2 个：848FC368 vita TOC / 848FC5C0 data TOC）——title 文件内容读取可能走新 reader
+③ 若是 AES/XOR 加密文件数据（CPK 内含 crypt flag），补 HLE 解密路径
+④ 打通后：title/title_p5.bin 内容读取 → 标题资源解析 → title.spr4/tga 纹理 → GXM 绘制标题第一帧
+```
+验证：`out80m_m1183tocsz.txt`（162MB 全量）、`m1183_tocsz_key.txt`（精简证据）、`m1183_tocsz_stderr_tail.txt`。 |
+| §18.4663 | CPK mounting is fully working: [FIOS] mounted data.cpk files=10555, mounted vita.cpk files=531, [CRILOG]=0, all title asset names enumerated (title/title_p5.bin, title.spr4, title.p3/logo.tga ...) and the first entry title/title_p5.bin selected. Three HLE transforms cooperate: TOCSZPATCH (64-bit variant TocSize +0x18), TOCPAD (zero-fill the short read at EOF) and TOCFIX (synthesize the TOC section header and shift the UTF table by +0x10, skipping the wrongly-triggered XOR). '
+       'm1183 evidence: [TOCSZPATCH] TocSize 0x4C94 -> 0x4CAC; [TOCPAD] dst=84B1C800 off=2168383488 req=19628 got=19604 -> zero-padded; [TOCFIX] dst=84B1C800 n=19628 utfsz=00004C94 hdr=TOC size=00004CAC; [UTFRETR] #1 utf=84B1C810 len=00004C9C (TOC UTF header size check passed); [UTFRETR-BYTES] 84B1C810: 46545540 944C0000 ... correct @UTF (no longer XOR-corrupted); [IO] PREAD vita.cpk off=2168383488 size=19628 got=19628; [CPKANA] state: 3 -> 4 -> 0x10 -> 0x11 -> 0x14 -> 0x16 (analyzer state machine fully advanced); [IO] OPEN app0:/data/data.cpk fd=16386 size=1913750232; [IO] PREAD data.cpk off=2048 size=471576 got=471576 (standard TOC header, passes automatically); [UTFRETR] #2 utf=84B21E10 len=00000350 (data.cpk header UTF); [UTFRETR] #3 utf=84B23110 len=00073208 (data.cpk TOC UTF); [CPKRESULT] #1 p2 slots: TocOffset=0x800, TocSize=0x73218; [CRILOG] 0 (all CRI errors gone); [IOPUMP-READER] discovered reader=848FC5C0 (second reader, data.cpk); [FIOS] mounted data.cpk files=10555; [FIOS] mounted vita.cpk files=531 (both CPKs mounted, file index built); [CPKNAME] title/title_p5.bin / title/title_p3.bin / title/title.spr4 / title/title.bin / title/p5/title.spr6 / title/p3/onpu_04.tga ...; [ACF] total=0; [CPKNAME] picked first entry: title/title_p5.bin (total 10555). '
+       'Three HLE transforms: (1) TOCSZPATCH: for the 64-bit CPK variant (original buffer+4==0xFFFFFFFF) the header UTF row (4 x u64 BE from buffer+0x44: ContentOffset@0x44, TocOffset@0x4C, TocSize@0x54, Align@0x5C) gets TocSize +0x18 (0x4C94->0x4CAC) to cover [synthetic 0x10 section header][UTF table size+8]; (2) TOCPAD: when the TOC read extends 0x18 bytes past EOF, zero-fill the tail and report the full requested length; (3) TOCFIX: when the read data starts with @UTF (bare TOC of the variant), memmove(dst+0x10, dst, n) and write the synthetic section header TOC + 0xFF000000 + LE32(n) + 0 so the +4=0xFF flag skips the XOR and the UTF sits at +0x10; data.cpk TOCs already start with TOC so they are untouched (automatic standard path). '
+       'New blocker (after mounting): after selecting the title file the game enters a wait/retry loop: [WAITP] va=812B2A50 r0=00001388(5000) ring: 8125DDAE 8125DDDA 8125DDF6 xN fib=848463A0; [WD] pcring: 8127B85C 8127B36A 8127B370 8127BB28 8127BE36 8127BE4E 812B2AE0 8127BE56 8127BB2E 8127B374 8127B860 81283C8A 81230C2A 8127C0E8 8127C0F4 812B2A80; two fibers: fib=84836300 pc=811E5CDA r0=2 (waiting), fib=848463A0 polling 8125DDAE~8125DDF6. Suspected: the title-file async load/status polling never completes (keep pumping new readers via IOPUMP or add the missing HLE semantics); [ACF] total=0 (audio still empty). '
+       'NEXT: (1) identify the object the 8125DDxx poll waits on (event/sema/flag address) and the 812B2A50 semantics (0x1388 arg); (2) check for new criFs readers after mount (only 2 found so far: 848FC368 vita TOC / 848FC5C0 data TOC) - title file content reads may use a new reader; (3) if the file data is AES/XOR encrypted (CPK crypt flag), add the HLE decryption path; (4) then: read title/title_p5.bin content -> parse title resources -> title.spr4/tga textures -> GXM draws the first title frame. '
+       'Verification: out80m_m1183tocsz.txt (full 162MB), m1183_tocsz_key.txt (trimmed evidence), m1183_tocsz_stderr_tail.txt. |
 m1181 证据（`out80m_m1181utfretr.txt`）：
 ```
 [PREAD-DST] dst=84B1C800: 46545540 944C0000 36000000 D82D0000 8C4C0000 00000000 16000600 13020000
@@ -501632,3 +501684,40 @@ if (param_3[4] == '\0') {
 ANTI-FORGETTING ENTRY. Keywords: M1117 TOC parse failure root cause - vita.cpk TOC region is a bare @UTF but the parser treats the TOC buffer as [0x10-byte section header][UTF]; raw @UTF makes byte+4=0x00 which triggers XOR decryption (rolling key 0x5F, key*=0x15 per byte) and the size field is misread as 0x36, so 54 bytes from buffer+0x10 are XORed into garbage and the UTF retriever reports four_cc mismatch. m1181: [PREAD-DST] dst=84B1C800: 46545540 944C0000 36000000 D82D0000 8C4C0000 00000000 16000600 13020000 (read data exactly matches file @0x813EE800); [UTFRETR] #0 utf=84B1BC10 len=00000082 OK; [UTFRETR] #1 utf=84B1C810 len=00004C84 (TOC buffer+0x10); [UTFRETR-BYTES] 84B1C810: 3FEBCB5F C3775BAF C547EDFF F0157B4F ... garbage; [CRILOG] E06100301 Invalid IFF header r3=0x77C3; [CPKRESULT] ContentOffset=0x800 TocOffset=0x813EE800 TocSize=0x4C94; [IO] PREAD off=2168383488 size=19604. XOR source in FUN_81292794: pbVar7 = param_3+0x10; uVar8 = LE32(param_3+8); if (param_3[4]==0) { key=0x5F; do { *p ^= key; key*=0x15; } while (++i < uVar8); } - header buffer +4=0xFF so no XOR, TOC buffer +4=0x00 so XOR triggered wrongly with misread size 0x36. UTF library callers: FUN_81290FAA, FUN_8129167C, FUN_81290C2A, FUN_81292794, FUN_812A56F8. NEXT: decompile FUN_8129167C/FUN_81290FAA/FUN_81290C2A to find TOC header four_cc/size/XOR logic; implement HLE TOC normalization after the PREAD (detect TOC read near EOF starting with @UTF, write TOC section header TOC +0xFF000000 +LE32(table size+8)+0 and move UTF to dst+0x10, verify 16 spare bytes); then TOC parse -> file index -> mount status=2 -> data.cpk. Verification: out80m_m1181utfretr.txt, cpkana_full.txt, toctu.txt, utfcallers.txt.
 
 LOOKUP: M1117 TOC bare @UTF treated as [header][UTF], XOR rolling 0x5F key*=0x15, misread size 0x36, buffer+0x10 garbage, UTFRETR 84B1C810 garbage, PREAD-DST 84B1C800 correct @UTF, CPU charset CPK header +4 0xFF no XOR, UTF library callers FUN_8129167C FUN_81290FAA FUN_81290C2A, next HLE TOC normalization with TOC header and shift UTF +0x10 -> 18.4661 [relevant: UTF fixes], 18.4660 [relevant: TOC location], 18.4657 [relevant: HDRFIX]
+### 18.4663 PORT M1118: ★ CPK 挂载完全打通 —— data.cpk 10555 文件 + vita.cpk 531 文件，标题素材枚举，选中 title/title_p5.bin
+
+1) 三项 HLE 变换（TOC 段头规范化）：
+```
+TOCSZPATCH：64 位变体头 UTF 行（buffer+0x44 起 4×u64 BE）TocSize += 0x18（0x4C94→0x4CAC）
+TOCPAD   ：TOC 读取越过 EOF 0x18B → 零填充尾部、返回完整请求长度
+TOCFIX   ：裸 @UTF TOC → memmove(dst+0x10,dst,n) + 写合成段头 "TOC "+0xFF000000+LE32(n)+0
+           （+4=0xFF 使 XOR 分支不触发；data.cpk 的 "TOC " 头不受影响）
+```
+2) m1183 结果：
+```
+[TOCSZPATCH] TocSize 0x4C94 -> 0x4CAC
+[TOCPAD] dst=84B1C800 off=2168383488 req=19628 got=19604 -> zero-padded
+[TOCFIX] dst=84B1C800 n=19628 utfsz=00004C94 hdr=TOC size=00004CAC
+[UTFRETR] #1 utf=84B1C810 len=00004C9C   ✓
+[UTFRETR-BYTES] 84B1C810: 46545540 944C0000 …  ✓ 正确 @UTF
+[CPKANA] 3 → 4 → 0x10 → 0x11 → 0x14 → 0x16   ★ 状态机全部推进
+[CRILOG] 0                                   ★ 错误全消
+[FIOS] mounted data.cpk files=10555
+[FIOS] mounted vita.cpk files=531             ★★★ 挂载成功
+[CPKNAME] title/title_p5.bin / title.spr4 / title.p3/logo.tga …（19 个标题素材）
+[CPKNAME] picked first entry: 'title/title_p5.bin' (total 10555)
+[ACF] total=0（音频 ACF 仍空）
+```
+3) 新卡点：挂载后进入轮询等待（详见 ROW 的 [WAITP]/[WD] 证据）
+4) NEXT：
+```
+① 8125DDxx 轮询等待对象 + 812B2A50（0x1388）语义
+② 挂载后新 reader（title 文件内容读取）
+③ 文件数据 AES/XOR 加密可能性
+④ title 内容 → 资源解析 → 纹理 → GXM 首帧标题
+```
+验证：`out80m_m1183tocsz.txt`、`m1183_tocsz_key.txt`、`m1183_tocsz_stderr_tail.txt`。
+
+ANTI-FORGETTING ENTRY. Keywords: M1118 CPK mount fully working - [FIOS] mounted data.cpk files=10555 and vita.cpk files=531, CRILOG=0, all title asset names enumerated, first entry title/title_p5.bin picked. Three HLE transforms: TOCSZPATCH (64-bit variant TocSize +0x18 at header UTF row buffer+0x54: 0x4C94->0x4CAC), TOCPAD (zero-fill TOC read past EOF and report full requested length), TOCFIX (for bare @UTF TOC reads: memmove(dst+0x10,dst,n) then synthetic header TOC +0xFF000000 +LE32(n)+0 so +4=0xFF skips the XOR; the UTF now sits at +0x10). m1183 evidence: [TOCSZPATCH] TocSize 0x4C94 -> 0x4CAC; [TOCPAD] dst=84B1C800 off=2168383488 req=19628 got=19604; [TOCFIX] n=19628 utfsz=00004C94 hdr=TOC size=00004CAC; [UTFRETR] #1 utf=84B1C810 len=00004C9C; [UTFRETR-BYTES] 84B1C810: 46545540 944C0000; [CPKANA] states 3,4,0x10,0x11,0x14,0x16; [CRILOG] 0; [IO] PREAD data.cpk off=2048 size=471576; [UTFRETR] #2 utf=84B21E10 len=0x350; #3 utf=84B23110 len=0x73208; [CPKRESULT] #1 TocOffset=0x800 TocSize=0x73218; [IOPUMP-READER] reader=848FC5C0; [FIOS] mounted; [CPKNAME] title/title_p5.bin etc; [ACF] total=0. New blocker after mount: wait/retry loop [WAITP] va=812B2A50 r0=0x1388 ring 8125DDAE 8125DDDA 8125DDF6 fib=848463A0; [WD] pcring 8127B85C ... 812B2A80; two fibers fib=84836300 pc=811E5CDA waiting and fib=848463A0 polling 8125DDAE~8125DDF6. NEXT: identify the object the 8125DDxx poll waits on and the 812B2A50 semantics, look for new criFs readers after mount, add HLE decryption if file data is AES/XOR encrypted, then read title/title_p5.bin and parse title resources/textures for the first GXM title frame. Verification: out80m_m1183tocsz.txt, m1183_tocsz_key.txt, m1183_tocsz_stderr_tail.txt.
+
+LOOKUP: M1118 CPK mount complete [FIOS] data.cpk 10555 vita.cpk 531, TOCSZPATCH 0x4C94 to 0x4CAC, TOCPAD zero-fill, TOCFIX synthetic TOC header shift UTF +0x10, [UTFRETR] 84B1C810 len 4C9C, [CPKANA] 3 4 0x10 0x11 0x14 0x16, CRILOG 0, title assets CPKNAME, title/title_p5.bin picked, ACF total=0, new wait loop 8125DDAE ring and 812B2A50 0x1388 -> 18.4662 [relevant: TOC XOR], 18.4661 [relevant: UTF fields], 18.4660 [relevant: real TOC]

@@ -11,18 +11,18 @@ CPU 采用 **AOT 静态重编译**（原版 ARM/Thumb 代码一次性翻译为 x
 
 ---
 
-## 当前状态（2026-11-02，里程碑 **M1115**；系统层约 85%，端到端目标约 55–65%）
+## 当前状态（2026-11-02，里程碑 **M1118**；系统层约 88%，端到端目标约 58–68%）
 
 **一句话**：原版 eboot 已在 PC 上原生（AOT）跑起来，S0_LOGO 完整通过；
-当前主线卡在 **CRI FS 的 CPK 挂载/文件索引**——vita.cpk 头分析已经成功（`ret=0`），
-真实 TOC 位置已定位（EOF 前 `0x813EE800`，大小 `0x4C94`），剩下最后一个 UTF 字段读取 bug。
+**CRI FS 的 CPK 挂载/文件索引已完全打通**——`data.cpk`（10,555 文件）+ `vita.cpk`（531 文件）
+双双挂载成功，标题素材名全部枚举并选中 `title/title_p5.bin`；当前卡点推进到**标题文件异步加载的轮询等待**。
 
 | 模块 | 完成度 | 当前状态（M1115 实测） |
 |---|---|---|
 | ARM/Thumb → x86-64 **AOT 静态重编译** | ~95% | **230,252 个基本块 / 12,921 个函数 / 36 个宿主批次**；`[NOFN]=0`、`[INDIRECT-MISS]=0`、`[BADMEM]=0`；本阶段修复两个**通用翻译器 bug**：① 全局 `LDRD rX,rY,[rX,#imm]`（34 处）② 此前的 `[pc,#imm]` 字面量加载（485 处） |
 | 原版 eboot/SELF **原样加载** | ~95% | ELF 段映射、导入表/NID 解析、模块启动全部可用；`module_start=0x81198464`、`IMG_VA_BASE=0x80600000`；完整 boot 链：S0_LOGO → 启动 USM 影片（guest 软件解码）→ 应用世界恢复 |
 | **HLE 系统 API 接管** | ~80% | 内存/线程/fiber/信号量/事件标志/消息/文件/GXM/音频(NGS)/CRI 日志；本阶段新增：**SceNgs HLE**（`P5D_NGS=1`，修复 39MB 假尺寸）、**HLE I/O 泵**（`P5D_IOPUMP=1`，打通 criFs 读完成）、**HDRFIX**（64 位 CPK 头标准化）、动态 reader 泵、CRILOG 调用点增强 |
-| **CRI FS / CPK 虚拟文件系统** | ~80% | `criFs_Initialize` → binder 初始化 → 打开真实 `vita.cpk`(2,168,403,092B) / `data.cpk`(1,913,750,232B)；**CPK 头分析已成功（`[CPKRESULT] ret=0`）**；真实 TOC 已定位 `0x813EE800`/`0x4C94`；待修：UTF 64-bit 列字段读取（见"当前阻塞"） |
+| **CRI FS / CPK 虚拟文件系统** | ~95% | **CPK 挂载完全打通**：`[FIOS] mounted data.cpk files=10555` / `mounted vita.cpk files=531`，`[CRILOG]=0`；标题素材名全部枚举（`title/title_p5.bin`、`title.spr4`、`title.p3/logo.tga` …）并选中 `title/title_p5.bin`；三项 HLE 变换：TOCSZPATCH（64 位变体 TocSize +0x18）+ TOCPAD（EOF 零填充）+ TOCFIX（合成 TOC 段头、UTF 后移 0x10） |
 | **GXM → Vulkan** | ~60% | 真实 SPIR-V 管线（GXP→SPIR-V manifest 4331 条）创建成功，BeginScene→Draw→RT→swapchain→`vkQueuePresentKHR result=0` 全链执行；**画面内容仍为黑**（纹理 dummy / uniform 零值 / 顶点数据未校验，M940–945 遗留问题） |
 | 音频（SceNgs / CRI Atom） | ~15% | SceNgs HLE 已能给出正确 work size（修复 E2009011903）；ACF/ACB 加载与真实解码/输出仍缺 |
 | 输入（SceCtrl / SceTouch） | ~10% | Pad/Touch HLE 骨架可用、可注入按键；游戏侧输入流未接通 |
@@ -49,6 +49,10 @@ CPU 采用 **AOT 静态重编译**（原版 ARM/Thumb 代码一次性翻译为 x
 
 ### 最近关键里程碑（M1093–M1115，2026-11-02）
 
+- **M1116（18.4661）**：UTF 字段误读根因——第 0 列名指针为空导致 `strcmp(null,key)==0`、所有字段读成 0x800；HLE strcmp 空指针语义修正（空指针=隐含 `"ContentOffset"`）→ TocOffset/TocSize 正确解析
+- **M1117（18.4662）**：TOC 解析失败根因——vita.cpk TOC 是裸 `@UTF`，被当成 `[0x10 段头][UTF]` → `+4=0x00` 误触发 XOR（滚动密钥 0x5F、`*=0x15`）把 UTF 数据就地破坏
+- **M1118（18.4663）**：★★★ **CPK 挂载完全打通**：TOCSZPATCH + TOCPAD + TOCFIX 三变换 → 分析器状态 3→4→0x10→0x11→0x14→0x16，`[FIOS] mounted data.cpk files=10555`、`mounted vita.cpk files=531`，标题素材枚举、选中 `title/title_p5.bin`；新卡点=标题文件异步加载轮询（`8125DDAE~8125DDF6`、等待参数 0x1388）
+
 - **M1093–M1098**：`P5D_CRIFSHLE` 之外的 **游戏自身 criFs 初始化链**跑通；binder 初始化、CRI FS 保持、file I/O 走真实 HLE
 - **M1104（18.4649）**：**`P5D_NGS=1` 成为必需项**——SceNgs HLE 缺失导致 NGS work size 返回 -1/39MB，触发 `E2009011903:Insufficient buffer size`，进而阻断后续流程
 - **M1105（18.4650）**：用 `batch_035` 补入 Ghidra 漏掉的函数 **`0x8128A576`**（criFs user-heap malloc 回调）→ `[INDIRECT-MISS]=0`，游戏开始打开真实 `vita.cpk`（`OPEN/PREAD` 2048B），运行从 n=181,670 推进到 12,600,000+
@@ -63,10 +67,8 @@ CPU 采用 **AOT 静态重编译**（原版 ARM/Thumb 代码一次性翻译为 x
 
 ### 当前阻塞（明确、可执行）
 
-1. **CPK 头 UTF 字段读取 bug（最后一步）**：
-   - 头分析返回成功，但 `ContentOffset/TocOffset/TocSize` 全部读成 `0x800`（第 1 列值）→ Analyzer 用 `TocOffset=0x800` 去读 TOC（读到 USM 影片 `CRID` 数据）→ `E06100301:Invalid IFF header`
-   - 真实 TOC 在 **`0x813EE800`**（EOF 前 `0x4C94` 字节），文件级已解析出真实值
-   - 修复路径：探针 `FUN_812AEA4C`（列名查找）/`FUN_812AF434`（取值），确认 64-bit 列解析错误 → 在 **HDRFIX** 中把 UTF 行数据规范化，或直接把正确 `TocOffset/TocSize` 写入分析结果结构
+1. **标题文件异步加载轮询（新卡点）**：挂载成功后选中 `title/title_p5.bin`，游戏进入轮询等待：`[WAITP] va=812B2A50 r0=0x1388`、ring `8125DDAE 8125DDDA 8125DDF6`（fib=848463A0），另一 fiber `84836300 pc=811E5CDA` 等待；疑似标题文件内容读取的异步完成未到达
+   - 下一步：定位 8125DDxx 轮询的等待对象（event/sema/flag）+ `812B2A50` 语义；检查挂载后新 criFs reader；确认文件数据是否需要 AES/XOR 解密
 2. **之后**：TOC 加载 → 文件索引 → `mount status=2` → data.cpk 挂载（同样处理）→ title 素材读取
 3. **GXM 画面仍黑**（M940–945 遗留）：纹理全 dummy、uniform 全零、几何数据未校验；需补纹理上传/uniform/顶点通路与 ShaderPatcher
 4. **音频/输入/视频**：ACF/ACB 加载与 NGS 输出、Pad/Touch 输入流、真实 AVC 解码
