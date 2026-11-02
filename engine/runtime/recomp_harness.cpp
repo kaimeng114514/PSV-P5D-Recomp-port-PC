@@ -3097,6 +3097,7 @@ extern "C" uint32_t hle_call(uint32_t stub_va, RecState* s) {
         else if (hh.fp) { _fseeki64(hh.fp, off, SEEK_SET); n = std::fread(dst, 1, size, hh.fp); } }
       hh.pos = off + (int64_t)n; r0 = (uint32_t)n;
       if (g_io_pn++ < 20) { printf("[IO] PREAD fd=%u off=%lld size=%u got=%zu\n", s->r[0], (long long)off, size, n); fflush(stdout); }
+      { static int _pd=0; if (_pd++ < 6) { uint32_t _dst = s->r[1]; uint8_t* _d = GP(_dst); printf("[PREAD-DST] dst=%08X:", _dst); if (_d) for (int _i=0;_i<8;++_i){ uint32_t _v=0; std::memcpy(&_v,_d+_i*4,4); printf(" %08X",_v);} printf("\n"); fflush(stdout); } }
       break; }
     case 0x812B28B0u:                                                 // 18.4270: sceIoLseek(fd,off,whence)
     case 0x812B2990u: {                                               // sceIoLseek32
@@ -3772,6 +3773,9 @@ static uint32_t fiber_exec_to_completion(RecState* s) {
             { uint8_t* _q = GP(0x848FC368u + 0x130u); if (_q) { uint32_t _v = _sz; std::memcpy(_q, &_v, 4); } }
             { uint8_t* _q = GP(0x848FC368u + 0xBCu); if (_q) { uint32_t _v = 2u; std::memcpy(_q, &_v, 4); } }
             if (_ip_n < 20) printf("[IOPUMP-DONE] state=7 size=%08X reader=%08X -> status=2 blk=%u\n", _sz, 0x848FC368u, g_blkcnt_total);
+            { uint32_t _addrs[3] = { 0x848E8EE8u, 0x84B1BA00u, 0x84B1BC00u };
+              for (int _a=0;_a<3;++_a) { uint8_t* _q = GP(_addrs[_a]); printf("[IODATA] %08X:", _addrs[_a]); if (_q) for (int _i=0;_i<8;++_i){ uint32_t _v=0; std::memcpy(&_v,_q+_i*4,4); printf(" %08X",_v);} printf("\n"); }
+              fflush(stdout); }
             break;
           }
         }

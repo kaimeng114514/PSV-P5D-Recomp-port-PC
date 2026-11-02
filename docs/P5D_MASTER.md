@@ -1125,6 +1125,65 @@
 | M1107 | §18.4652: ★★★★★★★ **锁不是卡点——SWAP 原子操作探针显示所有相关锁 acquire/release 成对正常（CPK Analyzer busy 0x84B1B984、binder mount lock 0x849064AC、reader I/O 对象锁 0x848FC424/0x848FC434 均正常）；真正卡点是 reader 状态 +0xBC 永远没有从 1(loading) 变到 2/3(完成)。另修复一个重要探针基础设施 bug：batch_022 因缺少 `harness_cur_fiber2` 声明编译失败但链接仍复用旧 .o，导致此前 IOSTAT/IOSUB/SWAP 探针"神秘不命中"。**
 | M1108 | §18.4653: ★★★★★★★★ **CPK 首次读的加载状态机只被驱动了 2 步就停：FUN_8128F04E（criFs 异步 Load 状态机）实测只被调用 2 次（state=1 初始化 → state=2 提交读、in-flight 置 1），之后没有第 3 次调用；progress 对象状态 1→2→3，但 reader +0xBC 仍停在 1(loading)，完成处理永远不发生。同时确认：全局 I/O 接口指针 DAT_815401D4/D8 = 0（未注册），但实际读路径用每请求 vtable（progress 对象 [0]=0x81540460，guest 函数指针 81294FDC=stat/81295016=open/8129513F…）。**
 | M1109 | §18.4654: ★★★★★★★★ **HLE I/O 泵成功打通"读完成"：CPK Analyzer 已进入分析函数 FUN_81292794（首次 [CPKANAL] 命中）！但新卡点=分析报 `E2011022806:CPK Analyzer::Cannot possibly analyze the CPK File. This CPK is broken.`（头数据缓冲内容不对）。**
+| M1110 | §18.4655: ★★★★★★★ **缓冲 dump 证明 HLE 读数据 100% 正确（与真实 vita.cpk 前 64 字节逐字节一致），"CPK is broken" 的真正原因浮出水面：CPK Analyzer 在 +0x08 处读取的是"表大小"，而 vita.cpk 该字段=0x813F3494(文件大小) → 触发 `if (0x800 < uVar8+0x10) 返回错误 1（CPK broken）`；vita.cpk 的 +0x04=0xFFFFFFFF、+0x08..0x0F=64 位文件大小 0x813F3494，说明它是"64 位/加密变体 CPK"，正常流程应在 load state 4 调用解密回调 param_1[0x20] 处理后才能给 Analyzer 解析。我们泵的完成 shim 跳过了 state 4（因为 param_1[0x20]==0），所以 Analyzer 看到原始头 → 报 broken。**
+m1167 证据（`out80m_m1167iodata.txt`）：
+```
+[PREAD-DST] dst=84B1BC00: 204B5043 FFFFFFFF 813F3494 00000000 46545540 7A000000 2C000000 4C000000
+[IODATA] 84B1BC00: 同上行（读完成时内容仍一致）
+真实文件 C:\dev\p5d_rom\data\vita.cpk 前 64 字节：
+  +00 204B5043  ('CPK ')
+  +04 FFFFFFFF
+  +08 813F3494   = 2168403092 = 文件大小
+  +0C 00000000
+  +10 46545540   ("@UTF" CRI UTF 表头)
+  +14 7A000000  +18 2C000000  +1C 4C000000  +20 72000000
+对比 data.cpk（1.9GB，正常结构）：+08 = 0x350（小表大小），可作为"正常 CPK 头"对照
+[CPKANAL] #0 r0=84B1B84C r1=84B1B858 r2=84B1BC00 r3=84B1B990 lr=81293CB8
+[CRILOG] E2011022806:CPK Analyzer::Cannot possibly analyze the CPK File. This CPK is broken. ×3 (n=1717)
+[IOPUMP-DONE] state=7 size=848E8EE8 reader=848FC368 -> status=2 blk=31500（第二次 size=00000000）
+[BADMEM] va=0x0000006B block=0x8128F04E（泵第二次用已失效 progress 指针）
+```
+**FUN_81292794（Analyzer）反编译关键段（`cpkana.txt`）**：
+```c
+pbVar7 = param_3 + 0x10;                        // UTF 表在 +0x10
+if (magic != "CPK ") { iVar3 = 2; goto err; }   // 2 = Not a CPK format
+local_38 = param_3[10]<<16; local_40 = param_3[8];
+uVar8 = local_38 | local_40 | param_3[11]<<24 | param_3[9]<<8;   // ★ 读取 +0x08 的 32 位作为"表大小"
+if (0x800 < uVar8 + 0x10) { iVar3 = 1; goto err; }                 // ★ 表大小 > 0x800-0x10 → 1 = CPK broken
+if (param_3[4] == '\0') {                                          // +0x04==0 才做 CRI 标准 XOR 解密
+   bVar12 = 0x5F; do { *pbVar7 ^= bVar12; bVar12 *= 0x15; pbVar7++; } while (... < uVar8);
+}
+FUN_812AFF10(); FUN_812AEA4C("UpdateDateTime" / "ContentOffset"/"ContentSize"/"TocOffset"/... )   // 解析 UTF 字段
+```
+**F04E 的 state 4 = 解密路径**（`ioop.txt`）：
+```c
+if (iVar1 == 4) {
+  iVar1 = (*(code *)param_1[0x20])(param_1[0x21], param_1[0x18], param_1[0x15], ...);  // 解密回调
+  if (iVar1 != 0) { "E2015042403:Decryption failure." state=8 }
+  ... 根据 +0x1B/+0x6D/+0x6E 等 → 5/6/7
+}
+LAB_8128F3C4: if (*(char*)(p+0x1a)==0) {        // 无错误
+  if (param_1[0x20] == 0) {                     // ★ 无解密回调 → 跳过 state 4 → 直接 state 7
+     ... state = 7
+```
+**⇒ 结论**：vita.cpk 是 **64 位表头/加密变体 CPK**：
+- 正常路径：load 读 0x800 字节到 0x84B1BC00 → F04E state 4 用解密回调（progress[0x20]/[0x21]）把头部变换成"表大小在 +0x08、+0x04=0"的标准形式 → 再交给 FUN_81292794
+- 我们的泵让 F04E 走了 [0x20]==0 分支（无解密）→ state 7 → 直接标记完成 → Analyzer 看到原始头 → +0x08=文件大小 > 0x800 → "CPK is broken"
+**NEXT**：
+```
+① 找 progress[0x20]/[0x21] 解密回调的设置者（FUN_8128F776 参数 / criFsBinder 解密器注册 API / 游戏初始化里的 CriFsBinder_SetDecryptor 之类），确认是"HLE 未实现注册 API"还是"我们泵绕过了注册调用"
+② 反编译 FUN_8128F776（Load 主函数）看 decrypt cb 从哪里来；查 FUN_8128E394 的 param_9..12
+③ 若解密算法在 guest（例如 P5D 自家 "P5D cpk header decrypt"），确认其 HLE 依赖（如 SceKernelUtils 的 AES/异或），必要时 HLE 实现
+④ 若无法还原：退而求其次，在 HLE 中按 CRI 标准 XOR 或已知 64 位头变换把 0x84B1BC00 头部转换为标准形式（仅 header，需先弄清目标格式）
+⑤ 解密成功后：+0x08 表大小 ≤0x7F0 → UTF 解析 → ContentOffset/TocOffset → 分析成功 state=0x1A → mount status=2 → data.cpk 挂载 → 文件索引 → title 素材
+```
+验证：`out80m_m1167iodata.txt`、`cpkana.txt`、`ioop.txt`、`criread2.txt`。 |
+| §18.4655 | Buffer dumps prove the HLE read data is 100% correct (byte-for-byte identical to the first 64 bytes of the real vita.cpk); the root cause of the CPK is broken error surfaces: the CPK Analyzer reads the "table size" at +0x08, but vita.cpk has 0x813F3494 (the file size) there, which triggers if (0x800 < uVar8+0x10) -> error 1 (CPK broken); vita.cpk +0x04=0xFFFFFFFF and +0x08..0x0F = the 64-bit file size 0x813F3494, so it is a 64-bit/encrypted CPK variant, and the normal flow should call the decrypt callback param_1[0x20] in load state 4 before handing the header to the Analyzer. Our pump completion shim skipped state 4 (because param_1[0x20]==0), so the Analyzer saw the raw header and reported broken. '
+       'm1167 evidence: [PREAD-DST] dst=84B1BC00: 204B5043 FFFFFFFF 813F3494 00000000 46545540 7A000000 2C000000 4C000000; [IODATA] 84B1BC00 same at read completion; real file C:\\dev\\p5d_rom\\data\\vita.cpk first 64 bytes: +00 204B5043 (CPK ), +04 FFFFFFFF, +08 813F3494 = 2168403092 = file size, +0C 00000000, +10 46545540 (@UTF CRI UTF table header), +14 7A000000 +18 2C000000 +1C 4C000000 +20 72000000; compare data.cpk (1.9GB, normal structure): +08 = 0x350 (small table size). [CPKANAL] #0 r0=84B1B84C r1=84B1B858 r2=84B1BC00 r3=84B1B990 lr=81293CB8; [CRILOG] E2011022806:CPK Analyzer::Cannot possibly analyze the CPK File. This CPK is broken. x3 (n=1717); [IOPUMP-DONE] state=7 size=848E8EE8 reader=848FC368 -> status=2 blk=31500 (second time size=00000000); [BADMEM] va=0x0000006B block=0x8128F04E (second pump used a stale progress pointer). '
+       'FUN_81292794 (Analyzer) decompile key part: pbVar7 = param_3 + 0x10 (UTF table at +0x10); if (magic != CPK ) { iVar3 = 2; goto err; } (2 = Not a CPK format); local_38 = param_3[10]<<16; local_40 = param_3[8]; uVar8 = local_38 | local_40 | param_3[11]<<24 | param_3[9]<<8 (32-bit table size at +0x08); if (0x800 < uVar8 + 0x10) { iVar3 = 1; goto err; } (1 = CPK broken); if (param_3[4] == 0) { CRI standard XOR decrypt of the +0x10 table with key start 0x5F stepping *0x15 }; FUN_812AFF10(); FUN_812AEA4C("UpdateDateTime"/"ContentOffset"/"ContentSize"/"TocOffset"/...) parse UTF fields. F04E state 4 = decrypt path: if (iVar1 == 4) { iVar1 = (*(code *)param_1[0x20])(param_1[0x21], param_1[0x18], param_1[0x15], ...); if (iVar1 != 0) { E2015042403:Decryption failure. state=8 } ... }. LAB_8128F3C4: if (*(char*)(p+0x1a)==0) { if (param_1[0x20] == 0) { ... state = 7 } }. '
+       'CONCLUSION: vita.cpk is a 64-bit-header/encrypted CPK variant. Normal flow: load reads 0x800 bytes into 0x84B1BC00, F04E state 4 uses the decrypt callback (progress[0x20]/[0x21]) to transform the header into the standard form (table size at +0x08, +0x04=0), then FUN_81292794 parses it. Our pump let F04E take the [0x20]==0 branch (no decrypt) -> state 7 -> marked complete -> Analyzer saw the raw header -> +0x08 = file size > 0x800 -> CPK is broken. '
+       'NEXT: (1) find who sets progress[0x20]/[0x21] (FUN_8128F776 params / criFsBinder decryptor registration API / game init CriFsBinder_SetDecryptor-like call) and determine whether the HLE lacks the registration API or our pump bypassed the registration call; (2) decompile FUN_8128F776 (Load main) to see where the decrypt cb comes from; check FUN_8128E394 param_9..12; (3) if the decryption algorithm is in guest code (e.g., P5D custom CPK header decrypt), identify its HLE dependencies (SceKernelUtils AES/XOR etc.) and implement if needed; (4) if it cannot be reproduced, as a fallback transform the 0x84B1BC00 header in HLE into the standard form (header only; first establish the target format); (5) after decrypt: +0x08 table size <=0x7F0 -> UTF parse -> ContentOffset/TocOffset -> analysis succeeds state=0x1A -> mount status=2 -> data.cpk -> file index -> title assets. '
+       'Verification: out80m_m1167iodata.txt, cpkana.txt, ioop.txt, criread2.txt. |
 关键进展（m1163→m1166）：
 1) **I/O 派发链解码**：
 ```
@@ -500910,3 +500969,45 @@ NEXT：
 ANTI-FORGETTING ENTRY. Keywords: M1109 HLE I/O pump unblocks read completion, CPK Analyzer enters FUN_81292794 analysis for the first time, new blocker E2011022806 CPK is broken (header buffer content wrong). I/O dispatch chain: FUN_8128AEEE worker loop body never called; FUN_8128AE8E pops one request and invokes its callback (FUN_8128B06C pops from ctx+0x5C queue via FUN_8128D178; return 0/1 -> FUN_8128B092 marks completion); FUN_8129019A never called. HLE pump P5D_IOPUMP=1: in main loop after mount-wait block 0x81287A70/0x81287BBA appears, every 1500 blocks; skip when CPK Analyzer busy flag 0x84B1B984 non-zero (avoid mid-call re-entry leaving the lock stuck), force-clear if stuck 400 times; else call_guest_cb2(FUN_8128D502, reader=0x848FC368); when progress state==7 do size=FUN_8128F6C8(progress), reader+0x130=size, reader+0xBC=2. Evidence: [IOSTATE] state 1->2->3->7 err=0 (24 F04E calls); [IOPUMP] drained=8 blk=30000 ctx=816A4F58, drained=1 blk=31500; [IOPUMP-DONE] state=7 size=848E8EE8 reader=848FC368 -> status=2 blk=31500; [CPKANAL] #0 r0=84B1B84C r1=84B1B858 r2=84B1BC00 r3=84B1B990 lr=81293CB8; [IOSTAT2] BC=1 before write; [CPKANA3] #6..#9 busy=0. New blocker m1166: [CRILOG] E2011022806:CPK Analyzer::Cannot possibly analyze the CPK File. This CPK is broken. x3 at n=1717; [BADMEM] guest va=0x0000006B unmapped block=0x8128F04E tid=0 stub=812B28A0; [IOPUMP-DONE] second time state=7 size=00000000. Analysis: read-completion notification unblocked (+0xBC=2) and analyzer case 4 enters FUN_81292794, but the header buffer used by analysis (r2=0x84B1BC00 = CPKANA w3/w4) is not a valid CPK header; need to determine where the PREAD 2048 target landed (0x84B1BA00? 0x84B1BC00? 0x848E8EE8?), whether the Load completion must copy the internal read buffer (progress[1]) into the user buffer (our shim wrote only size/status), and whether the decrypt/CRC branch was taken (F04E state 4 decrypt callback [0x20]). NEXT: dump 0x84B1BC00/0x84B1BA00/0x848E8EE8 first 32 bytes after PREAD and look for CPK magic 0x204B5043; decompile FUN_8128F6C8 (size?) and FUN_8128F776 (Load main, dest/size source); if data sits in internal buffer and was never copied, memcpy in the shim using the progress dest/size fields; if decrypt needed check F04E state 4 condition (param_1[0x20]); then analysis succeeds -> Analyzer state=0x1A -> mount status=2 -> data.cpk -> file index -> title assets. Verification: out80m_m1166iopump5.txt, out80m_m1165cpkal.txt, out80m_m1164iopump4.txt, out80m_m1163iopump3.txt.
 
 LOOKUP: M1109 HLE I/O pump P5D_IOPUMP, FUN_8128AE8E dispatcher, FUN_8128B06C queue pop, FUN_8128D502 pump reader=0x848FC368, progress state 1->2->3->7, IOPUMP-DONE status=2, FUN_81292794 analysis called, CPKANAL r2=84B1BC00, E2011022806 CPK is broken, BADMEM va=0x6B block 8128F04E, analyzer busy 0x84B1B984 guard, next dump 84B1BC00/84B1BA00/848E8EE8 CPK magic 204B5043 and check copy of internal buffer -> §18.4653 [relevant: load state machine], §18.4652 [relevant: SWAP locks], §18.4651 [relevant: analyzer]
+### 18.4655 PORT M1110: 读出数据 100% 正确；vita.cpk 是 64 位/加密 CPK 变体，Analyzer 需 state 4 解密回调；我们泵跳过了解密 → "CPK is broken"
+
+1) 数据正确性（m1167）：
+```
+[PREAD-DST] dst=84B1BC00: 204B5043 FFFFFFFF 813F3494 00000000 46545540 7A000000 2C000000 4C000000
+真实 vita.cpk 前 64B 完全一致：
+  +00 'CPK '  +04 FFFFFFFF  +08 813F3494(=2168403092=文件大小)  +0C 0  +10 "@UTF"(UTF 表)
+对照 data.cpk：+08 = 0x350（正常小表大小）
+```
+2) Analyzer FUN_81292794 反编译关键：
+```c
+if (magic != "CPK ") err=2;                    // Not a CPK format
+uVar8 = *(u32*)(param_3+8);                    // ★ +0x08 当"表大小"
+if (0x800 < uVar8 + 0x10) err=1;               // ★ CPK broken
+if (param_3[4] == 0) { XOR 解密 +0x10 表（key 0x5F*0x15）: }   // 仅 +4==0 才解
+FUN_812AFF10(); FUN_812AEA4C("UpdateDateTime"/"ContentOffset"/"TocOffset"...)
+```
+3) F04E state 4 = 解密路径：
+```c
+if (iVar1 == 4) {
+  iVar1 = (*(code *)param_1[0x20])(param_1[0x21], param_1[0x18], param_1[0x15], ...);
+  if (iVar1 != 0) { "E2015042403:Decryption failure."; state=8; }
+}
+LAB_8128F3C4: if (error_flag==0) { if (param_1[0x20]==0) { ... state=7 } }   // 无解密回调 → 跳到 7
+```
+4) 结论：
+- vita.cpk = 64 位表头/加密变体（+0x04=0xFF，+0x08=u64 文件大小，+0x10=UTF 表）
+- 正常：读 0x800 到 0x84B1BC00 → state 4 用解密回调变换为标准头（表大小@+8，+4=0）→ Analyzer 解析
+- 我们泵：[0x20]==0 → 跳过解密 → state 7 → Analyzer 看原始头 → +8=文件大小 > 0x800 → broken
+5) NEXT：
+```
+① 找 progress[0x20]/[0x21] 设置者（FUN_8128F776 参数 / CriFsBinder 解密器注册 / 游戏初始化）
+② 反编译 FUN_8128F776；查 FUN_8128E394 param_9..12
+③ 若解密在 guest：确认 HLE 依赖（SceKernelUtils AES/XOR 等），必要时实现
+④ 兜底：HLE 内把 0x84B1BC00 头按已知 64 位格式转换为标准形式（仅 header）
+⑤ 解密后：+8 表大小 ≤0x7F0 → UTF 解析 → 分析成功 state=0x1A → mount status=2 → data.cpk → 索引 → title
+```
+验证：`out80m_m1167iodata.txt`、`cpkana.txt`、`ioop.txt`、`criread2.txt`。
+
+ANTI-FORGETTING ENTRY. Keywords: M1110 read data 100% correct, vita.cpk is a 64-bit/encrypted CPK variant, Analyzer needs load state 4 decrypt callback, our pump skipped decrypt so CPK is broken. [PREAD-DST] dst=84B1BC00: 204B5043 FFFFFFFF 813F3494 00000000 46545540 7A000000 2C000000 4C000000 identical to the real vita.cpk first 64 bytes (+00 CPK , +04 FFFFFFFF, +08 813F3494 = 2168403092 = file size, +0C 0, +10 @UTF); data.cpk for comparison has +08 = 0x350 (normal small table size). FUN_81292794: checks magic CPK -> err 2 (not a CPK format); uVar8 = *(u32*)(param_3+8) read as table size; if (0x800 < uVar8+0x10) err 1 (CPK broken); if (param_3[4]==0) CRI XOR decrypt of the +0x10 table (key start 0x5F stepping *0x15); then FUN_812AFF10 and FUN_812AEA4C("UpdateDateTime"/"ContentOffset"/"ContentSize"/"TocOffset"/"TocSize"/"EtocOffset"/"ItocOffset"/"GtocOffset"...) parse the UTF fields. F04E state 4 = decrypt path: iVar1 = (*(code*)param_1[0x20])(param_1[0x21], param_1[0x18], param_1[0x15], ...); nonzero -> E2015042403 Decryption failure + state 8. LAB_8128F3C4: if (error flag 0) { if (param_1[0x20]==0) { ... state=7 } }. Evidence m1167: [CPKANAL] #0 r0=84B1B84C r1=84B1B858 r2=84B1BC00 r3=84B1B990 lr=81293CB8; [CRILOG] E2011022806:CPK Analyzer::Cannot possibly analyze the CPK File. This CPK is broken. x3 at n=1717; [IOPUMP-DONE] state=7 size=848E8EE8 reader=848FC368 -> status=2 blk=31500, second size=00000000; [BADMEM] va=0x0000006B block=0x8128F04E (stale progress pointer on 2nd pump). NEXT: find who sets progress[0x20]/[0x21] (FUN_8128F776 params / criFsBinder decryptor registration / game init), decompile FUN_8128F776 and check FUN_8128E394 param_9..12; if decryption is guest code identify HLE deps (SceKernelUtils AES/XOR) and implement; fallback: transform the 0x84B1BC00 header in HLE into the standard form (header only); then +0x08 table size <=0x7F0 -> UTF parse -> analysis succeeds state=0x1A -> mount status=2 -> data.cpk -> file index -> title assets. Verification: out80m_m1167iodata.txt, cpkana.txt, ioop.txt, criread2.txt.
+
+LOOKUP: M1110 read data correct, vita.cpk 64-bit encrypted CPK variant, +0x08 file size 0x813F3494, Analyzer table size check 0x800 < uVar8+0x10 err CPK broken, param_3[4]==0 CRI XOR decrypt key 0x5F*0x15, F04E state 4 decrypt callback param_1[0x20]/[0x21], E2015042403 decryption failure, LAB_8128F3C4 skip to state 7, data.cpk +08 0x350 normal, next find decrypt callback registration FUN_8128F776 / CriFsBinder decryptor / game init -> §18.4654 [relevant: pump], §18.4653 [relevant: load state machine], §18.4652 [relevant: SWAP locks]
