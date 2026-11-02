@@ -1120,6 +1120,71 @@
 | M1102 | §18.4647: ★★★★★★★★★ **binder 初始化真相：`criFsBinder_Initialize`（FUN_81284960）由 criFs_Initialize 内部调用（0x81283BAE），m1144 探针显示它**确实执行并成功**：`[BINDCALL] r0=00000020 r1=00000100 r2=84906328 r3=00002960`（num_binders=32, uVar6=0x100, work=0x84906328, size=0x2960，正好等于公式 param_2*param_1+param_1*0x48+0x60 = 0x2000+0x900+0x60=0x2960 ✓）、`[BINDRET] r0=00000020 flagFEF4=816A0BA0`（★ DAT_8153FEF4 被置为非 0 = binder 初始化成功）。**但随后又被清零**：`[BINDWARN] flagFEF4=00000000` at n=1754（CPK 挂载时的 FUN_812859FA 因此报 W2008121610）。⇒ 后续 2 次 Atom 初始化失败（`E2009011903:Insufficient buffer size.` ×3）触发 cleanup，其中调用 criFs 的 finalize 把 binder 模块也 finalize 了（清 DAT_8153FEF4）。**
 | M1103 | §18.4648: ★★★★★★★★★ **E2009011903 检查完全解码 + 数值实测：`[CMPBUF2] r9=0259A67B r6=000001FF`（r9=所需 uVar6=39,430,267B≈39MB，r6=剩余可用=0x1FF），检查块 blk_8122485C（`r9<=r6` 才成功，否则落入 0x81224860 记录 E2009011903）。uVar6 来源 = `FUN_81226624(&local_78) + FUN_81254D24()`（FUN_81224160 内 @0x812248xx 附近），其中 FUN_81259F30→FUN_8125AC84（视频解码工作大小）+ (iVar3+4)*4+0x14；FUN_81254D24 在 `DAT_8153FC8C>0` 时返回 0x4E0。同时取得配置数据：`[ATOMCFG] cfg=84856088 words: 00000024 00000010 45160000 8485609C 00000004 00000003 41EFC28F 84856318 00000000 02120105 …`、`[SIZEFN] arg=8485609C …`、`[SIZERET] size=0002018F`（FUN_81223EF6 对 config[3]=0x8485609C 返回 0x2018F=Atom 侧预算）。⇒ 矛盾：Atom 预算 0x2018F 远小于 Mana 所需 0x259A67B+0x1FF 剩余，说明**Mana/视频解码大小计算依赖的配置字段有误（很可能是未正确初始化的视频配置结构 local_78 字段）**，导致解码器工作大小被算成 39MB。**
 | M1104 | §18.4649: ★★★★★★★★★★★★ **决定性突破：E2009011903 的 39MB 假大小来自 SceNgs（NGS 音频引擎）HLE 未开启！FUN_8125AC84 是语音/音效接口调度器（ASR/HCA-MX），其注册的接口函数 FUN_8125CFB6→FUN_8125C2F0 是 **CRI NGS 初始化**（"\nCRI NGS/VITA Ver.1.10.00 Build:Jan 30 2018 18:45:39\n"，调用 SceSysmodule_53099B7A/79A0160A(sysmodule=0xB)、SceNgs_ED14CF4A=sceNgsSystemInit、SceNgs_6CE8B36F、SceNgs_E9B572B7、SceNgs_477318C0、SceNgs_14EF65A0 等 NGS HLE stub）。此前所有运行都**没设 P5D_NGS=1**，NGS stub 全部返回 0/假值 → NGS 工作大小算错（-1 或 39MB）→ E2009011903 → cleanup finalize → binder 清 0。**开启 P5D_NGS=1 后：NGS 工作大小=0x1DEF0（正常）、`[CMPBUF2] r9=0001E5CC r6=0001E7CC`（检查通过）、`[E1903HIT] 0`、`[BINDWARN] 0`（binder 保持）、`[CRIFMT] 0`（ACB/ACF 错误消失）；游戏自身 CRI 初始化链完全打通。**新问题：n=181,619 处 `E2009072321:Cannot allocate memory.`（criFs user-heap 相关，字符串 0x8131AD18，附近有 E2009072322:The user-heap API is unset.）后原地循环（n 停在 181,670）。**
+| M1105 | §18.4650: ★★★★★★★★★★★ **CPK 装载打通关键一步：补块函数 0x8128A576（criFs user-heap 分配回调）后，`[INDIRECT-MISS] 0`、`[HARNESS] 0`、无 BADMEM/CRILOG；游戏自身 criFs 通过 HLE `sceIoOpen` **真正打开了 vita.cpk**（`[IO] OPEN 'app0:/data/vita.cpk' -> fd=16385 ...vita.cpk size=2168403092`）并 PREAD 读取（off=0 size=2048）；运行从 n=181,670 的卡死推进到 **n=4,600,000+（25 倍）**，当前在 binder 挂载等待循环（[FIOSX] at=81287BBA，已 54000+ 次等待、状态未变）。**
+m1149（补块前）卡点：
+```
+[FIBER-EXEC] no block for pc=FFFFFFFD ×多
+[INDIRECT-MISS] reg2=8128A577 target=8128A576 block=81279B7A   ← ★ 缺失 AOT 块
+[HARNESS] indirect miss at pc=81279B7A after 181670 blocks
+[CRILOG] n=181619 E2009072321:Cannot allocate memory.
+（之后 POSTMAIN 进入线程泵但主线程已"返回"= 卡死）
+```
+**缺失函数 0x8128A576（capstone 反汇编，size=0x2C=44B）**：
+```
+8128A576: push {r4,r5,r6,lr}
+8128A578: movw r4,#0xFF24 ; movt r4,#0x8153   → r4=0x8153FF24（criFs 互斥量）
+8128A580: ldr r2,[r4]                          → r2=*mutex
+8128A582: adds r5,r0,#0 ; adds r6,r1,#0        → 保存 user 参数/大小
+8128A586: adds r0,r2,#0 ; bl 0x81278C48        → 加锁
+8128A58C: adds r0,r5,#0 ; adds r1,r6,#0 ; bl 0x81279B54   → ★ 调用 criFs 用户 malloc(user,size)
+8128A594: ldr r1,[r4] ; adds r4,r0,#0 ; adds r0,r1,#0 ; bl 0x81278C96  → 解锁
+8128A59E: adds r0,r4,#0 ; pop {r4,r5,r6,pc}    → 返回分配指针
+```
+即 **criFs 的 user-heap malloc 回调**（加锁→malloc→解锁），由 CPK 挂载解析时的内存分配调用；此前 AOT 表没有该函数的块（Ghidra 漏函数，function_bounds.json 中无 0x8128A576 条目：前一个函数 FUN_8128A4B8 到 0x8128A574 结束，下一个 FUN_8128A5C8 从 0x8128A5C8 开始）。
+**M1105 补块流程（复用 M1079 管线）**：
+```
+miss_bounds2.json = [{"va": 0x8128A576, "size": 44, "name": "FUN_8128A576_miss"}]
+_gen_miss_blocks3.py（_gen_miss_blocks.py 副本，BOUNDS=miss_bounds2.json、OUTDIR=C:\dev\tmp\recomp_miss2）
+→ 生成 batch_000.cpp（4 blocks）→ 重命名 batch_035.cpp（_000→_035，batch 0→35）
+→ P() 替换为 batch_022 的内存映射（0xA0000000+A2000000→+0x28000000 等）
+→ 编译 batch_035.o exit 0
+harness 注册 batch_035：FB(035) 宏、get_table_035/find_block_035 extern、ALL_FINDERS[36]、build 循环 i<36、
+ternary 链加 get_table_035、dedupe 循环 i=35..0
+→ harness 编译 exit 0；链接 exit 0（exe 57,128,718B，10:15:52）；[TABLE] blocks=230252（+1）
+```
+m1150（`out80m_m1150b035.txt`，P5D_NGS=1 + batch_035）进展：
+```
+[TABLE] blocks=230252
+[INDIRECT-MISS] 0 / [HARNESS] 0 / [BADMEM] 0 / [CRILOG] 0 / [CRIFMT] 0
+[IO] OPEN 'app0:/data/vita.cpk' -> fd=16385 C:\dev\p5d_rom\data\vita.cpk size=2168403092   ← ★ 游戏自身打开 CPK
+[IO] PREAD fd=16385 off=0 size=2048 got=2048                                              ← ★ 读 CPK 头
+[FIOSX] #18000..#54000 at=81287BBA …（binder 挂载等待循环，状态 r0=2 未变）
+[WD] loop=2 cnt=1499999/785069833/4591808/0 total=1500000 blk=81278C8E
+max n=4,600,000+（此前卡死 181,670 → 25 倍）
+[SCENE]0 [ABIBEGIN]0（尚未到标题页）
+```
+**⇒ 结论**：
+1. `0x8128A576` = criFs user-heap malloc 回调（锁+malloc+解锁）；补块后间接跳转缺口消失
+2. 游戏自身 criFs 现在能通过 HLE 打开真实 vita.cpk 并读取（CPK 挂载真正开始工作）
+3. 当前等待点：`81287BBA` binder 挂载等待（54000+ 次，状态 r0=2 未变）→ 下一步查挂载完成条件/CPK 解析进度
+4. 无任何 CRILOG/CRIFMT/ACB 错误——之前的 user-heap 分配失败已消除
+NEXT：
+```
+① 分析 FUN_81287BBA 的等待语义（r0=2 状态；完成标志在哪、谁置位）
+② 查 CPK 解析进度：guest 是否继续 PREAD 读 CPK 表（增加 HLE I/O 日志上限/看 PREAD 偏移）
+③ 若挂载依赖工作线程：检查该线程是否被泵（P5D_THRPUMP/PUMPMAIN 已开）
+④ 若 PREAD 数据不正确（CPK 表解析失败）→ 检查 HLE sceIoPread 语义/偏移
+⑤ 挂载成功后：data.cpk 也挂载 → guest 文件打开索引成功 → title 素材读取 → [SCENE] 视图 → GXM
+```
+验证：`out80m_m1150b035.txt`、`m1149ngs.txt`、`miss_bounds2.json`、`batch_035.cpp`、`_gen_miss_blocks3.py`。 |
+| §18.4650 | The key step for CPK loading is done: after adding AOT blocks for the missed function 0x8128A576 (criFs user-heap malloc callback), [INDIRECT-MISS] 0, [HARNESS] 0, no BADMEM/CRILOG; the game own criFs now actually opens vita.cpk through the HLE sceIoOpen ([IO] OPEN 'app0:/data/vita.cpk' -> fd=16385 ...vita.cpk size=2168403092) and PREADs it (off=0 size=2048); the run advanced from the n=181,670 stall to n=4,600,000+ (25x), currently in the binder mount wait loop ([FIOSX] at=81287BBA, 54000+ waits, status unchanged). '
+       'm1149 (before the block fix): [FIBER-EXEC] no block for pc=FFFFFFFD (many), [INDIRECT-MISS] reg2=8128A577 target=8128A576 block=81279B7A, [HARNESS] indirect miss at pc=81279B7A after 181670 blocks, [CRILOG] n=181619 E2009072321:Cannot allocate memory. (then POSTMAIN thread pump with the main thread returned = stall). '
+       'Missed function 0x8128A576 (capstone disasm, size=0x2C=44B): 8128A576: push {r4,r5,r6,lr}; 8128A578: movw r4,#0xFF24; movt r4,#0x8153 (r4=0x8153FF24 criFs mutex); 8128A580: ldr r2,[r4]; 8128A582: adds r5,r0,#0; adds r6,r1,#0; 8128A586: adds r0,r2,#0; bl 0x81278C48 (lock); 8128A58C: adds r0,r5,#0; adds r1,r6,#0; bl 0x81279B54 (user malloc(user,size)); 8128A594: ldr r1,[r4]; adds r4,r0,#0; adds r0,r1,#0; bl 0x81278C96 (unlock); 8128A59E: adds r0,r4,#0; pop {r4,r5,r6,pc}. I.e. the criFs user-heap malloc callback (lock->malloc->unlock) called by the CPK mount parser; the AOT table lacked blocks for this Ghidra-missed function (function_bounds.json has no 0x8128A576 entry: the previous FUN_8128A4B8 ends at 0x8128A574, the next FUN_8128A5C8 starts at 0x8128A5C8). '
+       'M1105 block-fill pipeline (reusing the M1079 one): miss_bounds2.json = [{"va": 0x8128A576, "size": 44, "name": "FUN_8128A576_miss"}]; _gen_miss_blocks3.py (_gen_miss_blocks.py copy with BOUNDS=miss_bounds2.json, OUTDIR=C:\\dev\\tmp\\recomp_miss2) -> generates batch_000.cpp (4 blocks) -> renamed batch_035.cpp (_000->_035, batch 0->35) -> P() replaced with batch_022 memory mapping -> batch_035.o exit 0. harness registration of batch_035: FB(035) macro, get_table_035/find_block_035 externs, ALL_FINDERS[36], build loop i<36, ternary chain get_table_035, dedupe loop i=35..0 -> harness compile exit 0; link exit 0 (exe 57,128,718B, 10:15:52); [TABLE] blocks=230252 (+1). '
+       'm1150 (P5D_NGS=1 + batch_035) progress: [TABLE] blocks=230252; [INDIRECT-MISS] 0 / [HARNESS] 0 / [BADMEM] 0 / [CRILOG] 0 / [CRIFMT] 0; [IO] OPEN app0:/data/vita.cpk -> fd=16385 C:\\dev\\p5d_rom\\data\\vita.cpk size=2168403092 (the game itself opens the CPK); [IO] PREAD fd=16385 off=0 size=2048 got=2048 (reads CPK header); [FIOSX] #18000..#54000 at=81287BBA (binder mount wait loop, status r0=2 unchanged); [WD] loop=2 ... 4591808/0 total=1500000 blk=81278C8E; max n=4,600,000+ (previous stall 181,670 -> 25x); [SCENE]0 [ABIBEGIN]0 (not yet at the title page). '
+       'CONCLUSION: (1) 0x8128A576 = criFs user-heap malloc callback (lock+malloc+unlock); after the block fill the indirect-jump gap is gone; (2) the game own criFs can now open and read the real vita.cpk through HLE (CPK mount truly working); (3) current wait point: 81287BBA binder mount wait (54000+ times, status r0=2 unchanged) -> next check the mount completion condition/CPK parse progress; (4) no CRILOG/CRIFMT/ACB errors - the earlier user-heap allocation failure is gone. '
+       'NEXT: (1) analyze the wait semantics of FUN_81287BBA (r0=2 status; where the completion flag is set and by whom); (2) check CPK parse progress: whether the guest continues to PREAD the CPK tables (raise the HLE I/O log cap / log PREAD offsets); (3) if the mount depends on a worker thread check whether it is pumped (P5D_THRPUMP/PUMPMAIN are on); (4) if the PREAD data is wrong (CPK table parse fails) check the HLE sceIoPread semantics/offset; (5) once mounted: data.cpk mounts too -> guest file open index works -> title assets read -> [SCENE] views -> GXM. '
+       'Verification: out80m_m1150b035.txt, m1149ngs.txt, miss_bounds2.json, batch_035.cpp, _gen_miss_blocks3.py. |
 m1148（NGS 关闭）vs m1149（P5D_NGS=1）对比：
 ```
 m1148（P5D_NGS 未设）:
@@ -500345,3 +500410,60 @@ case 0x812B1ED0/1EE0: sceAudioOutOpenPort/SetVolume; 0x812B1FC0: sceNgsSystemUpd
 ANTI-FORGETTING ENTRY. Keywords: M1104 DECISIVE breakthrough - the fake 39MB size behind E2009011903 comes from SceNgs HLE being disabled (P5D_NGS not set). FUN_8125AC84 is a voice/sound interface dispatcher (ASR/HCA-MX) whose registered interface FUN_8125CFB6 -> FUN_8125C2F0 is CRI NGS init ("\\nCRI NGS/VITA Ver.1.10.00 Build:Jan 30 2018 18:45:39\\n", SceSysmodule_53099B7A/79A0160A(0xB), SceNgs_ED14CF4A=sceNgsSystemInit, SceNgs_6CE8B36F, SceNgs_E9B572B7, SceNgs_477318C0, SceNgs_14EF65A0). All previous runs did not set P5D_NGS=1 so NGS stubs returned 0/fake -> NGS work size wrong (-1 or 39MB) -> E2009011903 -> finalize -> binder cleared. With P5D_NGS=1: [MANA3] decoder=0001DEF0, [CMPBUF2] r9=0001E5CC r6=0001E7CC (pass), [E1903HIT] 0, [BINDWARN] 0, [CRIFMT] 0; the game own CRI init chain is completely open. New issue: n=181619 E2009072321:Cannot allocate memory. (criFs user-heap, string 0x8131AD18, E2009072322:The user-heap API is unset. at 0x8131A918 nearby) then idle loop n=181,670. m1148 (NGS off): decoder=FFFFFFFF/C31B42F7/02599F9F, CMPBUF2 r9=0259A67B r6=0x1FF fail, E1903HIT, W2008121610 binder not initialized n=1754, E2010052671 Can not open ACF file n=1754. P5D_NGS=1 HLE (recomp_harness.cpp 18.4416/18.4421): if (!g_ngs_env) { r0 = 0; break; } uint32_t _sz = 0x2000; if (s->r[2]) memcpy(->0x2000); r0 = 0 (sceNgsSystemInit); case 0x812B20C0: r0 = 0x10/4; case 0x812B1E90: sceSysmoduleIsLoaded -> 1; case 0x812B1860: -> 0; case 0x812B1ED0/1EE0 sceAudioOutOpenPort/SetVolume; 0x812B1FC0 sceNgsSystemUpdate -> 0; 0x812B2060 VoiceGetStateData -> 0. CONCLUSION: P5D_NGS=1 must be added to the standard env (root cause of 15+ rounds of 39MB Insufficient buffer); the game own CRI chain (Atom/criFs/binder) is completely open once NGS is normal; new blocker is E2009072321 Cannot allocate memory (criFs user-heap) then idle loop. NEXT: add P5D_NGS=1 to standard env; xref E2009072321 (0x8131AD18)/E2009072322 (0x8131A918) to find the criFs user-heap allocation path; check whether the game calls criFs_SetUserMallocFunction/SetUserFreeFunction; HLE-intercept the stub to return proper memory or route to the HLE heap; then CPK mount completes -> ACB/ACF/title assets -> [SCENE] views -> GXM -> picture. Fallback: minimal HLE allocation if the user-heap API is not required before the title page.
 
 LOOKUP: M1104 P5D_NGS=1 decisive, E2009011903 39MB root cause SceNgs HLE disabled, FUN_8125AC84 ASR/HCA-MX dispatcher, FUN_8125CFB6 FUN_8125C2F0 CRI NGS init 0x1DEF0, SceNgs_ED14CF4A sceNgsSystemInit SceNgs_6CE8B36F SceNgs_477318C0 SceNgs_14EF65A0, SceSysmodule_53099B7A 79A0160A 0xB, [MANA3] decoder=0001DEF0, [CMPBUF2] r9=0001E5CC r6=0001E7CC pass, [BINDWARN] 0, binder kept, no ACB/ACF errors, new E2009072321 Cannot allocate memory n=181619 user-heap 0x8131AD18, E2009072322 0x8131A918, idle loop n=181670, next add P5D_NGS=1 to standard env and fix user-heap -> §18.4648 [relevant: E2009011903], §18.4647 [relevant: binder truth], §18.4646 [relevant: margin]
+### 18.4650 PORT M1105: 补块缺失函数 0x8128A576（criFs user-heap malloc 回调）→ CPK 真正开始加载、vita.cpk 被打开
+
+1) m1149 卡点（补块前）：
+```
+[FIBER-EXEC] no block for pc=FFFFFFFD ×多
+[INDIRECT-MISS] reg2=8128A577 target=8128A576 block=81279B7A   ← 缺失 AOT 块
+[HARNESS] indirect miss at pc=81279B7A after 181670 blocks
+[CRILOG] n=181619 E2009072321:Cannot allocate memory.
+```
+2) 缺失函数 0x8128A576 反汇编（size=0x2C=44B）：
+```
+8128A576: push {r4,r5,r6,lr}
+8128A578: movw r4,#0xFF24 ; movt r4,#0x8153      → r4=0x8153FF24（criFs 互斥量）
+8128A580: ldr r2,[r4]
+8128A582: adds r5,r0,#0 ; adds r6,r1,#0
+8128A586: adds r0,r2,#0 ; bl 0x81278C48           → 加锁
+8128A58C: adds r0,r5,#0 ; adds r1,r6,#0 ; bl 0x81279B54   → ★ criFs 用户 malloc(user,size)
+8128A594: ldr r1,[r4] ; adds r4,r0,#0 ; adds r0,r1,#0 ; bl 0x81278C96  → 解锁
+8128A59E: adds r0,r4,#0 ; pop {r4,r5,r6,pc}
+```
+（Ghidra 漏函数：function_bounds.json 无 0x8128A576；前一个 FUN_8128A4B8 到 0x8128A574，下一个 FUN_8128A5C8 从 0x8128A5C8 开始）
+3) M1105 补块：
+```
+miss_bounds2.json = [{"va":0x8128A576,"size":44,"name":"FUN_8128A576_miss"}]
+_gen_miss_blocks3.py → recomp_miss2/batch_000.cpp（4 blocks）
+→ batch_035.cpp（_000→_035；P() 用 batch_022 映射）
+→ batch_035.o exit 0
+harness：FB(035)、get_table_035/find_block_035、ALL_FINDERS[36]、i<36、dedupe i=35..0
+→ harness exit 0；link exit 0（exe 57,128,718B 10:15:52）；[TABLE] blocks=230252
+```
+4) m1150 进展：
+```
+[INDIRECT-MISS] 0 / [HARNESS] 0 / [BADMEM] 0 / [CRILOG] 0 / [CRIFMT] 0
+[IO] OPEN 'app0:/data/vita.cpk' -> fd=16385 ...\vita.cpk size=2168403092   ← ★ 游戏打开 CPK
+[IO] PREAD fd=16385 off=0 size=2048 got=2048                              ← ★ 读 CPK 头
+[FIOSX] #18000..#54000 at=81287BBA …（binder 挂载等待，状态 r0=2 未变）
+max n=4,600,000+（此前卡死 181,670 → 25 倍）
+[SCENE]0 [ABIBEGIN]0
+```
+5) 结论：
+- 0x8128A576 = criFs user-heap malloc 回调（锁+malloc+解锁），补块后缺口消失
+- 游戏自身 criFs 现在能打开并读取真实 vita.cpk（CPK 挂载真正开始）
+- 当前等待点 81287BBA（54000+ 次，状态未变）→ 查挂载完成条件/CPK 解析进度
+- 无 CRILOG/CRIFMT/ACB 错误——user-heap 分配失败已消除
+6) NEXT：
+```
+① FUN_81287BBA 等待语义（r0=2；完成标志谁置位）
+② CPK 解析进度：guest 是否继续 PREAD 读 CPK 表
+③ 挂载是否依赖工作线程（PUMP 已开）
+④ PREAD 语义/偏移是否正确
+⑤ 挂载成功 → data.cpk → 文件打开索引 → title 素材 → [SCENE] → GXM
+```
+验证：`out80m_m1150b035.txt`、`m1149ngs.txt`、`miss_bounds2.json`、`batch_035.cpp`、`_gen_miss_blocks3.py`。
+
+ANTI-FORGETTING ENTRY. Keywords: M1105 CPK loading key step - adding AOT blocks for the Ghidra-missed function 0x8128A576 (criFs user-heap malloc callback) made [INDIRECT-MISS] 0, [HARNESS] 0, no BADMEM/CRILOG; the game own criFs now opens vita.cpk through HLE sceIoOpen ([IO] OPEN 'app0:/data/vita.cpk' -> fd=16385 C:\\dev\\p5d_rom\\data\\vita.cpk size=2168403092) and PREADs it (off=0 size=2048 got=2048); the run advanced from the n=181,670 stall to n=4,600,000+ (25x), now in the binder mount wait loop ([FIOSX] at=81287BBA 54000+ waits, status r0=2 unchanged). m1149 before: [FIBER-EXEC] no block for pc=FFFFFFFD, [INDIRECT-MISS] reg2=8128A577 target=8128A576 block=81279B7A, [HARNESS] indirect miss at pc=81279B7A after 181670 blocks, [CRILOG] n=181619 E2009072321:Cannot allocate memory. then POSTMAIN stall. Function 0x8128A576 disasm (size 0x2C=44B): push {r4,r5,r6,lr}; movw r4,#0xFF24; movt r4,#0x8153 (0x8153FF24 criFs mutex); ldr r2,[r4]; adds r5,r0,#0; adds r6,r1,#0; adds r0,r2,#0; bl 0x81278C48 (lock); adds r0,r5,#0; adds r1,r6,#0; bl 0x81279B54 (user malloc(user,size)); ldr r1,[r4]; adds r4,r0,#0; adds r0,r1,#0; bl 0x81278C96 (unlock); adds r0,r4,#0; pop {r4,r5,r6,pc}. Ghidra missed it: function_bounds.json has no 0x8128A576 entry (previous FUN_8128A4B8 ends 0x8128A574, next FUN_8128A5C8 starts 0x8128A5C8). M1105 fill: miss_bounds2.json=[{"va":0x8128A576,"size":44,"name":"FUN_8128A576_miss"}]; _gen_miss_blocks3.py (copy of _gen_miss_blocks.py with BOUNDS=miss_bounds2.json OUTDIR=C:\\dev\\tmp\\recomp_miss2) -> recomp_miss2/batch_000.cpp (4 blocks) -> renamed batch_035.cpp (_000->_035; P() from batch_022) -> batch_035.o exit 0; harness registration FB(035), get_table_035/find_block_035 externs, ALL_FINDERS[36], build loop i<36, ternary get_table_035, dedupe i=35..0 -> harness exit 0; link exit 0 (exe 57,128,718B 10:15:52); [TABLE] blocks=230252 (+1). m1150 (P5D_NGS=1 + batch_035): [INDIRECT-MISS] 0 / [HARNESS] 0 / [BADMEM] 0 / [CRILOG] 0 / [CRIFMT] 0; [IO] OPEN app0:/data/vita.cpk -> fd=16385 size=2168403092; [IO] PREAD fd=16385 off=0 size=2048 got=2048; [FIOSX] #18000..#54000 at=81287BBA (binder mount wait, r0=2 unchanged); [WD] loop=2 ... 4591808/0 blk=81278C8E; max n=4,600,000+; [SCENE]0 [ABIBEGIN]0. CONCLUSION: 0x8128A576 = criFs user-heap malloc callback (lock+malloc+unlock); after the fill the indirect-jump gap is gone; the game own criFs opens and reads the real vita.cpk through HLE (CPK mount truly working); current wait point 81287BBA (54000+ waits, status r0=2 unchanged); no CRILOG/CRIFMT/ACB errors. NEXT: analyze FUN_81287BBA wait semantics (r0=2; where the completion flag is set); check CPK parse progress (raise HLE I/O log cap / log PREAD offsets); check whether the mount depends on a worker thread (PUMP on); check HLE sceIoPread semantics/offset; once mounted data.cpk mounts too -> guest file open index -> title assets -> [SCENE] views -> GXM. Verification: out80m_m1150b035.txt, m1149ngs.txt, miss_bounds2.json, batch_035.cpp, _gen_miss_blocks3.py.
+
+LOOKUP: M1105 missed function 0x8128A576 criFs user-heap malloc callback added as batch_035, INDIRECT-MISS gone, [IO] OPEN app0:/data/vita.cpk fd=16385 size=2168403092, [IO] PREAD off=0 size=2048, binder mount wait 81287BBA r0=2, max n=4,600,000 past stall 181,670, no BADMEM/CRILOG/CRIFMT, [TABLE] blocks=230252, exe 57,128,718B 10:15:52, miss_bounds2.json _gen_miss_blocks3.py batch_035.cpp, ALL_FINDERS[36], next analyze FUN_81287BBA wait and CPK parse progress -> §18.4649 [relevant: P5D_NGS breakthrough], §18.4648 [relevant: E2009011903], §18.4647 [relevant: binder truth]
