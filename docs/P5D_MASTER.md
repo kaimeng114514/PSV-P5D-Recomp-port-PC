@@ -1144,6 +1144,47 @@
 | M1126 | §18.4671: ★★★★★★★★★ **找到声音线程霸占 GFD fiber 的机制证据：HLE 线程栈分配地址（sp=848560F8 → 栈区 ≈[84817000,848560F8)）与 guest 光纤对象地址（84836300 / 848463A0）重叠；线程栈运行写入会覆盖光纤对象字段 [fiber+0x84]=entry / [fiber+0x88]=arg，随后 fiber_load 读到被覆盖的"入口"（81242D24 等线程代码地址）→ GFD 主循环 fiber 被劫持**。本轮两处实验（① fiber_save 线程期禁止写 fiber；② HLE arena 从 0x84600000 上移到 0x85800000）均未修复：①不足（劫持不经过 fiber_save），②直接回归（fiber 对象/host 堆随 HLE arena 迁移，挂载破坏、[IO] 仅 2 条）；已回退到已知良好构建
 | M1127 | §18.4672: ★★★★★★★★★ **独立线程栈 arena 实验（negative result）+ 修订 fiber 劫持假说**。新增 `[STKARENA]`（0x8C600000..0x8D000000 专用栈区，big arena 让位到 0x8D000000）：fiber 劫持消失（[EXECSTART] 不再出现 pc=81242D24），但 **boot 回归**（[IO] 仅 2 条、无 CPK TOC PREAD、[ACFFILL]=0、[FLOAD-BAD]×31、主 n 仅 ~37k、卡在 GSIG 循环）——因线程栈移出 heapA 后 guest 堆块/fiber 对象地址整体下移（84836300→84676300）。结合 `[HM]` 日志修订假说：fiber 对象 84836300/848463A0 **本身就是 HLE hle_malloc 分配**（size **0x100A0** = 0xA0 头 + 0x10000 栈，调用方 lr=811E6A0E），heapA 分配顺序为 6 个小块 → 0x50000 → **7×0x40000 线程栈** → 2×0x100A0 fiber 对象；单调 bump 分配不会让后分配的线程栈覆盖先前 fiber 对象，故劫持更可能来自 **fiber 上下文保存/恢复路径把错误 pc 写入 g_fctx[848463A0].r[15]**（flr=848D9504 为堆地址，说明保存的是混合/错误寄存器组）。下一轮：对 g_fctx[848463A0].r[15] 的每次写入加监视打印（值落入 81240000-81280000 时打印调用来源），定位真实写入点
 | M1128 | §18.4673: ★★★★★★★★★★ **找到并修复 fiber 劫持真正根因：AOT 函数边界截断导致 0x81242C3A..0x81242DD2（FUN_81241F46 尾部）未翻译，执行跳入未翻译地址 0x81242D24 → "no block" livelock**。用 gap-fill 管线生成 **batch_036**（38 blocks，覆盖 0x81242C3A..0x81242DD2），注册进 harness（ALL_FINDERS[37]、表分发 ternary、去重循环），`[TABLE] blocks=230290`（+38）；**fiber 劫持证据 [HUNT-EXEC]=0**；遗留新卡点：`[FIBER-EXEC] no block for pc=FFFFFFFD` ×9800（fiber 返回哨兵 0xFFFFFFFD 未被 fiber 执行循环处理，需按"回调返回"语义收尾）
+| M1129 | §18.4674: ★★★★★★★★★ **fiber 返回哨兵 0xFFFFFFFD 上下文完全定位**：`[FIBER-EXEC] no block for pc=FFFFFFFD (cur=848463A0) lr=81279C20 sp=84856050 r0=<heap>`，前驱块链 **81279BEE→81279C02→81279C0C→81279C1C（bl 812068F2）→812068F2（fiber 管理器）→812068D8/8120685A→812B1B70/812B1BA0（sceFiberSwitch HLE）**；哨兵在 fiber 切换往返后由恢复上下文带入。实验 A（把哨兵当"返回到 LR"：`s->r[15]=s->r[14]; continue`）只降低 livelock 日志量（[SENTRET]×20 后仍循环 81279BEE→81279C02→81279C0C→81279C1C），**未解锁帧循环**，已回退（保留诊断打印）
+m1213/m1214 证据（`m1213_sentinel_key.txt`、`m1214_sentret_key.txt`）：
+```
+[FIBER-EXEC] no block for pc=FFFFFFFD (cur=848463A0) lr=81279C20 sp=84856050 r0=84B99630 blk=81279C1C
+  ring: 81278C8E 81278C94 81253406 81278C96 81278CB0 81278CB8 812B28A0 81278CC4 81278CDA 81278CEC
+        81253414 81254C5A 8122724C 81254C14 8125326C 81253278 81279BEE 81279C08 81279C0C 81279C1C
+  （后续）ring: … 81279C08 81279C0C 81279C1C 81279C20 81253292 81253278 81279BEE 81279C02 81279C0C 81279C1C
+[FIBER-EXEC] no block for pc=FFFFFFFD … blk=812B1BA0 ring: 81279C0C 81279C1C 812068F2 812068D8 8120685A 812B1B70
+        81206860 … 812B1BA0（sceFiberSwitch HLE 反复进入）
+[SENTINEL] pc=FFFFFFFD fiber=848463A0 lr=81279C20 sp=84856050 r0=84B99630 r1=00000002 blk=81279C1C（×12）
+[TABLE] blocks=230290（batch_036 已生效）
+[COUNT] present=0 begin_pass=0 draw=0；[FRAMECB]/[UPD]/[POST]=0；[IO] 6；[ACFFILL] size=5152；[CRILOG]=0
+[TAILRET]=0（batch_036 新块未再出现缺失地址）
+```
+**实验 A（已回退）**：
+```
+在 no-block 分支对 pc∈{FFFFFFFD,FFFFFFFE,FFFFFFF0} 执行 s->r[15]=s->r[14]; continue;
+结果：run 行数 199,704→409,751，[SENTRET]×20 后仍反复 81279BEE→81279C02→81279C0C→81279C1C→FFFFFFFD
+      [FRAMECB]/[UPD]/[POST] 仍 0，未解锁 → 该语义不正确，已 revert（诊断打印保留）
+```
+**关键推断**：
+- 哨兵由 **fiber 切换/恢复路径**带来（lr=81279C20 是 81279C1C 处 `bl 812068F2` 的返回地址）；
+- `812068F2`/`812068D8`/`8120685A`/`812B1B70`/`812B1BA0` 属 guest fiber 管理器 + HLE `sceFiberSwitch`；
+  `0xFFFFFFFD` 更可能是 **HLE 嵌套回调/光纤返回约定**（harness call_guest_cb 系列用 LR=0xFFFFFFFE + 哨兵 break，
+  行 5004-5319），需要按"**恢复调用者上下文**（rc_restore/g_caller_ctx）并回到主派发"处理，而不是 pc=lr；
+- batch_036 修复仍有效：[TAILRET]=0、[TABLE]=230290、[HUNT-EXEC]=0。
+**NEXT**：
+```
+① 查 HLE 812B1B70/812B1BA0/812B1B60（fiber switch/return-to-thread/get-self）与我们 fiber exec 的交互：
+   确认哪个 case 会让 s->r[15] 变成 0xFFFFFFFD（或从 guest fiber 对象/栈恢复出该值）
+② 查 call_guest_cb/call_guest_cb2 的调用者（HLE fiber 代码路径）是否在嵌套执行里返回哨兵，需 rc_restore 收尾
+③ 在 fiber exec 收到哨兵时执行"嵌套返回"：恢复 g_caller_ctx + g_cur_fiber，令外层派发继续（而不是 pc=lr）
+④ 修复后 GFD 帧循环应启动：[FRAMECB]/[UPD]/[POST] 计数、[COUNT] present 递增 → 标题资源请求
+```
+验证：`m1214_sentret_key.txt`、`m1213_sentinel_key.txt`、`m1212_tail_key.txt`、`[TABLE] blocks=230290`。 |
+| §18.4674 | Fully localized the fiber-return-sentinel context (0xFFFFFFFD): [FIBER-EXEC] no block for pc=FFFFFFFD (cur=848463A0) lr=81279C20 sp=84856050 r0=<heap>, with predecessor chain 81279BEE -> 81279C02 -> 81279C0C -> 81279C1C (bl 812068F2) -> 812068F2 (fiber manager) -> 812068D8/8120685A -> 812B1B70/812B1BA0 (sceFiberSwitch HLE); the sentinel is brought in by the restored context after a fiber switch round-trip. Experiment A (treat the sentinel as "return to LR": s->r[15]=s->r[14]; continue) only reduced the livelock log volume ([SENTRET] x20 then the loop 81279BEE->81279C02->81279C0C->81279C1C persists) and did NOT unlock the frame loop, so it was reverted (diagnostic prints kept). '
+       'm1213/m1214 evidence: [FIBER-EXEC] no block for pc=FFFFFFFD (cur=848463A0) lr=81279C20 sp=84856050 r0=84B99630 blk=81279C1C ring: 81278C8E 81278C94 81253406 81278C96 81278CB0 81278CB8 812B28A0 81278CC4 81278CDA 81278CEC 81253414 81254C5A 8122724C 81254C14 8125326C 81253278 81279BEE 81279C08 81279C0C 81279C1C; later ring: ... 81279C1C 81279C20 81253292 81253278 81279BEE 81279C02 81279C0C 81279C1C; [FIBER-EXEC] no block for pc=FFFFFFFD ... blk=812B1BA0 ring: 81279C0C 81279C1C 812068F2 812068D8 8120685A 812B1B70 81206860 ... 812B1BA0 (sceFiberSwitch HLE entered repeatedly); [SENTINEL] pc=FFFFFFFD fiber=848463A0 lr=81279C20 sp=84856050 r0=84B99630 r1=00000002 blk=81279C1C x12; [TABLE] blocks=230290 (batch_036 active); [COUNT] present=0 begin_pass=0 draw=0; [FRAMECB]/[UPD]/[POST]=0; [IO] 6; [ACFFILL] size=5152; [CRILOG]=0; [TAILRET]=0 (batch_036 blocks no longer miss addresses). '
+       'Experiment A (reverted): in the no-block branch, for pc in {FFFFFFFD,FFFFFFFE,FFFFFFF0} do s->r[15]=s->r[14]; continue; result: run lines 199,704 -> 409,751, [SENTRET] x20 then the loop 81279BEE->81279C02->81279C0C->81279C1C->FFFFFFFD persists, [FRAMECB]/[UPD]/[POST] still 0, so the semantics is wrong; reverted (diagnostics kept). '
+       'Key inference: the sentinel is brought in by the fiber switch/restore path (lr=81279C20 is the return address of the bl 812068F2 at 81279C1C); 812068F2/812068D8/8120685A/812B1B70/812B1BA0 belong to the guest fiber manager + the HLE sceFiberSwitch; 0xFFFFFFFD is more likely the HLE nested-callback/fiber-return convention (the harness call_guest_cb family uses LR=0xFFFFFFFE + sentinel break at lines 5004-5319) and must be handled as "restore the caller context (rc_restore/g_caller_ctx) and return to the main dispatcher" rather than pc=lr. batch_036 remains effective: [TAILRET]=0, [TABLE]=230290, [HUNT-EXEC]=0. '
+       'NEXT: (1) inspect the HLE cases 812B1B70/812B1BA0/812B1B60 (fiber switch/return-to-thread/get-self) and their interaction with our fiber exec to find which case makes s->r[15] become 0xFFFFFFFD (or restores it from the guest fiber object/stack); (2) check whether a call_guest_cb/call_guest_cb2 caller (HLE fiber code path) returns the sentinel during nested execution and needs an rc_restore finish; (3) when the fiber exec receives the sentinel, perform the "nested return": restore g_caller_ctx + g_cur_fiber and let the outer dispatcher continue (instead of pc=lr); (4) after the fix the GFD frame loop should start ([FRAMECB]/[UPD]/[POST] counters, [COUNT] present increments) -> title asset requests. '
+       'Verification: m1214_sentret_key.txt, m1213_sentinel_key.txt, m1212_tail_key.txt, [TABLE] blocks=230290. |
 m1211/m1212 证据（`m1211_hunt_key.txt`、`m1212_tail_key.txt`）：
 ```
 [FIBER-EXEC] no block for pc=81242D24 (cur=848463A0)   ← 旧：未翻译地址被当 pc
@@ -502580,3 +502621,40 @@ _gen_tail.py = _gen_miss_blocks3.py 改 BOUNDS/OUTDIR → py -3 _gen_tail.py 500
 ANTI-FORGETTING ENTRY. Keywords: M1128 fiber hijack root cause = AOT function bounds truncation, 0x81242C3A..0x81242DD2 tail of FUN_81241F46 untranslated so execution jumped into 0x81242D24 with no translated block -> livelock. Fixed with gap-fill pipeline: tail_bounds.json [{"va":2166631482 (=0x81242C3A),"size":408 (=0x198),"name":"FUN_81241F46_tail"}], _gen_tail.py copy of _gen_miss_blocks3.py with BOUNDS/OUTDIR, py -3 _gen_tail.py 500 4 -> recomp_tail/batch_000.cpp (76 defs/38 table entries/.o 20678B incl blk_81242D24), rename to batch_036 with g_blocks_/find_block_/get_table_/batch 0: substitutions, harness registration FB(036)+externs+ALL_FINDERS[36]->[37]+build_all_blocks ternary chains (... : i == 34 ? get_table_034 : i == 35 ? get_table_035 : get_table_036) + loops i<37 and dedupe i=36; recompile+link exit=0; verification [TABLE] blocks=230290 (+38), [HUNT-EXEC]=0 (hijack pc 81242D24 gone). Root-cause evidence: [FIBER-EXEC] no block for pc=81242D24 (cur=848463A0), [HUNT-SAVE] #17 fiber=848463A0 pc=81242D24 sp=848560F8 lr=848D9504 blk=8124217E, [HUNT-EXEC] #1 meta_entry=81206BDC obj84=81198C0B obj88=82EFFF28 obj80=1; disassembly of 0x81242C3A.. shows valid Thumb code (cmp/add.w/ldr.w/str/adds/b.w/beq/bne/pop.w) but recorded function size 0xCF4 only reaches 0x81242C3A. New blocker after fix: [FIBER-EXEC] no block for pc=FFFFFFFD x9800 - the fiber return sentinel 0xFFFFFFFD is not handled by the fiber exec loop; [FRAMECB]/[UPD]/[POST]/[COUNT]=0, [IO]=6, [ACFFILL] size=5152, [CRILOG]=0. NEXT: handle pc in {0xFFFFFFFD,0xFFFFFFFE,0xFFFFFFF0,0} in the fiber exec loop as a callback/fiber return (see call_guest_cb helpers lines 5004-5319 where the sentinel breaks and returns) instead of no-block -> fiber_save -> livelock; trace the 0xFFFFFFFD source in fiber_save/load; then the GFD frame loop should start and title asset requests follow; keep scanning no-block and filling new gaps with the same pipeline. Verification: m1212_tail_key.txt, m1211_hunt_key.txt, tail_bounds.json, _gen_tail.py, batch_036.cpp, [TABLE] blocks=230290.
 
 LOOKUP: M1128 fiber hijack root cause AOT function bounds truncation FUN_81241F46 tail 0x81242C3A 0x81242DD2 untranslated 0x81242D24 no block, gap-fill pipeline tail_bounds.json _gen_tail.py _gen_miss_blocks3.py batch_036 38 blocks TABLE blocks 230290, harness FB(036) ALL_FINDERS[37] ternary chains dedupe, HUNT-EXEC 0 hijack fixed, new blocker FIBER-EXEC no block pc=FFFFFFFD x9800 fiber return sentinel, next handle sentinels FFFFFFFD FFFFFFFE FFFFFFF0 0 in fiber exec as callback return, FRAMECB UPD POST COUNT 0 frame loop not entered -> 18.4672 [relevant: revised hijack hypothesis], 18.4671 [relevant: thread stack overlap], 18.4670 [relevant: fiber B hijack]
+### 18.4674 PORT M1129: fiber 返回哨兵 0xFFFFFFFD 上下文定位（实验 A 语义错误已回退）
+
+1) 哨兵上下文（m1213/m1214）：
+```
+[FIBER-EXEC] no block for pc=FFFFFFFD (cur=848463A0) lr=81279C20 sp=84856050 r0=84B99630 blk=81279C1C
+  ring: 81278C8E … 81253278 81279BEE 81279C08 81279C0C 81279C1C
+[FIBER-EXEC] no block for pc=FFFFFFFD … blk=812B1BA0 ring: 81279C0C 81279C1C 812068F2 812068D8 8120685A
+        812B1B70 81206860 … 812B1BA0          ← 进入 sceFiberSwitch HLE 反复往返
+[SENTINEL] pc=FFFFFFFD fiber=848463A0 lr=81279C20 sp=84856050 r0=84B99630 r1=00000002 blk=81279C1C ×12
+[TABLE] blocks=230290 / [HUNT-EXEC]=0 / [TAILRET]=0     ← batch_036 修复仍有效
+[COUNT] present=0 / [FRAMECB][UPD][POST]=0 / [IO] 6 / [ACFFILL] size=5152 / [CRILOG]=0
+```
+2) 实验 A（回退）：
+```
+no-block 分支对 pc∈{FFFFFFFD,FFFFFFFE,FFFFFFF0}: s->r[15]=s->r[14]; continue;
+结果：[SENTRET]×20 后仍 81279BEE→81279C02→81279C0C→81279C1C→FFFFFFFD 循环；[FRAMECB][UPD][POST] 仍 0
+→ 语义不正确，已 revert（诊断打印保留）
+```
+3) 关键推断：
+```
+哨兵由 fiber 切换/恢复路径带入：lr=81279C20 = 81279C1C 处 bl 812068F2 的返回地址；
+812068F2/812068D8/8120685A/812B1B70/812B1BA0 = guest fiber 管理器 + HLE sceFiberSwitch；
+0xFFFFFFFD 更可能是 HLE 嵌套回调/光纤返回约定（call_guest_cb 系列用 LR=0xFFFFFFFE + 哨兵 break，行 5004-5319）
+→ 正确收尾应是"恢复调用者上下文（rc_restore/g_caller_ctx）并回主派发"，而不是 pc=lr
+```
+4) NEXT：
+```
+① 查 HLE 812B1B70/812B1BA0/812B1B60 与 fiber exec 的交互，找出谁把 s->r[15] 变成 0xFFFFFFFD（或从 guest fiber 对象/栈恢复）
+② 查 call_guest_cb/call_guest_cb2 的调用者（HLE fiber 路径）是否在嵌套执行里返回哨兵 → 需 rc_restore 收尾
+③ fiber exec 收到哨兵时执行"嵌套返回"：恢复 g_caller_ctx + g_cur_fiber，令外层派发继续
+④ 修复后 GFD 帧循环启动（[FRAMECB]/[UPD]/[POST]、[COUNT] present）→ 标题资源请求
+```
+验证：`m1214_sentret_key.txt`、`m1213_sentinel_key.txt`、`m1212_tail_key.txt`、`[TABLE] blocks=230290`。
+
+ANTI-FORGETTING ENTRY. Keywords: M1129 fiber return sentinel 0xFFFFFFFD localized: [FIBER-EXEC] no block for pc=FFFFFFFD (cur=848463A0) lr=81279C20 sp=84856050 r0=84B99630 blk=81279C1C, predecessor chain 81279BEE -> 81279C02 -> 81279C0C -> 81279C1C (bl 812068F2) -> 812068F2 fiber manager -> 812068D8/8120685A -> 812B1B70/812B1BA0 sceFiberSwitch HLE; ring 81278C8E 81278C94 81253406 81278C96 81278CB0 81278CB8 812B28A0 81278CC4 81278CDA 81278CEC 81253414 81254C5A 8122724C 81254C14 8125326C 81253278 81279BEE 81279C08 81279C0C 81279C1C. Experiment A (s->r[15]=s->r[14]; continue on sentinel) reduced log volume only; [SENTRET] x20 then loop 81279BEE->81279C02->81279C0C->81279C1C->FFFFFFFD persists, [FRAMECB]/[UPD]/[POST] still 0, reverted (diagnostics kept). batch_036 still effective: [TABLE]=230290, [HUNT-EXEC]=0, [TAILRET]=0; [COUNT] present=0, [IO]=6, [ACFFILL] size=5152, [CRILOG]=0. Inference: the sentinel is brought in by the fiber switch/restore path (lr=81279C20 is the return address of bl 812068F2 at 81279C1C); 812068F2/812068D8/8120685A/812B1B70/812B1BA0 = guest fiber manager + HLE sceFiberSwitch; 0xFFFFFFFD is likely the HLE nested-callback/fiber-return convention (call_guest_cb family uses LR=0xFFFFFFFE + sentinel break at lines 5004-5319) and must be handled as restore caller context (rc_restore/g_caller_ctx) and return to the main dispatcher instead of pc=lr. NEXT: inspect HLE 812B1B70/812B1BA0/812B1B60 to find which case makes s->r[15]=0xFFFFFFFD (or restores it from guest fiber object/stack); check call_guest_cb/call_guest_cb2 callers (HLE fiber path) returning the sentinel during nested execution and requiring rc_restore; when fiber exec receives the sentinel perform the nested return (restore g_caller_ctx + g_cur_fiber, let outer dispatcher continue); then GFD frame loop should start ([FRAMECB]/[UPD]/[POST], [COUNT] present) -> title asset requests. Verification: m1214_sentret_key.txt, m1213_sentinel_key.txt, m1212_tail_key.txt, [TABLE] blocks=230290.
+
+LOOKUP: M1129 fiber return sentinel 0xFFFFFFFD lr=81279C20 sp=84856050 blk=81279C1C chain 81279BEE 81279C02 81279C0C 81279C1C bl 812068F2 fiber manager 812B1B70 812B1BA0 sceFiberSwitch HLE, experiment A (sentinel-lr recovery) failed reverted, call_guest_cb LR 0xFFFFFFFE sentinel break lines 5004-5319, next rc_restore g_caller_ctx nested return inspect HLE 812B1B70 812B1B60, batch_036 effective TABLE 230290 HUNT-EXEC 0 TAILRET 0, COUNT present 0 frame loop not entered -> 18.4673 [relevant: batch_036 gap fix], 18.4672 [relevant: hijack hypothesis], 18.4670 [relevant: GFD fiber]

@@ -4537,7 +4537,13 @@ g_loop_site = 0; ++g_loop_cnt[0]; g_current_loop_pc = (int)pc; h7344_probe(s, pc
 BlockFn fn = gbn(pc);
     if (!fn) { int back = 0; uint32_t bq = gbn_back(pc, &back);
       if (bq && back <= 16) { fn = gbn(bq); if (fn) { if (g_fback_n++ < 8) printf("[FBACK] pc=%08X -> block %08X (back %d)\n", pc, bq, back); pc = bq; } } }
-    if (!fn) { printf("[FIBER-EXEC] no block for pc=%08X (cur=%08X)\n", pc, g_cur_fiber); fiber_save(s); break; }
+    if (!fn) {
+      { static int _nb=0; if (_nb++ < 20) { printf("[FIBER-EXEC] no block for pc=%08X (cur=%08X) lr=%08X sp=%08X r0=%08X blk=%08X ring:", pc, g_cur_fiber, s->r[14], s->r[13], s->r[0], g_cur_block);
+          for (int _k=0;_k<20;++_k) printf(" %08X", g_pc_ring[(g_pc_ring_n - 20u + (uint32_t)_k) & 63u]); printf("\n"); fflush(stdout);
+          if (pc >= 0x81242C3Au && pc < 0x81242DD2u) printf("[TAILRET] hit missing-tail address pc=%08X\n", pc);
+          if (pc == 0xFFFFFFFDu || pc == 0xFFFFFFFEu || pc == 0xFFFFFFF0u) {
+            static int _sn=0; if (_sn++ < 12) { printf("[SENTINEL] pc=%08X fiber=%08X lr=%08X sp=%08X r0=%08X r1=%08X blk=%08X\n", pc, g_cur_fiber, s->r[14], s->r[13], s->r[0], s->r[1], g_cur_block); fflush(stdout); } } } }
+            fiber_save(s); break; }
     if (pc==0x811DA024u) { RecState* _ps = SPTR(s); g_last_alloc_sz = _ps->r[0]; g_last_alloc_fp = _ps->r[4]; }
     else if ((pc==0x811DA028u||pc==0x811DA02Au||pc==0x811DA030u||pc==0x811DA036u) && SPTR(s)->r[0]==0u && g_allocf_n++ < 24) { RecState* _ps = SPTR(s); printf("[ALLOCFAIL] pc=%08X size=%08X fp=%08X r0=%08X r1=%08X r4=%08X r5=%08X r6=%08X r7=%08X sp=%08X lr=%08X fib=%08X thr=%08X\n", pc, g_last_alloc_sz, g_last_alloc_fp, _ps->r[0],_ps->r[1],_ps->r[4],_ps->r[5],_ps->r[6],_ps->r[7],_ps->r[13],_ps->r[14],g_cur_fiber,g_cur_thr); fflush(stdout); }
     job_probes(pc, SPTR(s));
