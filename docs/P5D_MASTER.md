@@ -1126,6 +1126,59 @@
 | M1108 | §18.4653: ★★★★★★★★ **CPK 首次读的加载状态机只被驱动了 2 步就停：FUN_8128F04E（criFs 异步 Load 状态机）实测只被调用 2 次（state=1 初始化 → state=2 提交读、in-flight 置 1），之后没有第 3 次调用；progress 对象状态 1→2→3，但 reader +0xBC 仍停在 1(loading)，完成处理永远不发生。同时确认：全局 I/O 接口指针 DAT_815401D4/D8 = 0（未注册），但实际读路径用每请求 vtable（progress 对象 [0]=0x81540460，guest 函数指针 81294FDC=stat/81295016=open/8129513F…）。**
 | M1109 | §18.4654: ★★★★★★★★ **HLE I/O 泵成功打通"读完成"：CPK Analyzer 已进入分析函数 FUN_81292794（首次 [CPKANAL] 命中）！但新卡点=分析报 `E2011022806:CPK Analyzer::Cannot possibly analyze the CPK File. This CPK is broken.`（头数据缓冲内容不对）。**
 | M1110 | §18.4655: ★★★★★★★ **缓冲 dump 证明 HLE 读数据 100% 正确（与真实 vita.cpk 前 64 字节逐字节一致），"CPK is broken" 的真正原因浮出水面：CPK Analyzer 在 +0x08 处读取的是"表大小"，而 vita.cpk 该字段=0x813F3494(文件大小) → 触发 `if (0x800 < uVar8+0x10) 返回错误 1（CPK broken）`；vita.cpk 的 +0x04=0xFFFFFFFF、+0x08..0x0F=64 位文件大小 0x813F3494，说明它是"64 位/加密变体 CPK"，正常流程应在 load state 4 调用解密回调 param_1[0x20] 处理后才能给 Analyzer 解析。我们泵的完成 shim 跳过了 state 4（因为 param_1[0x20]==0），所以 Analyzer 看到原始头 → 报 broken。**
+| M1111 | §18.4656: ★★★★★★★ **解密器注册链完全解码：progress 的 [0x20]/[0x21]（=reader+0xA8/+0xAC）由 FUN_8128EFF4(param1, cb, arg) 设置，数据来自 reader+0xF4/+0xF8（=reader+0xEC/+0xF0 的副本）；FUN_8128D716 在 blk 0x8128D9D0 无条件调用 FUN_8128EFF4(progress, reader+0xF4, reader+0xF8)。全对象写 watch（188 条 PROGWR）证明：reader+0xEC/+0xF0 在本运行中被 FUN_8128DEB4 初始化为 0，之后从未被置非零 → 游戏在本流程中从未给该 reader 注册解密器 → header 未解密 → Analyzer 报 broken。**
+m1169 证据（`out80m_m1169decstate.txt`）：
+```
+[DECSTATE] reader+DC=00000000 +E0=00000000 +E4=00000000 +E8=00000000 (blk 31500/33000)
+[PROGWR] a=848FC408 off=0A0 v=8128EEC7 blk=28805 pc=8128EFEE   ← FUN_8128EFEE 设置 "I/O 回调"（0x8128EEC6|1）
+[PROGWR] a=848FC40C off=0A4 v=848FC368 blk=28805 pc=8128EFEE   ← 回调参数=reader 自身
+[PROGWR] a=848FC454 off=0EC v=00000000 blk=28804 pc=8128DEB4   ← ★ 解密器 fn = 0
+[PROGWR] a=848FC458 off=0F0 v=00000000 blk=28804 pc=8128DEB4   ← ★ 解密器 arg = 0
+[PROGWR] a=848FC45C off=0F4 v=00000000 blk=28804 pc=8128DEB4
+[PROGWR] a=848FC460 off=0F8 v=00000000 blk=28804 pc=8128DEB4
+（其余 0x848FC4xx 写入均为 0 或 I/O 对象地址）
+```
+**小函数反编译（`decfn.txt`）**：
+```c
+FUN_8128EFF4(param_1, param_2, param_3) { *(u32*)(param_1+0x80)=param_2; *(u32*)(param_1+0x84)=param_3; }
+FUN_8128EFEE(param_1, param_2, param_3) { *(u32*)(param_1+0x78)=param_2; *(u32*)(param_1+0x7C)=param_3; }
+FUN_8128F6C8(param_1) { return *(u32*)(param_1+4); }      // progress[1]=用户缓冲/大小字段
+```
+**FUN_8128D716 关键段（criread2.txt 第 100-119 行）**：
+```c
+FUN_8127bbf8(iVar10, 0);                            // reader+0xBC = 0
+*(param_1 + 0xd9) = 0;
+pcVar1 = DAT_815401d4;                              // 全局 I/O 接口 read/write 指针（=0）
+if (*(char *)(param_1 + 0xd4) == 0) { iVar7 = *(char *)(param_1 + 0xd7); }
+bVar11 = DAT_815401d4 != 0;
+if (bVar11) {                                       // 接口已注册才调用
+   uVar5 = 2; if (... ) uVar5 = 3/1;
+   (*pcVar1)(DAT_815401d8, *(param_1+200), uVar5, *(param_1+0x108), *(param_1+0x104));
+}
+FUN_8128eff4(*(param_1 + 0xb0), *(param_1 + 0xf4), *(param_1 + 0xf8));   // ★ 解密器 = reader+0xF4/0xF8（=reader+0xEC/0xF0 拷贝）
+```
+**⇒ 结论**：
+1. 解密回调字段 = progress[0x20]/[0x21]（reader+0xA8/0xAC），由 FUN_8128EFF4 从 reader+0xF4/0xF8 拷贝；reader+0xF4/0xF8 在 load 开始时从 reader+0xEC/0xF0 复制而来
+2. 全 watch 证明 reader+0xEC/0xF0 只有一次写入（FUN_8128DEB4，值 0），**游戏从未注册解密器**
+3. DAT_815401D4/D8（全局 criFsIo read/write 接口）也从未注册（=0）——D716 中 `if (bVar11)` 分支被跳过
+4. CRI 库字符串证据：`E2011030301:Only one decrypter is creatable.` @0x81314F15、`E2015042403:Decryption failure.` @0x8131C878、`CPKC` @0x8131D184、`CRI CPK Analyzer/VITA Ver.0.99.54 Build:Jan 30 2018`——说明 CRI 有**独立 decrypter 对象**体系；正常流程应在初始化时创建 decrypter 并挂到 reader（经 reader+0xEC/0xF0），我们的运行中没有发生
+5. 怀疑：P5D 初始化中"创建 decrypter/注册 I/O 接口"的代码路径未执行或半途失败（可能是 HLE 某 API 返回不对导致跳过了注册），因此 mount 时 reader+0xEC/0xF0 为空
+**NEXT**：
+```
+① 通过字符串 xref 定位 "Only one decrypter is creatable." / "CPKC" 所属函数（criFsDecrypter_Create 等），反编译并找调用者（游戏初始化）
+② 探针/日志确认该函数是否在我们的运行中被调用；若未调用，找上层 init 分支为何跳过
+③ 若调用了：查看它写 reader+0xEC/0xF0 的前置条件（binder mount 参数 / CPK 文件标志 / HLE 内存分配返回值）
+④ 关注 DAT_815401D4/D8 注册函数（criFsIo_SetIoInterface 类）是否被调用，为什么没写；必要时 HLE 主动注册兼容接口
+⑤ 若 decrypter 无法恢复：确认 CPK header 加密算法（可能为 P5D 自定义），评估在 HLE 内做 header 变换的可行性（需已知明文格式：+0x08=table_size、+0x04=0 等）
+⑥ 解密打通后：+0x08 表大小合法 → UTF 解析 → 分析成功 state=0x1A → mount status=2 → data.cpk → 文件索引 → title 素材
+```
+验证：`out80m_m1169decstate.txt`、`decfn.txt`、`criread2.txt`、`cpkana.txt`。 |
+| §18.4656 | The decryptor-registration chain is fully decoded: progress [0x20]/[0x21] (= reader+0xA8/+0xAC) are set by FUN_8128EFF4(param1, cb, arg), with the data coming from reader+0xF4/+0xF8 (= copies of reader+0xEC/+0xF0). FUN_8128D716 unconditionally calls FUN_8128EFF4(progress, reader+0xF4, reader+0xF8) at blk 0x8128D9D0. A whole-object write watch (188 PROGWR entries) proves that reader+0xEC/+0xF0 were initialized to 0 by FUN_8128DEB4 in this run and never set non-zero afterwards -> the game never registered a decryptor for this reader -> the header was never decrypted -> the Analyzer reports broken. '
+       'm1169 evidence: [DECSTATE] reader+DC=00000000 +E0=00000000 +E4=00000000 +E8=00000000 (blk 31500/33000); [PROGWR] a=848FC408 off=0A0 v=8128EEC7 blk=28805 pc=8128EFEE (FUN_8128EFEE sets the I/O callback 0x8128EEC6|1); a=848FC40C off=0A4 v=848FC368 (callback arg = reader itself); a=848FC454 off=0EC v=00000000 blk=28804 pc=8128DEB4 (decryptor fn = 0); a=848FC458 off=0F0 v=00000000 blk=28804 (decryptor arg = 0); a=848FC45C off=0F4 v=0; a=848FC460 off=0F8 v=0; the rest of the 0x848FC4xx writes are 0 or I/O object addresses. '
+       'Function decompiles: FUN_8128EFF4(param_1,param_2,param_3) { *(u32*)(param_1+0x80)=param_2; *(u32*)(param_1+0x84)=param_3; }; FUN_8128EFEE(param_1,param_2,param_3) { *(u32*)(param_1+0x78)=param_2; *(u32*)(param_1+0x7C)=param_3; }; FUN_8128F6C8(param_1) { return *(u32*)(param_1+4); } (progress[1] = user buffer/size field). FUN_8128D716 key part: FUN_8127bbf8(iVar10,0) (reader+0xBC=0); *(param_1+0xd9)=0; pcVar1=DAT_815401d4 (global I/O interface read/write pointer, =0); if (*(char*)(param_1+0xd4)==0) iVar7=*(char*)(param_1+0xd7); bVar11 = DAT_815401d4 != 0; if (bVar11) { uVar5=2; ... (*pcVar1)(DAT_815401d8, *(param_1+200), uVar5, *(param_1+0x108), *(param_1+0x104)); } FUN_8128eff4(*(param_1+0xb0), *(param_1+0xf4), *(param_1+0xf8)) (decryptor = reader+0xF4/0xF8 = the copies of reader+0xEC/0xF0). '
+       'CONCLUSION: (1) the decrypt callback fields are progress[0x20]/[0x21] (reader+0xA8/0xAC), filled by FUN_8128EFF4 from reader+0xF4/0xF8; reader+0xF4/0xF8 are copied from reader+0xEC/0xF0 at load start; (2) the watch proves reader+0xEC/0xF0 were only written once (FUN_8128DEB4, value 0), so the game never registered a decryptor; (3) DAT_815401D4/D8 (global criFsIo read/write interface) were never registered either (=0), so the if (bVar11) branch in D716 was skipped; (4) CRI library strings: E2011030301:Only one decrypter is creatable. @0x81314F15, E2015042403:Decryption failure. @0x8131C878, CPKC @0x8131D184, CRI CPK Analyzer/VITA Ver.0.99.54 Build:Jan 30 2018 -> CRI has a separate decrypter object system; the normal flow should create a decrypter at initialization and attach it to the reader (via reader+0xEC/0xF0), which did not happen in our run; (5) suspicion: the P5D init code that creates the decrypter / registers the I/O interface never executed or failed halfway (possibly some HLE API returned the wrong value and the registration was skipped), so reader+0xEC/0xF0 were empty at mount time. '
+       'NEXT: (1) xref the strings Only one decrypter is creatable. / CPKC to locate the owning functions (criFsDecrypter_Create etc.), decompile them and find their callers (game init); (2) probe/log whether those functions are called in our run; if not, find why the upper init branch was skipped; (3) if called: inspect the preconditions for writing reader+0xEC/0xF0 (binder mount params / CPK file flag / HLE memory allocation return values); (4) check the DAT_815401D4/D8 registration function (criFsIo_SetIoInterface-like) - whether it is called and why it did not write; if necessary, register a compatible interface from the HLE; (5) if the decrypter cannot be recovered: identify the CPK header encryption algorithm (possibly P5D custom) and evaluate transforming the header in HLE (need the known plaintext format: +0x08=table_size, +0x04=0...); (6) after decryption: valid +0x08 table size -> UTF parse -> analysis succeeds state=0x1A -> mount status=2 -> data.cpk -> file index -> title assets. '
+       'Verification: out80m_m1169decstate.txt, decfn.txt, criread2.txt, cpkana.txt. |
 m1167 证据（`out80m_m1167iodata.txt`）：
 ```
 [PREAD-DST] dst=84B1BC00: 204B5043 FFFFFFFF 813F3494 00000000 46545540 7A000000 2C000000 4C000000
@@ -501011,3 +501064,46 @@ LAB_8128F3C4: if (error_flag==0) { if (param_1[0x20]==0) { ... state=7 } }   // 
 ANTI-FORGETTING ENTRY. Keywords: M1110 read data 100% correct, vita.cpk is a 64-bit/encrypted CPK variant, Analyzer needs load state 4 decrypt callback, our pump skipped decrypt so CPK is broken. [PREAD-DST] dst=84B1BC00: 204B5043 FFFFFFFF 813F3494 00000000 46545540 7A000000 2C000000 4C000000 identical to the real vita.cpk first 64 bytes (+00 CPK , +04 FFFFFFFF, +08 813F3494 = 2168403092 = file size, +0C 0, +10 @UTF); data.cpk for comparison has +08 = 0x350 (normal small table size). FUN_81292794: checks magic CPK -> err 2 (not a CPK format); uVar8 = *(u32*)(param_3+8) read as table size; if (0x800 < uVar8+0x10) err 1 (CPK broken); if (param_3[4]==0) CRI XOR decrypt of the +0x10 table (key start 0x5F stepping *0x15); then FUN_812AFF10 and FUN_812AEA4C("UpdateDateTime"/"ContentOffset"/"ContentSize"/"TocOffset"/"TocSize"/"EtocOffset"/"ItocOffset"/"GtocOffset"...) parse the UTF fields. F04E state 4 = decrypt path: iVar1 = (*(code*)param_1[0x20])(param_1[0x21], param_1[0x18], param_1[0x15], ...); nonzero -> E2015042403 Decryption failure + state 8. LAB_8128F3C4: if (error flag 0) { if (param_1[0x20]==0) { ... state=7 } }. Evidence m1167: [CPKANAL] #0 r0=84B1B84C r1=84B1B858 r2=84B1BC00 r3=84B1B990 lr=81293CB8; [CRILOG] E2011022806:CPK Analyzer::Cannot possibly analyze the CPK File. This CPK is broken. x3 at n=1717; [IOPUMP-DONE] state=7 size=848E8EE8 reader=848FC368 -> status=2 blk=31500, second size=00000000; [BADMEM] va=0x0000006B block=0x8128F04E (stale progress pointer on 2nd pump). NEXT: find who sets progress[0x20]/[0x21] (FUN_8128F776 params / criFsBinder decryptor registration / game init), decompile FUN_8128F776 and check FUN_8128E394 param_9..12; if decryption is guest code identify HLE deps (SceKernelUtils AES/XOR) and implement; fallback: transform the 0x84B1BC00 header in HLE into the standard form (header only); then +0x08 table size <=0x7F0 -> UTF parse -> analysis succeeds state=0x1A -> mount status=2 -> data.cpk -> file index -> title assets. Verification: out80m_m1167iodata.txt, cpkana.txt, ioop.txt, criread2.txt.
 
 LOOKUP: M1110 read data correct, vita.cpk 64-bit encrypted CPK variant, +0x08 file size 0x813F3494, Analyzer table size check 0x800 < uVar8+0x10 err CPK broken, param_3[4]==0 CRI XOR decrypt key 0x5F*0x15, F04E state 4 decrypt callback param_1[0x20]/[0x21], E2015042403 decryption failure, LAB_8128F3C4 skip to state 7, data.cpk +08 0x350 normal, next find decrypt callback registration FUN_8128F776 / CriFsBinder decryptor / game init -> §18.4654 [relevant: pump], §18.4653 [relevant: load state machine], §18.4652 [relevant: SWAP locks]
+### 18.4656 PORT M1111: 解密器注册链解码——reader+0xEC/0xF0 从未被注册（游戏初始化未创建 decrypter）
+
+1) 解密器字段链：
+```
+FUN_8128D716: FUN_8128EFF4(progress, reader+0xF4, reader+0xF8)   // progress+0x80/+0x84 = 解密器
+              reader+0xF4/+0xF8 ← 从 reader+0xEC/+0xF0 复制
+FUN_8128EFF4(p,cb,arg): *(p+0x80)=cb; *(p+0x84)=arg
+```
+2) 全对象写 watch（188 条）：
+```
+[PROGWR] a=848FC454 off=0EC v=00000000 blk=28804 pc=8128DEB4   ← 解密器 fn=0（唯一写）
+[PROGWR] a=848FC458 off=0F0 v=00000000 blk=28804 pc=8128DEB4   ← 解密器 arg=0
+[PROGWR] a=848FC408 off=0A0 v=8128EEC7 blk=28805 pc=8128EFEE   ← I/O 回调（FUN_8128EEC6|1）
+[PROGWR] a=848FC40C off=0A4 v=848FC368 blk=28805 pc=8128EFEE   ← 回调参数=reader
+[DECSTATE] reader+DC/+E0/+E4/+E8 = 0（blk 31500/33000）
+⇒ reader+0xEC/0xF0 从未被置非零 = 游戏从未注册解密器
+DAT_815401D4/D8（全局 criFsIo 接口）=0（从未注册）
+```
+3) CRI 字符串证据：
+```
+E2011030301:Only one decrypter is creatable.  @0x81314F15
+E2015042403:Decryption failure.               @0x8131C878
+CPKC                                          @0x8131D184
+CRI CPK Analyzer/VITA Ver.0.99.54 Build:Jan 30 2018
+```
+4) 结论：
+- CRI 有独立 decrypter 对象体系；正常流程应在初始化时创建 decrypter 并挂到 reader（reader+0xEC/0xF0）
+- 我们的运行中该注册从未发生（全 watch 为零）→ header 未解密 → Analyzer sees +0x08=文件大小 → "CPK is broken"
+- 怀疑 P5D 初始化中"创建 decrypter / 注册 I/O 接口"的代码路径未执行或半途失败（HLE API 返回值/回调导致跳过）
+5) NEXT：
+```
+① xref "Only one decrypter is creatable." / "CPKC" 定位 criFsDecrypter_Create 类函数与调用者
+② 确认该函数是否被调用；若未调用找上层 init 跳过原因
+③ 若调用：查 reader+0xEC/0xF0 写入的前置条件（mount 参数/CPK 标志/HLE 内存返回值）
+④ 查 DAT_815401D4/D8 注册函数（criFsIo_SetIoInterface 类）是否被调用
+⑤ 兜底：确认 CPK header 加密算法，评估 HLE 内 header 变换可行性
+⑥ 解密后：+0x08 表大小合法 → UTF 解析 → 分析成功 state=0x1A → mount status=2 → data.cpk → 索引 → title
+```
+验证：`out80m_m1169decstate.txt`、`decfn.txt`、`criread2.txt`、`cpkana.txt`。
+
+ANTI-FORGETTING ENTRY. Keywords: M1111 decryptor registration chain decoded, progress[0x20]/[0x21]=reader+0xA8/0xAC set by FUN_8128EFF4(p,cb,arg) from reader+0xF4/0xF8 (= copies of reader+0xEC/0xF0), FUN_8128D716 unconditionally calls FUN_8128EFF4(progress, reader+0xF4, reader+0xF8) at blk 0x8128D9D0, whole-object write watch 188 PROGWR entries proves reader+0xEC/0xF0 initialized to 0 by FUN_8128DEB4 and never set non-zero -> game never registered a decryptor -> header not decrypted -> Analyzer CPK broken. Evidence m1169: [DECSTATE] reader+DC=0 +E0=0 +E4=0 +E8=0 at blk 31500/33000; [PROGWR] a=848FC408 off=0A0 v=8128EEC7 blk=28805 pc=8128EFEE (I/O callback 0x8128EEC6|1); a=848FC40C off=0A4 v=848FC368 (arg=reader); a=848FC454 off=0EC v=0 blk=28804 pc=8128DEB4 (decryptor fn=0); a=848FC458 off=0F0 v=0 blk=28804 (decryptor arg=0); a=848FC45C off=0F4 v=0; a=848FC460 off=0F8 v=0; rest of 0x848FC4xx writes 0 or I/O object addrs. Decompiles: FUN_8128EFF4(p,a,b){ *(u32*)(p+0x80)=a; *(u32*)(p+0x84)=b; }; FUN_8128EFEE(p,a,b){ *(u32*)(p+0x78)=a; *(u32*)(p+0x7C)=b; }; FUN_8128F6C8(p){ return *(u32*)(p+4); } (progress[1]=user buffer/size). FUN_8128D716: FUN_8127bbf8(iVar10,0) (reader+0xBC=0); *(param_1+0xd9)=0; pcVar1=DAT_815401d4 (global I/O interface read/write pointer = 0); if (*(char*)(param_1+0xd4)==0) iVar7=*(char*)(param_1+0xd7); bVar11 = DAT_815401d4 != 0; if (bVar11) { uVar5=2; ... (*pcVar1)(DAT_815401d8, *(param_1+200), uVar5, *(param_1+0x108), *(param_1+0x104)); } FUN_8128eff4(*(param_1+0xb0), *(param_1+0xf4), *(param_1+0xf8)) (decryptor = reader+0xF4/0xF8 = copies of reader+0xEC/0xF0). CONCLUSION: decrypt callback fields are progress[0x20]/[0x21] (reader+0xA8/0xAC), filled by FUN_8128EFF4 from reader+0xF4/0xF8; reader+0xF4/0xF8 copied from reader+0xEC/0xF0 at load start; watch proves reader+0xEC/0xF0 only written once with 0 (FUN_8128DEB4) -> no decryptor registered; DAT_815401D4/D8 global criFsIo read/write interface never registered either (=0), so the if (bVar11) branch in D716 was skipped. CRI strings: E2011030301:Only one decrypter is creatable. @0x81314F15, E2015042403:Decryption failure. @0x8131C878, CPKC @0x8131D184, CRI CPK Analyzer/VITA Ver.0.99.54 Build:Jan 30 2018. Suspicion: P5D init code that creates the decrypter / registers the I/O interface never executed or failed halfway (some HLE API returned wrong value and registration was skipped), so reader+0xEC/0xF0 empty at mount. NEXT: xref the Only one decrypter is creatable. / CPKC strings to locate the owning functions (criFsDecrypter_Create etc.) and their callers (game init); probe/log whether those functions are called in our run; find why the upper init branch was skipped; inspect the preconditions for writing reader+0xEC/0xF0 (binder mount params / CPK file flag / HLE memory allocation return values); check the DAT_815401D4/D8 registration function (criFsIo_SetIoInterface-like) - whether called and why no write, if needed register a compatible interface from the HLE; if decrypter cannot be recovered identify the CPK header encryption algorithm (possibly P5D custom) and evaluate transforming the header in HLE (known plaintext format: +0x08=table_size, +0x04=0...); after decryption valid +0x08 table size -> UTF parse -> analysis succeeds state=0x1A -> mount status=2 -> data.cpk -> file index -> title assets. Verification: out80m_m1169decstate.txt, decfn.txt, criread2.txt, cpkana.txt.
+
+LOOKUP: M1111 decryptor registration chain, progress+0x80/+0x84 = reader+0xA8/0xAC, FUN_8128EFF4 setter, reader+0xEC/0xF0 zero, FUN_8128DEB4 init, DAT_815401D4/D8 global criFsIo interface never registered, FUN_8128EEC7 I/O callback at reader+0xA0, CRI strings Only one decrypter is creatable 0x81314F15 CPKC 0x8131D184 Decryption failure 0x8131C878, CPK Analyzer/VITA Ver.0.99.54, next xref decrypter create functions and check init path -> §18.4655 [relevant: header decrypt], §18.4654 [relevant: pump], §18.4653 [relevant: load state machine]

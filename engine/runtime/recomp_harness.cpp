@@ -3758,7 +3758,14 @@ static uint32_t fiber_exec_to_completion(RecState* s) {
         _ip_bsy_n = 0;
       }
       if (_ip_env > 0 && _ip_armed && _ctx != 0u && g_disp_depth == 0 && !g_cur_thr && ((g_blkcnt_total % 1500u) == 0u)) {
-        int _cnt = 0; ++g_disp_depth;
+        int _cnt = 0;
+        { static int _dp=0; if (_dp++ < 8) { uint32_t _a1=0,_a2=0,_a3=0,_a4=0;
+          { uint8_t* _q = GP(0x848FC368u + 0xDCu); if (_q) std::memcpy(&_a1, _q, 4); }
+          { uint8_t* _q = GP(0x848FC368u + 0xE0u); if (_q) std::memcpy(&_a2, _q, 4); }
+          { uint8_t* _q = GP(0x848FC368u + 0xE4u); if (_q) std::memcpy(&_a3, _q, 4); }
+          { uint8_t* _q = GP(0x848FC368u + 0xE8u); if (_q) std::memcpy(&_a4, _q, 4); }
+          printf("[DECSTATE] reader+DC=%08X +E0=%08X +E4=%08X +E8=%08X blk=%u\n", _a1, _a2, _a3, _a4, g_blkcnt_total); fflush(stdout); } }
+        ++g_disp_depth;
         for (int _i = 0; _i < 8; ++_i) {
           uint32_t _stt = 0; { uint8_t* _q = GP(0x848FC368u + 0xBCu); if (_q) std::memcpy(&_stt, _q, 4); }
           if (_stt == 2u) break;
@@ -5284,6 +5291,8 @@ extern "C" void wr16_watch(uint32_t a, uint32_t v) {
       if (g_w16_n++ < 240) { printf("[W16] a=%08X off=%02X v=%04X blk=%08X fib=%08X thr=%08X\n", a, a - g_watch_task, v, g_cur_block, g_cur_fiber, g_cur_thr); fflush(stdout); } } }
 }
 extern "C" void wr32_watch(uint32_t a, uint32_t v) {
+  { if (a >= 0x848FC368u && a < 0x848FC4A0u) { static int _pw2=0; if (_pw2++ < 300) { printf("[PROGWR] a=%08X off=%03X v=%08X blk=%u fib=%08X pc=%08X\n", a, a-0x848FC368u, v, g_blkcnt_total, g_cur_fiber, g_cur_block); fflush(stdout); } } }
+  { if (a >= 0x848FC368u && a < 0x848FC3B0u) { static int _prw=0; if (_prw++ < 300) { printf("[READERWR] a=%08X off=%03X v=%08X blk=%u fib=%08X pc=%08X\n", a, a-0x848FC368u, v, g_blkcnt_total, g_cur_fiber, g_cur_block); fflush(stdout); } } }
   { if (g_scwatch && a >= g_scwatch && a < g_scwatch + 0x50u) { static int _scw=0; if (_scw++ < 240) { std::fprintf(stderr,"[SCW] a=%08X off=%02X v=%08X blk=%08X fib=%08X thr=%08X\n", a, a-g_scwatch, v, g_cur_block, g_cur_fiber, g_cur_thr); std::fflush(stderr); } } }
   { static int _ow=0; if (g_ea552_obj && (a == g_ea552_obj || a == g_ea552_obj + 4u || a == 0x816CC66Cu) && _ow++ < 40) { printf("[OBJWR] a=%08X v=%08X off=%X blk=%08X fib=%08X pc=%08X\n", a, v, a-g_ea552_obj, g_blkcnt_total, g_cur_fiber, g_cur_block); fflush(stdout); } }
   { static int _gw=0; if ((a == 0x816CC66Cu || a == 0x816CC700u || a == 0x816CC66Cu+0x10u) && _gw++ < 40) { printf("[GW] a=%08X v=%08X blk=%08X fib=%08X thr=%08X\n", a, v, g_cur_block, g_cur_fiber, g_cur_thr); fflush(stdout); } }
