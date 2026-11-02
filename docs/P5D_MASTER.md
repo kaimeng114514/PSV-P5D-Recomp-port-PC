@@ -1140,6 +1140,50 @@
 | M1122 | §18.4667: ★★★★★★★★ **声音初始化路径确认真实执行（SNDINIT→ACFREG sound/common.acf→DSPSET BusSet_xrd722v2），但 ACF 读取不发主机 PREAD → ACF 注册失败 → DSP 设置失败**。新增 **IOPUMP_WAIT**（在 DelayThread 阻塞等待内泵 criFs reader，解决"嵌套 fiber spin 冻结 g_blkcnt_total → 主循环 IOPUMP 不触发"问题）；首版无门限泵动破坏 CPK 挂载（E2011022806 CPK broken，因 mount reader 需要 HDRFIX/TOCFIX 在前），改为 ≥100k 门限 + 动态 reader 扫描后挂载正常、等待泵成功（848FC5C0 pstate=7、848E9678 pstate=8），但 **ACF 仍注册失败**：`sound/common.acf` 的读取从未发出主机 IO PREAD**
 | M1123 | §18.4668: ★★★★★★★★★★ **ACF 注册成功！音频初始化错误全部清零（`[CRILOG]=0`）**。实现 **ACF_FILL**：在 `FUN_812309A4`（ACF 文件加载）入口用 FIOSFILL 从 vita.cpk 直服 `sound/common.acf`（5152B）。关键坑：第 5–8 个参数是**指向调用者局部变量的指针**（out-param），必须写穿指针而不是写栈槽（首版写栈槽导致 `E2015042302`/`E2010012613`/`E2010030613` 连锁报错）。修复后 `[ACFREG2] p1=84B967B0 p2=0x1420 p3=84B97BD0 p4=0x3E8` → `[CRILOG] 0`，声音线程 "thSeqSndAdx2" 开始运行（pc=81242D24），boot 链越过 init sound**
 | M1124 | §18.4669: ★★★★★★★★★★ **ACF 修复后 boot 链真实前进：进入 GFD_PSP2 主循环（fiber B = FUN_81198C0A），执行 app 初始化回调链，随后卡在 GFD 初始化/内存分配器（8115D0A8/8115D36A appAllocatorHandler）未能进入帧循环**。反编译明确 GFD 主循环结构（8 个回调槽 + 帧计数器 + fiber 让出）；确认 init 链驱动器 FUN_81184FFE（9 步表）在本流程**未被调用**——GFD 主循环才是真实驱动**
+| M1125 | §18.4670: ★★★★★★★★★ **GFD 初始化继续推进（BOOT 高上限跟踪）：经过 appSystem 初始化 FUN_81172EFC（2MB 堆/内存缓冲对象）后，执行流进入 CRI Atom 声音代码（81236D9C→8126A09C→81242xxx），随后 fiber B（848463A0 = GFD 主循环）被切入 pc=81242D24（CRI Atom 声音线程代码）且不再返回；[WD] 确认光纤 A 在 811E5CDA 空转、hle_ring 显示 A↔B 切换，GFD 帧循环仍未被到达**。新增 BOOT 跟踪上限 400→400000 用于精确定位卡点 pc
+m1206/m1207 证据（`m1207_bootpc_key.txt`）：
+```
+[ACFFILL] sound/common.acf size=5152（ACF 正常）
+[BOOT] … → 81236D9C → 8126A09C → 8126A0B0 → … → 8126A1C0 → 8126AE60 → … → 8126BFB6 → 8126C04C
+       → 81232A54 → 8123271E → 81247C00 → 8123273C → 81247BBC → 81232762 → 8123283A
+       → 81242F44 → 81242DD2 → 81242E60 → 81241F46 → 81242C2E → 812420C0 → 8124217E   ← 最后执行的块（CRI Atom）
+[FIBSW] #83 n=1844 lr=812068F2 fb=848463A0 fpc=81242D24 flr=848D9504 fr0=7FFFFFFF blk=108315   ★ fiber B 被切入声音线程
+[WD] n=108315 blk=812B1B70 fib=84836300 thr=00000000 stall=99
+     hle_ring: 812B1BA0@8120682A 812B2AC0@81198BF2 812B1B70@812067B6 …（fiber A↔B 往复）
+[WD] curpc=811E5CDA（fiber A 服务循环）   [THRD] n=10000000 … threads=16 cur=84836300 flags=00000002
+[FRAMECB]/[UPD]/[POST] = 0   [COUNT] 未打印（帧循环未进入）
+```
+**GFD 初始化链（已确认执行）**：
+```
+FUN_8115A336(+0x78 回调) → FUN_811C02DA(设置 DAT_816CD8D8) → FUN_811845C8 →
+  FUN_81172EFC(appSystem 初始化)：
+    SceLibc_6DC1F0D8(&DAT_81555E98,0,0xC14);
+    FUN_8115D7D0(&DAT_81555E98); FUN_8115D620(0,0,0x1F); FUN_8115D5E2();
+    uVar1=FUN_8115D614(); uVar2=FUN_8115D79C(0x200000);
+    FUN_8115D36A(uVar1,uVar2,0x200000,4,"…appSystem.c",0x3E,0);   // 2MB 系统堆
+    DAT_81555EA0 = FUN_8115D0A8(&local_6C,2,0x100000,0);          // 内存缓冲对象
+    FUN_8115D036/FUN_8116FB2A/FUN_81170C1E/FUN_8116E63C/FUN_8117339C/FUN_81007D54/…
+    FUN_8116556C/FUN_81019182/FUN_81019040/FUN_81018C48 …          // 继续初始化
+  FUN_8117B72C(); FUN_8115FB64(); FUN_81171CC2(); FUN_8102AD40(); …
+```
+**分配器链**：`FUN_8115D36A`（按 size 类选 handler）→ `FUN_8115D8E0`（lock FUN_8115F7C2 → FUN_8115F6E6 → FUN_8115F6F0 实分配 → unlock FUN_8115F7CE）；`FUN_8115D0A8` = appMemoryBuffer 构造。分配循环本身可完成（[LKTR] ALLOC_DONE/INSERT 正常）。
+**当前卡点（新）**：GFD 初始化/声音初始化交汇处——fiber B（848463A0，GFD 主循环）被切入 **pc=81242D24（CRI Atom 声音线程代码，lr=848D9504）** 后不再返回 fiber A 或 GFD 主循环；GFD 帧循环（param+0x80 帧渲染回调）始终未执行，无 GXM 出帧、无文件请求。
+**NEXT**：
+```
+① 查 harness 线程/光纤 HLE：sound thread "thSeqSndAdx2" 创建（SceLibKernel_C5C11EE7）+启动（F08DE149）
+   是否把当前 fiber（fiber B）当作线程执行上下文 → 导致 GFD 主循环 fiber 被霸占不返回
+② 让线程走独立执行上下文或在声音线程内周期让出/返回（参考 P5D_THRYIELD/P5D_THRPUMP 机制）
+③ 修复后 GFD 主循环应继续到帧循环：param+0x80 帧渲染回调 → GXM BeginScene/Present → [COUNT] present 递增
+④ 随后进入标题资源请求（[FHOPEN]/[RQMGR]→PREAD）
+```
+验证：`m1207_bootpc_key.txt`、`m1206_long150_key.txt`、`gfdinit.txt`、`allocator.txt`、`allocimpl.txt`、`heapalloc.txt`。 |
+| §18.4670 | GFD initialization continues (BOOT high-cap trace): after appSystem init FUN_81172EFC (2MB heap/memory buffer objects) the execution flow enters CRI Atom sound code (81236D9C -> 8126A09C -> 81242xxx), then fiber B (848463A0 = GFD main loop) is switched into pc=81242D24 (CRI Atom sound thread code) and never returns; [WD] confirms fiber A idles at 811E5CDA and hle_ring shows A<->B switching, while the GFD frame loop is still not reached. Raised the BOOT trace cap 400 -> 400000 to pinpoint the stall pc. '
+       'm1206/m1207 evidence: [ACFFILL] sound/common.acf size=5152 (ACF normal); [BOOT] ... -> 81236D9C -> 8126A09C -> 8126A0B0 -> ... -> 8126A1C0 -> 8126AE60 -> ... -> 8126BFB6 -> 8126C04C -> 81232A54 -> 8123271E -> 81247C00 -> 8123273C -> 81247BBC -> 81232762 -> 8123283A -> 81242F44 -> 81242DD2 -> 81242E60 -> 81241F46 -> 81242C2E -> 812420C0 -> 8124217E (last executed blocks, CRI Atom); [FIBSW] #83 n=1844 lr=812068F2 fb=848463A0 fpc=81242D24 flr=848D9504 fr0=7FFFFFFF blk=108315 (fiber B switched into sound thread); [WD] n=108315 blk=812B1B70 fib=84836300 thr=00000000 stall=99 hle_ring 812B1BA0@8120682A 812B2AC0@81198BF2 812B1B70@812067B6 (fiber A<->B); [WD] curpc=811E5CDA (fiber A service loop); [THRD] n=10000000 threads=16 cur=84836300 flags=00000002; [FRAMECB]/[UPD]/[POST]=0; [COUNT] not printed (frame loop not entered). '
+       'GFD init chain (confirmed executing): FUN_8115A336 (+0x78 callback) -> FUN_811C02DA (sets DAT_816CD8D8) -> FUN_811845C8 -> FUN_81172EFC (appSystem init): SceLibc_6DC1F0D8(&DAT_81555E98,0,0xC14); FUN_8115D7D0(&DAT_81555E98); FUN_8115D620(0,0,0x1F); FUN_8115D5E2(); uVar1=FUN_8115D614(); uVar2=FUN_8115D79C(0x200000); FUN_8115D36A(uVar1,uVar2,0x200000,4,"...appSystem.c",0x3E,0) 2MB system heap; DAT_81555EA0=FUN_8115D0A8(&local_6C,2,0x100000,0) memory buffer object; FUN_8115D036/FUN_8116FB2A/FUN_81170C1E/FUN_8116E63C/FUN_8117339C/FUN_81007D54/...; FUN_8116556C/FUN_81019182/FUN_81019040/FUN_81018C48; then FUN_8117B72C/FUN_8115FB64/FUN_81171CC2/FUN_8102AD40... '
+       'Allocator chain: FUN_8115D36A (picks handler by size class) -> FUN_8115D8E0 (lock FUN_8115F7C2 -> FUN_8115F6E6 -> FUN_8115F6F0 real alloc -> unlock FUN_8115F7CE); FUN_8115D0A8 = appMemoryBuffer constructor; the allocation loop itself completes normally ([LKTR] ALLOC_DONE/INSERT). '
+       'New blocker: at the GFD-init/sound-init junction, fiber B (848463A0, GFD main loop) is switched into pc=81242D24 (CRI Atom sound thread code, lr=848D9504) and never returns to fiber A or the GFD main loop; the GFD frame loop (param+0x80 frame render callback) never executes, so no GXM frame and no file requests. '
+       'NEXT: (1) inspect the harness thread/fiber HLE: whether creating the sound thread "thSeqSndAdx2" (SceLibKernel_C5C11EE7) and starting it (F08DE149) makes the current fiber (fiber B) the thread execution context, so the GFD main-loop fiber gets hijacked and never returns; (2) give threads their own execution context or make the sound thread yield/return periodically (see P5D_THRYIELD/P5D_THRPUMP); (3) after the fix the GFD main loop should reach the frame loop: param+0x80 frame render callback -> GXM BeginScene/Present -> [COUNT] present increments; (4) then title asset requests ([FHOPEN]/[RQMGR] -> PREAD). '
+       'Verification: m1207_bootpc_key.txt, m1206_long150_key.txt, gfdinit.txt, allocator.txt, allocimpl.txt, heapalloc.txt. |
 m1203/m1204/m1205 证据（`m1205_gfdprobe_key.txt` 等）：
 ```
 [CRILOG] 0                     ← ACF 修复后音频错误持续为零
@@ -502280,3 +502324,41 @@ fiber A 服务循环：`loop { FUN_811E5CDA(); sceKernelCheckCallback(); FUN_812
 ANTI-FORGETTING ENTRY. Keywords: M1124 ACF fix unblocks boot chain into the GFD_PSP2 main loop (fiber B = FUN_81198C0A) - app init FUN_811989C8 creates fiber A service loop (entry 81198BE8) and fiber B GFD main loop (entry 81198C0B) via FUN_81206700 (name "gfdFiber", bootstrap 81206BDD), sets DAT_816CC630|=2 app-running; fiber A loop = FUN_811E5CDA (calls DAT_81513DEC callback) + sceKernelCheckCallback(812B2AC0) + FUN_812067A0 yield while DAT_816CC630&2; GFD main loop = call slot +0x70, strcmp("GFD_PSP2_",...), FUN_81199D7E/FUN_81198DAE("app0:")/FUN_811995AC(param+8) init, DAT_816CC630|=1, FUN_811E5650("gfd: initialize PSP2"), FUN_811991BE, call +0x7C, then do { frame time FUN_812071F8, FUN_81199336 update when (flag&0xC)==0, frame render callback param+0x80(param+0x8C,flags), FUN_8119934A post, DAT_816CC63C++ frame counter, flag|=0x10, FUN_812067A0 yield, flag&=~0x10 } while (flag&2), then +0x84 and return DAT_813B1F00. m1205 evidence: [CRILOG]=0, [ACFFILL] size=5152, [FINIT] fibers 84836300 [f84]=81198BE9 and 848463A0 [f84]=81198C0B, [FIBER-AUTOCREATE] entry=81198C0B arg=82EFFF28, [BOOT] chain 81206BDC->81198BE8->81198BEA->811E5CDA->...->81198C0A->81198C12->8115A336->811C02DA->...->8115D7D0->8115F574->...->8115D3A6, [LKTR]/[D8E0]/[7C2]/[F7C2] 85x at 8115D36A appAllocatorHandler / 8115D0A8 appMemoryBuffer, [FRAMECB]/[UPD]/[POST]=0, [COUNT] present=0 draw=0, [DRVSTATE]/[STEP:*]=0 proving the init-chain driver FUN_81184FFE (9-step table) is NOT used in this flow. Blocker: GFD init callback chain (8115A336->811C02DA->811845C8->81172EFC->8115D7D0/8115F574) enters the appAllocatorHandler_8115D36A / appMemoryBuffer_8115D0A8 allocation loop then fiber B yields back to fiber A and never returns to the frame-loop body; no host IO requests. NEXT: check whether the 8115D36A/8115D0A8 allocation loop dead-waits on a guest heap lock/event ([LKTR] shows ALLOC_START->ALLOC_DONE completes but INSERT may wait), probe FUN_811995AC entry/exit + FUN_81199336/FUN_8119934A counters to confirm the main loop is reached, then the frame render callback param+0x80 should trigger GXM BeginScene/Present so [COUNT] present increments. Verification: m1205_gfdprobe_key.txt, m1204_gfdcb_key.txt, m1203_longdrv_key.txt, jobmgrloop.txt, apploop.txt, initchain.txt, flagrefs.txt.
 
 LOOKUP: M1124 GFD_PSP2 main loop fiber B FUN_81198C0A fiber A service loop 81198BE8 FUN_811989C8 FUN_81206700 gfdFiber 81206BDD, DAT_816CC630 bit2 app running, DAT_816CC63C frame counter, callbacks +0x70 +0x78 +0x7C +0x80 +0x84 +0x8C, FUN_811995AC init, FUN_81199336 update, FUN_8119934A post, FUN_812071F8 frame time, FUN_812067A0 yield, blocker appAllocatorHandler_8115D36A appMemoryBuffer_8115D0A8 allocation loop, [FRAMECB]/[UPD]/[POST]=0 frame loop not reached, [DRVSTATE]/[STEP] init chain driver FUN_81184FFE unused, [LKTR] allocator, next probe FUN_811995AC exit -> 18.4668 [relevant: ACF registration success], 18.4667 [relevant: sound init], 18.4666 [relevant: ACF chain]
+### 18.4670 PORT M1125: GFD 初始化推进到 CRI Atom 声音代码；fiber B 被声音线程霸占不返回（帧循环仍未到达）
+
+1) BOOT 高上限（400→400000）精确跟踪（m1207）：
+```
+[ACFFILL] sound/common.acf size=5152              ← ACF 正常
+[BOOT] … → 81236D9C → 8126A09C → 8126A0B0 → 8126A1C0 → 8126AE60 → 8126BFB6 → 8126C04C
+       → 81232A54 → 8123271E → 81247C00 → 8123273C → 81247BBC → 81232762 → 8123283A
+       → 81242F44 → 81242DD2 → 81242E60 → 81241F46 → 81242C2E → 812420C0 → 8124217E   ← 最后执行的块
+[FIBSW] #83 fb=848463A0 fpc=81242D24 flr=848D9504 fr0=7FFFFFFF blk=108315   ★ fiber B 切入声音线程
+[WD] n=108315 blk=812B1B70 fib=84836300 thr=00000000 stall=99
+     hle_ring: 812B1BA0@8120682A 812B2AC0@81198BF2 812B1B70@812067B6 …（fiber A↔B 往复）
+[WD] curpc=811E5CDA；[THRD] threads=16 cur=84836300 flags=2
+[FRAMECB]/[UPD]/[POST]=0；[COUNT] 未打印        ← GFD 帧循环未进入
+```
+2) GFD 初始化链（已确认执行）：
+```
+FUN_8115A336(+0x78 回调) → FUN_811C02DA → FUN_811845C8 → FUN_81172EFC(appSystem 初始化)
+  ├ SceLibc_6DC1F0D8(&DAT_81555E98,0,0xC14)
+  ├ FUN_8115D7D0(&DAT_81555E98) / FUN_8115D620(0,0,0x1F) / FUN_8115D5E2
+  ├ FUN_8115D36A(…,0x200000,4,"…appSystem.c",0x3E,0)   // 2MB 系统堆
+  ├ DAT_81555EA0 = FUN_8115D0A8(&local_6C,2,0x100000,0)  // 内存缓冲对象
+  └ FUN_8115D036/FUN_8116FB2A/FUN_81170C1E/FUN_8116E63C/FUN_8117339C/FUN_81007D54/…
+分配器链：FUN_8115D36A（size 类选 handler）→ FUN_8115D8E0（lock→FUN_8115F6F0 实分配→unlock）；
+         FUN_8115D0A8 = appMemoryBuffer 构造；分配循环正常完成（[LKTR] ALLOC_DONE/INSERT）。
+```
+3) 新卡点：fiber B（848463A0 = GFD 主循环）被切入 **pc=81242D24（CRI Atom 声音线程，lr=848D9504）** 后不再返回；GFD 帧渲染回调（param+0x80）始终未执行。
+4) NEXT：
+```
+① 查线程/光纤 HLE：声音线程 "thSeqSndAdx2" 创建(SceLibKernel_C5C11EE7)+启动(F08DE149) 是否霸占当前 fiber
+② 给线程独立上下文或声音线程内周期让出（参考 P5D_THRYIELD/P5D_THRPUMP）
+③ 修复后 GFD 帧循环 → param+0x80 帧回调 → GXM BeginScene/Present → [COUNT] present 递增
+④ 随后标题资源请求（[FHOPEN]/[RQMGR]→PREAD）
+```
+验证：`m1207_bootpc_key.txt`、`m1206_long150_key.txt`、`gfdinit.txt`、`allocator.txt`、`allocimpl.txt`、`heapalloc.txt`。
+
+ANTI-FORGETTING ENTRY. Keywords: M1125 GFD init continues after ACF fix - BOOT trace chain goes through appSystem init FUN_81172EFC (SceLibc_6DC1F0D8 clear 0xC14, FUN_8115D7D0, FUN_8115D620(0,0,0x1F), FUN_8115D5E2, 2MB heap via FUN_8115D36A(...0x200000,4,"...appSystem.c",0x3E,0), DAT_81555EA0=FUN_8115D0A8(&local_6C,2,0x100000,0), then FUN_8115D036/FUN_8116FB2A/FUN_81170C1E/FUN_8116E63C/FUN_8117339C/FUN_81007D54/FUN_8117B72C/FUN_8115FB64/FUN_81171CC2/FUN_8102AD40) and then enters CRI Atom sound code (BOOT last pcs 81236D9C 8126A09C 8126A1C0 8126AE60 8126BFB6 8126C04C 81232A54 8123271E 81247C00 81247BBC 81242F44 81242E60 81241F46 81242C2E 812420C0 8124217E). Then fiber B 848463A0 (GFD main loop) is switched into pc=81242D24 CRI Atom sound thread (FIBSW #83 fpc=81242D24 flr=848D9504 fr0=7FFFFFFF) and never returns; [WD] fib=84836300 stall=99 hle_ring A<->B, curpc=811E5CDA, [THRD] threads=16 cur=84836300 flags=2, [FRAMECB]/[UPD]/[POST]=0, [COUNT] absent => GFD frame loop not reached. Allocator chain FUN_8115D36A (size class) -> FUN_8115D8E0 (lock FUN_8115F7C2, FUN_8115F6E6, FUN_8115F6F0 real alloc, unlock FUN_8115F7CE), FUN_8115D0A8 appMemoryBuffer constructor, allocation loop works ([LKTR] ALLOC_DONE/INSERT). BOOT trace cap raised 400->400000. NEXT: inspect harness thread/fiber HLE - whether creating sound thread "thSeqSndAdx2" (SceLibKernel_C5C11EE7) + starting it (F08DE149) hijacks the current fiber (fiber B); give threads their own execution context or yield the sound thread periodically (P5D_THRYIELD/P5D_THRPUMP); then GFD frame loop -> frame render callback param+0x80 -> GXM BeginScene/Present -> [COUNT] present increments -> title asset requests. Verification: m1207_bootpc_key.txt, m1206_long150_key.txt, gfdinit.txt, allocator.txt, allocimpl.txt, heapalloc.txt.
+
+LOOKUP: M1125 GFD init continues appSystem FUN_81172EFC 2MB heap FUN_8115D36A FUN_8115D8E0 FUN_8115F6F0 allocator appMemoryBuffer FUN_8115D0A8, CRI Atom sound code BOOT tail 81242xxx 8126Axxx, fiber B 848463A0 hijacked by sound thread pc=81242D24 lr=848D9504 FIBSW #83, [WD] stall 99 fiber A 811E5CDA, [FRAMECB]/[UPD]/[POST]=0 frame loop not reached, BOOT cap 400000, thread-as-fiber hijack, thSeqSndAdx2 SceLibKernel_C5C11EE7 F08DE149, next thread execution context/yield P5D_THRYIELD P5D_THRPUMP -> 18.4669 [relevant: GFD main loop], 18.4668 [relevant: ACF success], 18.4667 [relevant: sound init]

@@ -4544,7 +4544,7 @@ BlockFn fn = gbn(pc);
       printf("[CANARY] r8=%08X [r8]=%08X [sp+6c]=%08X r1=%08X r2=%08X sp=%08X\n",
              s->r[8], c8, cstk, s->r[1], s->r[2], s->r[13]);
     }
-    if (g_boot_trace_n++ < 400) printf("[BOOT] %08X\n", pc);
+    if (g_boot_trace_n++ < 400000) printf("[BOOT] %08X\n", pc);   // M1125: raised cap to locate the GFD-init stall pc
     if (pc >= 0x81198000u && pc < 0x8119A000u && g_mt_n++ < 400) printf("[MT] %08X r0=%08X r14=%08X\n", pc, s->r[0], s->r[14]);
     { uint32_t gpc = pc; if ((gpc & ~1u) == 0x81206BDCu && s->r[0] != 0u && s->r[0] < 0x80000000u) {
         // 18.3871: diagnostic guard - the stub is being entered with a small/garbage r0 (M330: r0=2).
