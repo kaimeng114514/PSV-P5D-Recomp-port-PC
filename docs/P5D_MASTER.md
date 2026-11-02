@@ -1135,6 +1135,54 @@
 | M1117 | §18.4662: ★★★★★★★★ **TOC 解析失败根因锁定：TOC 解析器把 TOC 缓冲当成"[0x10 段头][UTF]"，而 vita.cpk 的 TOC 区是裸 @UTF → 段头字段被误读（+4=0x00 触发 XOR 解密，滚动密钥 0x5F、每字节 *=0x15；大小字段误读为 0x36）→ 从 buffer+0x10 开始的 UTF 数据被就地 XOR 成乱码 → UTF retriever 在 buffer+0x10 读到乱码、报 four_cc 不匹配。已用 PREAD-DST 证明读入数据本身完全正确（buffer 0x84B1C800 = '@UTF'+0x4C94…），并拿到 XOR 算法原文**
 | M1118 | §18.4663: ★★★★★★★★★★ **CPK 挂载完全打通！`[FIOS] mounted data.cpk files=10555` / `mounted vita.cpk files=531`，`[CRILOG]=0`，标题素材名全部枚举（title/title_p5.bin、title.spr4、title.p3/logo.tga …），并选中第一项 'title/title_p5.bin'。三项 HLE 变换协同完成：TOCSZPATCH（64 位变体 TocSize +0x18）+ TOCPAD（EOF 短读零填充）+ TOCFIX（合成 "TOC " 段头并把 UTF 后移 +0x10，跳过误触发的 XOR）**
 | M1119 | §18.4664: ★★★★★★★★ **挂载后卡点定位为 CRI AtomEx（音频）初始化**：主 fiber 在 `FUN_812360C8`（"CRI AtomEx/VITA Ver.2.13.00 Build:Jan 30 2018 18:45:17"）路径上反复执行 Fios/AtomEx 池初始化 `FUN_8125DBCC`（0x44/0x24/0x1C 节点池）→ 轮询块 `8125DDAE/8125DDDA/8125DDF6` + `sceKernelDelayThread(5000)`（stub 812B2A50，lr=81207612）→ 典型的**重试循环**；`[ACF] total=0`（无 ACF 注册）、`FUN_812309A4`（ACB 注册，报 "ACF is not registered"/E2010031630）、guest 空指针读 `va=0x28`（blk 81230C2A）同属音频初始化链；挂载后**再也没有文件 PREAD** → 标题/ACF 数据读取根本没发生。另：挂载后新 reader 848E9678 状态=1/进度=8，应用 pstate 7|8 完成 shim 后置 status=2（但未解锁主卡点，说明它不是唯一等待项）**
+| M1120 | §18.4665: ★★★★★★★★ **卡点再精化：5000us 轮询 = Fios 工作线程空转循环，不是 AtomEx 重试**。`[DELAYWRAP] usec=5000 caller=811F2376` 稳定 → 反编译 `FUN_811F22B8`（194B）= **Fios worker 主循环**：`do { 取 DAT_81539754+0xC 待处理任务链表头；若非空且 +0xFC0==0 则逐个 FUN_811F0B82(任务) 处理并移入完成链；FUN_8120760C(5000); } while(true)`。当前**任务链表为空**（链表头=0）→ 工作线程纯空转；pc_ring 显示的 `8125DDAE/8125DDDA/8125DDF6`（FUN_8125DBCC 池初始化）是**陈旧记录**（线程 context runner 不更新 pc_ring）。另确认：AtomEx 初始化**只调用一次**（`[ATOMEXINIT] cfg=848561F8 p2=0 p3=0`、`[ACFPARSE]×3`、`[ATOMEX] cfg=84856128 p2=848D9500 p3=0x820D0`、`[FIOSPOOL] param1=36`→36 节点池），**不存在 AtomEx 重试**；`P5D_LOADPUMP=1` 实验未触发（g_wait_task 未设置，pc≠0x811E5EC6）**
+m1186/m1187/m1188 证据（`m1188_delaywrap_key.txt` 等）：
+```
+[ATOMEXINIT] #0 cfg=848561F8 p2=0 p3=0 lr=8123F14A         ← 只调用一次，无重试
+[ACFPARSE] #0 p1=848561F8 out=84856180 lr=81273E88        ← 解析 ACF 配置头
+[ACFPARSE] #1 p1=848561F8 out=84856128 lr=81273EF4
+[ATOMEX] #0 cfg=84856128 p2=848D9500 p3=000820D0 lr=81273F00 w: 00000003 41EFC28F 00000001 00000000 00000024 00000400 00000010 00000010
+[ACFPARSE] #2 p1=84856128 out=848560B4 lr=812360F4
+[FIOSPOOL] #0 param1=36 param2=84959F08 lr=81236324       ← AtomEx 池初始化 36 节点
+[DELAYWRAP] #0..#39 usec=5000 caller=811F2376 sp=848352A8  ← 轮询调用者稳定在 811F2376（FUN_811F22B8 内）
+[POOLLOOP] cnt=1（FUN_8125DBCC 块只执行过一次→pc_ring 陈旧）
+[FIOS] mounted data.cpk files=10555 / vita.cpk files=531
+[ACF] total=0（ACF 尚未注册）
+[IO] 挂载后仍无 PREAD
+[LOADPUMP]=0 条（P5D_LOADPUMP=1 未触发）
+```
+**FUN_811F22B8 反编译（Fios worker 主循环，m1120）**：
+```c
+void FUN_811f22b8(void) {
+  do {
+    iVar1 = DAT_81539754;                       // Fios 管理器
+    iVar4 = *(int *)(DAT_81539754 + 0xC);       // pending-task list head
+    if (iVar4 != 0 && *(char *)(DAT_81539754 + 0xFC0) == 0) {
+      while (iVar4 != 0 && *(char*)(iVar1+0xFC0)==0) {
+        iVar5 = *(int *)(iVar4 + 0x20);          // next
+        FUN_811f0b82(iVar4);                     // 处理任务
+        ... 摘链/push 到完成链（锁 FUN_81207344/7352/7344）...
+        iVar4 = iVar5;
+      }
+    }
+    FUN_8120760c(5000);                          // 无任务 → sleep 5ms
+  } while (1);
+}
+```
+**NEXT**：
+```
+① 探针 DAT_81539754（Fios 管理器）：pending 链头 +0xC、完成链 +0x14/+0x18、计数 +0xFBC、标志 +0xFC0，确认任务从未入队还是被处理异常
+② 谁应该入队 title 任务：xref FUN_811F0B82 处理函数与 fios 任务提交 API（如 FUN_811F0xxx），找游戏在 CPK 挂载完成后应发的加载请求
+③ 检查 app 主 fiber 真正的等待点（当前 blk 8127BC14/81283D62/8128E9DE = criFs 等待/轮询区），以及 8125BDxx/81283C8A 等调用链
+④ 若任务入队逻辑依赖某个 HLE 系统调用（线程/信号量/事件），补齐语义使任务真正入队并被 worker 处理
+⑤ 目标：title 加载任务入队 → Fios worker 处理 → 文件 PREAD → 标题资源解析 → GXM 首帧
+```
+验证：`m1188_delaywrap_key.txt`、`m1187_loadpump_key.txt`、`m1186_atomex_key.txt`、`fiosretry.txt`、`atomexcallers.txt`、`atomexrefs.txt`。 |
+| §18.4665 | The blocker is refined: the 5000us polling is a Fios worker idle loop, not an AtomEx retry. [DELAYWRAP] usec=5000 caller=811F2376 is stable -> decompiled FUN_811F22B8 (194B) = Fios worker main loop: do { take pending-task list head at DAT_81539754+0xC; if non-null and +0xFC0==0 then process each task with FUN_811F0B82 and move it to the done list; FUN_8120760C(5000); } while(true). The task list is currently empty (head=0) so the worker purely idles; the pc_ring showing 8125DDAE/8125DDDA/8125DDF6 (FUN_8125DBCC pool init) is stale because the thread-context runner does not update pc_ring. Also confirmed: AtomEx init runs only ONCE ([ATOMEXINIT] cfg=848561F8 p2=0 p3=0; [ACFPARSE] x3; [ATOMEX] cfg=84856128 p2=848D9500 p3=0x820D0; [FIOSPOOL] param1=36 = 36 node pools), there is no AtomEx retry; the P5D_LOADPUMP=1 experiment did not trigger (g_wait_task not set, pc != 0x811E5EC6). '
+       'm1186/m1187/m1188 evidence: [ATOMEXINIT] #0 cfg=848561F8 p2=0 p3=0 lr=8123F14A (called once, no retry); [ACFPARSE] #0 p1=848561F8 out=84856180 lr=81273E88; [ACFPARSE] #1 p1=848561F8 out=84856128 lr=81273EF4; [ATOMEX] #0 cfg=84856128 p2=848D9500 p3=000820D0 lr=81273F00 w: 00000003 41EFC28F 00000001 00000000 00000024 00000400 00000010 00000010; [ACFPARSE] #2 p1=84856128 out=848560B4 lr=812360F4; [FIOSPOOL] #0 param1=36 param2=84959F08 lr=81236324; [DELAYWRAP] #0..#39 usec=5000 caller=811F2376 sp=848352A8 (poll caller stable at 811F2376 inside FUN_811F22B8); [POOLLOOP] cnt=1 (FUN_8125DBCC blocks run only once -> stale pc_ring); [FIOS] mounted data.cpk files=10555 / vita.cpk files=531; [ACF] total=0; [IO] still no PREAD after mounting; [LOADPUMP]=0 entries (P5D_LOADPUMP=1 not triggered). '
+       'FUN_811F22B8 decompiled (Fios worker main loop): void FUN_811f22b8(void) { do { iVar1 = DAT_81539754; iVar4 = *(int*)(DAT_81539754 + 0xC); if (iVar4 != 0 && *(char*)(DAT_81539754 + 0xFC0) == 0) { while (iVar4 != 0 && *(char*)(iVar1+0xFC0)==0) { iVar5 = *(int*)(iVar4 + 0x20); FUN_811f0b82(iVar4); ... unlink task, push to done list (locks FUN_81207344/7352/7344) ...; iVar4 = iVar5; } } FUN_8120760c(5000); } while (1); } '
+       'NEXT: (1) probe the Fios manager DAT_81539754: pending list head +0xC, done lists +0x14/+0x18, count +0xFBC, flag +0xFC0 - determine whether the title task was never enqueued or processed abnormally; (2) find who should enqueue the title task: xref the processor FUN_811F0B82 and the fios submit API (e.g. FUN_811F0xxx) to find the load request the game should issue after the CPK mount; (3) check the real wait point of the app main fiber (current blk 8127BC14/81283D62/8128E9DE = criFs wait/poll region) and the call chains 8125BDxx/81283C8A; (4) if enqueue depends on an HLE syscall (thread/sema/event), complete the semantics so the task is really enqueued and processed; (5) goal: title load task enqueued -> Fios worker processes it -> file PREAD -> title resources -> GXM first frame. '
+       'Verification: m1188_delaywrap_key.txt, m1187_loadpump_key.txt, m1186_atomex_key.txt, fiosretry.txt, atomexcallers.txt, atomexrefs.txt. |
 m1184/m1185 证据（`m1184_diag_key.txt`、`m1185_pstate8_key.txt`）：
 ```
 [IOPUMP-READER] reader=848E9678 blk=153000 status=00000001 prog=848E96A0 pstate=00000003 size=848E8EE8
@@ -501788,3 +501836,40 @@ LOOKUP: M1118 CPK mount complete [FIOS] data.cpk 10555 vita.cpk 531, TOCSZPATCH 
 ANTI-FORGETTING ENTRY. Keywords: M1119 post-mount blocker = CRI AtomEx audio init retry loop; main fiber runs FUN_812360C8 (CRI AtomEx/VITA Ver.2.13.00 Build:Jan 30 2018 18:45:17) -> FUN_8125DBCC Fios/AtomEx pool init (0x44/0x24/0x1C node pools) -> polling blocks 8125DDAE 8125DDDA 8125DDF6 + sceKernelDelayThread(5000) stub 812B2A50 lr=81207612; [ACF] total=0 no ACF registered; FUN_812309A4 ACB register "ACF is not registered" E2010031630; guest null read va=0x28 blk=81230C2A; no file PREAD after mount; reader 848E9678 status=1 pstate=8 -> pstate 7|8 shim -> status=2 but stall persists; waits: WaitEventFlag 60014000 (workers), WaitEventFlagCB 60017000, WaitSema 50018000, FiberSwitch; [DQPROC] d60=3 a8=816A0AC0 q0=812264B5 CRI Atom queue. FUN_812360C8 decompiled: DAT_8169e258 = CRI AtomEx/VITA Ver.2.13.00; FUN_81235a10 parses AtomEx config header; version check local_20 == 0x2130000; calls FUN_8125DBCC @0x81236320. NEXT: decompile caller of FUN_812360C8 (retry logic) and its return handling; trace ACF data source (sound/*.acf from CPK, no reads issued); investigate FUN_812309A4 ACF-not-registered and null va=0x28; options: complete AtomEx HLE, prefetch/inject ACF, or temporarily skip audio init to verify title asset loading; goal AtomEx init success -> title reads -> title resources -> GXM first frame. Verification: m1184_diag_key.txt, m1185_pstate8_key.txt, out80m_m1185pstate8.txt, fiosinit.txt, stallfuncs.txt, fiosrefs.txt.
 
 LOOKUP: M1119 post-mount stall CRI AtomEx init retry loop, FUN_812360C8 CRI AtomEx/VITA Ver.2.13.00, FUN_8125DBCC Fios/AtomEx pool init, polling 8125DDAE 8125DDDA 8125DDF6, DelayThread 5000 stub 812B2A50, ACF total=0, FUN_812309A4 ACB register ACF is not registered, null read va=0x28 blk=81230C2A, reader 848E9678 pstate=8 shim, no PREAD after mount, next AtomEx caller decompile and ACF source -> 18.4663 [relevant: mount complete], 18.4662 [relevant: TOC XOR], 18.4661 [relevant: UTF]
+### 18.4665 PORT M1120: 5000us 轮询 = Fios worker 空转（任务链表为空）；AtomEx 只初始化一次、无重试
+
+1) 探针证据（m1186/1187/1188）：
+```
+[ATOMEXINIT] #0 cfg=848561F8 p2=0 p3=0 lr=8123F14A              ← 只调用一次
+[ACFPARSE] #0..#2  p1=848561F8/84856128（ACF 配置头解析 ×3）
+[ATOMEX]    cfg=84856128 p2=848D9500 p3=000820D0 w: 00000003 41EFC28F 00000001 00000000 00000024 00000400 00000010 00000010
+[FIOSPOOL]  param1=36 param2=84959F08（36 节点池建立）
+[DELAYWRAP] usec=5000 caller=811F2376 sp=848352A8（×40，稳定）
+[POOLLOOP]  cnt=1（FUN_8125DBCC 只执行一次 → pc_ring 陈旧）
+[ACF] total=0；挂载后无 PREAD；P5D_LOADPUMP=1 未触发
+```
+2) `FUN_811F22B8`（194B）= **Fios worker 主循环**：
+```c
+do {
+  iVar4 = *(int*)(DAT_81539754 + 0xC);        // pending task head
+  if (iVar4 && *(char*)(DAT_81539754+0xFC0)==0) {
+    while (iVar4 && ...) { next=*(iVar4+0x20); FUN_811F0B82(iVar4); ...移入完成链...; iVar4=next; }
+  }
+  FUN_8120760C(5000);   // 空转 sleep
+} while(1);
+```
+- 任务链表头为 0 → **没有任何待处理任务**
+- pc_ring 里 8125DDAE… 是 FUN_8125DBCC（池初始化，只执行 1 次）后的陈旧记录（线程 context runner 不更新 ring）
+3) NEXT：
+```
+① 探针 Fios 管理器 DAT_81539754（+0xC pending 链、+0x14/+0x18 完成链、+0xFBC 计数、+0xFC0 标志）
+② 找 title 加载任务应在何处入队（xref FUN_811F0B82 与 fios 提交 API）
+③ 检查 app 主 fiber 真实等待点（8127BC14/81283D62/8128E9DE = criFs 区）
+④ 若入队依赖 HLE 语义（线程/信号量/事件），补齐
+⑤ 目标：任务入队 → worker 处理 → PREAD → 标题资源 → GXM 首帧
+```
+验证：`m1188_delaywrap_key.txt`、`m1187_loadpump_key.txt`、`m1186_atomex_key.txt`、`fiosretry.txt`、`atomexcallers.txt`、`atomexrefs.txt`。
+
+ANTI-FORGETTING ENTRY. Keywords: M1120 blocker refined - the 5000us polling is the Fios worker idle loop, not AtomEx retry; [DELAYWRAP] usec=5000 caller=811F2376 stable; FUN_811F22B8 (194B) = Fios worker main loop: do { pending list head DAT_81539754+0xC; if non-null and +0xFC0==0 process each with FUN_811F0B82 and move to done list; FUN_8120760C(5000); } while(1); task list is EMPTY -> worker idles; pc_ring 8125DDAE/8125DDDA/8125DDF6 (FUN_8125DBCC pool init) is stale because the thread-context runner does not update pc_ring. AtomEx init runs only ONCE: [ATOMEXINIT] cfg=848561F8 p2=0 p3=0; [ACFPARSE] p1=848561F8/84856128; [ATOMEX] cfg=84856128 p2=848D9500 p3=000820D0 w: 00000003 41EFC28F ...; [FIOSPOOL] param1=36 = 36 node pools; no AtomEx retry. P5D_LOADPUMP=1 did not trigger (g_wait_task not set; pc!=0x811E5EC6). [ACF] total=0; no PREAD after mount. NEXT: probe Fios manager DAT_81539754 pending/done lists and counters, xref FUN_811F0B82 and the fios submit API to find where the title load task should be enqueued, check the app main fiber real wait point (8127BC14/81283D62/8128E9DE = criFs wait), complete HLE semantics if enqueue depends on them; goal task enqueued -> worker process -> PREAD -> title resources -> GXM first frame. Verification: m1188_delaywrap_key.txt, m1187_loadpump_key.txt, m1186_atomex_key.txt, fiosretry.txt, atomexcallers.txt, atomexrefs.txt.
+
+LOOKUP: M1120 Fios worker idle loop FUN_811F22B8, DELAYWRAP caller 811F2376, DAT_81539754 pending list +0xC empty, FUN_811F0B82 task processor, AtomEx init once cfg 848561F8/84856128, FIOSPOOL param1=36, ACF total=0, no PREAD after mount, LOADPUMP not triggered, stale pc_ring 8125DDAE pool init, next probe Fios manager and task submit API -> 18.4664 [relevant: AtomEx theory], 18.4663 [relevant: mount complete], 18.4662 [relevant: TOC XOR]

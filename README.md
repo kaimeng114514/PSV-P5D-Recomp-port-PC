@@ -49,6 +49,9 @@ CPU 采用 **AOT 静态重编译**（原版 ARM/Thumb 代码一次性翻译为 x
 
 ### 最近关键里程碑（M1093–M1115，2026-11-02）
 
+- **M1119（18.4664）**：挂载后卡点初判为 CRI AtomEx（音频）初始化重试；新增 IOPUMP pstate 7\|8 完成 shim（新 reader 848E9678 完成）
+- **M1120（18.4665）**：卡点再精化——5000us 轮询其实是 **Fios 工作线程空转**（`FUN_811F22B8`，pending 任务链表 `DAT_81539754+0xC` 为空）；AtomEx 初始化只调用一次、无重试（`[ATOMEXINIT] cfg=848561F8`、`[FINSPOOL] param1=36`）；下一目标=找出 title 加载任务应在何处入队
+
 - **M1116（18.4661）**：UTF 字段误读根因——第 0 列名指针为空导致 `strcmp(null,key)==0`、所有字段读成 0x800；HLE strcmp 空指针语义修正（空指针=隐含 `"ContentOffset"`）→ TocOffset/TocSize 正确解析
 - **M1117（18.4662）**：TOC 解析失败根因——vita.cpk TOC 是裸 `@UTF`，被当成 `[0x10 段头][UTF]` → `+4=0x00` 误触发 XOR（滚动密钥 0x5F、`*=0x15`）把 UTF 数据就地破坏
 - **M1118（18.4663）**：★★★ **CPK 挂载完全打通**：TOCSZPATCH + TOCPAD + TOCFIX 三变换 → 分析器状态 3→4→0x10→0x11→0x14→0x16，`[FIOS] mounted data.cpk files=10555`、`mounted vita.cpk files=531`，标题素材枚举、选中 `title/title_p5.bin`；新卡点=标题文件异步加载轮询（`8125DDAE~8125DDF6`、等待参数 0x1388）
@@ -67,8 +70,8 @@ CPU 采用 **AOT 静态重编译**（原版 ARM/Thumb 代码一次性翻译为 x
 
 ### 当前阻塞（明确、可执行）
 
-1. **标题文件异步加载轮询（新卡点）**：挂载成功后选中 `title/title_p5.bin`，游戏进入轮询等待：`[WAITP] va=812B2A50 r0=0x1388`、ring `8125DDAE 8125DDDA 8125DDF6`（fib=848463A0），另一 fiber `84836300 pc=811E5CDA` 等待；疑似标题文件内容读取的异步完成未到达
-   - 下一步：定位 8125DDxx 轮询的等待对象（event/sema/flag）+ `812B2A50` 语义；检查挂载后新 criFs reader；确认文件数据是否需要 AES/XOR 解密
+1. **Fios 任务未入队（当前卡点，M1120）**：5000us 轮询 = Fios worker 空转循环 `FUN_811F22B8`（pending 链表 `DAT_81539754+0xC` 为空）；AtomEx 初始化已一次性完成（无重试），说明卡点不在音频初始化，而在**标题加载任务应入队而未入队**
+   - 下一步：探针 Fios 管理器（+0xC/+0x14/+0x18/+0xFBC/+0xFC0）、xref `FUN_811F0B82` 处理器与 fios 提交 API，找出 title 加载任务应在何处入队；检查 app 主 fiber 真实等待点（8127BC14/81283D62/8128E9DE = criFs 区）
 2. **之后**：TOC 加载 → 文件索引 → `mount status=2` → data.cpk 挂载（同样处理）→ title 素材读取
 3. **GXM 画面仍黑**（M940–945 遗留）：纹理全 dummy、uniform 全零、几何数据未校验；需补纹理上传/uniform/顶点通路与 ShaderPatcher
 4. **音频/输入/视频**：ACF/ACB 加载与 NGS 输出、Pad/Touch 输入流、真实 AVC 解码
