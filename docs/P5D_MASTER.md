@@ -1142,6 +1142,41 @@
 | M1124 | §18.4669: ★★★★★★★★★★ **ACF 修复后 boot 链真实前进：进入 GFD_PSP2 主循环（fiber B = FUN_81198C0A），执行 app 初始化回调链，随后卡在 GFD 初始化/内存分配器（8115D0A8/8115D36A appAllocatorHandler）未能进入帧循环**。反编译明确 GFD 主循环结构（8 个回调槽 + 帧计数器 + fiber 让出）；确认 init 链驱动器 FUN_81184FFE（9 步表）在本流程**未被调用**——GFD 主循环才是真实驱动**
 | M1125 | §18.4670: ★★★★★★★★★ **GFD 初始化继续推进（BOOT 高上限跟踪）：经过 appSystem 初始化 FUN_81172EFC（2MB 堆/内存缓冲对象）后，执行流进入 CRI Atom 声音代码（81236D9C→8126A09C→81242xxx），随后 fiber B（848463A0 = GFD 主循环）被切入 pc=81242D24（CRI Atom 声音线程代码）且不再返回；[WD] 确认光纤 A 在 811E5CDA 空转、hle_ring 显示 A↔B 切换，GFD 帧循环仍未被到达**。新增 BOOT 跟踪上限 400→400000 用于精确定位卡点 pc
 | M1126 | §18.4671: ★★★★★★★★★ **找到声音线程霸占 GFD fiber 的机制证据：HLE 线程栈分配地址（sp=848560F8 → 栈区 ≈[84817000,848560F8)）与 guest 光纤对象地址（84836300 / 848463A0）重叠；线程栈运行写入会覆盖光纤对象字段 [fiber+0x84]=entry / [fiber+0x88]=arg，随后 fiber_load 读到被覆盖的"入口"（81242D24 等线程代码地址）→ GFD 主循环 fiber 被劫持**。本轮两处实验（① fiber_save 线程期禁止写 fiber；② HLE arena 从 0x84600000 上移到 0x85800000）均未修复：①不足（劫持不经过 fiber_save），②直接回归（fiber 对象/host 堆随 HLE arena 迁移，挂载破坏、[IO] 仅 2 条）；已回退到已知良好构建
+| M1127 | §18.4672: ★★★★★★★★★ **独立线程栈 arena 实验（negative result）+ 修订 fiber 劫持假说**。新增 `[STKARENA]`（0x8C600000..0x8D000000 专用栈区，big arena 让位到 0x8D000000）：fiber 劫持消失（[EXECSTART] 不再出现 pc=81242D24），但 **boot 回归**（[IO] 仅 2 条、无 CPK TOC PREAD、[ACFFILL]=0、[FLOAD-BAD]×31、主 n 仅 ~37k、卡在 GSIG 循环）——因线程栈移出 heapA 后 guest 堆块/fiber 对象地址整体下移（84836300→84676300）。结合 `[HM]` 日志修订假说：fiber 对象 84836300/848463A0 **本身就是 HLE hle_malloc 分配**（size **0x100A0** = 0xA0 头 + 0x10000 栈，调用方 lr=811E6A0E），heapA 分配顺序为 6 个小块 → 0x50000 → **7×0x40000 线程栈** → 2×0x100A0 fiber 对象；单调 bump 分配不会让后分配的线程栈覆盖先前 fiber 对象，故劫持更可能来自 **fiber 上下文保存/恢复路径把错误 pc 写入 g_fctx[848463A0].r[15]**（flr=848D9504 为堆地址，说明保存的是混合/错误寄存器组）。下一轮：对 g_fctx[848463A0].r[15] 的每次写入加监视打印（值落入 81240000-81280000 时打印调用来源），定位真实写入点
+m1210/m1208 证据（`m1210_stkarena_key.txt`、`m1208_hm_key.txt`）：
+```
+[STKARENA] n=00040000 -> 8C600000 (range [8C600000,8C640000)) ×16   ← 专用栈区生效
+[STKARENA] n=00040000 -> 8C7C0000 (range [8C7C0000,8C800000))
+[EXECSTART] #6 fib=846863A0 pc=81207612 sp=846962B8 …   ← 劫持 pc 81242D24 消失
+[FINIT] fiber=84676300 / 846863A0（地址较 known-good 下移 0x1C0000）
+[FLOAD-BAD] ×31  [IO] 仅 2 条  [ACFFILL] 0  [CRILOG] 0  [FIOS] 2（仅 HLE 挂载消息）
+最后活动：[GSIG] obj=50018000 … n=37394（主循环只跑到 ~37k，known-good 为 108k+）
+[HLE 分配记录，known-good m1208]：
+[HM] n=00010027 -> 84600230   [HM] n=00007827 -> 846102B0   [HM] n=00007037 -> 84617B30
+[HM] n=00002037 -> 8461EBC0   [HM] n=00004000 -> 84621050   [HM] n=00050000 -> 846650C0
+[HM] n=000100A0 -> 84836300   [HM] n=000100A0 -> 848463A0    ← fiber 对象 = hle_malloc(0x100A0)
+（其间还有 7×0x40000 线程栈，地址从 846B50C0 到 848350C0，随后才分配 fiber 对象）
+```
+**反编译/实现依据**：
+- `hle_malloc` arena：`g_heapA=0x84600000..0x8C600000`（<1MB 常规分配）、`g_big=0x8C600000..0xA0000000`（≥1MB）；`sceKernelAllocMemBlock` 也走 `hle_malloc(size+align+0x100)`；
+- `FUN_81206700`（fiber 创建）：`FUN_811DA534(uVar3+0xA0)`（uVar3=默认 0x10000 栈）→ 分配 0x100A0 → 即 [HM] 的 fiber 对象分配；`[fiber+0x84]=entry, [fiber+0x88]=arg`；
+- `SceFiber_F24A298C(fiber,"gfdFiber",0x81206BDD,fiber,fiber+0xA0,stack_size,...)`；
+- 线程栈：`HLE case 0x812B2940 StartThread` 内 `hle_malloc(0x40000); t.stack=base+0x3F000`；
+- 实验回退校验：revert 后 `recomp_harness.cpp` 与 `recomp_harness_known_good_4671.cpp` SHA256 **完全一致**，重新编译链接 exit=0。
+**NEXT**：
+```
+① 在 harness 所有 g_fctx[..].r[15] 写入点加 watch：值 ∈ [0x81240000,0x81280000) 时打印 fiber id/来源/lr，
+   定位把 fiber B 上下文写成 81242D24 的确切路径（fiber_save / fiber_load / SWCH / pump2 保存/恢复）
+② 在 fiber_load 校验：guest 光纤对象 [f84] 与 g_fib_meta 记录 entry 不一致时告警并用 meta 值（防止被覆盖值劫持）
+③ 定位后修复保存路径（不移动 arena，避免 guest 堆地址整体下移的回归）
+④ 目标：fiber B 保持 entry=81198C0B → GFD 帧循环启动（[FRAMECB]/[UPD]/[POST]、[COUNT] present）
+```
+验证：`m1210_stkarena_key.txt`、`m1208_hm_key.txt`、`m1208_fibguard_key.txt`、`m1207_bootpc_key.txt`、`recomp_harness_known_good_4671.cpp`。 |
+| §18.4672 | Dedicated thread-stack arena experiment (negative result) + revised fiber-hijack hypothesis. Added [STKARENA] (dedicated stack region 0x8C600000..0x8D000000, big arena moved to 0x8D000000): the fiber hijack disappeared ([EXECSTART] no longer shows pc=81242D24), but boot regressed ([IO] only 2 lines, no CPK TOC PREADs, [ACFFILL]=0, [FLOAD-BAD] x31, main n only ~37k, stalled in the GSIG loop) because moving thread stacks out of heapA shifts the guest heap block/fiber object addresses down (84836300 -> 84676300). Combined with the [HM] log, the hypothesis is revised: the fiber objects 84836300/848463A0 ARE HLE hle_malloc allocations (size 0x100A0 = 0xA0 header + 0x10000 stack, caller lr=811E6A0E); the heapA allocation order is 6 small blocks -> 0x50000 -> 7x0x40000 thread stacks -> 2x0x100A0 fiber objects; a monotonic bump allocator cannot let later thread stacks overwrite earlier fiber objects, so the hijack more likely comes from a fiber save/restore path writing a wrong pc into g_fctx[848463A0].r[15] (flr=848D9504 is a heap address, suggesting a mixed/wrong register set was saved). '
+       'm1210/m1208 evidence: [STKARENA] n=00040000 -> 8C600000 (range [8C600000,8C640000)) x16, last 8C7C0000; [EXECSTART] #6 fib=846863A0 pc=81207612 sp=846962B8 (hijack pc 81242D24 gone); [FINIT] fiber=84676300/846863A0 (addresses shifted down 0x1C0000); [FLOAD-BAD] x31; [IO] only 2 lines; [ACFFILL] 0; [CRILOG] 0; [FIOS] 2 (HLE mount messages only); last activity [GSIG] obj=50018000 n=37394 (main loop only ~37k vs known-good 108k+). HLE allocation record from known-good m1208: [HM] n=00010027 -> 84600230, n=00007827 -> 846102B0, n=00007037 -> 84617B30, n=00002037 -> 8461EBC0, n=00004000 -> 84621050, n=00050000 -> 846650C0, n=000100A0 -> 84836300, n=000100A0 -> 848463A0 (fiber objects = hle_malloc(0x100A0)); between them are 7x0x40000 thread stacks from 846B50C0 to 848350C0, then the fiber objects. '
+       'Implementation references: hle_malloc arenas g_heapA=0x84600000..0x8C600000 (<1MB) and g_big=0x8C600000..0xA0000000 (>=1MB); sceKernelAllocMemBlock also uses hle_malloc(size+align+0x100); FUN_81206700 (fiber create) calls FUN_811DA534(uVar3+0xA0) with uVar3=default 0x10000 stack -> 0x100A0 allocation (the [HM] fiber-object allocation), [fiber+0x84]=entry/[fiber+0x88]=arg; SceFiber_F24A298C(fiber,"gfdFiber",0x81206BDD,fiber,fiber+0xA0,stack_size,...); thread stacks in HLE case 0x812B2940 StartThread: hle_malloc(0x40000); t.stack=base+0x3F000. Revert verified: recomp_harness.cpp SHA256 identical to recomp_harness_known_good_4671.cpp and rebuild/link exit=0. '
+       'NEXT: (1) add a watch on every write to g_fctx[..].r[15] in the harness: when the value is in [0x81240000,0x81280000), print the fiber id/source/lr to find the exact path that writes fiber B''s context to 81242D24 (fiber_save / fiber_load / SWCH / pump2 save-restore); (2) validate in fiber_load: if the guest fiber object [f84] differs from the recorded g_fib_meta entry, warn and use the meta value (prevents hijack by clobbered values); (3) after locating the save path, fix it without moving arenas (to avoid the guest-heap address shift regression); (4) goal: fiber B keeps entry=81198C0B -> GFD frame loop starts ([FRAMECB]/[UPD]/[POST], [COUNT] present). '
+       'Verification: m1210_stkarena_key.txt, m1208_hm_key.txt, m1208_fibguard_key.txt, m1207_bootpc_key.txt, recomp_harness_known_good_4671.cpp. |
 m1208/m1209 证据（`m1208_fibguard_key.txt`、`m1209_heapa_key.txt`、`m1208_thrstack_key.txt`）：
 ```
 [FINIT] fiber=84836300 name=8130CC28 entry=81206BDD arg=84836300 [f84]=81198BE9 [f88]=00000000
@@ -502432,3 +502467,38 @@ LOOKUP: M1125 GFD init continues appSystem FUN_81172EFC 2MB heap FUN_8115D36A FU
 ANTI-FORGETTING ENTRY. Keywords: M1126 sound thread hijacks GFD fiber mechanism = HLE thread stack allocation overlaps guest fiber objects. Fiber objects 84836300/848463A0 allocated by guest FUN_81206700 (FUN_811DA534) from the guest heap in the 0x84600000 window; HLE thread stacks come from hle_malloc(0x40000) with g_heapA starting at 0x84600000; sound thread stack top sp=848560F8 means its range [84817000,848560F8) covers fiber object 848463A0; thread stack writes overwrite [fiber+0x84]=entry (81242D24) and [fiber+0x88]=arg (848D9504), so fiber_load restores the GFD main-loop fiber with pc=81242D24 (FIBSW #83 fpc=81242D24 flr=848D9504) and [EXECSTART] #6 fib=848463A0 pc=81242D24 sp=848560F8. Experiments: fiber_save guard if (g_cur_thr) return ineffective (hijack is in fiber_load reading clobbered guest fiber object); g_heapA_ptr 0x84600000->0x85800000 regressed (fiber objects moved to 85A3xxxx, mount broke, only 2 [IO] lines, no ACF/CRILOG) because the guest heap block itself is HLE-allocated so moving the arena changes the whole address assumption chain; both reverted to known-good build. NEXT: give thread stacks a dedicated arena disjoint from the guest heap window / fiber objects (e.g. 0x8C600000+ g_big area or a new stack arena), validate in hle_malloc against recorded fiber objects and guest heap blocks, or print the guest heap block range from sceKernelAllocMemBlock and partition the general arena into an unused sub-region; then fiber B keeps entry=81198C0B, GFD frame loop starts ([FRAMECB]/[UPD]/[POST], [COUNT] present), then title asset requests. Verification: m1208_fibguard_key.txt, m1209_heapa_key.txt, m1208_thrstack_key.txt, m1207_bootpc_key.txt, apploop.txt, jobmgrloop.txt.
 
 LOOKUP: M1126 sound thread hijack GFD fiber HLE thread stack overlaps guest fiber objects 84836300 848463A0, hle_malloc 0x40000 g_heapA 0x84600000, sp=848560F8 stack range covers 848463A0, fiber+0x84 entry fiber+0x88 arg overwritten 81242D24 848D9504, fiber_load hijack FIBSW #83, fiber_save guard ineffective, g_heapA 0x85800000 regression reverted, guest heap block HLE-allocated, next dedicated stack arena 0x8C600000 disjoint validate overlap, then GFD frame loop FRAMECB UPD POST COUNT present -> 18.4670 [relevant: fiber B hijacked], 18.4669 [relevant: GFD main loop], 18.4668 [relevant: ACF success]
+### 18.4672 PORT M1127: 独立线程栈 arena 实验（negative）+ fiber 劫持假说修订
+
+1) 实验：`[STKARENA]` 专用栈区 0x8C600000..0x8D000000（big arena 移至 0x8D000000），线程栈改走 `hle_stack_alloc(0x40000)`。
+```
+[STKARENA] n=00040000 -> 8C600000 (range [8C600000,8C640000)) ×16
+[EXECSTART] #6 fib=846863A0 pc=81207612 sp=846962B8        ← 劫持 pc=81242D24 消失
+[FINIT] fiber=84676300 / 846863A0                          ← fiber 地址较 known-good 下移 0x1C0000
+[FLOAD-BAD] ×31  [IO] 仅 2 条  [ACFFILL] 0  [FIOS] 仅 HLE 挂载消息
+最后活动 [GSIG] … n=37394（known-good 主循环到 108k+）       ← boot 回归
+```
+原因：线程栈移出 heapA 后 guest 堆块/fiber 对象整体下移，改变全链路地址假设 → 回归。已回退：`recomp_harness.cpp` 与 `recomp_harness_known_good_4671.cpp` **SHA256 一致**，重编译链接 exit=0。
+
+2) `[HM]` 分配记录（known-good m1208）修订假说：
+```
+[HM] n=00010027 -> 84600230      [HM] n=00007827 -> 846102B0
+[HM] n=00007037 -> 84617B30      [HM] n=00002037 -> 8461EBC0
+[HM] n=00004000 -> 84621050      [HM] n=00050000 -> 846650C0
+[HM] n=000100A0 -> 84836300      [HM] n=000100A0 -> 848463A0   ← fiber 对象 = hle_malloc(0x100A0)
+（期间 7×0x40000 线程栈：846B50C0→848350C0，随后才分配 fiber 对象）
+```
+⇒ fiber 对象本身就是 HLE 分配（0xA0 头 + 0x10000 栈 = 0x100A0，调用方 lr=811E6A0E；对应 FUN_81206700 的 FUN_811DA534(0x10000+0xA0)）。
+⇒ 单调 bump 分配不可能让“后分配线程栈覆盖先前 fiber 对象”，劫持更可能来自 **fiber 上下文保存/恢复路径写错 pc**：`flr=848D9504` 为堆地址 → 保存了混合/错误寄存器组。
+
+3) NEXT：
+```
+① harness 里所有 g_fctx[..].r[15] 写入点加 watch：值 ∈ [0x81240000,0x81280000) 时打印 fiber id/来源/lr
+② fiber_load 校验 [f84] 与 g_fib_meta entry，不一致告警并用 meta（防覆盖值劫持）
+③ 修复保存路径（不移动 arena）
+④ 目标：fiber B entry=81198C0B → GFD 帧循环启动（[FRAMECB]/[UPD]/[POST]、[COUNT] present）
+```
+验证：`m1210_stkarena_key.txt`、`m1208_hm_key.txt`、`m1208_fibguard_key.txt`、`m1207_bootpc_key.txt`、`recomp_harness_known_good_4671.cpp`。
+
+ANTI-FORGETTING ENTRY. Keywords: M1127 dedicated thread-stack arena experiment negative result + revised fiber hijack hypothesis. Tested [STKARENA] dedicated stack region 0x8C600000..0x8D000000 (big arena moved to 0x8D000000) with hle_stack_alloc(0x40000) for thread stacks: hijack pc 81242D24 disappeared from [EXECSTART] but boot regressed ([IO] only 2 lines, no CPK TOC PREADs, [ACFFILL]=0, [FLOAD-BAD] x31, [FINIT] fibers shifted 84836300->84676300, main n only ~37k stalled in GSIG loop) because moving thread stacks out of heapA shifts the guest heap block/fiber objects down and changes the whole address assumption chain; reverted and SHA256 of recomp_harness.cpp matches recomp_harness_known_good_4671.cpp. New evidence from [HM] allocation log: fiber objects 84836300/848463A0 are themselves HLE hle_malloc allocations of size 0x100A0 (0xA0 header + 0x10000 stack, caller lr=811E6A0E = FUN_81206700 calling FUN_811DA534(0x10000+0xA0)); heapA order: 6 small blocks (84600230 846102B0 84617B30 8461EBC0 84621050 846650C0) -> 7x0x40000 thread stacks (846B50C0..848350C0) -> 2x0x100A0 fiber objects (84836300, 848463A0). A monotonic bump allocator cannot let later thread stacks overwrite earlier fiber objects, so the hijack more likely comes from a fiber save/restore path writing a wrong pc into g_fctx[848463A0].r[15]; flr=848D9504 being a heap address indicates a mixed/wrong register set was saved. NEXT: add a watch on every harness write to g_fctx[..].r[15] printing fiber id/source/lr when the value falls in [0x81240000,0x81280000) to locate the exact write path (fiber_save/fiber_load/SWCH/pump2); validate in fiber_load that guest fiber object [f84] matches g_fib_meta entry, warn and use meta on mismatch; fix the save path without moving arenas; goal fiber B keeps entry=81198C0B and the GFD frame loop starts ([FRAMECB]/[UPD]/[POST], [COUNT] present). Verification: m1210_stkarena_key.txt, m1208_hm_key.txt, m1208_fibguard_key.txt, m1207_bootpc_key.txt, recomp_harness_known_good_4671.cpp.
+
+LOOKUP: M1127 STKARENA dedicated stack arena 0x8C600000 0x8D000000 big arena 0x8D000000 hle_stack_alloc 0x40000 negative boot regression fiber shift 84836300 84676300 FLOAD-BAD 31 IO 2 ACFFILL 0 GSIG 37394, HM allocation log fiber objects hle_malloc 0x100A0 caller 811E6A0E FUN_81206700 FUN_811DA534 0x10000, heapA order thread stacks 846B50C0 848350C0, revised hypothesis fiber save/restore writes wrong pc g_fctx 848463A0 r15 81242D24 flr 848D9504 mixed register set, next watch writes to g_fctx r15 range 81240000-81280000 fiber_load validate f84 vs g_fib_meta, SHA256 known-good match recomp_harness_known_good_4671.cpp -> 18.4671 [relevant: thread stacks overlap], 18.4670 [relevant: fiber B hijack], 18.4669 [relevant: GFD main loop]
