@@ -645,6 +645,57 @@ static inline uint8_t* GP(uint32_t va) {
     fprintf(stderr, "\n"); return nullptr; }
   return gp_img + off;
 }
+
+// M1122 IOPUMP_WAIT: drive criFs load state machines from inside blocking delays too.
+// Reason: the guest ACF-read spin loop (FUN_812309A4: while (FUN_8128E9BC(reader,&st), st==1) { FUN_81283C84(); FUN_8127C0E8(10); })
+// runs inside nested fiber execution where g_blkcnt_total does not advance, so the main-loop IOPUMP never fires and
+// the reader stays at status +0xBC == 1 forever (observed: reader 848E9678 LOADST #15/#16 statusBC=1 after sound init,
+// then ACF registration fails => W2010110102 / E2013081521). Pump the known post-mount readers here.
+static void iopump_from_wait(RecState* s) {
+  static int _env = -1, _busy = 0, _n = 0;
+  if (_env < 0) { const char* _e = getenv("P5D_IOPUMP"); _env = (_e && atoi(_e)) ? 1 : 0; }
+  if (!_env || _busy) return;
+  // M1122b: gate to the POST-MOUNT phase only and only pump the file-data reader 848E9678.
+  // (Pumping the mount readers 848FC368/848FC5C0 here breaks the CPK analyzer because the
+  // main-loop pump applies HDRFIX/TOCFIX before the completion shim, which this path does not.)
+  // g_blkcnt_total is frozen during nested fiber waits; mount header reads freeze it around 30-43k,
+  // while the post-mount phase runs at >100k, so gate there.
+  if (g_blkcnt_total < 100000u) return;
+  // M1122d: dynamically discover every criFs reader (progress signature 0x81540460 + back-pointer at
+  // reader+0xB0) and pump all with status==1. The ACF read (FUN_812309A4) creates its own reader, so a
+  // hardcoded list misses it; rescan rarely to keep the cost low.
+  static uint32_t _rd[8] = {0};
+  static int _rdn = 0, _tick = 0;
+  if ((_tick++ & 0xFF) == 0) {
+    int _n = 0;
+    for (uint32_t _a = 0x84600000u; _a < 0x85200000u && _n < 8; _a += 4u) {
+      uint32_t _v = 0; { uint8_t* _q = GP(_a); if (_q) std::memcpy(&_v, _q, 4); }
+      if (_v != 0x81540460u) continue;
+      uint32_t _r = _a - 0x28u, _bk = 0;
+      { uint8_t* _q = GP(_r + 0xB0u); if (_q) std::memcpy(&_bk, _q, 4); }
+      if (_bk != _a) continue;
+      bool _dup = false; for (int _k = 0; _k < _n; ++_k) if (_rd[_k] == _r) { _dup = true; break; }
+      if (!_dup) _rd[_n++] = _r;
+    }
+    _rdn = _n;
+  }
+  _busy = 1;
+  for (int _i = 0; _i < _rdn; ++_i) {
+    uint32_t _r = _rd[_i];
+    uint32_t _st = 0; { uint8_t* _q = GP(_r + 0xBCu); if (_q) std::memcpy(&_st, _q, 4); }
+    if (_st != 1u) continue;
+    call_guest_cb2(s, 0x8128D502u, _r, 0u, 300000);
+    uint32_t _prog = 0; { uint8_t* _q = GP(_r + 0xB0u); if (_q) std::memcpy(&_prog, _q, 4); }
+    uint32_t _pst = 0; if (_prog) { uint8_t* _q = GP(_prog + 0xCu); if (_q) std::memcpy(&_pst, _q, 4); }
+    if (_pst == 7u || _pst == 8u) {
+      uint32_t _sz = call_guest_cb2(s, 0x8128F6C8u, _prog, 0u, 200000);
+      { uint8_t* _q = GP(_r + 0x130u); if (_q) { uint32_t _v = _sz; std::memcpy(_q, &_v, 4); } }
+      { uint8_t* _q = GP(_r + 0xBCu); if (_q) { uint32_t _v = 2; std::memcpy(_q, &_v, 4); } }
+      if (_n++ < 20) { printf("[IOPUMP_WAIT] pumped reader=%08X pstate=%u size=%08X blk=%u\n", _r, _pst, _sz, g_blkcnt_total); fflush(stdout); }
+    }
+  }
+  _busy = 0;
+}
 static uint32_t loadpump_task(void) {   // 18.4282: pump a live Fios task - prefer the MAIN WAIT-LOOP object (r4 at 0x811E5ED4) when its state is valid 0..8, else the global task head [0x816CDA2C]; never pump stale/freed pointers
   uint32_t _t = g_wait_task;
   if (_t) {
@@ -3451,6 +3502,7 @@ extern "C" uint32_t hle_call(uint32_t stub_va, RecState* s) {
     case 0x812B2A80u:                                                 // 18.4272: sceKernelDelayThreadCB
       g_vtime_extra += (uint64_t)(s->r[0] ? s->r[0] : 1u);   // M815: deterministic virtual sleep (CriFs wait-loop lr=0x8127C0F8; 72,518 calls/100M blocks)
     case 0x812B2A50u: {                                               // sceKernelDelayThread -> cooperative yield (per-frame pacing)
+      iopump_from_wait(s);   // M1122: pump criFs load state machines during blocking waits (nested fiber spin loops)
       g_vtime_extra += (uint64_t)(s->r[0] ? s->r[0] : 1u);   // M815: deterministic virtual sleep
       r0 = 0;
       if (tl_ht_tid) { uint32_t _us = s->r[0]; if (_us > 2000u) _us = 2000u; if (_us < 100u) _us = 100u; if (!g_fastsleep) std::this_thread::sleep_for(std::chrono::microseconds(_us)); break; }

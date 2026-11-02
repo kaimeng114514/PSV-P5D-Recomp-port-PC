@@ -1137,6 +1137,67 @@
 | M1119 | §18.4664: ★★★★★★★★ **挂载后卡点定位为 CRI AtomEx（音频）初始化**：主 fiber 在 `FUN_812360C8`（"CRI AtomEx/VITA Ver.2.13.00 Build:Jan 30 2018 18:45:17"）路径上反复执行 Fios/AtomEx 池初始化 `FUN_8125DBCC`（0x44/0x24/0x1C 节点池）→ 轮询块 `8125DDAE/8125DDDA/8125DDF6` + `sceKernelDelayThread(5000)`（stub 812B2A50，lr=81207612）→ 典型的**重试循环**；`[ACF] total=0`（无 ACF 注册）、`FUN_812309A4`（ACB 注册，报 "ACF is not registered"/E2010031630）、guest 空指针读 `va=0x28`（blk 81230C2A）同属音频初始化链；挂载后**再也没有文件 PREAD** → 标题/ACF 数据读取根本没发生。另：挂载后新 reader 848E9678 状态=1/进度=8，应用 pstate 7|8 完成 shim 后置 status=2（但未解锁主卡点，说明它不是唯一等待项）**
 | M1120 | §18.4665: ★★★★★★★★ **卡点再精化：5000us 轮询 = Fios 工作线程空转循环，不是 AtomEx 重试**。`[DELAYWRAP] usec=5000 caller=811F2376` 稳定 → 反编译 `FUN_811F22B8`（194B）= **Fios worker 主循环**：`do { 取 DAT_81539754+0xC 待处理任务链表头；若非空且 +0xFC0==0 则逐个 FUN_811F0B82(任务) 处理并移入完成链；FUN_8120760C(5000); } while(true)`。当前**任务链表为空**（链表头=0）→ 工作线程纯空转；pc_ring 显示的 `8125DDAE/8125DDDA/8125DDF6`（FUN_8125DBCC 池初始化）是**陈旧记录**（线程 context runner 不更新 pc_ring）。另确认：AtomEx 初始化**只调用一次**（`[ATOMEXINIT] cfg=848561F8 p2=0 p3=0`、`[ACFPARSE]×3`、`[ATOMEX] cfg=84856128 p2=848D9500 p3=0x820D0`、`[FIOSPOOL] param1=36`→36 节点池），**不存在 AtomEx 重试**；`P5D_LOADPUMP=1` 实验未触发（g_wait_task 未设置，pc≠0x811E5EC6）**
 | M1121 | §18.4666: ★★★★★★★★ **卡点根因链闭合：游戏根本不发文件请求（[RQMGR]/[APOPEN]/[FHOPEN]=0）→ 卡在"init sound"步骤之前；AtomEx 的 DSP Bus Setting 校验 `FUN_8123EA10 → FUN_81263A66` 因 `DAT_8153FB30+0x44 == 0`（ACF 未注册）失败，报 `W2010110102:ACF file is not registered`；DSP 设置名 = `"BusSet_xrd722v2"`（文件 0x81305FE0）**
+| M1122 | §18.4667: ★★★★★★★★ **声音初始化路径确认真实执行（SNDINIT→ACFREG sound/common.acf→DSPSET BusSet_xrd722v2），但 ACF 读取不发主机 PREAD → ACF 注册失败 → DSP 设置失败**。新增 **IOPUMP_WAIT**（在 DelayThread 阻塞等待内泵 criFs reader，解决"嵌套 fiber spin 冻结 g_blkcnt_total → 主循环 IOPUMP 不触发"问题）；首版无门限泵动破坏 CPK 挂载（E2011022806 CPK broken，因 mount reader 需要 HDRFIX/TOCFIX 在前），改为 ≥100k 门限 + 动态 reader 扫描后挂载正常、等待泵成功（848FC5C0 pstate=7、848E9678 pstate=8），但 **ACF 仍注册失败**：`sound/common.acf` 的读取从未发出主机 IO PREAD**
+m1192/m1194/m1195 证据（`m1195_iopumpwait_key.txt` 等）：
+```
+[SNDINIT] #0 called lr=81172EA8                ← 声音初始化真实执行
+[ACFREG] #0 ctx=84906440 path=[sound/common.acf] lr=8115305C
+[DSPSET] #0 name=[BusSet_xrd722v2] lr=81153076
+[IOPUMP_WAIT] pumped reader=848FC5C0 pstate=7 size=848E8F20 blk=104829   ← 等待泵（m1195）
+[IOPUMP_WAIT] pumped reader=848E9678 pstate=8 size=848E8EE8 blk=109568
+[LOADST] #15 reader=848E9678 statusBC=00000001 prog=848E96A0（ACF 读取提交后停在 loading）
+[IO] 挂载后仍无任何 PREAD（sound/common.acf 从未被主机读取）
+[CRILOG] W2010110102:ACF file is not registered.（lr=81263AC4 blk=81263AB6）
+[CRILOG] E2013081521:"%s" is invalid DSP Bus Setting.（lr=8123EA5A blk=8123EA4A）
+[CRILOG]（m1192 变体还出现）E2010052671:Can not open ACF file. (path = %s)
+```
+**反编译证据（ACF 加载链）**：
+1. `FUN_81153022`（声音初始化，354B）：
+```c
+SceLibc_7449B359(auStack_124,&DAT_81305fc8,"sound/common.acf");
+uVar1 = FUN_811821cc();                       // 取游戏 FS 上下文（全局 0x813B0174）
+FUN_81230f54(uVar1, auStack_124, 0, 0);       // ★ criAtomEx_RegisterAcfFile
+FUN_812522e4(0,0,0);
+FUN_81234aa8("BusSet_xrd722v2",0,0);          // ★ 设置 DSP bus setting
+... 创建音效对象 + SceLibKernel_C5C11EE7("thSeqSndAdx2",&LAB_811539f2,...) 线程 ...
+```
+2. `FUN_81230F54`（8B 包装）→ `FUN_81230DC8`（criAtomEx_RegisterAcfFile 实现）：
+```c
+if (FUN_81236BF2()==0) log "Need to initialize the library before registering ACF";
+else if (DAT_8153F3F8==0) { if (FUN_8122E22C()==0) {
+   iVar1 = FUN_812309A4(param_1,param_2,...);   // ★ ACF 文件加载
+   if (iVar1) { if (FUN_812305C6(...)) return 1; ... } } }
+```
+3. `FUN_812309A4`（1058B，ACF 文件加载）：
+```c
+iVar2 = FUN_812881A2(param_1,param_2,&local_58);          // 游戏 FS stat：取 ACF 文件大小
+if (iVar2==0 && size>0) {
+   iVar2 = FUN_81225296(...);  // alloc
+   iVar7 = size+8;
+   iVar2 = FUN_8128DEFC(&local_68,0x7ff);
+   iVar2 = FUN_8128E394(local_68,local_4c,param_2,0,0,0,iVar7,...);  // ★ criFs 提交读
+   if (iVar2==0) { while (FUN_8128E9BC(local_68,&local_64), local_64==1) { FUN_81283C84(); FUN_8127C0E8(10); } }  // 自旋等完成
+}
+else FUN_81279486(0,"E2010052671:Can not open ACF file. (path = %s)",param_2);
+```
+⇒ ACF 文件读取走**游戏级请求管理器**（FUN_812881A2/FUN_8128E394），该队列的消费者任务未调度（M1038 已知缺口）→ 读取不发主机 PREAD → ACF 数据为空 → 注册失败。
+**IOPUMP_WAIT 实现（harness）**：
+- `static void iopump_from_wait(RecState* s)`：在 DelayThread(812B2A50/812B2A80) HLE 内调用；
+- 门限 `g_blkcnt_total >= 100000`（mount 阶段 header 读取时 g_blkcnt_total 冻结在 30–43k，后挂载期 >100k）；
+- 每 256 次调用动态扫描 0x84600000..0x85200000 的 progress 签名（`progress[0]==0x81540460` + `reader+0xB0` 回指），对 status==1 的 reader 调 `FUN_8128D502` 泵动，pstate∈{7,8} 时补完成 shim（size=FUN_8128F6C8、reader+0x130=size、reader+0xBC=2）。
+**NEXT**：
+```
+① 用 FIOSFILL 方式直接服务 ACF：在 FUN_812881A2（游戏 FS stat）入口用 HLE CpkReader 查 "sound/common.acf" 大小并返回成功；
+② 在 ACF 读提交/完成点（FUN_8128E394 或 reader 完成回调）注入 HLE 数据来源：从 data.cpk 读出 ACF 字节写入 guest 缓冲（或让 FUN_8128DEFC/FUN_8128E394 走 HLE 假文件提供者）
+③ 成功后 ACF 注册 → DSP Bus Setting 通过 → AtomEx 初始化完成 → "init sound" 步骤完成 → boot 链继续 → 文件请求/标题加载
+```
+验证：`m1195_iopumpwait_key.txt`、`m1194_iopumpwait_key.txt`、`m1192_iopumpwait_key.txt`、`acfload.txt`、`acfload2.txt`、`acfreg2.txt`、`acfreg.txt`。 |
+| §18.4667 | The sound-init path really executes ([SNDINIT] -> [ACFREG] sound/common.acf -> [DSPSET] BusSet_xrd722v2), but the ACF read never issues a host PREAD -> ACF registration fails -> DSP setting fails. Added IOPUMP_WAIT: pump criFs readers from inside blocking DelayThread waits, solving the problem that nested fiber spins freeze g_blkcnt_total so the main-loop IOPUMP never fires. The first ungated version broke the CPK mount (E2011022806 CPK broken) because mount readers need HDRFIX/TOCFIX applied before the completion shim; after gating to >=100k plus dynamic reader discovery the mount is normal and the wait-pump works (848FC5C0 pstate=7, 848E9678 pstate=8), but ACF registration still fails: the sound/common.acf read never issues any host IO PREAD. '
+       'm1192/m1194/m1195 evidence: [SNDINIT] #0 called lr=81172EA8; [ACFREG] #0 ctx=84906440 path=[sound/common.acf] lr=8115305C; [DSPSET] #0 name=[BusSet_xrd722v2] lr=81153076; [IOPUMP_WAIT] pumped reader=848FC5C0 pstate=7 size=848E8F20 blk=104829; [IOPUMP_WAIT] pumped reader=848E9678 pstate=8 size=848E8EE8 blk=109568; [LOADST] #15 reader=848E9678 statusBC=00000001 (ACF read stuck loading); [IO] no PREAD after mounting; [CRILOG] W2010110102:ACF file is not registered (lr=81263AC4 blk=81263AB6); [CRILOG] E2013081521 invalid DSP Bus Setting (lr=8123EA5A blk=8123EA4A); the m1192 variant also showed E2010052671:Can not open ACF file. '
+       'Decompiled ACF chain: (1) FUN_81153022 (sound init, 354B): SceLibc_7449B359(auStack_124,&DAT_81305fc8,"sound/common.acf"); uVar1 = FUN_811821cc() (game FS context from global 0x813B0174); FUN_81230f54(uVar1, auStack_124, 0, 0) (criAtomEx_RegisterAcfFile); FUN_812522e4(0,0,0); FUN_81234aa8("BusSet_xrd722v2",0,0) (set DSP bus setting); ... create sound objects + SceLibKernel_C5C11EE7("thSeqSndAdx2",&LAB_811539f2,...) thread. (2) FUN_81230F54 (8B wrapper) -> FUN_81230DC8 (RegisterAcfFile): if (FUN_81236BF2()==0) log Need to initialize the library before registering ACF; else if (DAT_8153F3F8==0) { if (FUN_8122E22C()==0) { iVar1 = FUN_812309A4(...); if (iVar1) { if (FUN_812305C6(...)) return 1; } } } (3) FUN_812309A4 (1058B): iVar2 = FUN_812881A2(param_1,param_2,&local_58) (game FS stat: get ACF file size); if (iVar2==0 && size>0) { iVar2 = FUN_81225296(...) alloc; iVar7 = size+8; iVar2 = FUN_8128DEFC(&local_68,0x7ff); iVar2 = FUN_8128E394(local_68,local_4c,param_2,0,0,0,iVar7,...) (criFs submit read); if (iVar2==0) { while (FUN_8128E9BC(local_68,&local_64), local_64==1) { FUN_81283C84(); FUN_8127C0E8(10); } } } else FUN_81279486(0,"E2010052671:Can not open ACF file. (path = %s)",param_2). So the ACF file read goes through the game-level request manager (FUN_812881A2/FUN_8128E394), whose consumer task is not scheduled (known M1038 gap) -> no host PREAD -> empty ACF -> registration fails. '
+       'IOPUMP_WAIT implementation (harness): static void iopump_from_wait(RecState* s) called inside the DelayThread HLE (812B2A50/812B2A80); gate g_blkcnt_total >= 100000 (mount header reads freeze it around 30-43k, post-mount phase >100k); every 256 calls dynamically scan 0x84600000..0x85200000 for the progress signature (progress[0]==0x81540460 plus reader+0xB0 back-pointer), pump readers with status==1 via FUN_8128D502, and when pstate in {7,8} apply the completion shim (size=FUN_8128F6C8, reader+0x130=size, reader+0xBC=2). '
+       'NEXT: (1) serve the ACF directly in FIOSFILL style: at FUN_812881A2 (game FS stat) entry use the HLE CpkReader to look up the size of sound/common.acf and return success; (2) inject an HLE data source at the ACF read submit/completion point (FUN_8128E394 or the reader completion callback): read the ACF bytes from data.cpk and write them into the guest buffer (or route FUN_8128DEFC/FUN_8128E394 through the HLE fake-file provider); (3) then ACF registered -> DSP Bus Setting passes -> AtomEx init completes -> init-sound step completes -> boot chain continues -> file requests/title loading. '
+       'Verification: m1195_iopumpwait_key.txt, m1194_iopumpwait_key.txt, m1192_iopumpwait_key.txt, acfload.txt, acfload2.txt, acfreg2.txt, acfreg.txt. |
 m1190 证据（`m1190_reqmgr_key.txt`）：
 ```
 [RQMGR] 0 条          ← 游戏请求管理器 FUN_81181A3C 从未被调用
@@ -501967,3 +502028,44 @@ ACF 未注册（+0x44==0）
 ANTI-FORGETTING ENTRY. Keywords: M1121 root-cause chain closed - the game never issues file requests ([RQMGR]/[APOPEN]/[FHOPEN]=0) and is stuck before the init-sound step; AtomEx DSP Bus Setting check FUN_8123EA10 -> FUN_81263A66 fails because DAT_8153FB30+0x44==0 (ACF not registered) printing W2010110102:ACF file is not registered; DSP setting name = "BusSet_xrd722v2" at VA 0x81305FE0. m1190: [RQMGR] 0, [APOPEN] 0, [FHOPEN] 0, [FIOSHLE] Initialize lr=811E5D68 (only sceFiosInitialize), [FIOS] data.cpk 10555/vita.cpk 531, [IO] no PREAD after mount, [CRILOG] W2010110102 lr=81263AC4 blk=81263AB6, [CRILOG] E2013081521 lr=8123EA5A blk=8123EA4A, [ACF] total=0. ELF strings: 0x81305FE0 BusSet_xrd722v2; 0x81311BD8 E2013081521; 0x8131573C W2010110102 (SEG va 0x81000000 filesz 0x321810 off 0x1000; va 0x81325000 filesz 0x21BA74 off 0x323000). FUN_8123EA10: FUN_81263A66(param_1,out); if 0 -> E2013081521 invalid DSP Bus Setting, return -1. FUN_81263A66: iVar1=DAT_8153fb30; if +0x44==0 -> W2010110102 ACF file is not registered, return 0; else if +0x944==0 -> W2011111111 target mismatch; else if +0x24c==0 -> W2012101211 no dsp setting; else FUN_81271bfc/FUN_81271a7a -> 1. Chain: ACF not registered -> DSP Bus Setting invalid -> AtomEx init incomplete -> init-sound step never completes -> boot stalls -> no file requests. FIOSFILL hooks (harness_fios_* in batch_010) still wired but never reached. NEXT: probe the 8/9-step init chain driver FUN_81184FFE (9-entry table + FUN_8116F8D2 advance condition) for current step/job states, probe init-sound worker (job 846182D0 / wf=811848B7), use STEPFORCE or pump if unscheduled, make the app open chain execute (HLE serve ACF) if waiting on ACF open; then ACF registered -> DSP passes -> AtomEx completes -> init sound completes -> file requests -> PREAD -> GXM first frame. Verification: m1190_reqmgr_key.txt, out80m_m1190reqmgr.txt, dspbus.txt, ngsbus.txt, _rdumpva.py.
 
 LOOKUP: M1121 no file requests RQMGR APOPEN FHOPEN zero, ACF not registered DAT_8153FB30+0x44, DSP Bus Setting BusSet_xrd722v2 0x81305FE0, FUN_8123EA10 FUN_81263A66, W2010110102 W2011111111 W2012101211, AtomEx init incomplete init sound step, init chain driver FUN_81184FFE next probe, FIOSFILL hooks unused -> 18.4665 [relevant: Fios idle], 18.4664 [relevant: AtomEx], 18.4663 [relevant: mount complete]
+### 18.4667 PORT M1122: 声音初始化真实执行；新增 IOPUMP_WAIT（DelayThread 内泵 reader）；ACF 读取不走主机 IO 仍是卡点
+
+1) m1195 证据：
+```
+[SNDINIT] #0 called lr=81172EA8
+[ACFREG] #0 ctx=84906440 path=[sound/common.acf] lr=8115305C
+[DSPSET] #0 name=[BusSet_xrd722v2] lr=81153076
+[IOPUMP_WAIT] pumped reader=848FC5C0 pstate=7 size=848E8F20 blk=104829   ← 新机制生效
+[IOPUMP_WAIT] pumped reader=848E9678 pstate=8 size=848E8EE8 blk=109568
+[LOADST] #15 reader=848E9678 statusBC=00000001（ACF 读取停在 loading）
+[IO] 挂载后仍无 PREAD（sound/common.acf 从未被主机读取）
+[CRILOG] W2010110102:ACF file is not registered. / E2013081521:invalid DSP Bus Setting.
+```
+2) ACF 加载链（反编译）：
+```
+FUN_81153022（声音初始化）
+  "sound/common.acf" → FUN_81230F54 → FUN_81230DC8（criAtomEx_RegisterAcfFile）
+     → FUN_812309A4：FUN_812881A2(ctx,path,&size)（游戏 FS stat）
+        → FUN_8128E394（criFs 提交读）→ 自旋 while(FUN_8128E9BC(st)==1){FUN_81283C84();FUN_8127C0E8(10);}
+  FUN_81234AA8("BusSet_xrd722v2")（DSP 设置，依赖 ACF）
+  创建 "thSeqSndAdx2" 音效线程
+```
+⇒ 读取走游戏级请求管理器，消费者任务未调度（M1038 已知缺口）→ 无主机 PREAD → ACF 空 → 注册失败 → DSP 失败。
+3) 新机制 IOPUMP_WAIT（harness，DelayThread 内泵动）：
+```
+- 门限 g_blkcnt_total >= 100000（mount 阶段冻结 30-43k，后挂载期 >100k）
+- 每 256 次动态扫描 0x84600000..0x85200000 的 progress 签名，泵 status==1 的 reader
+- pstate∈{7,8} 时补完成 shim（size=FUN_8128F6C8 / reader+0x130 / reader+0xBC=2）
+- 首版无门限会破坏 CPK 挂载：mount reader 需要先做 HDRFIX/TOCFIX（主循环 pump 内联），等待泵不可替代
+```
+4) NEXT：
+```
+① FIOSFILL 方式直服 ACF：FUN_812881A2 入口用 HLE CpkReader 查 sound/common.acf 大小并返回成功
+② ACF 读提交/完成点注入 HLE 数据源：从 data.cpk 读 ACF 字节写入 guest 缓冲
+③ ACF 注册 → DSP 通过 → AtomEx 完成 → init sound 完成 → boot 继续 → 文件请求/标题加载
+```
+验证：`m1195_iopumpwait_key.txt`、`m1194_iopumpwait_key.txt`、`m1192_iopumpwait_key.txt`、`acfload.txt`、`acfload2.txt`、`acfreg2.txt`、`acfreg.txt`。
+
+ANTI-FORGETTING ENTRY. Keywords: M1122 sound-init path really executes ([SNDINIT] -> [ACFREG] sound/common.acf -> [DSPSET] BusSet_xrd722v2) but the ACF read never issues a host PREAD -> ACF registration fails -> DSP setting fails. Added IOPUMP_WAIT: pump criFs readers from inside blocking DelayThread waits because nested fiber spins freeze g_blkcnt_total and the main-loop IOPUMP never fires; first ungated version broke the CPK mount (E2011022806 CPK broken) since mount readers need HDRFIX/TOCFIX before the completion shim; gated >=100k plus dynamic reader scan keeps mount normal and pumps (848FC5C0 pstate=7 blk=104829, 848E9678 pstate=8 blk=109568) but ACF still fails because sound/common.acf is never read from the host. Decompiled ACF chain: FUN_81153022 sound init -> "sound/common.acf" -> FUN_81230F54 -> FUN_81230DC8 criAtomEx_RegisterAcfFile -> FUN_812309A4 -> FUN_812881A2 game FS stat(ctx,path,&size) -> FUN_8128E394 criFs submit read -> spin while FUN_8128E9BC status==1 { FUN_81283C84(); FUN_8127C0E8(10); } else E2010052671 Can not open ACF file; then FUN_81234AA8("BusSet_xrd722v2") and SceLibKernel_C5C11EE7("thSeqSndAdx2",&LAB_811539f2,...) thread. IOPUMP_WAIT: gate g_blkcnt_total>=100000, every 256 calls dynamically scan 0x84600000..0x85200000 for progress signature 0x81540460 + reader+0xB0 back-pointer, pump status==1 readers via FUN_8128D502, shim pstate 7/8 (size=FUN_8128F6C8, reader+0x130, reader+0xBC=2). NEXT: serve ACF in FIOSFILL style - at FUN_812881A2 use HLE CpkReader to look up sound/common.acf size and return success; inject HLE data source at the read submit/completion (FUN_8128E394 or reader completion) writing the ACF bytes from data.cpk into guest memory; then ACF registered -> DSP passes -> AtomEx completes -> init-sound completes -> boot continues -> file requests/title loading. Verification: m1195_iopumpwait_key.txt, m1194_iopumpwait_key.txt, m1192_iopumpwait_key.txt, acfload.txt, acfload2.txt, acfreg2.txt, acfreg.txt.
+
+LOOKUP: M1122 sound init SNDINIT ACFREG sound/common.acf DSPSET BusSet_xrd722v2, IOPUMP_WAIT DelayThread pump nested spin frozen g_blkcnt_total, mount readers need HDRFIX/TOCFIX, gate 100000 dynamic scan progress 0x81540460, FUN_81230DC8 FUN_812309A4 FUN_812881A2 FUN_8128E394 spin FUN_8128E9BC, E2010052671 Can not open ACF file, thSeqSndAdx2 thread, next FIOSFILL serve ACF from data.cpk -> 18.4666 [relevant: ACF not registered], 18.4665 [relevant: Fios worker idle], 18.4664 [relevant: AtomEx]
