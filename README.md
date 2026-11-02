@@ -11,69 +11,108 @@ CPU 采用 **AOT 静态重编译**（原版 ARM/Thumb 代码一次性翻译为 x
 
 ---
 
-## 当前状态（2026-11-01，里程碑 M1030；整体约 70–75%）
+## 当前状态（2026-11-02，里程碑 **M1115**；系统层约 85%，端到端目标约 55–65%）
 
-| 模块 | 完成度 | 当前状态 |
+**一句话**：原版 eboot 已在 PC 上原生（AOT）跑起来，S0_LOGO 完整通过；
+当前主线卡在 **CRI FS 的 CPK 挂载/文件索引**——vita.cpk 头分析已经成功（`ret=0`），
+真实 TOC 位置已定位（EOF 前 `0x813EE800`，大小 `0x4C94`），剩下最后一个 UTF 字段读取 bug。
+
+| 模块 | 完成度 | 当前状态（M1115 实测） |
 |---|---|---|
-| ARM/Thumb → x86-64 **AOT 静态重编译** | 90–95% | **229,791 个基本块 / 32 个宿主批次**已翻译并原生执行，`[NOFN]=0`；修复全局性 **pc-relative 字面量加载错误**（`ldr/ldrd/vldr [pc,#imm]` 原先按 `r15` 生成 → 485 处修正、22/32 批次重编） |
-| 原版 eboot/SELF **原样加载** | 85–90% | ELF 段映射、导入表、NID 解析、模块启动全部可用；默认 30M 块回归稳定 `exit=0`；**完整 boot 链已打通**：S0_LOGO → 启动 USM 影片（约 100 秒虚拟时间，guest 软件解码器 `FUN_811DF91A`）→ 应用世界在 **n≈59.5M** 恢复运行 → **S1 标题加载页（page1）开始运行** |
-| **HLE 系统 API 接管** | 70–75% | 内存/线程/fiber/信号量/事件标志/消息/文件/GXM/CRI 日志骨架均工作；本阶段新增：`sceKernelCreateLwMutex` 语义修正、`sceKernelLockLwMutexCB`(0x812B2800) 别名、`sceDisplayWaitVblankStartMultiCB` 时间片模拟、`sceKernelGetProcessTimeWide` 虚拟时钟模式、CRI FS 初始化桥（`0x8128399E`）等 |
-| **GXM → Vulkan** | 60–70% | **提交流程已打通、画面内容仍为黑（诚实版）**：真实 SPIR-V 管线（GXP→SPIR-V manifest 4331 条）创建成功（`[REAL-PIPE] #1 OK`），BeginScene → Draw → RT→swapchain 拷贝 → `vkQueuePresentKHR result=0` 全链执行；但实测 RT 截图 **全黑**（PIL mean=0/max=0），根因：纹理全绑 dummy（`[TEXBIND] dummy=16`）、uniform 全零（RINIT 零表兜底）、顶点/几何数据未校验；正在补渲染数据通路 |
-| 资源 / 文件系统 | 65–70% | `data.cpk`（10,555 文件）+ `vita.cpk`（531 文件）已挂载；**CRI FS binder 已初始化并保持**（`binit=0x816A0BA0`，n=5000 由 HLE 直接调用 guest `criFs_Initialize`）；page1 阶段 **CRI 流已打开（`streamcnt=3`）**，sequence 控制器 `page0..page5` 回调全部注册；读完成投递链路仍在定位 |
-| 线程 / fiber / 调度 | 85–90% | **guest 双 fiber 启动链完全打通**（fiber A 原生完成位 → `FUN_8120683C` 返回 → 销毁 A → 运行 fiber B）；线程级 `sceFiberGetSelf` 重新武装 dummy 使调度器恢复切换；新增**周期抢占 + 虚拟唤醒期限**（`P5D_PERIODPUMP`/`P5D_THRYIELD`），修复"抢占后 worker 永久 waiting"；调度实验早期门控 `n>=100000` 保护 CRI 初始化 |
-| 音频（SceNgs / CRI Atom） | 5–10% | CRI Atom 初始化已进入；仍缺 ACF/ACB 配置与解码，音频输出为桩 |
-| 输入（SceCtrl / SceTouch） | ~10% | Pad/Touch HLE 骨架可用，可注入按键；游戏侧输入流未接通 |
-| 视频解码 | 10–15% | 启动 USM 影片由 guest 软件解码跑通（约 5,000 万块）；`VdecInitLibrary` 已在 page1 被调用一次，真实 AVC/CRI Mana 解码未完成 |
-| 场景链 S0→S4→RESULT | **S0 ✅ / S1 加载中（page1 已出画面）** | S0_LOGO 完整通过；S1_TITLE 的 page1 现在会真实渲染并 present（首帧已上屏），但 page1 尚未结束；S2–S4 未到达 |
-| 单 exe 打包 / 移动端 | ~40% / 0% | 仓库/许可证/审计/CI 在跑；单文件成品与移动端尚未开始 |
+| ARM/Thumb → x86-64 **AOT 静态重编译** | ~95% | **230,252 个基本块 / 12,921 个函数 / 36 个宿主批次**；`[NOFN]=0`、`[INDIRECT-MISS]=0`、`[BADMEM]=0`；本阶段修复两个**通用翻译器 bug**：① 全局 `LDRD rX,rY,[rX,#imm]`（34 处）② 此前的 `[pc,#imm]` 字面量加载（485 处） |
+| 原版 eboot/SELF **原样加载** | ~95% | ELF 段映射、导入表/NID 解析、模块启动全部可用；`module_start=0x81198464`、`IMG_VA_BASE=0x80600000`；完整 boot 链：S0_LOGO → 启动 USM 影片（guest 软件解码）→ 应用世界恢复 |
+| **HLE 系统 API 接管** | ~80% | 内存/线程/fiber/信号量/事件标志/消息/文件/GXM/音频(NGS)/CRI 日志；本阶段新增：**SceNgs HLE**（`P5D_NGS=1`，修复 39MB 假尺寸）、**HLE I/O 泵**（`P5D_IOPUMP=1`，打通 criFs 读完成）、**HDRFIX**（64 位 CPK 头标准化）、动态 reader 泵、CRILOG 调用点增强 |
+| **CRI FS / CPK 虚拟文件系统** | ~80% | `criFs_Initialize` → binder 初始化 → 打开真实 `vita.cpk`(2,168,403,092B) / `data.cpk`(1,913,750,232B)；**CPK 头分析已成功（`[CPKRESULT] ret=0`）**；真实 TOC 已定位 `0x813EE800`/`0x4C94`；待修：UTF 64-bit 列字段读取（见"当前阻塞"） |
+| **GXM → Vulkan** | ~60% | 真实 SPIR-V 管线（GXP→SPIR-V manifest 4331 条）创建成功，BeginScene→Draw→RT→swapchain→`vkQueuePresentKHR result=0` 全链执行；**画面内容仍为黑**（纹理 dummy / uniform 零值 / 顶点数据未校验，M940–945 遗留问题） |
+| 音频（SceNgs / CRI Atom） | ~15% | SceNgs HLE 已能给出正确 work size（修复 E2009011903）；ACF/ACB 加载与真实解码/输出仍缺 |
+| 输入（SceCtrl / SceTouch） | ~10% | Pad/Touch HLE 骨架可用、可注入按键；游戏侧输入流未接通 |
+| 视频解码 | ~15% | 启动 USM 影片由 guest 软件解码跑通；真实 AVC/CRI Mana 解码未完成 |
+| 场景链 S0→S4→RESULT | S0 ✅ / S1 进行中 | S0_LOGO 完整通过；S1_TITLE 资源加载（CPK 挂载→文件索引→title 素材）进行中；S2–S4 未到达 |
+| 单 exe 打包 / 移动端 | ~40% / 0% | 目前是单一 Windows 可执行 `recomp_harness.exe`（AOT+HLE 开发态）；正式打包/移动端未开始 |
 
-### 最新里程碑（M1000–M1030，2026-11-01）
+### 距离目标还有多远（诚实评估）
 
-- **M1000–M1005**：Job 完成链打通（trampoline 强制完成）→ page1 8 步初始化完成、job "title sequence" 提交、**page6 TITLE 页启动**；序列页表从 ELF 完整解析（page0 DEBUG MENU / page1 initread / page2 FREE MODE / page3 COMMU / page4 TUTORIAL / page5 MAIN MENU / **page6 TITLE start=0x81185974 update=0x81185986 end=0x81185998**）
-- **M1011–M1018**：探针盲区定位（title 路径走 nested runner，job_probes 不生效）→ 所有关键探针下沉到 AOT block 内（batch 级）
-- **M1015–M1016**：**AOT 内部函数覆盖率 100%**（Ghidra 12,532 函数全部命中；230,243 blocks；仅剩 14 个 HLE import + module_start 无 block）
-- **M1019–M1020**：appFade 真相闭环——fade "对象"是周期 job 节点，被"全强制完成"破坏其 job arg（0xE5 毒值）
-- **M1021–M1022**：改为**选择性强制**（只强制 boot init worker）→ 周期 job 全部真跑（JOBNORM 28 条），appFade 状态修复；title worker 真正运行并推进到声音对象缺口
-- **M1023–M1026**：移除 page1 提前结束强制 → **真实 init 链启动**（trophy/sound/initDataRead worker 真实调度）；发现 STEPFORCE 对 nested runner 无效 → 18 个 init 检查 block 强制下沉到 AOT 内
-- **M1027–M1030**：**找到 8 步 init 链驱动器 `FUN_81184FFE`（"initDataRead" worker）**：9 项函数表 + 状态机，推进条件 `FUN_8116F8D2(step_job)==0`；trophy step 已通过、卡点缩小到 **step1 "init sound" 的完成**（本轮 SSTEP/DRV 探针运行中）
+| 关口 | 状态 | 剩余工作 | 粗略轮数 |
+|---|---|---|---|
+| CPK 挂载 + 文件索引 | **80%** | UTF 字段读取修正 → TOC 解析 → data.cpk 同样处理 | 5–10 |
+| criFs 流式读取 / 资源加载 | 70% | 文件索引建立后验证 title 素材真实读取 | ~10 |
+| GXM 真实画面（纹理/uniform/几何/ShaderPatcher） | 60% | **黑屏修复**、纹理上传、uniform 数据、顶点格式校验、真实管线选择 | 30–60 |
+| S1 标题画面（对象/动画/音效触发） | ~40% | 依赖上面两项 + 标题状态机 | 20–40 |
+| S2 MENU / S3 SELECT / S4 GAME / RESULT | 10–20% | 每个场景 20–50 轮（复用引擎能力） | 80–150 |
+| 音频（SceNgs/ACB 解码输出） | ~15% | ACF/ACB 加载、NGS 连接、真实输出 | 20–40 |
+| 输入 / 视频真解码 | 10–15% | Pad/Touch 接通；USM/AVC 硬解或软件解码 | 10–30 |
+| 单 exe 打包 / 移动端 | 40% / 0% | 发布形态、缓存、跨平台 | 10–20 |
 
-### 最近关键里程碑（M869–M923）
+综合判断：**"第一帧真实标题画面"约还需 50–90 轮**（按当前每轮 1–2 个里程碑的节奏）；
+**完整 S0→RESULT 全流程**约还需 **200–400 轮**（主要不确定性在 GXM 渲染正确性与音频/输入接通）。
+当前进度 1079/2500 轮，时间预算充足；最大风险仍是 GXM 画面内容与真实视频/音频解码。
 
-- **M869–M871**：boot 影片阶段真实解码（n 5M→59.5M）；`ctr` 开始增长；`[SEQST]`/`[SEQREQ]`/`[SEQCB]` 页面序列控制器初始化，`page0..page5` 回调注册
-- **M885（18.4430）**：**fiber RUNNING 位修复**——guest `FUN_812067A0` 只有 fiber `+0x80` bit0 置位才置完成位 bit2；HLE `fiber_load` 补置 bit0 → fiber A 完成投递打通，启动链解锁
-- **M889（18.4438/18.4439）**：**线程级 `sceFiberGetSelf` 修复**——原先返回的 dummy 被清零且 guest 链表头为 0，`FUN_8120683C` 永不调用 `sceFiberSwitch`；改为每次调用**重新武装** dummy（`+0x80=1`、`+0x94` 指向存活 fiber）→ 调度器恢复切换，外层 n 从 1717 推进到 30,000,000
-- **M894 / M896**：app 主循环真正运行（boot 影片解码循环 `0x811DFxxx`）；page1 活跃：`ctr` 0→174、`[SEQCB]` 179 条、`[NSET]` 14,720、`[SAVESLOT]` 4,909
-- **M899–M902**：display queue 回调确认已注册；Ghidra 证明 **`FUN_81284960` 写 binder 全局、唯一调用者 `FUN_8128399E` = CRI FS 初始化入口**
-- **M904（18.4449）**：**GXM ABI `sceGxmGetRenderTargetMemSize` 从不写 out 参数** → guest 拿栈垃圾 `0x846001FC` 当 memblock 大小（2.2GB）→ `[MEMA-OOM]` ×5；修复后 `size=0x33D000` 正常分配
-- **M906–M917**：page1 定向探针（`[H57]`/`[H57M]`/`[HLEDUMP]`/`[PDUMP]`）；确认 page1 期间**没有任何文件 I/O API 调用**，主上下文只有 libc + `DelayThreadCB`；部分 worker 线程 `ready=1` 却从未执行
-- **M911–M914**：`[PDUMP]` 证明 worker 被 `g_cur_thr` 上下文屏蔽；周期抢占判据最初用 `g_blkcnt_total`（嵌套执行冻结）→ 改用 **job_probes 调用计数**后抢占生效；**n 突破 59.8M 卡点推进到 64M**；修复"抢占后无唤醒期限 → worker 永久 waiting"；`n>=100000` 门控保护 criFs 初始化（binder 恢复）
-- **M915**：门控版长跑 **CRI 资源流开始工作（`streamcnt=3`）**，n 推进到 63M，binder 持久
-- **M919（18.4464）**：`[HLEDUMP]` 发现 **`sceKernelLockLwMutexCB`(0x812B2800) 有 1,740,287 次调用却无 HLE 实现**（WaitEventFlag 9.23M 比 SetEventFlag 6.98M 多 225 万次）→ 补别名
-- **M921（18.4466）**：反汇编发现 **CRI 帧节拍器 `FUN_8127BB30`**：用 `sceKernelGetProcessTimeWide()/1000` 计算帧间隔并 `DelayThreadCB(sleep)`；真实墙钟 vs 虚拟时间不一致 → `P5D_VTIME=1`（进程时间/RTC 返回虚拟时间）
-- **M922–M923**：`P5D_WAKE57` 周期唤醒阻塞在 eventflag `60018000/6001A000/6001C000` 的 loader worker；`[P1TICK]` 每 1M n 打印 page1 进度（`ctr`/seq/pc/GXM 计数）
+### 最近关键里程碑（M1093–M1115，2026-11-02）
 
-### 最近关键里程碑（M935–M940）
-
-- **M935–M937（18.4480–18.4482）**：GXP→SPIR-V 管线接线：manifest 4331 条、FNV-1a64 哈希、`select_real_pipeline`；发现 page1 走 **Precomputed** 状态 API 且 ShaderPatcher 是 STUB（program 句柄全 0）→ 实现**假句柄链**（RegisterProgram → Create*Program → Precomputed 捕获）
-- **M938（18.4483）**：假句柄链全链打通（`[ABIPGID]→[ABIPGOBJ]→[ABIOBJ]→[SHADERMOD] ok`），真实 `vkCreateGraphicsPipelines` 调用；修复 "Draw" 子串误匹配 `PrecomputedDrawInit` 导致的过早建管线崩溃
-- **M939（18.4484）**：**第一发真实 draw 完整执行**（`[REAL-PIPE] #1 OK`、`[FRAMEBEGIN] frame=1`、`[FUBOHOST]`、`[TEXBIND]`）；发现 app 不调用 `sceGxmEndScene`，只调用 `sceGxmDisplayQueueAddEntry` → 把两者接到后端 `end_frame()`（提交+present）
-- **M940–M943（18.4485–18.4488）**：present 提交流程打通（`vkQueuePresentKHR result=0`、RT→swapchain 拷贝、RT 截图钩子）；**诚实更正（M945）**：画面内容仍为黑，纹理/uniform/几何数据通路待补
-- **M944–M945（18.4489–18.4490）**：窗口"未响应"修复（Win32 消息泵）；RT 截图实测全黑（PIL mean=0/max=0）、定位纹理 dummy/uniform 零值问题，启动红色片元着色器诊断实验
+- **M1093–M1098**：`P5D_CRIFSHLE` 之外的 **游戏自身 criFs 初始化链**跑通；binder 初始化、CRI FS 保持、file I/O 走真实 HLE
+- **M1104（18.4649）**：**`P5D_NGS=1` 成为必需项**——SceNgs HLE 缺失导致 NGS work size 返回 -1/39MB，触发 `E2009011903:Insufficient buffer size`，进而阻断后续流程
+- **M1105（18.4650）**：用 `batch_035` 补入 Ghidra 漏掉的函数 **`0x8128A576`**（criFs user-heap malloc 回调）→ `[INDIRECT-MISS]=0`，游戏开始打开真实 `vita.cpk`（`OPEN/PREAD` 2048B），运行从 n=181,670 推进到 12,600,000+
+- **M1106–M1108（18.4651–53）**：CPK 挂载卡点逐层定位——Analyzer 结构 `0x84B1B828`（`[0]=state [1]=reader [3][4]=缓冲`）；**锁不是卡点**（SWAP 原子探针证明所有锁成对）；真正卡点=**reader 状态 `+0xBC` 停在 1(loading)**，Load 状态机只被驱动 2 步
+- **M1109（18.4654）**：**HLE I/O 泵 `P5D_IOPUMP=1` 打通读完成**——直接泵 `FUN_8128D502(reader=0x848FC368)`，Load 状态机 1→2→3→7，完成 shim 置 `status=2`；**CPK Analyzer 首次进入分析 `FUN_81292794`**
+- **M1110（18.4655）**：缓冲 dump 证明 **HLE 读数据与真实 vita.cpk 100% 一致**；vita.cpk 是 **64 位头/变体 CPK**（`+0x08`=u64 文件大小、`+0x10`=`@UTF`）；需要解密/头变换
+- **M1111（18.4656）**：解密器注册链解码——`progress[0x20]/[0x21]` 来自 `FUN_8128EFF4(progress, reader+0xF4, reader+0xF8)`；全对象写 watch 证明游戏**从未注册解密器**（`reader+0xEC/0xF0=0`）
+- **M1112（18.4657）**：**HDRFIX 头变换成功**——64 位 CPK 头在内存中标准化为 32 位布局（`+0x04=0xFF`、`+0x08=UTF 表大小`、`+0x0C=0`），`E2011022806:CPK is broken` 错误**完全消失**（CRILOG=0）；发现 **CRI UTF 表字段是大端序**
+- **M1113（18.4658）**：**修复 AOT 翻译器通用 bug `LDRD rX,rY,[rX,#imm]`（34 处）**——第二字误用被覆盖的基址；修复后 **BADMEM 归零**、CPK 表读取解锁（`PREAD off=2048`）、游戏开始挂载 `data.cpk`
+- **M1114（18.4659）**：错误调用点全部定位——IFF 错误来自 `FUN_812B074C`（CRI UTF Retriever/VITA，期望大端 `@UTF`）；内存错误来自 CPK 分析器 `FUN_812938C6`；同时安装**通用动态 reader 泵**（扫描 `progress[0]=0x81540460` 签名）
+- **M1115（18.4660）**：**CPK 头分析成功（`[CPKRESULT] ret=0`）**；但解析字段全读成 0x800（64-bit 列变体被误读）；文件级分析找到**真实 TOC = 0x813EE800，大小 0x4C94（正好到 EOF）**，头 UTF 行真实值 `ContentOffset=0x800 / TocOffset=0x813EE800 / TocSize=0x4C94 / Align=0`
 
 ### 当前阻塞（明确、可执行）
 
-- **init 链 step1 "init sound" 的完成条件未闭合**：driver `FUN_81184FFE` 已越过 trophy（创建了 sound job，WFDBG #49 node=85B8861C），但 sound step job 的 appProcess 节点未被完成回调释放 → `FUN_8116F8D2(step_job)` 仍非 0 → driver 停在 step2 等待；SSTEP/DRV 探针（batch_012 811848D6/DA/DE、811850A6/B2/BC）正在定位
-- 完成后 driver 将继续创建 gamedata → msgwindow → mainmenu → step5 → 返回 -1 → 完成回调 setSequence(6,0,0,5) → page6 TITLE 页
-- 之后：title 状态机（声音对象已创建后）→ title 对象 → 引擎自绘标题画面
-- 后续：S2_MENU / S3_SELECT / S4_GAME / RESULT；音频/输入/真实视频解码；单 exe 打包（当前 AOT 与 HLE 已远超 M940 状态）
+1. **CPK 头 UTF 字段读取 bug（最后一步）**：
+   - 头分析返回成功，但 `ContentOffset/TocOffset/TocSize` 全部读成 `0x800`（第 1 列值）→ Analyzer 用 `TocOffset=0x800` 去读 TOC（读到 USM 影片 `CRID` 数据）→ `E06100301:Invalid IFF header`
+   - 真实 TOC 在 **`0x813EE800`**（EOF 前 `0x4C94` 字节），文件级已解析出真实值
+   - 修复路径：探针 `FUN_812AEA4C`（列名查找）/`FUN_812AF434`（取值），确认 64-bit 列解析错误 → 在 **HDRFIX** 中把 UTF 行数据规范化，或直接把正确 `TocOffset/TocSize` 写入分析结果结构
+2. **之后**：TOC 加载 → 文件索引 → `mount status=2` → data.cpk 挂载（同样处理）→ title 素材读取
+3. **GXM 画面仍黑**（M940–945 遗留）：纹理全 dummy、uniform 全零、几何数据未校验；需补纹理上传/uniform/顶点通路与 ShaderPatcher
+4. **音频/输入/视频**：ACF/ACB 加载与 NGS 输出、Pad/Touch 输入流、真实 AVC 解码
 
+## 最新标准运行环境（开发调试用，全部默认关闭）
+
+```powershell
+$env:P5D_NESTED_UNTIL=1500000; $env:P5D_GXMABI=1; $env:P5D_NOSCHEDRUN=1; $env:P5D_GETSELFFIX=1
+$env:P5D_FASTSLEEP=1; $env:P5D_THRYIELD=1; $env:P5D_PERIODPUMP=1; $env:P5D_VTIME=1
+$env:P5D_P1TICK=1; $env:P5D_RINIT=1; $env:P5D_OTFORCE=1; $env:P5D_STEPFORCE=1
+$env:P5D_NOMOVIE=1; $env:P5D_FORCETITLE=1; $env:P5D_FIOSFILL=1; $env:P5D_WAITFORCE=1
+$env:P5D_SCNFORCE=1; $env:P5D_THRPUMP=1; $env:P5D_PUMPMAIN=1; $env:P5D_POSTMAIN=1
+$env:P5D_NGS=1; $env:P5D_IOPUMP=1
+.\recomp_harness.exe 0x81198464 300000000
+```
+
+其中本阶段新增的**必需项**：
+
+| 变量 | 作用 |
+|---|---|
+| `P5D_NGS=1` | **必需**：SceNgs HLE（缺失会导致 39MB 假 work size → `E2009011903`） |
+| `P5D_IOPUMP=1` | **必需**：HLE 主循环泵 criFs Load 状态机（打通读完成/多 reader 自动发现） |
+| `P5D_POSTMAIN=1` / `P5D_PUMPMAIN=1` | 主线程返回后继续 pump guest 线程（CPK 挂载等待需要） |
+
+## 开发状态开关（当前阶段，仅调研用）
+
+| 变量 | 作用 |
+|---|---|
+| `P5D_GXMABI=1` | GXM 调用走 ABI 桥接层（当前主线必需） |
+| `P5D_NOSCHEDRUN=1` | 关闭旧调度 hack，使用 guest 自己的双 fiber 启动链 |
+| `P5D_GETSELFFIX=1` | 线程级 `sceFiberGetSelf` 返回重新武装的 dummy（调度器恢复切换） |
+| `P5D_THRYIELD=1` / `P5D_PERIODPUMP=1` | guest 线程合作让出 + 周期性抢占/pump |
+| `P5D_VTIME=1` | 进程时间/RTC 返回虚拟时间（配合虚拟睡眠） |
+| `P5D_FASTSLEEP=1` | 虚拟睡眠加速 |
+| `P5D_OTFORCE=1` / `P5D_STEPFORCE=1` / `P5D_WAITFORCE=1` | boot/page 状态机选择性强制（研究用） |
+| `P5D_NOMOVIE=1` / `P5D_FORCETITLE=1` | 跳过 USM 影片/直冲标题（开发加速） |
+| `P5D_FIOSFILL=1` / `P5D_SCNFORCE=1` / `P5D_THRPUMP=1` | FIOS/场景/线程泵加速开关 |
+| `P5D_P1TICK=1` | 每 1M n 打印进度（ctr/seq/pc/GXM 计数） |
+| `P5D_CRIFSHLE=1` | 历史开关：由 HLE 调 guest `criFs_Initialize`（现在游戏自身 init 已跑通，不再必需） |
 
 ## 仓库结构
 
 ```
 docs/
-  P5D_MASTER.md              权威研究/开发记录（全部里程碑、证据、结论与历史纠正）
-  P5D_DIGEST.md              精简摘要
+  P5D_MASTER.md              权威研究/开发记录（全部里程碑、证据、结论与历史纠正，约 36MB）
+  P5D_DIGEST.md              精简摘要（脚本自动生成，勿手改）
   P5D_OPERATION_CHECKLIST.md 操作/验证清单
   REUSABLE_KNOWLEDGE.md      可复用知识清单（历史成果/工具/规格/负结果，按 ROI 排序）
   COMPARISON_VITA3K.md       与 Vita3K 模拟器的区别
@@ -92,13 +131,14 @@ tools/
   diag.py / hle_probe.py     诊断与 HLE 探测工具
 engine/
   recompiler/_gen_split.py   ARM/Thumb → C++ AOT 重编译生成器
-  recompiler/_gen_batch2.py  指令发射后端（移位/写回/字面量等语义修正）
-  runtime/recomp_harness.cpp 静态重编译运行时 + HLE（内存映射、线程/fiber、GXM/文件/Pad 等）
+  recompiler/_gen_batch2.py  指令发射后端（移位/写回/字面量/LDRD 等语义修正）
+  runtime/recomp_harness.cpp 静态重编译运行时 + HLE（内存映射、线程/fiber、GXM/文件/Pad、I/O 泵、HDRFIX）
   runtime/gxm_abi.cpp        GXM ABI 桥接层（导入 stub + 指针翻译）
   runtime/cpk_reader.h       CPK 虚拟文件系统 + CRILAYLA 解压（header-only）
   gxm/                       GXM → Vulkan 后端（sce_gxm、vulkan_backend、texture_format）
   mem/                       虚拟地址空间注册/翻译（客机 VA → 宿主指针）
   common/                    公共类型与日志
+（开发工作区另有 AOT 生成的 batch_000..batch_035.cpp、recomp_harness.exe 等，不进仓库）
 ```
 
 ## 设计路线
@@ -108,24 +148,6 @@ engine/
 3. **HLE 只替换系统边界**：游戏代码原样执行，文件/内存/线程/图形/音频/输入等系统 API 由兼容层实现。
 4. **GXM→Vulkan 在 API 层**：不模拟 GPU 命令流，把 SceGxm 调用映射为 Vulkan 调用；着色器由玩家数据中的 GSC/GXP **在玩家机器上一次性翻译**为 SPIR-V 并缓存。
 5. **发布形态**：`P5D_Engine.exe`（引擎，无游戏数据） + 玩家自备游戏数据 + 本地缓存（`cache/recomp`、`cache/shaders`、`cache/pipelines`）。
-
-## 开发状态开关（当前阶段，仅调研用）
-
-运行时通过环境变量开启各阶段的实验/探针（默认行为保持不变）：
-
-| 变量 | 作用 |
-|---|---|
-| `P5D_GXMABI=1` | GXM 调用走 ABI 桥接层（当前主线必需） |
-| `P5D_NOSCHEDRUN=1` | 关闭旧调度 hack，使用 guest 自己的双 fiber 启动链 |
-| `P5D_GETSELFFIX=1` | 线程级 `sceFiberGetSelf` 返回重新武装的 dummy（调度器恢复切换） |
-| `P5D_CRIFSHLE=1` + `P5D_CRIFSHLE_AT=5000` | 在 boot 初始化后由 HLE 调用 guest `criFs_Initialize`（binder 建立） |
-| `P5D_THRYIELD=1` | guest 线程 DelayThread 合作让出 + 虚拟唤醒 |
-| `P5D_PERIODPUMP=1` | 周期性抢占/pump guest 线程（每 8192 个执行块） |
-| `P5D_VTIME=1` | 进程时间/RTC 返回虚拟时间（配合虚拟睡眠） |
-| `P5D_WAKE57=1` | page1 周期唤醒 CRI loader worker（实验） |
-| `P5D_HLEDUMP` / `P5D_HLEDUMP_AT` | 统计并打印 page1 期间全部 HLE stub 调用直方图 |
-| `P5D_P1TICK=1` | 每 1M n 打印 page1 进度（ctr/seq/pc/GXM 计数） |
-| `P5D_BT57=1` | page1 帧节拍器调用点栈回溯（定位驱动函数） |
 
 ## 验证与审计
 
