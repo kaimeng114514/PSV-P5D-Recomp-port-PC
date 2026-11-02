@@ -1136,6 +1136,59 @@
 | M1118 | §18.4663: ★★★★★★★★★★ **CPK 挂载完全打通！`[FIOS] mounted data.cpk files=10555` / `mounted vita.cpk files=531`，`[CRILOG]=0`，标题素材名全部枚举（title/title_p5.bin、title.spr4、title.p3/logo.tga …），并选中第一项 'title/title_p5.bin'。三项 HLE 变换协同完成：TOCSZPATCH（64 位变体 TocSize +0x18）+ TOCPAD（EOF 短读零填充）+ TOCFIX（合成 "TOC " 段头并把 UTF 后移 +0x10，跳过误触发的 XOR）**
 | M1119 | §18.4664: ★★★★★★★★ **挂载后卡点定位为 CRI AtomEx（音频）初始化**：主 fiber 在 `FUN_812360C8`（"CRI AtomEx/VITA Ver.2.13.00 Build:Jan 30 2018 18:45:17"）路径上反复执行 Fios/AtomEx 池初始化 `FUN_8125DBCC`（0x44/0x24/0x1C 节点池）→ 轮询块 `8125DDAE/8125DDDA/8125DDF6` + `sceKernelDelayThread(5000)`（stub 812B2A50，lr=81207612）→ 典型的**重试循环**；`[ACF] total=0`（无 ACF 注册）、`FUN_812309A4`（ACB 注册，报 "ACF is not registered"/E2010031630）、guest 空指针读 `va=0x28`（blk 81230C2A）同属音频初始化链；挂载后**再也没有文件 PREAD** → 标题/ACF 数据读取根本没发生。另：挂载后新 reader 848E9678 状态=1/进度=8，应用 pstate 7|8 完成 shim 后置 status=2（但未解锁主卡点，说明它不是唯一等待项）**
 | M1120 | §18.4665: ★★★★★★★★ **卡点再精化：5000us 轮询 = Fios 工作线程空转循环，不是 AtomEx 重试**。`[DELAYWRAP] usec=5000 caller=811F2376` 稳定 → 反编译 `FUN_811F22B8`（194B）= **Fios worker 主循环**：`do { 取 DAT_81539754+0xC 待处理任务链表头；若非空且 +0xFC0==0 则逐个 FUN_811F0B82(任务) 处理并移入完成链；FUN_8120760C(5000); } while(true)`。当前**任务链表为空**（链表头=0）→ 工作线程纯空转；pc_ring 显示的 `8125DDAE/8125DDDA/8125DDF6`（FUN_8125DBCC 池初始化）是**陈旧记录**（线程 context runner 不更新 pc_ring）。另确认：AtomEx 初始化**只调用一次**（`[ATOMEXINIT] cfg=848561F8 p2=0 p3=0`、`[ACFPARSE]×3`、`[ATOMEX] cfg=84856128 p2=848D9500 p3=0x820D0`、`[FIOSPOOL] param1=36`→36 节点池），**不存在 AtomEx 重试**；`P5D_LOADPUMP=1` 实验未触发（g_wait_task 未设置，pc≠0x811E5EC6）**
+| M1121 | §18.4666: ★★★★★★★★ **卡点根因链闭合：游戏根本不发文件请求（[RQMGR]/[APOPEN]/[FHOPEN]=0）→ 卡在"init sound"步骤之前；AtomEx 的 DSP Bus Setting 校验 `FUN_8123EA10 → FUN_81263A66` 因 `DAT_8153FB30+0x44 == 0`（ACF 未注册）失败，报 `W2010110102:ACF file is not registered`；DSP 设置名 = `"BusSet_xrd722v2"`（文件 0x81305FE0）**
+m1190 证据（`m1190_reqmgr_key.txt`）：
+```
+[RQMGR] 0 条          ← 游戏请求管理器 FUN_81181A3C 从未被调用
+[APOPEN] 0 条         ← app 打开包装 FUN_8115FBE6 从未被调用
+[FHOPEN] 0 条         ← sceFiosFHOpen HLE 从未被调用
+[FIOSHLE] Initialize lr=811E5D68   ← 只有 sceFiosInitialize 执行一次
+[FIOS] mounted data.cpk files=10555 / vita.cpk files=531
+[IO] 挂载后无任何 PREAD
+[CRILOG] W2010110102:ACF file is not registered.（lr=81263AC4 blk=81263AB6）
+[CRILOG] E2013081521:"%s" is invalid DSP Bus Setting.（lr=8123EA5A blk=8123EA4A）
+[ACF] total=0
+```
+**离线字符串证据（p5d_true.elf）**：
+```
+VA 0x81305FE0: "BusSet_xrd722v2\0"     ← DSP Bus Setting 名
+VA 0x81311BD8: "E2013081521:\"%s\" is invalid DSP Bus Setting.\0"
+VA 0x8131573C: "W2010110102:ACF file is not registered.\0"
+（ELF SEG: va=0x81000000 filesz=0x321810 off=0x1000；va=0x81325000 filesz=0x21BA74 off=0x323000）
+```
+**反编译证据**：
+1. `FUN_8123EA10`（DSP Bus Setting 解析，274B）：
+```c
+iVar2 = FUN_81263A66(param_1, auStack_138);       // param_1 = "BusSet_xrd722v2"
+if (iVar2 == 0) { FUN_81279486(0,"E2013081521:\"%s\" is invalid DSP Bus Setting.",param_1); iVar1 = -1; }
+```
+2. `FUN_81263A66`（184B）：
+```c
+iVar1 = DAT_8153fb30;                              // ACF 对象（criAtomEx 全局）
+if (DAT_8153fb30 == 0) error;
+else { memset(param_2,0,0x10C);
+  if (*(int *)(iVar1 + 0x44) == 0) { FUN_81278f96(1,"W2010110102:ACF file is not registered."); return 0; }   // ★ 命中
+  else if (*(char *)(iVar1 + 0x944) == 0) { "W2011111111:target mismatch" }
+  else if (*(int *)(iVar1 + 0x24c) == 0) { "W2012101211:ACF has no dsp setting" }
+  else { iVar3 = FUN_81271bfc(iVar1+0x21c,param_1); FUN_81271a7a(iVar1+0x21c,iVar3,param_2); return 1; } }
+```
+⇒ **ACF 未注册**（ACF 对象存在但 +0x44=0）→ DSP Bus Setting 无效 → AtomEx 初始化未完成 → "init sound" 步骤不完成 → 游戏卡在 boot 链、永远不发文件请求。
+**为什么 ACF 没注册**：ACF 数据（P5D 的 sound ACF，通常 sound/*.acf）需要通过 app 文件打开链（FUN_8115FBE6 → FUN_81181A3C 请求管理器 → 消费者任务）读取并 `criAtomEx_RegisterAcfData`；但 `[RQMGR]/[APOPEN]=0` 表明该链**从未被调用**——即 init sound 步骤的 job 尚未运行/未被调度到发请求的位置。FIOSFILL 假文件 HLE 钩子仍在（batch_010 的 harness_fios_* 注入保留），但游戏没走到打开文件。
+**NEXT**：
+```
+① 探针 8/9 步 init 链驱动器 FUN_81184FFE（M1027-1030 已知：9 项函数表 + 状态机，推进条件 FUN_8116F8D2(step_job)==0）：打印当前 step 索引/表项/各 job 状态，定位"init sound"步骤卡在哪
+② 探针 "init sound" worker（TTRET/TRRET 相关，M1000s：sound step job 846182D0 / wf=811848B7）当前状态
+③ 若 job 未调度：按 M1027-1030 的 STEPFORCE 机制补强制/泵动；若 job 在等待 ACF 打开：让 app open 链真正执行（HLE 直服 ACF 文件）
+④ ACF 注册成功 → DSP Bus Setting 通过 → AtomEx 初始化完成 → init sound 完成 → boot 链继续 → 发出标题/素材文件请求 → PREAD → GXM 首帧
+```
+验证：`m1190_reqmgr_key.txt`、`out80m_m1190reqmgr.txt`、`dspbus.txt`、`ngsbus.txt`、`fiosretry.txt`、`_rdumpva.py`。 |
+| §18.4666 | The root-cause chain is complete: the game never issues any file request ([RQMGR]/[APOPEN]/[FHOPEN]=0) so it is stuck before the "init sound" step; the AtomEx DSP Bus Setting check FUN_8123EA10 -> FUN_81263A66 fails because DAT_8153FB30+0x44 == 0 (ACF not registered), printing W2010110102:ACF file is not registered; the DSP setting name is "BusSet_xrd722v2" (file VA 0x81305FE0). '
+       'm1190 evidence: [RQMGR] 0 entries (game request manager FUN_81181A3C never called); [APOPEN] 0 entries (app open wrapper FUN_8115FBE6 never called); [FHOPEN] 0 entries (sceFiosFHOpen HLE never called); [FIOSHLE] Initialize lr=811E5D68 (only sceFiosInitialize runs once); [FIOS] mounted data.cpk files=10555 / vita.cpk files=531; [IO] no PREAD after mounting; [CRILOG] W2010110102:ACF file is not registered (lr=81263AC4 blk=81263AB6); [CRILOG] E2013081521:"%s" is invalid DSP Bus Setting (lr=8123EA5A blk=8123EA4A); [ACF] total=0. '
+       'Offline string evidence (p5d_true.elf): VA 0x81305FE0 = "BusSet_xrd722v2"; VA 0x81311BD8 = "E2013081521:%s is invalid DSP Bus Setting."; VA 0x8131573C = "W2010110102:ACF file is not registered." (ELF segments: va=0x81000000 filesz=0x321810 off=0x1000; va=0x81325000 filesz=0x21BA74 off=0x323000). '
+       'Decompiled evidence: (1) FUN_8123EA10 (DSP Bus Setting parser, 274B): iVar2 = FUN_81263A66(param_1, auStack_138); if (iVar2 == 0) { FUN_81279486(0,"E2013081521:%s is invalid DSP Bus Setting.",param_1); iVar1 = -1; }. (2) FUN_81263A66 (184B): iVar1 = DAT_8153fb30 (ACF object); if (DAT_8153fb30 == 0) error; else { memset(param_2,0,0x10C); if (*(int *)(iVar1 + 0x44) == 0) { FUN_81278f96(1,"W2010110102:ACF file is not registered."); return 0; } else if (*(char *)(iVar1 + 0x944) == 0) { W2011111111 target mismatch } else if (*(int *)(iVar1 + 0x24c) == 0) { W2012101211 ACF has no dsp setting } else { iVar3 = FUN_81271bfc(iVar1+0x21c,param_1); FUN_81271a7a(iVar1+0x21c,iVar3,param_2); return 1; } }. So ACF is not registered (ACF object exists but +0x44=0) -> DSP Bus Setting invalid -> AtomEx init incomplete -> the init-sound step never completes -> the boot chain stalls and never issues file requests. '
+       'Why the ACF is not registered: the ACF data (P5D sound ACF, usually sound/*.acf) must be read through the app file-open chain (FUN_8115FBE6 -> FUN_81181A3C request manager -> consumer task) and registered with criAtomEx_RegisterAcfData; but [RQMGR]/[APOPEN]=0 shows that chain was never called - the init-sound job has not run far enough to issue the request. The FIOSFILL fake-file HLE hooks still exist (harness_fios_* injected in batch_010) but the game never reaches the open. '
+       'NEXT: (1) probe the 8/9-step init chain driver FUN_81184FFE (known from M1027-1030: 9-entry function table + state machine, advance condition FUN_8116F8D2(step_job)==0): print the current step index/table entry/job states to locate where the init-sound step is stuck; (2) probe the init-sound worker state (M1000s: sound step job 846182D0 / wf=811848B7); (3) if the job is not scheduled: use the M1027-1030 STEPFORCE mechanism or pump it; if the job is waiting for the ACF open: make the app open chain really execute (HLE serve the ACF file); (4) ACF registered -> DSP Bus Setting passes -> AtomEx init completes -> init sound completes -> boot chain continues -> issues title/asset file requests -> PREAD -> GXM first frame. '
+       'Verification: m1190_reqmgr_key.txt, out80m_m1190reqmgr.txt, dspbus.txt, ngsbus.txt, fiosretry.txt, _rdumpva.py. |
 m1186/m1187/m1188 证据（`m1188_delaywrap_key.txt` 等）：
 ```
 [ATOMEXINIT] #0 cfg=848561F8 p2=0 p3=0 lr=8123F14A         ← 只调用一次，无重试
@@ -501873,3 +501926,44 @@ do {
 ANTI-FORGETTING ENTRY. Keywords: M1120 blocker refined - the 5000us polling is the Fios worker idle loop, not AtomEx retry; [DELAYWRAP] usec=5000 caller=811F2376 stable; FUN_811F22B8 (194B) = Fios worker main loop: do { pending list head DAT_81539754+0xC; if non-null and +0xFC0==0 process each with FUN_811F0B82 and move to done list; FUN_8120760C(5000); } while(1); task list is EMPTY -> worker idles; pc_ring 8125DDAE/8125DDDA/8125DDF6 (FUN_8125DBCC pool init) is stale because the thread-context runner does not update pc_ring. AtomEx init runs only ONCE: [ATOMEXINIT] cfg=848561F8 p2=0 p3=0; [ACFPARSE] p1=848561F8/84856128; [ATOMEX] cfg=84856128 p2=848D9500 p3=000820D0 w: 00000003 41EFC28F ...; [FIOSPOOL] param1=36 = 36 node pools; no AtomEx retry. P5D_LOADPUMP=1 did not trigger (g_wait_task not set; pc!=0x811E5EC6). [ACF] total=0; no PREAD after mount. NEXT: probe Fios manager DAT_81539754 pending/done lists and counters, xref FUN_811F0B82 and the fios submit API to find where the title load task should be enqueued, check the app main fiber real wait point (8127BC14/81283D62/8128E9DE = criFs wait), complete HLE semantics if enqueue depends on them; goal task enqueued -> worker process -> PREAD -> title resources -> GXM first frame. Verification: m1188_delaywrap_key.txt, m1187_loadpump_key.txt, m1186_atomex_key.txt, fiosretry.txt, atomexcallers.txt, atomexrefs.txt.
 
 LOOKUP: M1120 Fios worker idle loop FUN_811F22B8, DELAYWRAP caller 811F2376, DAT_81539754 pending list +0xC empty, FUN_811F0B82 task processor, AtomEx init once cfg 848561F8/84856128, FIOSPOOL param1=36, ACF total=0, no PREAD after mount, LOADPUMP not triggered, stale pc_ring 8125DDAE pool init, next probe Fios manager and task submit API -> 18.4664 [relevant: AtomEx theory], 18.4663 [relevant: mount complete], 18.4662 [relevant: TOC XOR]
+### 18.4666 PORT M1121: 卡点根因链闭合 —— 游戏不发文件请求（卡在 init sound）；ACF 未注册导致 DSP Bus Setting 失败
+
+1) m1190 探针（标准 env）：
+```
+[RQMGR] 0 / [APOPEN] 0 / [FHOPEN] 0     ← 请求管理器/app 打开/ Fios FHOpen 均从未调用
+[FIOSHLE] Initialize lr=811E5D68        ← 只有 sceFiosInitialize 一次
+[FIOS] mounted data.cpk 10555 / vita.cpk 531
+[IO] 挂载后无 PREAD
+[CRILOG] W2010110102:ACF file is not registered.（lr=81263AC4 blk=81263AB6）
+[CRILOG] E2013081521:"%s" is invalid DSP Bus Setting.（lr=8123EA5A blk=8123EA4A）
+```
+2) 字符串（p5d_true.elf）：
+```
+0x81305FE0 = "BusSet_xrd722v2"                      ← DSP Bus Setting 名
+0x81311BD8 = "E2013081521:\"%s\" is invalid DSP Bus Setting."
+0x8131573C = "W2010110102:ACF file is not registered."
+```
+3) 反编译：
+- `FUN_8123EA10`：`FUN_81263A66(param_1, out)`，失败则报 E2013081521 → 返回 -1
+- `FUN_81263A66`：`iVar1 = DAT_8153fb30`（ACF 对象）；`if (*(int*)(iVar1+0x44)==0) { W2010110102:ACF file is not registered; return 0; }` ← **命中**
+4) 因果链：
+```
+ACF 未注册（+0x44==0）
+→ DSP Bus Setting "BusSet_xrd722v2" 解析失败（E2013081521）
+→ AtomEx 初始化未完成
+→ "init sound" 步骤不完成
+→ boot 链停在原地，永不发文件请求（[RQMGR]/[APOPEN]/[FHOPEN]=0）
+→ 标题/素材/ACF 读取全部不发生
+```
+5) NEXT：
+```
+① 探针 init 链驱动器 FUN_81184FFE：当前 step 索引/表项/各 step job 状态（M1027-1030 已知 9 项函数表 + 推进条件 FUN_8116F8D2(step_job)==0）
+② 探针 "init sound" worker（job 846182D0 / wf=811848B7）状态
+③ 若 job 未调度 → STEPFORCE/泵动；若在等 ACF 打开 → 让 app open 链执行（HLE 直服 ACF）
+④ ACF 注册 → DSP 通过 → AtomEx 完成 → init sound 完成 → boot 继续 → 文件请求 → PREAD → GXM 首帧
+```
+验证：`m1190_reqmgr_key.txt`、`out80m_m1190reqmgr.txt`、`dspbus.txt`、`ngsbus.txt`、`_rdumpva.py`。
+
+ANTI-FORGETTING ENTRY. Keywords: M1121 root-cause chain closed - the game never issues file requests ([RQMGR]/[APOPEN]/[FHOPEN]=0) and is stuck before the init-sound step; AtomEx DSP Bus Setting check FUN_8123EA10 -> FUN_81263A66 fails because DAT_8153FB30+0x44==0 (ACF not registered) printing W2010110102:ACF file is not registered; DSP setting name = "BusSet_xrd722v2" at VA 0x81305FE0. m1190: [RQMGR] 0, [APOPEN] 0, [FHOPEN] 0, [FIOSHLE] Initialize lr=811E5D68 (only sceFiosInitialize), [FIOS] data.cpk 10555/vita.cpk 531, [IO] no PREAD after mount, [CRILOG] W2010110102 lr=81263AC4 blk=81263AB6, [CRILOG] E2013081521 lr=8123EA5A blk=8123EA4A, [ACF] total=0. ELF strings: 0x81305FE0 BusSet_xrd722v2; 0x81311BD8 E2013081521; 0x8131573C W2010110102 (SEG va 0x81000000 filesz 0x321810 off 0x1000; va 0x81325000 filesz 0x21BA74 off 0x323000). FUN_8123EA10: FUN_81263A66(param_1,out); if 0 -> E2013081521 invalid DSP Bus Setting, return -1. FUN_81263A66: iVar1=DAT_8153fb30; if +0x44==0 -> W2010110102 ACF file is not registered, return 0; else if +0x944==0 -> W2011111111 target mismatch; else if +0x24c==0 -> W2012101211 no dsp setting; else FUN_81271bfc/FUN_81271a7a -> 1. Chain: ACF not registered -> DSP Bus Setting invalid -> AtomEx init incomplete -> init-sound step never completes -> boot stalls -> no file requests. FIOSFILL hooks (harness_fios_* in batch_010) still wired but never reached. NEXT: probe the 8/9-step init chain driver FUN_81184FFE (9-entry table + FUN_8116F8D2 advance condition) for current step/job states, probe init-sound worker (job 846182D0 / wf=811848B7), use STEPFORCE or pump if unscheduled, make the app open chain execute (HLE serve ACF) if waiting on ACF open; then ACF registered -> DSP passes -> AtomEx completes -> init sound completes -> file requests -> PREAD -> GXM first frame. Verification: m1190_reqmgr_key.txt, out80m_m1190reqmgr.txt, dspbus.txt, ngsbus.txt, _rdumpva.py.
+
+LOOKUP: M1121 no file requests RQMGR APOPEN FHOPEN zero, ACF not registered DAT_8153FB30+0x44, DSP Bus Setting BusSet_xrd722v2 0x81305FE0, FUN_8123EA10 FUN_81263A66, W2010110102 W2011111111 W2012101211, AtomEx init incomplete init sound step, init chain driver FUN_81184FFE next probe, FIOSFILL hooks unused -> 18.4665 [relevant: Fios idle], 18.4664 [relevant: AtomEx], 18.4663 [relevant: mount complete]

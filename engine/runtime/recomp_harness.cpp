@@ -3054,9 +3054,10 @@ extern "C" uint32_t hle_call(uint32_t stub_va, RecState* s) {
         std::memcpy(p, w, 0x14u); }
       if (g_gxm_n++ < 12) printf("[GXM] DepthStencilInit surf=%08X fmt=%08X\n", surf, s->r[1]);
       r0 = 0; break; }
-    case 0x812B19B0u: fios_ensure_cpk(); r0 = 0; break;                // sceFiosInitialize
+    case 0x812B19B0u: { static int _n=0; if(_n++<20){ printf("[FIOSHLE] Initialize lr=%08X\n", s->r[14]); fflush(stdout);} } fios_ensure_cpk(); r0 = 0; break;                // sceFiosInitialize
     case 0x812B1970u: r0 = 0; break;                                  // sceFiosTerminate
     case 0x812B19F0u: {                                               // sceFiosFHOpen(op, fhPtr, path, params)
+      { static int _n=0; if(_n++<60){ const char* _p="(null)"; uint8_t* _q=GP(s->r[2]); if(_q) _p=(const char*)_q; printf("[FIOSHLE] FHOpen path=[%s] fhptr=%08X lr=%08X\n", _p, s->r[1], s->r[14]); fflush(stdout);} }
       if (g_main_n >= 59000000u) { static int _fo_n=0; if (_fo_n++ < 120) { const char* _pp=nullptr; uint8_t* _q=GP(s->r[2]); if(_q) _pp=(const char*)_q; printf("[FHOPEN57] path=%s fh=%08X pc=%08X fib=%08X\n", _pp?_pp:"(null)", s->r[1], g_cur_block, g_cur_fiber); fflush(stdout); } }
       fios_ensure_cpk();
       std::string path; { uint8_t* p = GP(s->r[2]); if (p) path = (const char*)p; }
@@ -3075,6 +3076,7 @@ extern "C" uint32_t hle_call(uint32_t stub_va, RecState* s) {
       hle_eflag_set(0x60014000u, 1u); hle_eflag_set(0x60015000u, 1u);   // 18.4264: wake guest Fios worker threads (op completion notification)
       r0 = op; break; }
     case 0x812B19D0u: {                                               // sceFiosFHRead(op, fh, dst, ...; size at [sp])
+      { static int _n=0; if(_n++<60){ uint32_t _sz=0; uint8_t* _q=GP(s->r[13]); if(_q) std::memcpy(&_sz,_q,4); printf("[FIOSHLE] FHRead fh=%08X dst=%08X size=%08X lr=%08X\n", s->r[1], s->r[2], _sz, s->r[14]); fflush(stdout);} }
       if (g_main_n >= 59000000u) { static int _fr_n=0; if (_fr_n++ < 120) { printf("[FHREAD57] fh=%08X dst=%08X size=%08X pc=%08X fib=%08X\n", s->r[1], s->r[2], 0u, g_cur_block, g_cur_fiber); fflush(stdout); } }
       ++g_fread_n;
       auto it = g_fios_data.find(s->r[1]);
