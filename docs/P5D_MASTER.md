@@ -1115,6 +1115,70 @@
 | M1097 | §18.4642: ★★★★★★★ **关键实验 m1140：完全不设 P5D_CRIFSHLE（去掉 HLE 强制初始化），让游戏自己的 boot 流程完成 criFs 初始化与 CPK 挂载。基于 M1096 的新线索（allocator 错误信息证明游戏自身 CRI 初始化在 n=1717 附近运行；且经过 M1068~M1095 修复后 boot 流程已大幅健康化）。**
 | M1098 | §18.4643: ★★★★★★★ **m1140（不设 P5D_CRIFSHLE）早期结果：游戏自己的 boot 在 n=1717 调用 CPK 挂载（[FIOSX] at=811820B6 / 81286EC4）并**自己调用 criFs_Initialize**，但初始化失败：`E2009072703:Insufficient buffer size.`（说明游戏传入的工作缓冲大小 < criFs 计算所需 local_68）→ CPK 挂载失败 → `E2010052671:Can not open ACF file (sound/common.acf)`、`E2013081521:"BusSet_xrd722v2" is invalid DSP Bus Setting`。⇒ 游戏自身初始化路径存在但**参数不足**：需要查明游戏传给 criFs_Initialize 的 (config, work, size) 从哪来、为何 size 不够。M1098 扩展 [FIOSX] 探针到 0x8128399E（criFs_Initialize 入口）与 0x81235F30/0x81224638（两个调用点），打印 r0-r3 参数。**
 | M1099 | §18.4644: ★★★★★★★ **解码了游戏自己的 CRI 初始化完整调用链，并定位 "Insufficient buffer size" 的来源：`FUN_81257318`（CRI Atom Sound 初始化，358B）→ `FUN_81224160`（CRI 系统初始化，3270B：内含 E2009072703 检查 @0x81224960 与 criFs_Initialize 调用 @0x81224638）→ `FUN_8128399E`（criFs_Initialize）。m1141 的 [FIOSX] 探针未命中 0x8128399E/0x81235F30/0x81224638，说明这些是纯 guest 调用（非 HLE 拦截点）。另发现 `W2008121610:The binder module is not initialized.`（binder 未初始化，来自 FUN_8128715E/812871D0/812859FA 等 binder 函数）——CPK 挂载失败的直接原因。**
+| M1100 | §18.4645: ★★★★★★★★★ **量化定位：游戏自身 CRI 初始化的 "Insufficient buffer size" 是 1 字节差——探针实测 `[CMPBUF] r1=00020190 r6=0002018F`（r1=local_98[0] 即 criFs 所需大小 0x20190；r6=param_4 即 Atom 侧提供的大小 0x2018F，**差 1 字节**！），`[ATOMINIT] cfg=84856088 buf=848E8E7C r2=00023FEF r3=00000090 lr=81236208`（FUN_81257318 入口：config/buffer/调用者来自 FUN_81235A10 区域）。⇒ 不是缺失步骤，而是**两侧 size 计算差 1**：criFs 需求比 Atom 预算多 1 字节。**
+| M1101 | §18.4646: ★★★★★★★★★ **1 字节差已通过 +0x200 安全余量绕过：`[CMPBUF] r1=00020190 r6=0002038F`（0x20190 ≤ 0x2038F ✓）、`[FIOSX] #1 at=8128399E n=1717 r0=84855FC8 r1=848E8E7C r2=00020190`（★ criFs_Initialize 真实被调用，config=0x84855FC8/buf=0x848E8E7C/size=0x20190）、`[INITRET] r0=00000000`（★ FUN_81224160 返回 0=成功）。失败点后移到下一层：`E2009011903:Insufficient buffer size.（×3，n=1717）`（另一个子模块 buffer 检查）与 `W2008121610:The binder module is not initialized.（n=1754）`（binder 仍未初始化）→ CPK 挂载仍失败。**
+m1143（`out80m_m1143margin.txt`）证据：
+```
+[ATOMINIT] cfg=84856088 buf=848E8E7C r2=00023FEF r3=00000090 lr=81236208
+[CMPBUF]   r1=00020190 r6=0002038F …            ← 检查通过（余量 0x200 生效）
+[FIOSX] #1 at=8128399E n=1717 r0=84855FC8 r1=848E8E7C r2=00020190 …   ← ★ criFs_Initialize 被调用
+[INITRET]  r0=00000000 r1=812B4150 r2=812B4150 r3=00000000 lr=81278C46  ← ★ 初始化成功返回 0
+[CRILOG] n=1717 E2009011903:Insufficient buffer size.（×3）              ← 下一层子模块 buffer 不足
+[CRILOG] n=1754 W2008121610:The binder module is not initialized.（×5）  ← binder 仍未初始化
+[CRIFMT] n=1754 E2010052671:Can not open ACF file. (path = sound/common.acf)
+[CRIFMT] n=1754 E2013081521:"%s" is invalid DSP Bus Setting. (BusSet_xrd722v2)
+[FIOSX] #4-6 at=811820B6 n=1754 …（CPK 挂载仍在尝试）
+[BADMEM]=0
+```
+**M1101 补丁（batch_020 blk_812573B0，FUN_81257318 调 FUN_81224160 前）**：
+```cpp
+s->r[3] += 0x200u;          // ★ 给 FUN_81224160 的 param_4（工作缓冲大小）加安全余量
+s->r[14] = ...; return 0x81224160u;   /* bl */
+```
+编译：batch_020 exit 0；harness/link exit 0（exe 57,121,735B，09:11:35）。验证运行 `out80m_m1143margin.txt` 已启动（无强制初始化）。
+**分析**：
+1. 1 字节差通过 +0x200 余量解决 → **criFs_Initialize 首次由游戏自己的代码成功调用并返回 0**（M1093~M1101 的持续目标达成）
+2. 新失败点：
+   - `E2009011903:Insufficient buffer size.`（同一初始化链的另一个子模块，来自 FUN_81224160 内 `param_4 < uVar6` 检查或 FUN_81224E32 路径）
+   - `W2008121610:The binder module is not initialized.`（binder 初始化函数尚未被调用/失败）
+3. ⇒ 下一步：给 FUN_81224E68（FUN_81224E32 内的 FUN_81224160 调用点）也加余量；或定位 E2009011903 所属子模块并加余量；同时找 binder 初始化函数（FUN_812859FA 的调用者/内部）并确保在 CPK 挂载前完成
+NEXT：
+```
+① 定位 E2009011903 的检查块（FUN_81224160 内）→ 探针取值 → 同样加余量或修正确值
+② 定位 binder 初始化入口（FUN_812859FA 或 binder 模块 init 函数）→ 探针其调用/返回
+③ 给 FUN_81224E68 调用点也加 margin（统一策略）
+④ 验证 CPK 挂载成功（vita.cpk/data.cpk）→ ACB/ACF 打开成功
+⑤ 之后：title 素材读取 → 场景视图 → GXM → 画面
+备选：若余量方案污染 buffer 分配，改为修正 1 字节差的计算源头（更干净）
+```
+验证：`out80m_m1142bufprobe.txt`、`out80m_m1143margin.txt`、`criinit2.txt`、`criinit3.txt`、batch_018/020 探针/补丁。 |
+| §18.4645 | Pinpointed the game's own CRI init 'Insufficient buffer size' as a 1-byte difference: the probe measured [CMPBUF] r1=00020190 r6=0002018F (r1=local_98[0] = criFs required size 0x20190; r6=param_4 = Atom-side provided size 0x2018F, difference exactly 1 byte!) and [ATOMINIT] cfg=84856088 buf=848E8E7C r2=00023FEF r3=00000090 lr=81236208 (FUN_81257318 entry: config/buffer, caller in the FUN_81235A10 area). So it is not a missing step but a 1-byte difference between the two size computations: criFs needs 1 byte more than the Atom budget. '
+       'm1142 (no forced init + new probes) evidence: [ATOMINIT] cfg=84856088 buf=848E8E7C r2=00023FEF r3=00000090 lr=81236208; [CMPBUF] r1=00020190 r6=0002018F r0=848E8FFF r2=812B4150 r3=84855F30 r4=8169E124 r5=8130D424 r7=00000000 sp=84855F80 lr=81290480 fib=848463A0 (r1=0x20190 criFs required local_98[0], r6=0x2018F Atom-provided param_4 -> 1-byte shortfall); [CRILOG] n=1717 E2009072703:Insufficient buffer size. (x3). '
+       'Probe implementation (batch_018/batch_020): batch_018 blk_81224958 (FUN_81224160 buffer check block) prints [CMPBUF] r1..r7/sp/lr/fib; batch_018 blk_81224632 (before criFs_Initialize call) prints [CALLINIT] config/buf/size; batch_020 blk_81257318 (FUN_81257318 entry) prints [ATOMINIT] cfg/buf. Note: the first probe injection failed to compile because the printf \\n became a real newline; fixed with re.sub(r\'(%08X)\\r?\\n(\",)\', r\'\\1\\\\n\\2\', t), after which batch_018/batch_020 compiled. NEXT (done in M1101): add a +0x200 safety margin to the FUN_81257318 -> FUN_81224160 size argument and verify whether the check passes, criFs_Initialize is really called and succeeds. '
+| §18.4646 | The 1-byte difference was bypassed with a +0x200 safety margin: [CMPBUF] r1=00020190 r6=0002038F (0x20190 <= 0x2038F OK), [FIOSX] #1 at=8128399E n=1717 r0=84855FC8 r1=848E8E7C r2=00020190 (criFs_Initialize really called with config=0x84855FC8, buffer=0x848E8E7C, size=0x20190), [INITRET] r0=00000000 (FUN_81224160 returned 0 = success). The failure moved to the next layer: E2009011903:Insufficient buffer size. (x3, n=1717; another submodule buffer check) and W2008121610:The binder module is not initialized. (n=1754; binder still not initialized) -> the CPK mount still fails. '
+       'm1143 evidence: [ATOMINIT] cfg=84856088 buf=848E8E7C r2=00023FEF r3=00000090 lr=81236208; [CMPBUF] r1=00020190 r6=0002038F (check passed, margin took effect); [FIOSX] #1 at=8128399E n=1717 r0=84855FC8 r1=848E8E7C r2=00020190 (criFs_Initialize called); [INITRET] r0=00000000 r1=812B4150 r2=812B4150 r3=00000000 lr=81278C46 (init success); [CRILOG] n=1717 E2009011903:Insufficient buffer size. (x3, next submodule); [CRILOG] n=1754 W2008121610:The binder module is not initialized. (x5); [CRIFMT] n=1754 E2010052671:Can not open ACF file (path = sound/common.acf) and E2013081521:\"%s\" is invalid DSP Bus Setting (BusSet_xrd722v2); [FIOSX] #4-6 at=811820B6 n=1754 (CPK mount still trying); [BADMEM]=0. '
+       'M1101 patch (batch_020 blk_812573B0, before FUN_81257318 calls FUN_81224160): s->r[3] += 0x200u; /* add safety margin to param_4 (work buffer size) */ s->r[14] = ...; return 0x81224160u; /* bl */. Build: batch_020 exit 0; harness/link exit 0 (exe 57,121,735B 09:11:35). Verification run out80m_m1143margin.txt started (no forced init). '
+       'Analysis: (1) the 1-byte shortfall was solved with a +0x200 margin, so for the first time the game own code successfully calls criFs_Initialize and gets 0 back (the goal pursued since M1093-M1101); (2) new failure points: E2009011903:Insufficient buffer size. (another submodule of the same init chain, from the param_4 < uVar6 check inside FUN_81224160 or the FUN_81224E32 path) and W2008121610:The binder module is not initialized. (binder init function not yet called/failing); (3) next: also add the margin to the FUN_81224E68 call site (inside FUN_81224E32), or locate the E2009011903 submodule and add margin there; and find the binder init function (FUN_812859FA or the binder module init) to ensure it completes before the CPK mount. '
+       'NEXT: (1) locate the E2009011903 check block (inside FUN_81224160) and probe values, then add margin/fix; (2) locate the binder init entry (FUN_812859FA or binder module init) and probe its call/return; (3) also add margin at the FUN_81224E68 call site (unified strategy); (4) verify the CPK mount succeeds (vita.cpk/data.cpk) -> ACB/ACF opens succeed; (5) then title assets -> scene views -> GXM -> picture. Fallback: if the margin pollutes buffer allocation, fix the 1-byte computation source instead (cleaner). '
+       'Verification: out80m_m1142bufprobe.txt, out80m_m1143margin.txt, criinit2.txt, criinit3.txt, batch_018/020 probes/patches. |
+m1142（`out80m_m1142bufprobe.txt`，无强制初始化 + 新探针）证据：
+```
+[ATOMINIT] cfg=84856088 buf=848E8E7C r2=00023FEF r3=00000090 lr=81236208   ← FUN_81257318 入口
+[CMPBUF]   r1=00020190 r6=0002018F r0=848E8FFF r2=812B4150 r3=84855F30
+           r4=8169E124 r5=8130D424 r7=00000000 sp=84855F80 lr=81290480 fib=848463A0
+           ↑ r1=0x20190（criFs 所需 local_98[0]），r6=0x2018F（Atom 提供的 param_4）→ 差 1 字节
+[CRILOG] n=1717 E2009072703:Insufficient buffer size.（×3）
+```
+**探针实现（batch_018/batch_020，M1100）**：
+```cpp
+// batch_018 blk_81224958（FUN_81224160 的 buffer 检查块）：
+printf("[CMPBUF] r1=%08X r6=%08X r0=%08X r2=%08X r3=%08X r4=%08X r5=%08X r7=%08X sp=%08X lr=%08X fib=%08X\n", ...)
+// batch_018 blk_81224632（criFs_Initialize 调用前块）：[CALLINIT] config/buf/size
+// batch_020 blk_81257318（FUN_81257318 入口）：[ATOMINIT] cfg/buf
+```
+**说明**：探针注入时首次因 printf `\n` 被写成真实换行导致编译失败，用 `re.sub(r'(%08X)\r?\n(",)', r'\1\\n\2', t)` 修复后 batch_018/batch_020 均编译通过。
+**⇒ 下一步（M1101 已执行）**：给 FUN_81257318→FUN_81224160 的 size 参数加安全余量（+0x200），验证检查是否通过、criFs_Initialize 是否被真正调用并成功。
+验证：`out80m_m1142bufprobe.txt`、`criinit2.txt`、`criinit3.txt`。 |
 **m1141（`out80m_m1141criinit.txt`，无强制初始化）证据**：
 ```
 [CRILOG] n=1717 msg=E2009072703:Insufficient buffer size.（×3，来自 FUN_81224160 @0x81224960）
@@ -499911,3 +499975,61 @@ void FUN_81257318(int *param_1, int param_2) {
 ANTI-FORGETTING ENTRY. Keywords: M1099 decoded the game's own complete CRI init chain and located Insufficient buffer size: FUN_81257318 (CRI Atom Sound init) -> FUN_81224160 (CRI system init, contains E2009072703 check @0x81224960 and criFs_Initialize call @0x81224638) -> FUN_8128399E (criFs_Initialize); the m1141 [FIOSX] probe did NOT hit 0x8128399E/0x81235F30/0x81224638 (plain guest calls, not HLE interception points); also found W2008121610:The binder module is not initialized. (from FUN_8128715E/812871D0/812859FA etc.) as the direct cause of CPK mount failure. m1141 evidence: [CRILOG] n=1717 E2009072703:Insufficient buffer size. (x3, FUN_81224160 @0x81224960); [CRILOG] n=1717 W2008121610:The binder module is not initialized. (x4); [CRIFMT] n=1717 E2010052671:Can not open ACF file (path = sound/common.acf); [CRIFMT] n=1717 E2013081521:\"%s\" is invalid DSP Bus Setting (BusSet_xrd722v2); [FIOSX] only 811820B6/81286EC4; max n=38,030,000 no BADMEM. FUN_81257318 decompile: void FUN_81257318(int *param_1, int param_2) { DAT_8169E6E8 = \"\\nCRI Atom Sound/VITA Ver.1.54.06 Build:Jan 30 2018 18:45:35\\n\"; piVar4=param_1; if (param_1==NULL) { local_40[]={0x20,0x20,0x45160000,0,4}; piVar4=local_40; } iVar2=*piVar4; iVar5=piVar4[1]; iVar1=FUN_81223EF6(piVar4[3]); SceLibc_6DC1F0D8(param_2,0,iVar2*0x1B4+iVar1+iVar5*8+0x90); iVar1=FUN_81224FB0(); if (iVar1==0) { iVar1=FUN_81223EF6(param_1[3]); FUN_81224160(param_1[3],0,param_2,iVar1); DAT_8153F988=1; param_2+=iVar1; } else log W2010062701; submodule inits FUN_81257E60/FUN_81275404/FUN_81256FA0/FUN_81258044; DAT_8153F984=1; FUN_81258110(param_1[2]); }. FUN_81224160 key: else { if (param_4 < local_98[0]) { FUN_81278F96(0,\"E2009072703:Insufficient buffer size.\"); /* @0x81224960 */ ...cleanup... } param_4 -= local_98[0]; iVar2 = param_3 + local_98[0]; iVar4 = param_3; } iVar4 = FUN_8128399E(local_68 + 6, iVar4, local_98[0]); /* @0x81224638 */ if (iVar4 != 0) { log E2012051832:Atom library needs to be finalized after Mana library. }. Analysis: the game own init chain is complete (Atom -> CRI -> criFs) requiring (config, buffer, size) to match; Insufficient buffer size = param_4 (FUN_81223EF6(config[3])) < local_98[0] (criFs requirement computed inside FUN_81224160); binder not initialized -> CPK mount fails; possible root cause is a HLE memory-layer numeric mismatch (alignment/available memory) or config[3] from a config we do not provide. NEXT: (1) add a probe at the 0x81224960 check block printing param_4, local_98[0], config pointer and fields (find the block in its batch, add an extern \"C\" hook); (2) print config[3], the FUN_81223EF6 return and the SceLibc memset size in FUN_81257318; (3) compare which side is wrong; (4) if config comes from a game file confirm it is readable (FIOSFILL may be needed); (5) after the fix the game own init succeeds -> binder init -> CPK mount -> assets read. Fallback: HLE-intercept the buffer check (not recommended).
 
 LOOKUP: M1099 CRI init chain FUN_81257318 FUN_81224160 FUN_8128399E, E2009072703 Insufficient buffer size @0x81224960, criFs_Initialize call @0x81224638, W2008121610 binder module not initialized, FUN_81223EF6 required size FUN_81224FB0 already init, config[3], m1141 no forced init max n=38,030,000, next probe 0x81224960 param_4 local_98[0] and FUN_81223EF6 return values -> §18.4643 [relevant: m1140 result], §18.4642 [relevant: no-forced experiment], §18.4641 [relevant: CPK mount timing]
+### 18.4645 PORT M1100: 探针量化——CRI 初始化 "Insufficient buffer size" = 两侧 size 差 1 字节（0x20190 vs 0x2018F）
+
+1) m1142 探针数据：
+```
+[ATOMINIT] cfg=84856088 buf=848E8E7C r2=00023FEF r3=00000090 lr=81236208   ← FUN_81257318 入口
+[CMPBUF]   r1=00020190 r6=0002018F … lr=81290480                            ← 差 1 字节！
+            r1 = local_98[0] = criFs 需求 0x20190
+            r6 = param_4 = Atom 提供 0x2018F
+[CRILOG] n=1717 E2009072703:Insufficient buffer size.（×3）
+```
+2) 探针代码（batch_018/batch_020）：
+```cpp
+// blk_81224958（FUN_81224160 buffer 检查块）
+printf("[CMPBUF] r1=%08X r6=%08X r0=%08X r2=%08X r3=%08X r4=%08X r5=%08X r7=%08X sp=%08X lr=%08X fib=%08X\n", ...);
+// blk_81224632（criFs_Initialize 调用前）：[CALLINIT] config/buf/size
+// blk_81257318（FUN_81257318 入口）：[ATOMINIT] cfg/buf
+```
+3) 探针注入曾因 printf `\n` 写成真实换行导致编译失败；用 `re.sub(r'(%08X)\r?\n(",)', r'\1\\n\2', t)` 修复后编译通过
+4) ⇒ 结论：不是缺失步骤，而是**两侧 size 计算差 1 字节**（criFs 需求比 Atom 预算多 1）
+5) NEXT（M1101 已执行）：给 FUN_81224160 的 size 参数加 +0x200 安全余量验证
+验证：`out80m_m1142bufprobe.txt`、`criinit2.txt`、`criinit3.txt`。
+
+### 18.4646 PORT M1101: +0x200 安全余量生效——游戏自身 criFs_Initialize 首次成功调用（返回 0），失败点后移到 E2009011903 与 binder 未初始化
+
+1) m1143 证据：
+```
+[CMPBUF]   r1=00020190 r6=0002038F …                       ← 检查通过（+0x200 生效）
+[FIOSX] #1 at=8128399E n=1717 r0=84855FC8 r1=848E8E7C r2=00020190   ← ★ criFs_Initialize 被调用
+[INITRET]  r0=00000000 …                                   ← ★ FUN_81224160 返回 0（成功）
+[CRILOG] n=1717 E2009011903:Insufficient buffer size.（×3） ← 下一层子模块 buffer 不足
+[CRILOG] n=1754 W2008121610:The binder module is not initialized.（×5）
+[CRIFMT] n=1754 E2010052671:Can not open ACF file (sound/common.acf)
+[CRIFMT] n=1754 E2013081521:"BusSet_xrd722v2" is invalid DSP Bus Setting
+[BADMEM]=0
+```
+2) M1101 补丁（batch_020 blk_812573B0）：
+```cpp
+s->r[3] += 0x200u;          // ★ FUN_81224160 的 param_4（工作缓冲大小）加安全余量
+s->r[14] = ...; return 0x81224160u;   /* bl */
+```
+3) 编译：batch_020 exit 0；harness/link exit 0（exe 57,121,735B，09:11:35）
+4) 分析：
+- 1 字节差用 +0x200 余量解决 → **游戏自己的 criFs_Initialize 首次成功调用并返回 0**（M1093~M1101 目标达成）
+- 新失败点：`E2009011903:Insufficient buffer size.`（同链另一子模块）、`W2008121610:The binder module is not initialized.`（binder 初始化未完成）
+5) NEXT：
+```
+① 定位 E2009011903 检查块（FUN_81224160 内）→ 探针 → 加余量/修正确值
+② 定位 binder 初始化入口（FUN_812859FA 或 binder 模块 init）→ 探针调用/返回
+③ FUN_81224E68 调用点也加 margin（统一策略）
+④ CPK 挂载成功 → ACB/ACF 打开成功
+⑤ title 素材 → 场景视图 → GXM → 画面
+备选：修正 1 字节差的计算源头（更干净）
+```
+验证：`out80m_m1142bufprobe.txt`、`out80m_m1143margin.txt`、`criinit2.txt`、`criinit3.txt`。
+
+ANTI-FORGETTING ENTRY. Keywords: M1100/M1101 game's own CRI init Insufficient buffer size root cause = 1-byte difference between criFs required local_98[0]=0x20190 and Atom-provided param_4=0x2018F, measured by probes [CMPBUF] r1=00020190 r6=0002018F and [ATOMINIT] cfg=84856088 buf=848E8E7C r2=00023FEF r3=00000090 lr=81236208 at FUN_81257318 entry; probes injected into batch_018 blk_81224958 (CMPBUF) and batch_020 blk_81257318 (ATOMINIT); printf newline injection bug fixed with re.sub; M1101 patch: batch_020 blk_812573B0 adds s->r[3] += 0x200u before calling FUN_81224160 (margin) -> [CMPBUF] r1=00020190 r6=0002038F passes, [FIOSX] #1 at=8128399E n=1717 r0=84855FC8 r1=848E8E7C r2=00020190 (criFs_Initialize really called), [INITRET] r0=00000000 (FUN_81224160 success). New failure points: E2009011903:Insufficient buffer size. (x3 n=1717, another submodule check inside FUN_81224160's param_4 < uVar6 or FUN_81224E32 path) and W2008121610:The binder module is not initialized. (x5 n=1754, binder init not done) -> CPK mount still fails, ACB/ACF still fail. exe 57,121,735B 09:11:35, run out80m_m1143margin.txt. NEXT: locate the E2009011903 check block and probe/fix; locate the binder init entry (FUN_812859FA or binder module init) and probe; add margin at FUN_81224E68 call site too; verify CPK mount success -> ACB/ACF opens; then title assets -> scene views -> GXM -> picture. Fallback: fix the 1-byte computation source instead of margins.
+
+LOOKUP: M1100 M1101 CRI init 1 byte shortfall 0x20190 vs 0x2018F, [CMPBUF] probe blk_81224958, [ATOMINIT] blk_81257318, +0x200 margin batch_020 blk_812573B0 s->r[3] += 0x200u, [FIOSX] at=8128399E criFs_Initialize called config=84855FC8 buf=848E8E7C size=0x20190, [INITRET] r0=0 success, new E2009011903 Insufficient buffer size, W2008121610 binder module not initialized n=1754, exe 57,121,735B 09:11:35, out80m_m1143margin.txt, next find E2009011903 block and binder init entry -> §18.4644 [relevant: CRI init chain], §18.4643 [relevant: m1140 result], §18.4642 [relevant: no-forced experiment]
