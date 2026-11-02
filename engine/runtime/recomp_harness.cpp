@@ -1268,6 +1268,7 @@ namespace p5d { namespace vulkan { void update_uniform_buffer_raw(const void* da
 namespace p5d { namespace vulkan { int32_t upload_gxm_control_resolved(unsigned int unit, const void* control16); } }   // 18.4510 M965
 namespace p5d { namespace vulkan { int32_t upload_gxm_control_to_unit(unsigned int unit, const void* control16, const unsigned char* hostPixels, unsigned int bytes); } }   // 18.4521 M976
 namespace p5d { namespace vulkan { int upload_vertex_stream(const void* data, unsigned int bytes, unsigned int vertex_count); } }   // 18.4498 M953
+namespace p5d { namespace vulkan { void gxm_draw_arrays(unsigned int vertexCount); } }   // M1142: real vkCmdDraw for the uploaded vertex stream
 static uint32_t call_guest_cb4(RecState* s, uint32_t entry, uint32_t a0, uint32_t a1, uint32_t a2, uint32_t a3, int maxblocks);  // M1034 fwd
 static void job_probes(uint32_t pcv, RecState* s) {
   // 18.4579 M1034: P5D_FORCETITLE - call guest FUN_81185616(6,0,0,0) once after page1 has started,
@@ -2180,6 +2181,16 @@ extern "C" uint32_t hle_call(uint32_t stub_va, RecState* s) {
             static const float _I[16] = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
             p5d::vulkan::update_uniform_buffer(_I, _I);
             printf("[ABIUNI] identity vertex uniforms set n=%u\n", g_main_n); fflush(stdout); } }
+        // M1142: actually ISSUE the draw for the uploaded test stream. Previously only upload_vertex_stream was
+        // called and the real vkCmdDraw never happened, so every captured frame stayed black.
+        { static int _tri2 = 0; if (!_tri2) { _tri2 = 1;
+            // M1142C: force a fullscreen viewport using the convention the backend used in the older movie path
+            // (DRAWST vp=0,0,960,544 when xo=0,xs=960,yo=0,ys=544) and ENABLE it: the game's last
+            // sceGxmSetViewportEnable(0) had disabled the viewport, which kept vp degenerate -> black.
+            p5d::vulkan::set_gxm_viewport(0.0f, 960.0f, 0.0f, 544.0f, 0.0f, 1.0f);
+            p5d::vulkan::set_gxm_viewport_enable(1);
+            p5d::vulkan::gxm_draw_arrays(3u);
+            printf("[ABIDRAWTEST] gxm_draw_arrays(3) issued n=%u\n", g_main_n); fflush(stdout); } }
         static int _pn = 0; if (_pn++ < 20) { printf("[ABIPIPE] v=%s f=%s rc=%d n=%u\n", _abi_vspv.c_str(), _abi_fspv.c_str(), _rc, g_main_n); fflush(stdout); } }
       uint32_t _stk[8];
       for (int _i = 0; _i < 8; ++_i) { uint32_t _v = 0; uint8_t* _q = GP(s->r[13] + (uint32_t)_i * 4u); if (_q) std::memcpy(&_v, _q, 4); _stk[_i] = _v; }
@@ -2234,7 +2245,12 @@ extern "C" uint32_t hle_call(uint32_t stub_va, RecState* s) {
       // 18.4548 M1003: sceGxmSetViewport / SetViewportEnable -> backend GXM viewport state machine
       if (std::strcmp(_ge->name, "sceGxmSetViewport") == 0) {
         float _f[6];
-        for (int _i = 0; _i < 6; ++_i) { uint32_t _b = s->r[1 + _i]; std::memcpy(&_f[_i], &_b, 4); }
+        // M1142B: sceGxmSetViewport(context, xOffset, xScale, yOffset, yScale, zOffset, zScale) -
+        // r1..r3 = xOffset/xScale/yOffset, yScale/zOffset/zScale are STACK args (sp+0,+4,+8).
+        _f[0] = 0.0f; { uint32_t _b = s->r[1]; std::memcpy(&_f[0], &_b, 4); }
+        _f[1] = 0.0f; { uint32_t _b = s->r[2]; std::memcpy(&_f[1], &_b, 4); }
+        _f[2] = 0.0f; { uint32_t _b = s->r[3]; std::memcpy(&_f[2], &_b, 4); }
+        for (int _i = 3; _i < 6; ++_i) { uint32_t _b = 0; uint8_t* _q = GP(s->r[13] + (uint32_t)(_i - 3) * 4u); if (_q) std::memcpy(&_b, _q, 4); std::memcpy(&_f[_i], &_b, 4); }
         p5d::vulkan::set_gxm_viewport(_f[0], _f[1], _f[2], _f[3], _f[4], _f[5]);
         static int _vp = 0; if (_vp++ < 30) { printf("[ABIVP] xo=%.2f xs=%.2f yo=%.2f ys=%.2f zo=%.2f zs=%.2f n=%u\n", _f[0],_f[1],_f[2],_f[3],_f[4],_f[5],g_main_n); fflush(stdout); }
         s->r[0] = 0; return s->r[14]; }

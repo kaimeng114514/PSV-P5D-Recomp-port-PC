@@ -1157,6 +1157,44 @@
 | M1139 | §18.4684: ★★★★★★★★ **M1138 修复后长跑首次进入 S0_LOGO 渲染路径（LOGO 状态机 5→8、LOGODRAW 80 次、场景构建 120 次、FLUSH frame 计数到 2），并确认 Vulkan 后端 present 成功（gxm_vk.o 的 [PRESENT] 探针：imgIdx=0 result=VK_SUCCESS）**。m1233（NESTED_UNTIL=300M）在 blk≈64.5M 时：`[LOGO] state=5→8`（状态机推进）、`[LOGODRAW] #80 arg=85BD6024`（8119351C 绘制入口被调用 80 次）、`[TRRET] #160`（811DB24E job trampoline）、`[SCBUILD] #100`（811C241E 场景构建）、`[SCENE] #120`（811C2964 场景对象 p=85BD52A0 st=1 head=0 cnt=0，已创建但尚无渲染条目）、`[FLUSH] #120 frame=2`（帧计数推进到 2）；`[NESTED-STOP]=0`、`[BADMEM]=0`、`[IO]=6`。Vulkan 证据：`gxm_vk.o` 含 `[PRESENT]` 探针，m1232 日志出现 `[PRESENT] #1 imgIdx=0 result=0(VK_SUCCESS)`（GXM→Vulkan 呈现路径打通）；但 harness 的 `[GXM-PRESENT]`（sceGxmDisplayQueueAddEntry 812B1720）=0、`[GFX]` begin/end/present 计数=0 → 游戏尚未提交 GXM 场景/显示队列
 | M1140 | §18.4685: ★★★★★★★ **m1233 长跑最终状态：S0_LOGO 状态机推进到 state=B(11)（LOGODRAW 80、FLUSH frame=2、场景构建 120 但 [SCENE] 仍空 cnt=0），随后在 blk≈66,494,954 发生全系统死锁**：g_blkcnt_total 冻结、[WD] stall=1（main fiber 848463A0 在 DelayThread 812B2A50@81207612 重试循环中）、线程泵空转（pumped=5,076,000，blocks=0，全部线程阻塞）、hle_ring 反复 `812B2A50@81207612`（DelayThread），pcring 显示 Fios/loader 轮询环：`81207344 → 812B2830@81207350(LockLwMutex) → 811E6374/811E6A4C/812B2270/811E6A52 → 811E638C/811E639A → 81207352 → 812B28A0@8120735C(UnlockLwMutex) → 811E63A0 → 812B2AD0(SignalSema) → 811E63A8 → 812B2880(WaitEventFlag)`，最后 curpc=812B2AE0(SetEventFlag)。IO 仍=6、[FHOPEN]=0 → **loader 等待的异步任务/IO 从未完成**（无新文件读取，游戏在 LOGO 状态 B 后等待加载/任务完成），HLE 作业队列/线程调度未完成该任务 → 死锁
 | M1141 | §18.4686: ★★★★★★★★ **首次把帧真正写到 Vulkan 交换链并存成 BMP（960×544：p5d_swap_0.bmp / p5d_swap_1.bmp / p5d_disp_1.bmp / p5d_rt_first.bmp），但像素全黑（RGB extrema 全 0，[SHOTSTAT] max=0 mean=0.00）**；同时确认 ABI 桥接管线细节：首次 sceGxmDraw 选中真实 SPIR-V 管线（`gxp_vert_0001.gxp.spv` + `gxp_frag_0165.gxp.spv`，rc=0）、上传测试三角形（stride128/3 verts）、设置 identity uniform、初始化 960×544 stride=1024 的颜色表面 ×3（8CF00000/8D300000/8D700000）与 224×68/960×544 小表面，[SUBMIT]×121 提交命令缓冲、[ENQ]×100、[PROC]×141 作业系统活跃、[TMX]×81 纹理创建。LOGO 状态 B(11) 时游戏 worker 线程（tid=40020000 entry=8120767D）在 811830F4 轮询作业状态（DelayThread 0x7530），GFD 帧/作业链等待完成；[GXM-PRESENT]=0（sceGxmDisplayQueueAddEntry 未被调用）、场景 cnt=0（空）。结论：呈现/截图链路已打通，**黑屏原因=游戏 LOGO 绘制走 precomputed draw（顶点/流/USSE 数据未翻译成 vkCmdDraw，实际没有可见光栅化）**，下一步实现 precomputed draw→Vulkan 翻译并验证像素非黑
+| M1142 | §18.4687: ★★★★★★★★ **首次让真实的 vkCmdDraw 被发出（`[DRAWST] #1 vc=3 inst=1 pipe=… vbuf=… rp=…`），并定位黑屏的直接原因之一=viewport 退化**：`[DRAWST] vp=-0.0,0.0,0.0,0.0`（GXM viewport 原始参数全 0）→ 没有任何像素落入视口；历史运行（m1047–m1071 的电影路径）曾出现 `vp=0.0,0.0,960.0,544.0` 的正常 viewport，证明后端/管线本身可以光栅化。修复/改动：① 在 sceGxmDraw 钩子中**真正调用 `p5d::vulkan::gxm_draw_arrays(3)`**（此前只 upload_vertex_stream、从未发 draw → 永远黑屏）；② 修正 `sceGxmSetViewport` 参数解码：GXM 签名是 (context, xOff, xScale, yOff, yScale, zOff, zScale)，其中 **yScale/zOffset/zScale 是栈参数**，旧代码只读寄存器导致视图参数错误；③ 测试绘制前强制 `set_gxm_viewport(0,960,0,544,0,1)` + `set_gxm_viewport_enable(1)`。但 m1237 中 `[DRAWST]` 仍显示 vp=-0,0,0,0 → 强制设置未进入 DRAWST 使用的状态（顺序/状态对象问题待查）。当前帧仍全黑（BMP extrema 0），但**绘制链路已从"不发 draw"推进到"draw 已发、viewport 未生效"**，这是出画面的最后一段
+m1235/m1236/m1237 证据（`m1235_drawtest_key.txt`、`m1236_vptest_key.txt`、`m1237_vp2_key.txt`）：
+```
+# 未发 draw 时（m1234 及之前）：无 [DRAWST]，帧全黑
+# M1142 加入 gxm_draw_arrays 后（m1235）：
+[DRAWST] #3 vc=3 inst=1 first=0 pipe=000002c2725ea8d0 inrp=1 vtxcnt=3 vbuf=000002c2721681d0 vp=-0.0,0.0,0.0,-0.0 sc=0,0,960,544 rp=000002c272166e50
+[BEGRP2] cd=8D300000 960x544 cmd=… doClear=1 rp=…
+[BSIMG] cd=8D300000 960x544 doClear=1 img=… fb=… view=…
+[ABIDRAWTEST] gxm_draw_arrays(3) issued n=2399
+[ABISWAP] p5d_swap_0/1 rc=0
+[SHOTSTAT] frame=0 max=0 mean=0.00 / frame=1 max=0 mean=0.00     ← 仍黑
+# 历史正常 viewport（旧电影路径 m1047…m1071）：
+[DRAWST] #1 vc=3 inst=1 pipe=… vbuf=… vp=0.0,0.0,960.0,544.0 sc=0,0,960,544 rp=…
+# 游戏真实 viewport 参数（[ABIVP]，m1237）：
+[ABIVPE] mode=0 n=1880
+[ABIVP] xo=0.00 xs=-0.00 yo=0.00 ys=0.00 zo=0.00 zs=0.00 n=1880
+[ABIVP] xo=0.00 xs=-0.00 yo=0.00 ys=0.00 zo=-0.00 zs=-0.00 n=2399
+# M1142B/C 修复后（m1236/m1237）仍：
+[DRAWST] #1 … vp=-0.0,0.0,0.0,0.0（强制 set_gxm_viewport(0,960,0,544)+enable 未反映到 DRAWST）
+[ABIVP] xo=0.00 xs=-0.00 yo=0.00 ys=0.00 zo=0.00 zs=0.00（栈参数解码修复后仍 0：游戏此时确实把 viewport 设为 0）
+```
+**分析**：
+- 后端真实绘制链路现在**完整走通**：sceGxmDraw → 选择真实 SPIR-V 管线（gxp_vert_0001/gxp_frag_0165）→ 绑定 vertex buffer/rp → `vkCmdDraw` 被调用（[DRAWST] 证实）；
+- 唯一直接障碍是 **viewport 全 0**：`vp=-0,0,0,0` 使光栅化裁剪掉一切；旧电影路径曾设置出 `vp=0,0,960,544` 并正常光栅化（历史证据）→ 说明管线/着色器/后端无根本问题；
+- 游戏在 n=2399 之前调用 `sceGxmSetViewportEnable(0)` 且 viewport 值为 0（可能是有意关闭，等真正渲染时才开）；我们在测试绘制前强制设置 viewport+enable，但 DRAWST 仍显示 0，说明 `set_gxm_viewport` 写入的状态与 `DRAWST/绘制路径`读取的状态不是同一处（或时序上被后续 SetViewportEnable(0) 覆盖）。
+**NEXT**：
+```
+① 在 sceGxmBeginScene 钩子里（场景开始时）设置全屏 viewport + enable，并在每次 sceGxmDraw 前再设置一次；
+② 反汇编 gxm_vk.o 的 set_gxm_viewport / DRAWST 读取点，确认 vp 打印来自哪个全局/结构，找出我们的设置被覆盖的原因；
+③ 用 env P5D_DBG_PXVIEWPORT / P5D_DBG_GREENCLEAR 打开后端 viewport/clear 调试；
+④ viewport 正确后验收：BMP extrema>0（首帧可见）→ S0_LOGO 淡出 → S1_TITLE
+```
+验证：`m1235_drawtest_key.txt`、`m1236_vptest_key.txt`、`m1237_vp2_key.txt`、p5d_swap_*.bmp（960×544 仍黑）、`[TABLE] blocks=230291`。 |
+| §18.4687 | First real vkCmdDraw is issued ([DRAWST] #1 vc=3 inst=1 pipe=... vbuf=... rp=...) and one direct cause of the black screen is identified: degenerated viewport ([DRAWST] vp=-0.0,0.0,0.0,0.0, GXM viewport params all zero) -> no pixels land in the viewport; historical runs (the m1047-m1071 movie path) showed vp=0.0,0.0,960.0,544.0 and could rasterize, proving the backend/pipeline works. Changes: (1) the sceGxmDraw hook now actually calls p5d::vulkan::gxm_draw_arrays(3) (previously only upload_vertex_stream, no draw was ever issued -> always black); (2) fixed sceGxmSetViewport argument decoding: the GXM signature is (context, xOff, xScale, yOff, yScale, zOff, zScale) where yScale/zOffset/zScale are STACK args; the old code only read registers so the view params were wrong; (3) forced set_gxm_viewport(0,960,0,544,0,1)+set_gxm_viewport_enable(1) before the test draw. However m1237 still shows [DRAWST] vp=-0,0,0,0, so the forced viewport did not reach the state used by DRAWST (ordering/state-object issue to investigate). The frame is still black (BMP extrema 0), but the draw chain advanced from "no draw issued" to "draw issued, viewport not in effect" - the last stretch before visible pixels. '
+       'm1235/m1236/m1237 evidence: (before M1142 no [DRAWST], frames black) after adding gxm_draw_arrays: [DRAWST] #3 vc=3 inst=1 first=0 pipe=000002c2725ea8d0 inrp=1 vtxcnt=3 vbuf=000002c2721681d0 vp=-0.0,0.0,0.0,-0.0 sc=0,0,960,544 rp=000002c272166e50; [BEGRP2] cd=8D300000 960x544 cmd=... doClear=1 rp=...; [BSIMG] cd=8D300000 960x544 doClear=1 img=... fb=... view=...; [ABIDRAWTEST] gxm_draw_arrays(3) issued n=2399; [ABISWAP] p5d_swap_0/1 rc=0; [SHOTSTAT] frame=0 max=0 mean=0.00 / frame=1 max=0 mean=0.00 (still black). Historical proper viewport (old movie path m1047-m1071): [DRAWST] #1 vc=3 inst=1 pipe=... vbuf=... vp=0.0,0.0,960.0,544.0 sc=0,0,960,544 rp=...; game real viewport params ([ABIVP], m1237): [ABIVPE] mode=0 n=1880, [ABIVP] xo=0.00 xs=-0.00 yo=0.00 ys=0.00 zo=0.00 zs=0.00 n=1880, xo=0.00 xs=-0.00 yo=0.00 ys=0.00 zo=-0.00 zs=-0.00 n=2399; after M1142B/C fixes (m1236/m1237) still [DRAWST] vp=-0.0,0.0,0.0,0.0 (forced set_gxm_viewport(0,960,0,544)+enable not reflected in DRAWST); [ABIVP] still all zero (the game really sets the viewport to 0 at this point). '
+       'Analysis: the backend real draw path is now complete: sceGxmDraw -> select real SPIR-V pipeline (gxp_vert_0001/gxp_frag_0165) -> bind vertex buffer/rp -> vkCmdDraw called ([DRAWST] proves it); the only direct blocker is the all-zero viewport (vp=-0,0,0,0) which clips everything. The old movie path once set vp=0,0,960,544 and rasterized (historical evidence), so pipeline/shaders/backend are fundamentally fine. The game calls sceGxmSetViewportEnable(0) with all-zero viewport before n=2399 (probably intentionally off until real rendering); we force a viewport+enable before the test draw but DRAWST still shows 0, meaning the state written by set_gxm_viewport is not the state read by the DRAWST/draw path (or it gets overwritten by the later SetViewportEnable(0)). '
+       'NEXT: (1) set the fullscreen viewport + enable in the sceGxmBeginScene hook (scene start) and again before every sceGxmDraw; (2) disassemble gxm_vk.o set_gxm_viewport / DRAWST read sites to find which global/struct vp comes from and why our set is overwritten; (3) enable env P5D_DBG_PXVIEWPORT / P5D_DBG_GREENCLEAR for backend viewport/clear debugging; (4) acceptance after a correct viewport: BMP extrema > 0 (first visible frame) -> S0_LOGO fade -> S1_TITLE. '
+       'Verification: m1235_drawtest_key.txt, m1236_vptest_key.txt, m1237_vp2_key.txt, p5d_swap_*.bmp (960x544 still black), [TABLE] blocks=230291. |
 m1233 证据（`m1233_abi_key.txt`、`m1233_long4_key.txt`，截图文件在 `C:\dev\tmp\recomp_split\`）：
 ```
 [# Vulkan/呈现]
@@ -503628,3 +503666,45 @@ LOGO state B 等待来自 GFD 作业链（worker 轮询作业状态），与渲�
 ANTI-FORGETTING ENTRY. Keywords: M1141 first frames written to the Vulkan swapchain and saved as 960x544 BMPs (p5d_swap_0.bmp, p5d_swap_1.bmp, p5d_disp_1.bmp, p5d_rt_first.bmp) but fully black (RGB extrema all 0, SHOTSTAT max=0 mean=0.00). Present/screenshot chain works: Vulkan Backend Init with Window, Creating Win32 window (960x544), Screenshot image created, ABISWAP saved p5d_swap_0 rc=0 n=2399, p5d_swap_1 rc=0, ABIRT disp=0 cd=8CF00000 rc=-1, disp=1 cd=8D300000 rc=0. ABI bridge: ABIPIPE v=gxp_vert_0001.gxp.spv f=gxp_frag_0165.gxp.spv rc=0 n=2399; ABITRI upload_vertex_stream rc=0 (stride128,3 verts); ABIUNI identity vertex uniforms; ABICS surfaces 960x544 stride=1024 data=8CF00000/8D300000/8D700000 sane=1 plus 224x68 stride=224 95600000 and 960x544 stride=960 97600000; ABICAP PrecomputedFragmentStateInit frag=1 r1=8540EA80 r2=8F950D80; ABIVFMT obj=8540C000 attr0 fmt=9 comps=3 strm0 stride=12, obj=8540C080 attr0 fmt=9 attr1 fmt=8 stride=30; ABIVARG obj=8540C000 r2=84856114 gpr2=1 n=1826; SUBMIT #1 imgIdx=0 VK_SUCCESS, #120 type=2 builder=848563D0; ENQ q=84857A7C node=84897DD4; PROC runner fa5c a0=84617C40; TMX texobj=85CE573C. Status: LOGO 201 state=B(11), LOGODRAW=80, SCENE=120 cnt=0, FLUSH=120 frame=2, GXM-PRESENT=0, GFX begin=end=present=0, IO=6, FHOPEN=0, WD thread tid=40020000 entry=8120767D ctxpc=811830F4 polling job status via DelayThread 0x7530. Analysis: the Vulkan backend is fully initialized and the present/screenshot chain really works; the black screen is because the game LOGO drawing uses Precomputed draws (captured vertex format/params) that are not translated into vkCmdDraw, while the bridge currently only uploads a test triangle for sceGxmDraw; the LOGO state B wait comes from the GFD job chain (worker polling job status). NEXT: implement precomputed draw -> Vulkan (attr/stream fmt/comps/stride + USSE vertex buffer -> vkCmdDraw/vkCmdDrawIndexed with gxp_vert_0001/gxp_frag_0165; first validate pipeline with a full-screen color bar/LOGO-position triangle); acceptance via BMP extrema>0; in parallel analyze the LOGO state B job wait (worker 40020000 @811830F4 + PROC/ENQ); after first visible frame advance S0_LOGO timing/fade -> S1_TITLE asset loading. Verification: m1233_abi_key.txt, m1233_long4_key.txt, p5d_swap_0.bmp/p5d_swap_1.bmp/p5d_disp_1.bmp/p5d_rt_first.bmp, recomp_harness_getselfpump_4683.cpp, [TABLE] blocks=230291.
 
 LOOKUP: M1141 first frames Vulkan swapchain BMP 960x544 black RGB extrema 0 SHOTSTAT max 0, present screenshot chain works Vulkan Backend Init Win32 window 960x544, ABISWAP p5d_swap_0/1 rc 0 n 2399, ABIRT disp 0 cd 8CF00000 rc -1 disp 1 cd 8D300000 rc 0, ABIPIPE v gxp_vert_0001.gxp.spv f gxp_frag_0165.gxp.spv rc 0, ABITRI stride128 3 verts, ABIUNI identity uniforms, ABICS surfaces 8CF00000 8D300000 8D700000 224x68 95600000 960x544 97600000, ABICAP PrecomputedFragmentStateInit, ABIVFMT obj 8540C000 attr0 fmt9 comps3 stride12, obj 8540C080 attr1 fmt8 stride30, ABIVARG gpr2 1 n 1826, SUBMIT 121 ENQ 100 PROC 141 TMX 81, LOGO state B 11 LOGODRAW 80 SCENE 120 cnt0 FLUSH frame2, GXM-PRESENT 0 GFX begin end present 0, worker thread 40020000 entry 8120767D ctxpc 811830F4 job poll, next precomputed draw to vkCmdDraw USSE vertex buffer gxp pipelines full-screen color bar BMP extrema acceptance, LOGO state B job wait PROC ENQ, then S1_TITLE IO FHOPEN -> 18.4685 [relevant: deadlock analysis], 18.4684 [relevant: S0_LOGO], 18.4683 [relevant: GetSelf fix]
+### 18.4687 PORT M1142: 首次发出真实 vkCmdDraw（[DRAWST] 证实）；黑屏直接原因=viewport 全 0（已定位，修复进行中）
+
+1) 关键转折：draw 真正被发出（M1142 前只 upload 不发 draw → 必黑）
+```
+[DRAWST] #3 vc=3 inst=1 first=0 pipe=000002c2725ea8d0 inrp=1 vtxcnt=3 vbuf=000002c2721681d0
+         vp=-0.0,0.0,0.0,-0.0 sc=0,0,960,544 rp=000002c272166e50
+[BEGRP2] cd=8D300000 960x544 cmd=… doClear=1 rp=…
+[BSIMG] cd=8D300000 960x544 doClear=1 img=… fb=… view=…
+[ABIDRAWTEST] gxm_draw_arrays(3) issued n=2399
+[ABISWAP] p5d_swap_0/1 rc=0；[SHOTSTAT] max=0 mean=0.00（仍黑）
+```
+2) 历史正常 viewport（旧电影路径 m1047–m1071）：
+```
+[DRAWST] #1 vc=3 inst=1 pipe=… vbuf=… vp=0.0,0.0,960.0,544.0 sc=0,0,960,544 rp=…
+```
+→ 后端/管线/着色器具备光栅化能力，当前问题在 viewport 状态。
+
+3) 本轮修复：
+```
+① sceGxmDraw 钩子中真正调用 p5d::vulkan::gxm_draw_arrays(3)（首次发出真实 vkCmdDraw）
+② 修正 sceGxmSetViewport 参数解码：GXM 签名 (context,xOff,xScale,yOff,yScale,zOff,zScale)，
+   yScale/zOffset/zScale 是栈参数；旧代码只读寄存器 → 视图参数错误
+③ 测试绘制前 set_gxm_viewport(0,960,0,544,0,1) + set_gxm_viewport_enable(1)
+```
+4) 现状（m1236/m1237）：
+```
+[DRAWST] vp 仍为 -0.0,0.0,0.0,0.0 → 强制 viewport 未进入 DRAWST 使用的状态
+[ABIVPE] mode=0 / [ABIVP] 全 0（游戏此时确实把 viewport 设为 0）
+帧仍全黑（BMP extrema 0）
+```
+5) NEXT：
+```
+① 在 sceGxmBeginScene 钩子与每次 sceGxmDraw 前都设置全屏 viewport+enable
+② 反汇编 gxm_vk.o set_gxm_viewport / DRAWST 读取点，确认 vp 状态来源与被覆盖原因
+③ 打开 P5D_DBG_PXVIEWPORT / P5D_DBG_GREENCLEAR 调试后端 viewport/clear
+④ viewport 修正后验收：BMP extrema>0（首帧可见）→ S0_LOGO 淡出 → S1_TITLE
+```
+验证：`m1235_drawtest_key.txt`、`m1236_vptest_key.txt`、`m1237_vp2_key.txt`、p5d_swap_*.bmp、`[TABLE] blocks=230291`。
+
+ANTI-FORGETTING ENTRY. Keywords: M1142 first real vkCmdDraw issued and black-screen cause narrowed to degenerate viewport. [DRAWST] #3 vc=3 inst=1 first=0 pipe=000002c2725ea8d0 inrp=1 vtxcnt=3 vbuf=000002c2721681d0 vp=-0.0,0.0,0.0,-0.0 sc=0,0,960,544 rp=000002c272166e50; [BEGRP2] cd=8D300000 960x544 cmd=... doClear=1 rp=...; [BSIMG] cd=8D300000 960x544 doClear=1 img=... fb=... view=...; [ABIDRAWTEST] gxm_draw_arrays(3) issued n=2399; [ABISWAP] p5d_swap_0/1 rc=0; [SHOTSTAT] frame=0/1 max=0 mean=0.00 (still black). Historical proper viewport from old movie path m1047-m1071: [DRAWST] #1 vc=3 inst=1 pipe=... vbuf=... vp=0.0,0.0,960.0,544.0 sc=0,0,960,544 rp=... (so the backend CAN rasterize). Changes this round: (1) the sceGxmDraw hook now actually calls p5d::vulkan::gxm_draw_arrays(3) (before only upload_vertex_stream, no draw ever -> always black); (2) fixed sceGxmSetViewport argument decoding: signature (context,xOff,xScale,yOff,yScale,zOff,zScale) with yScale/zOffset/zScale as STACK args; old code read registers only; (3) forced set_gxm_viewport(0,960,0,544,0,1)+set_gxm_viewport_enable(1) before the test draw. But m1236/m1237 still [DRAWST] vp=-0.0,0.0,0.0,0.0 -> forced viewport does not reach the state used by DRAWST (ordering/state-object issue); [ABIVPE] mode=0 and [ABIVP] all zero (the game really sets viewport 0 at this point); frames still black (BMP extrema 0). Analysis: backend draw path complete (sceGxmDraw -> real SPIR-V pipeline gxp_vert_0001/gxp_frag_0165 -> vertex buffer/rp bound -> vkCmdDraw called); the only direct blocker is the all-zero viewport which clips everything; the old movie path once set vp=0,0,960,544 and rasterized so pipeline/shaders/backend are fundamentally fine. NEXT: set fullscreen viewport+enable in the sceGxmBeginScene hook and again before every sceGxmDraw; disassemble gxm_vk.o set_gxm_viewport / DRAWST read sites to find which global/struct vp comes from and why our set is overwritten; enable env P5D_DBG_PXVIEWPORT / P5D_DBG_GREENCLEAR; acceptance BMP extrema>0 (first visible frame) -> S0_LOGO fade -> S1_TITLE. Verification: m1235_drawtest_key.txt, m1236_vptest_key.txt, m1237_vp2_key.txt, p5d_swap_*.bmp, [TABLE] blocks=230291.
+
+LOOKUP: M1142 first real vkCmdDraw issued DRAWST vc=3 pipe vbuf rp vp degenerate -0,0,0,0 sc 0,0,960,544, BEGRP2 cd 8D300000 doClear 1, BSIMG, ABIDRAWTEST gxm_draw_arrays 3 issued, ABISWAP swap 0/1 rc 0, SHOTSTAT max 0 mean 0, historical proper viewport m1047-m1071 vp 0,0,960,544, fixes gxm_draw_arrays call and sceGxmSetViewport stack args yScale zOffset zScale and forced set_gxm_viewport 0,960,0,544 enable 1, still vp zero forced viewport not reaching DRAWST state, ABIVPE mode 0 ABIVP all zero, next set viewport in sceGxmBeginScene and before every draw, disassemble set_gxm_viewport DRAWST read site, P5D_DBG_PXVIEWPORT P5D_DBG_GREENCLEAR, acceptance BMP extrema>0 first visible frame S0_LOGO S1_TITLE -> 18.4686 [relevant: first BMP frames black], 18.4684 [relevant: S0_LOGO], 18.4683 [relevant: GetSelf fix]
