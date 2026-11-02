@@ -1,4 +1,3 @@
-# SPDX-License-Identifier: MIT
 # 一键跑四条回归线（互不干扰）：
 #   ① 探针/RE 工具红线（模拟器侧基线，保持不变）
 #   ② PC 原生渲染回归（游戏原生 960×544，含图像级判据）
@@ -24,7 +23,7 @@ Push-Location 'C:\dev\p5dsrc\tools'
 $out2 = py -3 render_regression.py 2>&1
 Pop-Location
 $out2 | Where-Object { $_ -match '960x544|RENDER_REGRESSION' } | ForEach-Object { Write-Output ('  ' + $_.ToString().Trim()) }
-if (($out2 | Select-String -Pattern 'RENDER_REGRESSION_PASS')) { Write-Output '  => 渲染线 PASS' } else { Write-Output '  => 渲染线 FAIL'; $fail = 1 }
+if (($out2 | Select-String -Pattern 'RENDER_REGRESSION_PASS')) { Write-Output '  => 渲染线 PASS' } elseif (($out2 | Select-String -Pattern 'RENDER_REGRESSION_SKIP')) { Write-Output '  => 渲染线 SKIP (captured inputs missing, regenerable)' } else { Write-Output '  => 渲染线 FAIL'; $fail = 1 }
 
 Write-Output ''
 Write-Output '===== ③ ver3 GAP 块图遍历（1000/1039 基线，见 18.3224/18.3227）====='
