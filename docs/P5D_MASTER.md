@@ -1119,6 +1119,70 @@
 | M1101 | §18.4646: ★★★★★★★★★ **1 字节差已通过 +0x200 安全余量绕过：`[CMPBUF] r1=00020190 r6=0002038F`（0x20190 ≤ 0x2038F ✓）、`[FIOSX] #1 at=8128399E n=1717 r0=84855FC8 r1=848E8E7C r2=00020190`（★ criFs_Initialize 真实被调用，config=0x84855FC8/buf=0x848E8E7C/size=0x20190）、`[INITRET] r0=00000000`（★ FUN_81224160 返回 0=成功）。失败点后移到下一层：`E2009011903:Insufficient buffer size.（×3，n=1717）`（另一个子模块 buffer 检查）与 `W2008121610:The binder module is not initialized.（n=1754）`（binder 仍未初始化）→ CPK 挂载仍失败。**
 | M1102 | §18.4647: ★★★★★★★★★ **binder 初始化真相：`criFsBinder_Initialize`（FUN_81284960）由 criFs_Initialize 内部调用（0x81283BAE），m1144 探针显示它**确实执行并成功**：`[BINDCALL] r0=00000020 r1=00000100 r2=84906328 r3=00002960`（num_binders=32, uVar6=0x100, work=0x84906328, size=0x2960，正好等于公式 param_2*param_1+param_1*0x48+0x60 = 0x2000+0x900+0x60=0x2960 ✓）、`[BINDRET] r0=00000020 flagFEF4=816A0BA0`（★ DAT_8153FEF4 被置为非 0 = binder 初始化成功）。**但随后又被清零**：`[BINDWARN] flagFEF4=00000000` at n=1754（CPK 挂载时的 FUN_812859FA 因此报 W2008121610）。⇒ 后续 2 次 Atom 初始化失败（`E2009011903:Insufficient buffer size.` ×3）触发 cleanup，其中调用 criFs 的 finalize 把 binder 模块也 finalize 了（清 DAT_8153FEF4）。**
 | M1103 | §18.4648: ★★★★★★★★★ **E2009011903 检查完全解码 + 数值实测：`[CMPBUF2] r9=0259A67B r6=000001FF`（r9=所需 uVar6=39,430,267B≈39MB，r6=剩余可用=0x1FF），检查块 blk_8122485C（`r9<=r6` 才成功，否则落入 0x81224860 记录 E2009011903）。uVar6 来源 = `FUN_81226624(&local_78) + FUN_81254D24()`（FUN_81224160 内 @0x812248xx 附近），其中 FUN_81259F30→FUN_8125AC84（视频解码工作大小）+ (iVar3+4)*4+0x14；FUN_81254D24 在 `DAT_8153FC8C>0` 时返回 0x4E0。同时取得配置数据：`[ATOMCFG] cfg=84856088 words: 00000024 00000010 45160000 8485609C 00000004 00000003 41EFC28F 84856318 00000000 02120105 …`、`[SIZEFN] arg=8485609C …`、`[SIZERET] size=0002018F`（FUN_81223EF6 对 config[3]=0x8485609C 返回 0x2018F=Atom 侧预算）。⇒ 矛盾：Atom 预算 0x2018F 远小于 Mana 所需 0x259A67B+0x1FF 剩余，说明**Mana/视频解码大小计算依赖的配置字段有误（很可能是未正确初始化的视频配置结构 local_78 字段）**，导致解码器工作大小被算成 39MB。**
+| M1104 | §18.4649: ★★★★★★★★★★★★ **决定性突破：E2009011903 的 39MB 假大小来自 SceNgs（NGS 音频引擎）HLE 未开启！FUN_8125AC84 是语音/音效接口调度器（ASR/HCA-MX），其注册的接口函数 FUN_8125CFB6→FUN_8125C2F0 是 **CRI NGS 初始化**（"\nCRI NGS/VITA Ver.1.10.00 Build:Jan 30 2018 18:45:39\n"，调用 SceSysmodule_53099B7A/79A0160A(sysmodule=0xB)、SceNgs_ED14CF4A=sceNgsSystemInit、SceNgs_6CE8B36F、SceNgs_E9B572B7、SceNgs_477318C0、SceNgs_14EF65A0 等 NGS HLE stub）。此前所有运行都**没设 P5D_NGS=1**，NGS stub 全部返回 0/假值 → NGS 工作大小算错（-1 或 39MB）→ E2009011903 → cleanup finalize → binder 清 0。**开启 P5D_NGS=1 后：NGS 工作大小=0x1DEF0（正常）、`[CMPBUF2] r9=0001E5CC r6=0001E7CC`（检查通过）、`[E1903HIT] 0`、`[BINDWARN] 0`（binder 保持）、`[CRIFMT] 0`（ACB/ACF 错误消失）；游戏自身 CRI 初始化链完全打通。**新问题：n=181,619 处 `E2009072321:Cannot allocate memory.`（criFs user-heap 相关，字符串 0x8131AD18，附近有 E2009072322:The user-heap API is unset.）后原地循环（n 停在 181,670）。**
+m1148（NGS 关闭）vs m1149（P5D_NGS=1）对比：
+```
+m1148（P5D_NGS 未设）:
+[MANA3] decoder=FFFFFFFF / decoder=C31B42F7 / decoder=02599F9F    ← NGS 大小错误（-1 或 39MB）
+[CMPBUF2] r9=0259A67B r6=000001FF                                  ← 失败
+[E1903HIT] #0 …                                                    ← E2009011903
+[CRILOG] n=1754 W2008121610:The binder module is not initialized.   ← binder 被 finalize
+[CRIFMT] n=1754 E2010052671:Can not open ACF file (sound/common.acf)
+m1149（P5D_NGS=1）:
+[MANA3] decoder=0001DEF0 (0x1DEF0) ×8                               ← ★ NGS 工作大小正常
+[CMPBUF2] r9=0001E5CC r6=0001E7CC                                   ← ★ 检查通过（所需 ≤ 可用）
+[E1903HIT] 0                                                        ← ★ 无 E2009011903
+[BINDWARN] 0                                                        ← ★ binder 保持（flag=0x816A0BA0）
+[CRIFMT] 0 / [FIOSX] #4-6 at=811820B6 n=1717                        ← CPK 挂载进行中，无 ACB 错误
+[CRILOG] n=181619 E2009072321:Cannot allocate memory.               ← 新卡点（后半段）
+[WD] loop=1 … blk=81173182/811731E0/812B2880/812B28A0 … n=181670    ← 原地循环（等待/自旋）
+[BADMEM]=0
+```
+**NGS 初始化链反编译（`mana_sz3.txt`/`asr_ws.txt`/`asr2.txt`）**：
+```c
+// FUN_8125AC84：语音/音效接口调度（param_1=接口索引）
+if (DAT_8153F9D4[param_1] != 0) return ((code*)((uint**)DAT_8153F9D4[param_1])[0])(param_2);
+if (param_1 < 3) { if (1 < param_1) { "E2010092710:ASR is not initialized."; return -1; } }
+else if (param_1 < 4) { "E2010092711:HCA-MX is not initialized."; return -1; }
+"E2010092712:The library is not initialized. (Voice interface is not registered.)"; return -1;
+// FUN_8125AC60(idx, table)：注册接口 DAT_8153F9D4[idx] = table
+// FUN_8125CFAC()：返回接口表 &PTR_FUN_8125cfb6_1_813144F4（表中函数指针：8125CFB7 8125CFC1 8125D02B …）
+// FUN_8125CFB6 → FUN_8125C2F0（CRI NGS 初始化 664B）：
+DAT_816A0900 = "\nCRI NGS/VITA Ver.1.10.00 Build:Jan 30 2018 18:45:39\n";
+iVar1 = SceSysmodule_53099B7A(0xB); if (iVar1 != 0 && SceSysmodule_79A0160A(0xB) == 0) DAT_8153FA10 = 1;
+iVar1 = SceNgs_ED14CF4A(&DAT_8169E900, 0x2000, &local_7C, local_94);    // ★ sceNgsSystemInit
+if (iVar1 < 0) { log "E2015101320:sceNgsSystemInit failed 0x%08x"; }
+else if (local_94[0] != 0) { … SceNgs_6CE8B36F(&…,&local_98); … SceNgs_E9B572B7()/SceNgs_477318C0(…,&local_9C) …
+                            SceNgs_14EF65A0()/SceNgs_477318C0(…,&local_A0) … }
+```
+**P5D_NGS=1 时 HLE 行为（recomp_harness.cpp，18.4416/18.4421 段）**：
+```cpp
+if (!g_ngs_env) { r0 = 0; break; } uint32_t _sz = 0x2000; if (s->r[2]) memcpy(→0x2000); r0 = 0;  // sceNgsSystemInit
+case 0x812B20C0: r0 = 4/0x10; case 0x812B20B0: r0 = 4; case 0x812B1F30: r0 = 4; case 0x812B1FE0: r0 = 2;   // NGS getters
+case 0x812B1E90: sceSysmoduleIsLoaded -> 1（NGS 已加载）; case 0x812B1860: sceSysmoduleLoadModule -> 0
+case 0x812B1ED0/1EE0: sceAudioOutOpenPort/SetVolume; case 0x812B1FC0: sceNgsSystemUpdate -> 0; case 0x812B2060: VoiceGetStateData -> 0
+```
+**⇒ 本轮结论**：
+1. **P5D_NGS=1 必须加入标准运行环境**（此前 15+ 轮的"39MB Insufficient buffer"根因就是它）
+2. 游戏自身 CRI 初始化链（Atom/criFs/binder）在 NGS 正常后**完全打通**：binder 保持、CPK 挂载进行、ACB/ACF 不再报错
+3. 新卡点：`E2009072321:Cannot allocate memory.`（criFs user-heap API 相关，E2009072322:The user-heap API is unset. 在附近字符串）→ 之后原地循环 n=181,670 不进
+NEXT：
+```
+① 加入 P5D_NGS=1 到标准 env，后续运行一律使用
+② xref E2009072321(0x8131AD18)/E2009072322(0x8131A918) → 找函数（criFs user-heap 分配路径）
+③ 检查游戏是否调用 criFs_SetUserMallocFunction/SetUserFreeFunction（可能在我们跳过的初始化里）
+④ HLE 拦截对应 stub 返回正确内存，或让分配走 HLE 堆
+⑤ 打通后：CPK 挂载完成 → ACB/ACF/title 素材可读 → [SCENE] 视图 → GXM → 画面
+备选：若 user-heap API 在标题页前非必需，HLE 提供最小分配实现
+```
+验证：`out80m_m1148mana.txt`、`out80m_m1149ngs.txt`、`mana_sz3.txt`、`asr_ws.txt`、`asr2.txt`、`recomp_harness.cpp`。 |
+| §18.4649 | DECISIVE breakthrough: the fake 39MB size behind E2009011903 comes from SceNgs (NGS audio engine) HLE being disabled! FUN_8125AC84 is a voice/sound interface dispatcher (ASR/HCA-MX) whose registered interface function FUN_8125CFB6->FUN_8125C2F0 is CRI NGS init ("\\nCRI NGS/VITA Ver.1.10.00 Build:Jan 30 2018 18:45:39\\n", calling SceSysmodule_53099B7A/79A0160A(sysmodule=0xB), SceNgs_ED14CF4A=sceNgsSystemInit, SceNgs_6CE8B36F, SceNgs_E9B572B7, SceNgs_477318C0, SceNgs_14EF65A0 etc. NGS HLE stubs). All previous runs did NOT set P5D_NGS=1, so the NGS stubs returned 0/fake values -> the NGS work size was wrong (-1 or 39MB) -> E2009011903 -> cleanup finalize -> binder cleared. With P5D_NGS=1: NGS work size = 0x1DEF0 (normal), [CMPBUF2] r9=0001E5CC r6=0001E7CC (check passes), [E1903HIT] 0, [BINDWARN] 0 (binder kept), [CRIFMT] 0 (ACB/ACF errors gone); the game own CRI init chain is completely open. New issue: at n=181,619 E2009072321:Cannot allocate memory. (criFs user-heap related, string 0x8131AD18, with E2009072322:The user-heap API is unset. nearby) then an idle loop (n stuck at 181,670). '
+       'm1148 (NGS off) vs m1149 (P5D_NGS=1): m1148 [MANA3] decoder=FFFFFFFF / C31B42F7 / 02599F9F (wrong NGS sizes -1 or 39MB), [CMPBUF2] r9=0259A67B r6=000001FF (fail), [E1903HIT] #0 (E2009011903), [CRILOG] n=1754 W2008121610 binder not initialized (binder finalized), [CRIFMT] n=1754 E2010052671 Can not open ACF file (sound/common.acf). m1149 [MANA3] decoder=0001DEF0 x8 (normal), [CMPBUF2] r9=0001E5CC r6=0001E7CC (pass), [E1903HIT] 0, [BINDWARN] 0 (binder kept, flag=0x816A0BA0), [CRIFMT] 0, [FIOSX] #4-6 at=811820B6 n=1717 (CPK mount in progress, no ACB errors), [CRILOG] n=181619 E2009072321:Cannot allocate memory., [WD] loop=1 ... blk=81173182/811731E0/812B2880/812B28A0 ... n=181670 (idle loop), [BADMEM]=0. '
+       'NGS init chain decompile: FUN_8125AC84: if (DAT_8153F9D4[param_1] != 0) return ((code*)((uint**)DAT_8153F9D4[param_1])[0])(param_2); if (param_1 < 3) { if (1 < param_1) { log E2010092710:ASR is not initialized.; return -1; } } else if (param_1 < 4) { log E2010092711:HCA-MX is not initialized.; return -1; } log E2010092712:The library is not initialized. (Voice interface is not registered.); return -1;. FUN_8125AC60(idx, table) registers DAT_8153F9D4[idx] = table. FUN_8125CFAC() returns interface table &PTR_FUN_8125cfb6_1_813144F4 (function pointers 8125CFB7 8125CFC1 8125D02B ...). FUN_8125CFB6 -> FUN_8125C2F0 (CRI NGS init 664B): DAT_816A0900 = "\\nCRI NGS/VITA Ver.1.10.00 Build:Jan 30 2018 18:45:39\\n"; iVar1 = SceSysmodule_53099B7A(0xB); if (iVar1 != 0 && SceSysmodule_79A0160A(0xB) == 0) DAT_8153FA10 = 1; iVar1 = SceNgs_ED14CF4A(&DAT_8169E900, 0x2000, &local_7C, local_94) (sceNgsSystemInit); if (iVar1 < 0) log E2015101320:sceNgsSystemInit failed 0x%08x; else if (local_94[0] != 0) { ... SceNgs_6CE8B36F(&...,&local_98); ... SceNgs_E9B572B7()/SceNgs_477318C0(...,&local_9C) ... SceNgs_14EF65A0()/SceNgs_477318C0(...,&local_A0) ... }. '
+       'P5D_NGS=1 HLE behavior (recomp_harness.cpp sections 18.4416/18.4421): if (!g_ngs_env) { r0 = 0; break; } uint32_t _sz = 0x2000; if (s->r[2]) memcpy(->0x2000); r0 = 0 (sceNgsSystemInit); case 0x812B20C0: r0 = 4/0x10; case 0x812B20B0: r0 = 4; case 0x812B1F30: r0 = 4; case 0x812B1FE0: r0 = 2 (NGS getters); case 0x812B1E90: sceSysmoduleIsLoaded -> 1; case 0x812B1860: sceSysmoduleLoadModule -> 0; case 0x812B1ED0/1EE0: sceAudioOutOpenPort/SetVolume; case 0x812B1FC0: sceNgsSystemUpdate -> 0; case 0x812B2060: VoiceGetStateData -> 0. '
+       'CONCLUSION: (1) P5D_NGS=1 must be added to the standard run environment (the root cause of the 15+ rounds of 39MB Insufficient buffer); (2) the game own CRI init chain (Atom/criFs/binder) is completely open once NGS is normal: binder kept, CPK mount in progress, no ACB/ACF errors; (3) new blocker: E2009072321:Cannot allocate memory. (criFs user-heap API related, E2009072322:The user-heap API is unset. nearby) -> then an idle loop at n=181,670. '
+       'NEXT: (1) add P5D_NGS=1 to the standard env and use it for all subsequent runs; (2) xref E2009072321 (0x8131AD18)/E2009072322 (0x8131A918) to find the functions (criFs user-heap allocation path); (3) check whether the game calls criFs_SetUserMallocFunction/SetUserFreeFunction (possibly in an init step we skipped); (4) HLE-intercept the corresponding stub to return proper memory, or route the allocation to the HLE heap; (5) then CPK mount completes -> ACB/ACF/title assets readable -> [SCENE] views -> GXM -> picture. Fallback: if the user-heap API is not required before the title page, HLE-provide a minimal allocation implementation. '
+       'Verification: out80m_m1148mana.txt, out80m_m1149ngs.txt, mana_sz3.txt, asr_ws.txt, asr2.txt, recomp_harness.cpp. |
 m1145/m1146/m1147（`out80m_m1145cmp2.txt`/`m1146ring.txt`/`m1147cfg.txt`）证据：
 ```
 [CMPBUF2] r9=0259A67B r6=000001FF r0=849091FF r1=8153FCA0 r2=812B4150 r3=00000090
@@ -500231,3 +500295,53 @@ FUN_81254D24: return (0<DAT_8153FC8C)? FUN_8127AE92() : 0;   // FUN_8127AE92 →
 ANTI-FORGETTING ENTRY. Keywords: M1103 E2009011903 check decoded - [CMPBUF2] r9=0259A67B (required uVar6 = 39,430,267B ~39MB) vs r6=000001FF (remaining), check block blk_8122485C succeeds when r9<=r6 else falls to 0x81224860 logging E2009011903; uVar6 = FUN_81226624(&local_78) + FUN_81254D24() inside FUN_81224160, where FUN_81226624 reads fields *(p+4),*(p+8),*(p+0xc), calls FUN_81259F30 which calls FUN_8125AC84 (video decoder work size) and adds (iVar3+4)*4+0x14; FUN_81254D24 returns 0x4E0 when DAT_8153FC8C>0 (FUN_8127AE92). [ATOMCFG] cfg=84856088 words 00000024 00000010 45160000 8485609C 00000004 00000003 41EFC28F 84856318 00000000 02120105 00000024 00000003 41EFC28F 00000001 00000000 00000024; FUN_81223EF6(config[3]=0x8485609C) returns 0x2018F ([SIZERET]); criFs_Initialize called with size 0x20190 (three times at n=1717, FIOSX #1-3). At the check moment criFECC=00000001 and binfFEF4=816A0BA0 (criFs initialized and binder established). [E1903HIT] ring: 81224860 8122485C 81224736 81224418 81224414 81254D36 81254D34 8127AEB2. Contradiction: Atom budget 0x2018F far smaller than Mana requirement 0x259A67B+0x1FF -> the Mana/video-decoder size depends on wrong config fields (likely the video config struct local_78 fields) making the decoder size 39MB. NEXT: probe FUN_81226624/FUN_81259F30/FUN_8125AC84 for local_20/local_1c/uStack_18 and the decoder size; if the 39MB comes from FUN_8125AC84 check whether its codec/size fields are garbage; find the correct source of those fields and fix; then Mana size becomes normal -> all 3 Atom inits succeed -> binder flag stays -> CPK mount succeeds -> assets readable. Fallback: HLE-skip the Mana init if not required before the title page.
 
 LOOKUP: M1103 E2009011903 check r9=0259A67B vs r6=0x1FF, blk_8122485C blk_81224860, FUN_81226624 FUN_81254D24 FUN_81259F30 FUN_8125AC84 video decoder work size, FUN_8127AE92 0x4E0, DAT_8153FC8C, [ATOMCFG] words, FUN_81223EF6 -> 0x2018F, criFs_Initialize size 0x20190, criFECC=1 binfFEF4=816A0BA0, ring 81224860 8122485C 81224736 81224418 81224414, next probe Mana sizes and fix config -> §18.4647 [relevant: binder truth], §18.4646 [relevant: margin], §18.4645 [relevant: 1-byte diff]
+### 18.4649 PORT M1104: 决定性突破——39MB 假大小来自 SceNgs HLE 未开启；P5D_NGS=1 后 CRI/binder 全通，新卡点=user-heap 分配
+
+1) m1148（NGS 关闭）vs m1149（P5D_NGS=1）：
+```
+m1148: [MANA3] decoder=FFFFFFFF / C31B42F7 / 02599F9F   ← NGS 大小错误
+       [CMPBUF2] r9=0259A67B r6=000001FF                  ← 失败
+       [CRILOG] n=1754 W2008121610 binder not initialized ← binder 被 finalize
+       [CRIFMT] n=1754 E2010052671 Can not open ACF file
+m1149: [MANA3] decoder=0001DEF0 ×8                        ← ★ NGS 大小正常
+       [CMPBUF2] r9=0001E5CC r6=0001E7CC                  ← ★ 检查通过
+       [E1903HIT] 0 / [BINDWARN] 0                        ← ★ binder 保持
+       [CRIFMT] 0 / [FIOSX] #4-6 at=811820B6 n=1717       ← CPK 挂载进行，无 ACB 错误
+       [CRILOG] n=181619 E2009072321:Cannot allocate memory.（新卡点）
+       [WD] … n=181670 原地循环
+```
+2) FUN_8125AC84 = 语音/音效接口调度（ASR/HCA-MX）：
+```c
+if (DAT_8153F9D4[param_1] != 0) return ((code*)((uint**)DAT_8153F9D4[param_1])[0])(param_2);
+… "E2010092710:ASR is not initialized." / "E2010092711:HCA-MX is not initialized." / "E2010092712:…Voice interface is not registered." → -1
+// FUN_8125AC60(idx,table) 注册；FUN_8125CFAC() 返回表 &PTR_FUN_8125cfb6_1_813144F4
+// FUN_8125CFB6 → FUN_8125C2F0（CRI NGS 初始化）：
+DAT_816A0900 = "\nCRI NGS/VITA Ver.1.10.00 Build:Jan 30 2018 18:45:39\n";
+SceSysmodule_53099B7A(0xB) / SceSysmodule_79A0160A(0xB);
+SceNgs_ED14CF4A(&DAT_8169E900, 0x2000, &local_7C, local_94);   // sceNgsSystemInit
+SceNgs_6CE8B36F / SceNgs_E9B572B7 / SceNgs_477318C0 / SceNgs_14EF65A0 …
+```
+3) P5D_NGS=1 的 HLE 行为（recomp_harness.cpp 18.4416/18.4421）：
+```cpp
+if (!g_ngs_env) { r0 = 0; break; } uint32_t _sz = 0x2000; if (s->r[2]) memcpy(→0x2000); r0 = 0;   // sceNgsSystemInit
+case 0x812B20C0: r0 = 0x10/4; case 0x812B1E90: sceSysmoduleIsLoaded → 1; case 0x812B1860: → 0;
+case 0x812B1ED0/1EE0: sceAudioOutOpenPort/SetVolume; 0x812B1FC0: sceNgsSystemUpdate → 0; 0x812B2060: VoiceGetStateData → 0
+```
+4) 结论：
+- **P5D_NGS=1 必须加入标准 env**（前 15+ 轮 39MB 根因）
+- 游戏自身 CRI 链完全打通：binder 保持、CPK 挂载进行、ACB/ACF 无错
+- 新卡点：`E2009072321:Cannot allocate memory.`（criFs user-heap；E2009072322:The user-heap API is unset.）→ 原地循环 n=181,670
+5) NEXT：
+```
+① 标准 env 加入 P5D_NGS=1
+② xref E2009072321(0x8131AD18)/E2009072322(0x8131A918) 找函数
+③ 查游戏是否调用 criFs_SetUserMallocFunction/SetUserFreeFunction
+④ HLE 拦截/提供内存，或路由到 HLE 堆
+⑤ CPK 挂载完成 → ACB/ACF/title 素材 → [SCENE] 视图 → GXM → 画面
+备选：user-heap 非必需时提供最小实现
+```
+验证：`out80m_m1148mana.txt`、`out80m_m1149ngs.txt`、`mana_sz3.txt`、`asr_ws.txt`、`asr2.txt`。
+
+ANTI-FORGETTING ENTRY. Keywords: M1104 DECISIVE breakthrough - the fake 39MB size behind E2009011903 comes from SceNgs HLE being disabled (P5D_NGS not set). FUN_8125AC84 is a voice/sound interface dispatcher (ASR/HCA-MX) whose registered interface FUN_8125CFB6 -> FUN_8125C2F0 is CRI NGS init ("\\nCRI NGS/VITA Ver.1.10.00 Build:Jan 30 2018 18:45:39\\n", SceSysmodule_53099B7A/79A0160A(0xB), SceNgs_ED14CF4A=sceNgsSystemInit, SceNgs_6CE8B36F, SceNgs_E9B572B7, SceNgs_477318C0, SceNgs_14EF65A0). All previous runs did not set P5D_NGS=1 so NGS stubs returned 0/fake -> NGS work size wrong (-1 or 39MB) -> E2009011903 -> finalize -> binder cleared. With P5D_NGS=1: [MANA3] decoder=0001DEF0, [CMPBUF2] r9=0001E5CC r6=0001E7CC (pass), [E1903HIT] 0, [BINDWARN] 0, [CRIFMT] 0; the game own CRI init chain is completely open. New issue: n=181619 E2009072321:Cannot allocate memory. (criFs user-heap, string 0x8131AD18, E2009072322:The user-heap API is unset. at 0x8131A918 nearby) then idle loop n=181,670. m1148 (NGS off): decoder=FFFFFFFF/C31B42F7/02599F9F, CMPBUF2 r9=0259A67B r6=0x1FF fail, E1903HIT, W2008121610 binder not initialized n=1754, E2010052671 Can not open ACF file n=1754. P5D_NGS=1 HLE (recomp_harness.cpp 18.4416/18.4421): if (!g_ngs_env) { r0 = 0; break; } uint32_t _sz = 0x2000; if (s->r[2]) memcpy(->0x2000); r0 = 0 (sceNgsSystemInit); case 0x812B20C0: r0 = 0x10/4; case 0x812B1E90: sceSysmoduleIsLoaded -> 1; case 0x812B1860: -> 0; case 0x812B1ED0/1EE0 sceAudioOutOpenPort/SetVolume; 0x812B1FC0 sceNgsSystemUpdate -> 0; 0x812B2060 VoiceGetStateData -> 0. CONCLUSION: P5D_NGS=1 must be added to the standard env (root cause of 15+ rounds of 39MB Insufficient buffer); the game own CRI chain (Atom/criFs/binder) is completely open once NGS is normal; new blocker is E2009072321 Cannot allocate memory (criFs user-heap) then idle loop. NEXT: add P5D_NGS=1 to standard env; xref E2009072321 (0x8131AD18)/E2009072322 (0x8131A918) to find the criFs user-heap allocation path; check whether the game calls criFs_SetUserMallocFunction/SetUserFreeFunction; HLE-intercept the stub to return proper memory or route to the HLE heap; then CPK mount completes -> ACB/ACF/title assets -> [SCENE] views -> GXM -> picture. Fallback: minimal HLE allocation if the user-heap API is not required before the title page.
+
+LOOKUP: M1104 P5D_NGS=1 decisive, E2009011903 39MB root cause SceNgs HLE disabled, FUN_8125AC84 ASR/HCA-MX dispatcher, FUN_8125CFB6 FUN_8125C2F0 CRI NGS init 0x1DEF0, SceNgs_ED14CF4A sceNgsSystemInit SceNgs_6CE8B36F SceNgs_477318C0 SceNgs_14EF65A0, SceSysmodule_53099B7A 79A0160A 0xB, [MANA3] decoder=0001DEF0, [CMPBUF2] r9=0001E5CC r6=0001E7CC pass, [BINDWARN] 0, binder kept, no ACB/ACF errors, new E2009072321 Cannot allocate memory n=181619 user-heap 0x8131AD18, E2009072322 0x8131A918, idle loop n=181670, next add P5D_NGS=1 to standard env and fix user-heap -> §18.4648 [relevant: E2009011903], §18.4647 [relevant: binder truth], §18.4646 [relevant: margin]
