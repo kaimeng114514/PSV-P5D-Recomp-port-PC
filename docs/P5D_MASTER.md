@@ -1118,6 +1118,67 @@
 | M1100 | §18.4645: ★★★★★★★★★ **量化定位：游戏自身 CRI 初始化的 "Insufficient buffer size" 是 1 字节差——探针实测 `[CMPBUF] r1=00020190 r6=0002018F`（r1=local_98[0] 即 criFs 所需大小 0x20190；r6=param_4 即 Atom 侧提供的大小 0x2018F，**差 1 字节**！），`[ATOMINIT] cfg=84856088 buf=848E8E7C r2=00023FEF r3=00000090 lr=81236208`（FUN_81257318 入口：config/buffer/调用者来自 FUN_81235A10 区域）。⇒ 不是缺失步骤，而是**两侧 size 计算差 1**：criFs 需求比 Atom 预算多 1 字节。**
 | M1101 | §18.4646: ★★★★★★★★★ **1 字节差已通过 +0x200 安全余量绕过：`[CMPBUF] r1=00020190 r6=0002038F`（0x20190 ≤ 0x2038F ✓）、`[FIOSX] #1 at=8128399E n=1717 r0=84855FC8 r1=848E8E7C r2=00020190`（★ criFs_Initialize 真实被调用，config=0x84855FC8/buf=0x848E8E7C/size=0x20190）、`[INITRET] r0=00000000`（★ FUN_81224160 返回 0=成功）。失败点后移到下一层：`E2009011903:Insufficient buffer size.（×3，n=1717）`（另一个子模块 buffer 检查）与 `W2008121610:The binder module is not initialized.（n=1754）`（binder 仍未初始化）→ CPK 挂载仍失败。**
 | M1102 | §18.4647: ★★★★★★★★★ **binder 初始化真相：`criFsBinder_Initialize`（FUN_81284960）由 criFs_Initialize 内部调用（0x81283BAE），m1144 探针显示它**确实执行并成功**：`[BINDCALL] r0=00000020 r1=00000100 r2=84906328 r3=00002960`（num_binders=32, uVar6=0x100, work=0x84906328, size=0x2960，正好等于公式 param_2*param_1+param_1*0x48+0x60 = 0x2000+0x900+0x60=0x2960 ✓）、`[BINDRET] r0=00000020 flagFEF4=816A0BA0`（★ DAT_8153FEF4 被置为非 0 = binder 初始化成功）。**但随后又被清零**：`[BINDWARN] flagFEF4=00000000` at n=1754（CPK 挂载时的 FUN_812859FA 因此报 W2008121610）。⇒ 后续 2 次 Atom 初始化失败（`E2009011903:Insufficient buffer size.` ×3）触发 cleanup，其中调用 criFs 的 finalize 把 binder 模块也 finalize 了（清 DAT_8153FEF4）。**
+| M1103 | §18.4648: ★★★★★★★★★ **E2009011903 检查完全解码 + 数值实测：`[CMPBUF2] r9=0259A67B r6=000001FF`（r9=所需 uVar6=39,430,267B≈39MB，r6=剩余可用=0x1FF），检查块 blk_8122485C（`r9<=r6` 才成功，否则落入 0x81224860 记录 E2009011903）。uVar6 来源 = `FUN_81226624(&local_78) + FUN_81254D24()`（FUN_81224160 内 @0x812248xx 附近），其中 FUN_81259F30→FUN_8125AC84（视频解码工作大小）+ (iVar3+4)*4+0x14；FUN_81254D24 在 `DAT_8153FC8C>0` 时返回 0x4E0。同时取得配置数据：`[ATOMCFG] cfg=84856088 words: 00000024 00000010 45160000 8485609C 00000004 00000003 41EFC28F 84856318 00000000 02120105 …`、`[SIZEFN] arg=8485609C …`、`[SIZERET] size=0002018F`（FUN_81223EF6 对 config[3]=0x8485609C 返回 0x2018F=Atom 侧预算）。⇒ 矛盾：Atom 预算 0x2018F 远小于 Mana 所需 0x259A67B+0x1FF 剩余，说明**Mana/视频解码大小计算依赖的配置字段有误（很可能是未正确初始化的视频配置结构 local_78 字段）**，导致解码器工作大小被算成 39MB。**
+m1145/m1146/m1147（`out80m_m1145cmp2.txt`/`m1146ring.txt`/`m1147cfg.txt`）证据：
+```
+[CMPBUF2] r9=0259A67B r6=000001FF r0=849091FF r1=8153FCA0 r2=812B4150 r3=00000090
+          r4=84855FA0 r5=8130D424 r7=0 r8=8490900C sp=84855F80 lr=8127AEAE
+          criFECC=00000001 binfFEF4=816A0BA0        ← 此刻 criFs 已初始化、binder 已建立
+[E1903HIT] #0 r0=849091FF … r6=000001FF r8=8490900C r9=0259A67B r10=8485609C r12=00000100
+           ring: 81224860 8122485C 81224736 81224418 81224414 81254D36 81254D34 8127AEB2
+[ATOMCFG] cfg=84856088 words:
+          00000024 00000010 45160000 8485609C 00000004 00000003 41EFC28F 84856318
+          00000000 02120105 00000024 00000003 41EFC28F 00000001 00000000 00000024
+[SIZECALL] arg(config3)=00000000 r1=0 r2=00023FEF r3=84855EFC r9=84856088 lr=812573A4
+[SIZEFN]  arg=8485609C r1=0 r2=00023FEF r3=84855EFC lr=812573B0     ← FUN_81223EF6(config[3])
+[SIZERET] size=0002018F …                                          ← Atom 预算
+[FIOSX] #1-3 at=8128399E n=1717 r0=84855FC8 r1=848E8E7C r2=00020190  ← criFs_Initialize 被调用（criFs 部分需要 0x20190）
+```
+**E2009011903 检查反编译上下文（FUN_81224160，`criinit2.txt` 258-303 行）**：
+```c
+local_70 = param_1[5]; uStack_6c = param_1[3];
+iVar2 = FUN_81226624(&local_78);
+if (((iVar2 < 0) || (iVar4 = FUN_81254D24(), iVar4 < 0)) || (uVar6 = iVar2 + iVar4, (int)uVar6 < 0)) {
+   … 失败 cleanup（含 finalize）… goto LAB_81224E1C; }
+if (param_3 == 0 && param_4 == 0) { param_3 = FUN_81279b54(&DAT_8169e110, uVar6); DAT_8153f27c = param_3; }
+else if (param_4 < (int)uVar6) { FUN_81278f96(0,"E2009011903:Insufficient buffer size."); … cleanup … }
+```
+**子函数反编译（`mana_sz.txt`/`mana_sz2.txt`）**：
+```c
+void FUN_81226624(int param_1) {                  // 返回 Mana 工作大小（通过栈返回）
+  local_20 = *(param_1+4); local_1c = *(param_1+8); uStack_18 = *(param_1+0xc);
+  iVar1 = FUN_81259f30(&local_20);
+  return (iVar1 < 0) ? -1 : iVar1 + (local_1c*4 + 0x14)*2; }
+void FUN_81259f30(undefined4 *param_1) {
+  local_18 = *param_1; iVar3 = param_1[1]; local_14 = param_1[2];
+  uVar1 = FUN_8125cfac(); FUN_8125ac60(1, uVar1, 1);
+  iVar2 = FUN_8125ac84(1, &local_18);              // ★ 视频解码器工作大小（依赖 codec/尺寸参数）
+  return (iVar2 < 0) ? -1 : iVar2 + (iVar3+4)*4 + 0x14; }
+undefined4 FUN_81254D24(void) { return (0 < DAT_8153FC8C) ? FUN_8127AE92() : 0; }
+undefined4 FUN_8127AE92(void) { … 8×FUN_8127B250(0) …; return 0x4e0; }
+```
+**分析**：
+1. E2009011903 检查在 criFs 部分**之前**（`uVar6` = Mana/视频解码 + 其他）——即 `param_4`（总工作缓冲）必须先容纳 Mana 部分，再容纳 criFs（0x20190）
+2. 实测 Mana 部分 = 0x259A67B（39MB）远超 Atom 预算 0x2018F（131KB）
+3. 若 Mana 大小计算（FUN_81226624/FUN_81259F30/FUN_8125AC84）依赖的 video 配置字段（local_78，从 param_1 派生）有误 → 解码器工作大小被算成 39MB
+4. 配置结构（0x84856088）看起来字段齐全（含 float 2400.0=0x45160000、29.97=0x41EFC28F 等），但需确认 FUN_81224160 内部构建 local_78 时取的字段是否正确
+NEXT：
+```
+① 在 FUN_81226624 入口/返回、FUN_81259F30 入口、FUN_8125AC84 入口/返回加探针：
+   打印 local_20/local_1c/uStack_18、iVar2（解码器工作大小）、iVar3
+② 若 FUN_8125AC84 返回 39MB 级别 → 检查它依赖的 codec/尺寸字段是否为垃圾值（未初始化）
+③ 找到这些字段的正确来源（游戏配置结构/常量表），修正初始化
+④ 修复后：Mana 大小回到正常值（约几十万字节）→ param_4 足够 → 3 次 Atom init 全部成功
+   → binder flag 保持 → CPK 挂载成功 → ACB/ACF/title 素材可读
+备选：若 Mana 初始化在标题页前并非必需，可 HLE 层跳过 Mana 初始化（需确认游戏后续不依赖）
+```
+验证：`out80m_m1145cmp2.txt`、`out80m_m1146ring.txt`、`out80m_m1147cfg.txt`、`criinit2.txt`、`mana_sz.txt`、`mana_sz2.txt`。 |
+| §18.4648 | E2009011903 check fully decoded and measured: [CMPBUF2] r9=0259A67B r6=000001FF (r9 = required uVar6 = 39,430,267 bytes ~39MB, r6 = remaining available = 0x1FF), check block blk_8122485C (succeeds when r9<=r6, otherwise falls into 0x81224860 which logs E2009011903). uVar6 comes from FUN_81226624(&local_78) + FUN_81254D24() (inside FUN_81224160 around 0x812248xx), where FUN_81259F30 -> FUN_8125AC84 (video decoder work size) + (iVar3+4)*4+0x14; FUN_81254D24 returns 0x4E0 when DAT_8153FC8C>0. Config data captured: [ATOMCFG] cfg=84856088 words 00000024 00000010 45160000 8485609C 00000004 00000003 41EFC28F 84856318 00000000 02120105 ...; [SIZEFN] arg=8485609C; [SIZERET] size=0002018F (FUN_81223EF6 returns the Atom-side budget 0x2018F for config[3]=0x8485609C). Contradiction: the Atom budget 0x2018F is far smaller than the Mana requirement 0x259A67B+0x1FF, so the Mana/video-decoder size computation depends on wrong config fields (likely the video config struct local_78 fields not initialized correctly), making the decoder work size 39MB. '
+       'Evidence: [CMPBUF2] r9=0259A67B r6=000001FF r0=849091FF r1=8153FCA0 r2=812B4150 r3=00000090 r4=84855FA0 r5=8130D424 r7=0 r8=8490900C sp=84855F80 lr=8127AEAE criFECC=00000001 binfFEF4=816A0BA0 (at this moment criFs initialized and binder established); [E1903HIT] #0 r0=849091FF r6=000001FF r8=8490900C r9=0259A67B r10=8485609C r12=00000100 ring 81224860 8122485C 81224736 81224418 81224414 81254D36 81254D34 8127AEB2; [ATOMCFG] cfg=84856088 words 00000024 00000010 45160000 8485609C 00000004 00000003 41EFC28F 84856318 00000000 02120105 00000024 00000003 41EFC28F 00000001 00000000 00000024; [SIZECALL] arg(config3)=00000000 r1=0 r2=00023FEF r3=84855EFC r9=84856088 lr=812573A4; [SIZEFN] arg=8485609C r1=0 r2=00023FEF r3=84855EFC lr=812573B0; [SIZERET] size=0002018F; [FIOSX] #1-3 at=8128399E n=1717 r0=84855FC8 r1=848E8E7C r2=00020190. '
+       'E2009011903 check decompile context (FUN_81224160 lines 258-303): local_70 = param_1[5]; uStack_6c = param_1[3]; iVar2 = FUN_81226624(&local_78); if (((iVar2 < 0) || (iVar4 = FUN_81254D24(), iVar4 < 0)) || (uVar6 = iVar2 + iVar4, (int)uVar6 < 0)) { ...cleanup (includes finalize)... goto LAB_81224E1C; } if (param_3 == 0 && param_4 == 0) { param_3 = FUN_81279b54(&DAT_8169e110, uVar6); DAT_8153f27c = param_3; } else if (param_4 < (int)uVar6) { FUN_81278f96(0,"E2009011903:Insufficient buffer size."); ...cleanup... }. Subfunctions: void FUN_81226624(int param_1) { local_20 = *(param_1+4); local_1c = *(param_1+8); uStack_18 = *(param_1+0xc); iVar1 = FUN_81259f30(&local_20); return (iVar1 < 0) ? -1 : iVar1 + (local_1c*4 + 0x14)*2; } void FUN_81259f30(undefined4 *param_1) { local_18 = *param_1; iVar3 = param_1[1]; local_14 = param_1[2]; uVar1 = FUN_8125cfac(); FUN_8125ac60(1, uVar1, 1); iVar2 = FUN_8125ac84(1, &local_18); return (iVar2 < 0) ? -1 : iVar2 + (iVar3+4)*4 + 0x14; } undefined4 FUN_81254D24(void) { return (0 < DAT_8153FC8C) ? FUN_8127AE92() : 0; } undefined4 FUN_8127AE92(void) { ...8xFUN_8127B250(0)...; return 0x4e0; }. '
+       'Analysis: (1) the E2009011903 check happens BEFORE the criFs part (uVar6 = Mana/video decoder + other) - i.e. param_4 (total work buffer) must first hold the Mana part, then the criFs part (0x20190); (2) measured Mana part = 0x259A67B (39MB), far above the Atom budget 0x2018F (131KB); (3) if the Mana size computation (FUN_81226624/FUN_81259F30/FUN_8125AC84) depends on wrong video config fields (local_78 derived from param_1), the decoder work size becomes 39MB; (4) the config struct 0x84856088 looks populated (float 2400.0=0x45160000, 29.97=0x41EFC28F etc.), but the fields used to build local_78 inside FUN_81224160 still need checking. '
+       'NEXT: (1) add probes at FUN_81226624 entry/return, FUN_81259F30 entry, FUN_8125AC84 entry/return printing local_20/local_1c/uStack_18, iVar2 (decoder work size), iVar3; (2) if FUN_8125AC84 returns a 39MB-class value check whether the codec/size fields it depends on are garbage (uninitialized); (3) find the correct source of those fields (game config structure/constant table) and fix initialization; (4) after the fix the Mana size returns to normal (tens/hundreds of KB) -> param_4 sufficient -> all 3 Atom inits succeed -> binder flag stays -> CPK mount succeeds -> ACB/ACF/title assets readable. Fallback: if Mana initialization is not required before the title page, HLE-skip the Mana init (first confirm the game does not depend on it later). '
+       'Verification: out80m_m1145cmp2.txt, out80m_m1146ring.txt, out80m_m1147cfg.txt, criinit2.txt, mana_sz.txt, mana_sz2.txt. |
 m1144（`out80m_m1144binder.txt`）证据：
 ```
 [BINDCALL] r0=00000020 r1=00000100 r2=84906328 r3=00002960 r7=84855FC8 lr=81283BB2 flagFEF4=00000000
@@ -500126,3 +500187,47 @@ else if (param_4 < (int)uVar6) { log "E2009011903:Insufficient buffer size."; �
 ANTI-FORGETTING ENTRY. Keywords: M1102 binder init truth - criFsBinder_Initialize (FUN_81284960) called from criFs_Initialize at 0x81283BAE actually runs and SUCCEEDS: [BINDCALL] r0=00000020 r1=00000100 r2=84906328 r3=00002960 (num_binders=32, uVar6=0x100, work=0x84906328, size=0x2960 = 0x100*0x20+0x20*0x48+0x60 exactly), [BINDRET] r0=00000020 flagFEF4=816A0BA0 (DAT_8153FEF4 set non-zero). But it is later cleared: [BINDWARN] flagFEF4=00000000 at n=1754 (CPK mount FUN_812859FA reports W2008121610). The following 2 Atom init calls fail with E2009011903:Insufficient buffer size. (x3 at n=1717) and their cleanup runs the criFs finalize chain which also finalizes binder (flag cleared). m1144 also: [FIOSX] #1-3 at=8128399E n=1717 r0=84855FC8 r1=848E8E7C r2=00020190 (criFs_Initialize 3 calls); [CRIFMT] n=1754 E2010052671:Can not open ACF file (sound/common.acf); [BADMEM]=0. E2009011903 check is in FUN_81224160 @0x81224864: else if (param_4 < (int)uVar6) { log E2009011903:Insufficient buffer size.; … cleanup (includes finalize) … }. NEXT: locate the 0x81224864 check block in batch_018 and probe param_4/uVar6 actual values; if the difference is small use the same +margin approach, if large investigate the uVar6 source (Atom config); after all 3 Atom inits succeed the binder flag stays non-zero -> CPK mount succeeds -> ACB/ACF readable -> title assets -> scene views -> GXM -> picture. Fallback: if the 2nd/3rd Atom init are repeated initialization (should return already-initialized instead of failing), HLE-intercept the Atom init already-initialized check to skip.
 
 LOOKUP: M1102 binder init success flag 0x816A0BA0 then cleared, criFsBinder_Initialize FUN_81284960 @0x81283BAE, [BINDCALL] r0=0x20 r1=0x100 r2=84906328 r3=0x2960, [BINDRET] flagFEF4=816A0BA0, [BINDWARN] flagFEF4=0 n=1754, E2009011903 Insufficient buffer size x3 n=1717 @0x81224864 check param_4 vs uVar6, 3x criFs_Initialize at n=1717, next probe 0x81224864 block -> §18.4646 [relevant: margin fix], §18.4645 [relevant: 1-byte diff], §18.4644 [relevant: CRI init chain]
+### 18.4648 PORT M1103: E2009011903 检查解码——Mana/视频解码所需 39MB vs 剩余 0x1FF；配置结构已抓取
+
+1) m1145/1146/1147 实测：
+```
+[CMPBUF2] r9=0259A67B r6=000001FF … criFECC=00000001 binfFEF4=816A0BA0
+          ↑ r9 = 所需 uVar6 = 39,430,267B；r6 = 剩余可用 = 0x1FF
+[E1903HIT] #0 … r9=0259A67B r10=8485609C ring: 81224860 8122485C 81224736 81224418 81224414 81254D36 81254D34 8127AEB2
+[ATOMCFG] cfg=84856088 words: 00000024 00000010 45160000 8485609C 00000004 00000003 41EFC28F 84856318 00000000 02120105 …
+[SIZECALL]/[SIZEFN]/[SIZERET]: FUN_81223EF6(config[3]=8485609C) = 0x2018F
+[FIOSX] #1-3 at=8128399E n=1717 r0=84855FC8 r1=848E8E7C r2=00020190
+```
+2) E2009011903 检查上下文（FUN_81224160）：
+```c
+iVar2 = FUN_81226624(&local_78);
+if (((iVar2 < 0) || (iVar4 = FUN_81254D24(), iVar4 < 0)) || (uVar6 = iVar2 + iVar4, (int)uVar6 < 0)) { …cleanup+finalize… }
+if (param_3 == 0 && param_4 == 0) { param_3 = FUN_81279b54(&DAT_8169e110, uVar6); … }
+else if (param_4 < (int)uVar6) { "E2009011903:Insufficient buffer size."; …cleanup… }
+```
+3) 子函数：
+```c
+FUN_81226624: local_20=*(p+4); local_1c=*(p+8); uStack_18=*(p+0xc); iVar1=FUN_81259F30(&local_20);
+              return iVar1<0? -1 : iVar1+(local_1c*4+0x14)*2;
+FUN_81259F30: local_18=*p; iVar3=p[1]; local_14=p[2]; uVar1=FUN_8125CFAC();
+              FUN_8125AC60(1,uVar1,1); iVar2=FUN_8125AC84(1,&local_18);   // ★视频解码工作大小
+              return iVar2<0? -1 : iVar2+(iVar3+4)*4+0x14;
+FUN_81254D24: return (0<DAT_8153FC8C)? FUN_8127AE92() : 0;   // FUN_8127AE92 → 0x4E0
+```
+4) 分析：
+- E2009011903 检查在 criFs 部分之前；Mana 部分需要 39MB，Atom 预算仅 0x2018F
+- 若 Mana 配置字段（local_78）有误 → 解码器工作大小被算成 39MB
+- 配置结构 0x84856088 已抓取（含 2400.0f、29.97f 等）
+5) NEXT：
+```
+① 探针 FUN_81226624/FUN_81259F30/FUN_8125AC84：local_20/local_1c/uStack_18、解码器大小、iVar3
+② 若 39MB 来自 FUN_8125AC84 → 检查其 codec/尺寸字段是否为垃圾值
+③ 找字段正确来源并修正
+④ 修复 → Mana 大小正常 → 3 次 Atom init 成功 → binder 保持 → CPK 挂载 → 素材可读
+备选：HLE 跳过 Mana 初始化（需确认后续不依赖）
+```
+验证：`out80m_m1145cmp2.txt`、`out80m_m1146ring.txt`、`out80m_m1147cfg.txt`、`criinit2.txt`、`mana_sz.txt`、`mana_sz2.txt`。
+
+ANTI-FORGETTING ENTRY. Keywords: M1103 E2009011903 check decoded - [CMPBUF2] r9=0259A67B (required uVar6 = 39,430,267B ~39MB) vs r6=000001FF (remaining), check block blk_8122485C succeeds when r9<=r6 else falls to 0x81224860 logging E2009011903; uVar6 = FUN_81226624(&local_78) + FUN_81254D24() inside FUN_81224160, where FUN_81226624 reads fields *(p+4),*(p+8),*(p+0xc), calls FUN_81259F30 which calls FUN_8125AC84 (video decoder work size) and adds (iVar3+4)*4+0x14; FUN_81254D24 returns 0x4E0 when DAT_8153FC8C>0 (FUN_8127AE92). [ATOMCFG] cfg=84856088 words 00000024 00000010 45160000 8485609C 00000004 00000003 41EFC28F 84856318 00000000 02120105 00000024 00000003 41EFC28F 00000001 00000000 00000024; FUN_81223EF6(config[3]=0x8485609C) returns 0x2018F ([SIZERET]); criFs_Initialize called with size 0x20190 (three times at n=1717, FIOSX #1-3). At the check moment criFECC=00000001 and binfFEF4=816A0BA0 (criFs initialized and binder established). [E1903HIT] ring: 81224860 8122485C 81224736 81224418 81224414 81254D36 81254D34 8127AEB2. Contradiction: Atom budget 0x2018F far smaller than Mana requirement 0x259A67B+0x1FF -> the Mana/video-decoder size depends on wrong config fields (likely the video config struct local_78 fields) making the decoder size 39MB. NEXT: probe FUN_81226624/FUN_81259F30/FUN_8125AC84 for local_20/local_1c/uStack_18 and the decoder size; if the 39MB comes from FUN_8125AC84 check whether its codec/size fields are garbage; find the correct source of those fields and fix; then Mana size becomes normal -> all 3 Atom inits succeed -> binder flag stays -> CPK mount succeeds -> assets readable. Fallback: HLE-skip the Mana init if not required before the title page.
+
+LOOKUP: M1103 E2009011903 check r9=0259A67B vs r6=0x1FF, blk_8122485C blk_81224860, FUN_81226624 FUN_81254D24 FUN_81259F30 FUN_8125AC84 video decoder work size, FUN_8127AE92 0x4E0, DAT_8153FC8C, [ATOMCFG] words, FUN_81223EF6 -> 0x2018F, criFs_Initialize size 0x20190, criFECC=1 binfFEF4=816A0BA0, ring 81224860 8122485C 81224736 81224418 81224414, next probe Mana sizes and fix config -> §18.4647 [relevant: binder truth], §18.4646 [relevant: margin], §18.4645 [relevant: 1-byte diff]
