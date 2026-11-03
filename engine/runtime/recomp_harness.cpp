@@ -837,9 +837,9 @@ static void movie_maybe_init(void) {
   if (_wh && *_wh) { unsigned a=0,b=0; if (std::sscanf(_wh,"%ux%u",&a,&b)==2 && a && b) { g_movie_w=a; g_movie_h=b; } }
   g_movie_fp = fopen(_path, "rb");
   if (!g_movie_fp) { printf("[MOVIE] open FAIL %s\n", _path); fflush(stdout); return; }
-  fseek(g_movie_fp, 0, SEEK_END); long _sz = ftell(g_movie_fp); fseek(g_movie_fp, 0, SEEK_SET);
+  _fseeki64(g_movie_fp, 0, SEEK_END); long long _sz = _ftelli64(g_movie_fp); _fseeki64(g_movie_fp, 0, SEEK_SET);   // M1151: >2GB
   size_t _fsz = (size_t)g_movie_w * g_movie_h * 3u / 2u;
-  g_movie_frames = _fsz ? (long)(_sz / (long)_fsz) : 0;
+  g_movie_frames = _fsz ? (long)(_sz / (long long)_fsz) : 0;
   { const char* _ms = getenv("P5D_MOVIE_START"); if (_ms && *_ms) { long _v = atol(_ms); if (_v >= 0 && _v < g_movie_frames) { g_movie_frame = _v;
       printf("[MOVIE] P5D_MOVIE_START -> frame=%ld\n", g_movie_frame); fflush(stdout); } } }
   g_movie_va = hle_malloc((uint32_t)(g_movie_w * g_movie_h * 4u));
@@ -863,7 +863,7 @@ static void movie_advance_frame(void) {
       g_movie_frame = _start + (long)((_now - _t0) * 30000LL / 1001LL / 1000LL);
       if (g_movie_frame >= g_movie_frames) g_movie_frame = g_movie_frames - 1; } }
   if (g_movie_frame >= g_movie_frames) g_movie_frame = 0;
-  if (fseek(g_movie_fp, (long)(g_movie_frame * (long)_fsz), SEEK_SET) != 0) return;
+  if (_fseeki64(g_movie_fp, (long long)g_movie_frame * (long long)_fsz, SEEK_SET) != 0) return;   // M1151: >2GB
   if (fread(g_movie_nv12.data(), 1, _fsz, g_movie_fp) != _fsz) return;
   uint8_t* _dst = GP(g_movie_va);
   { const char* _mt = getenv("P5D_MOVIE_TEST");   // 18.4517 M972: diagnostic solid colour
@@ -1988,9 +1988,9 @@ static uint32_t p5d_vdec_hle(uint32_t stub_va, RecState* s) {
         const char* _path = (_env && *_env) ? _env : "C:/dev/p5d_movies/title_c_p5d001_nv12.raw";
         g_vdec_fp = fopen(_path, "rb");
         if (g_vdec_fp) {
-          fseek(g_vdec_fp, 0, SEEK_END); long _sz = ftell(g_vdec_fp); fseek(g_vdec_fp, 0, SEEK_SET);
+          _fseeki64(g_vdec_fp, 0, SEEK_END); long long _sz = _ftelli64(g_vdec_fp); _fseeki64(g_vdec_fp, 0, SEEK_SET);   // M1151: >2GB
           size_t _fsz = (size_t)g_vdec_w * g_vdec_h * 3u / 2u;
-          g_vdec_frames = _fsz ? (long)(_sz / (long)_fsz) : 0;
+          g_vdec_frames = _fsz ? (long)(_sz / (long long)_fsz) : 0;
           const char* _st = getenv("P5D_VDEC_START"); if (_st && *_st) g_vdec_frame = atol(_st);
           printf("[AVDEC] raw=%s frames=%ld start=%ld\n", _path, g_vdec_frames, g_vdec_frame); fflush(stdout);
         } else { printf("[AVDEC] raw open FAIL %s\n", _path); fflush(stdout); }
@@ -2005,7 +2005,7 @@ static uint32_t p5d_vdec_hle(uint32_t stub_va, RecState* s) {
         if (g_vdec_fp && g_vdec_frames > 0 && ysz) {
           if (g_vdec_frame >= g_vdec_frames) g_vdec_frame = 0;
           if (g_vdec_buf.size() < ysz + uvsz) g_vdec_buf.resize(ysz + uvsz);
-          fseek(g_vdec_fp, (long)(g_vdec_frame * (long)(ysz + uvsz)), SEEK_SET);
+          _fseeki64(g_vdec_fp, (long long)g_vdec_frame * (long long)(ysz + uvsz), SEEK_SET);   // M1151: >2GB
           size_t got = fread(g_vdec_buf.data(), 1, ysz + uvsz, g_vdec_fp);
           uint8_t* q0 = b0 ? GP(b0) : nullptr;
           uint8_t* q1 = b1 ? GP(b1) : nullptr;
@@ -3446,6 +3446,7 @@ extern "C" uint32_t hle_call(uint32_t stub_va, RecState* s) {
         for (int _sp = 0; _sp < 2000 && !ok; ++_sp) { g_pump_force = 1; hle_thr_pump(s, 400); g_pump_force = 0; cur = (g_eflag.count(obj) ? g_eflag[obj] : 0u); ok = eval(cur); }
       }
       if (g_evw_n++ < 40) { printf("[EVW] wait obj=%08X bits=%08X mode=%X cur=%08X ok=%d thr=%08X lr=%08X\n", obj, bits, mode, cur, (int)ok, g_cur_thr, s->r[14]); fflush(stdout); }
+      if (g_blkcnt_total > 60000000u) { static int _el=0; if (_el++ < 160) { printf("[EVWLATE] obj=%08X bits=%08X mode=%X cur=%08X ok=%d thr=%08X lr=%08X blk=%08X\n", obj, bits, mode, cur, (int)ok, g_cur_thr, s->r[14], g_cur_block); fflush(stdout);} }
       if (ok) {
         if (outp) { uint8_t* p = GP(outp); if (p) std::memcpy(p, &cur, 4); }
         if (mode & 4u) g_eflag[obj] = 0u;                      // CLEAR_ALL
@@ -3463,7 +3464,8 @@ extern "C" uint32_t hle_call(uint32_t stub_va, RecState* s) {
       g_eflag[obj] |= bits;
       if (g_thr_log_n++ < 80) printf("[EVT] set obj=%08X bits=%08X cur_thr=%08X lr=%08X\n", obj, bits, g_cur_thr, s->r[14]);
       if (g_evt2_n++ < 60) { printf("[EVT2] set obj=%08X bits=%08X thr=%08X lr=%08X\n", obj, bits, g_cur_thr, s->r[14]); fflush(stdout); }
-      if (g_blkcnt_total > 60000000u) { static int _t60=0; if (_t60++ < 40) { printf("[SET60] obj=%08X bits=%08X lr=%08X blk=%08X fib=%08X\n", obj, bits, s->r[14], g_cur_block, g_cur_fiber); fflush(stdout);} }
+
+      if (g_blkcnt_total > 60000000u) { static int _sl=0; if (_sl++ < 160) { printf("[EVSLATE] obj=%08X bits=%08X cur_after=%08X thr=%08X lr=%08X blk=%08X\n", obj, bits, (g_eflag.count(obj)?g_eflag[obj]:0u), g_cur_thr, s->r[14], g_cur_block); fflush(stdout);} }      if (g_blkcnt_total > 60000000u) { static int _t60=0; if (_t60++ < 40) { printf("[SET60] obj=%08X bits=%08X lr=%08X blk=%08X fib=%08X\n", obj, bits, s->r[14], g_cur_block, g_cur_fiber); fflush(stdout);} }
       { uint32_t cur2 = g_eflag[obj];
         for (auto& kv : g_thr) if (kv.second.waiting && kv.second.wait_obj == obj) {
           bool _or = (kv.second.wait_mode & 1u) != 0u;
@@ -5838,6 +5840,14 @@ int main(int argc, char** argv) {
                g_loop_site, g_loop_cnt[0], g_loop_cnt[1], g_loop_cnt[2], g_loop_cnt[3], g_blkcnt_total, g_cur_block, g_cur_fiber, g_in_fex, g_in_fiber_exec, g_pumping2, g_current_loop_pc);
         printf("[WDRING]"); for (int i = 52; i < 64; ++i) printf(" %08X", g_pc_ring[(g_pc_ring_n + (unsigned)i) & 63u]); printf("\n");
         for (auto& kv : g_fctx) { printf("[WDCTX] fib=%08X pc=%08X sp=%08X r0=%08X r5=%08X\n", kv.first, kv.second.r[15], kv.second.r[13], kv.second.r[0], kv.second.r[5]); }
+        for (auto& kv : g_fctx) { printf("[WDCTX] fib=%08X pc=%08X sp=%08X r0=%08X r5=%08X\n", kv.first, kv.second.r[15], kv.second.r[13], kv.second.r[0], kv.second.r[5]); }
+
+         if (g_blkcnt_total > 65000000u) { static int _ts=0; if (_ts++ < 40) {
+           printf("[THRSLATE] total=%u blk=%08X fib=%08X threads=%zu:\n", (unsigned)g_blkcnt_total, g_cur_block, g_cur_fiber, g_thr.size());
+           for (auto& _kv : g_thr) { auto& _tt=_kv.second; printf("[THRSLATE]  tid=%08X entry=%08X alive=%d ready=%d wait=%d obj=%08X bits=%08X mode=%X pc=%08X sp=%08X\n", _kv.first, _tt.entry, _tt.alive, _tt.ready, _tt.waiting, _tt.wait_obj, _tt.wait_bits, _tt.wait_mode, _tt.ctx.r[15], _tt.ctx.r[13]); }
+           printf("[THRSLATE] eflags:"); for (auto& _ek : g_eflag) printf(" %08X=%08X", _ek.first, _ek.second); printf("\n");
+           printf("[THRSLATE] semas:"); for (auto& _sk : g_sema) printf(" %08X=%u", _sk.first, _sk.second); printf("\n");
+           fflush(stdout); } }
         fflush(stdout);
       } }).detach(); }
   { const char* _pw = getenv("P5D_PUMP_WALLCLOCK"); g_pump_wallclock = (_pw && atoi(_pw) != 0) ? 1 : 0; }
