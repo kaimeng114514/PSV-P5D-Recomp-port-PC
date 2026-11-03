@@ -361,7 +361,7 @@ static uint32_t g_fiber_arg = 0;
 
 struct FCtx { uint32_t r[16]; uint32_t apsr; };
 static std::map<uint32_t, FCtx> g_fctx;
-struct HThread { uint32_t entry, arg, stack; FCtx ctx; int alive, ready, waiting; uint32_t wait_obj, wait_bits, wait_mode; RecState gctx; std::thread* hth; int exit_flag; };
+struct HThread { uint32_t entry, arg, stack; FCtx ctx; int alive, ready, waiting; uint32_t wait_obj, wait_bits, wait_mode; RecState gctx; std::thread* hth; int exit_flag; uint32_t hle_ring[16]; uint32_t hle_n; };
 static std::map<uint32_t, HThread> g_thr;
 static uint32_t g_cur_thr = 0;
 extern "C" uint32_t harness_cur_thr(void) { return g_cur_thr; }
@@ -2096,6 +2096,17 @@ static void gfd_atomic_probe(uint32_t pcv, RecState* s) {
   { uint8_t* p = GP(0x8155543Cu); if (p) { p[0] = (uint8_t)p1; p[1] = (uint8_t)p2; } }
   static int _n = 0; if (_n++ < 30) { printf("[GFDATOMIC] applied p1=%u p2=%u state=%08X blk=%08X thr=%08X\n", p1, p2, st, g_cur_block, tl_ht_tid); fflush(stdout); }
 }
+
+static void semaw_probe(uint32_t pcv, RecState* s) {
+  uint32_t q = pcv & ~1u;
+  if (q != 0x81207402u && q != 0x81207454u) return;
+  static int _n = 0; if (_n++ > 300) return;
+  uint32_t objp = s->r[0], sid = 0;
+  { uint8_t* p = GP(objp); if (p) std::memcpy(&sid, p, 4); }
+  printf("[SEMAW] %s caller_lr=%08X objp=%08X sid=%08X fib=%08X thr=%08X blk=%08X\n",
+         q == 0x81207402u ? "WAIT" : "SIGNAL", s->r[14], objp, sid,
+         tl_is_hfiber, tl_ht_tid, g_cur_block); fflush(stdout);
+}
 // ===================== M1155/M1160 P0: host fibers (native thread per guest fiber) =====================
 // M1160 rewrite: strict SUSPENDED/RUNNING state machine + ONE global mutex/condvar for all park/resume
 // handoffs. The previous per-fiber std::condition_variable version crashed inside libwinpthread when a
@@ -2150,6 +2161,8 @@ static void hf_fiber_thread(HFiber* f) {
     g_cur_block = pc; f->cur_pc = pc; ++f->blocks; ++g_hf_blocks;
     tl_pc_ring[tl_pc_n & 63u] = pc; ++tl_pc_n;
     if (pc == 0x81160712u) { gfd_atomic_probe(pc, s); pc = s->r[14]; continue; }
+    semaw_probe(pc, s);
+    if (pc == 0x811E5FB8u) { static int _jsb=0; if (_jsb++<40) { printf("[JOBSB] fib=%08X thr=%08X r0=%08X r1=%08X lr=%08X blk=%u\n", tl_hf?tl_hf->addr:0u, tl_ht_tid, s->r[0], s->r[1], s->r[14], (unsigned)g_hf_blocks); fflush(stdout); } }
     hf_assert_probe(pc, s);
     uint32_t nx = fn(s);
     if (nx == 0u || nx == 0xFFFFFFF0u || nx == 0xFFFFFFFEu || nx == 0xFFFFFFFDu) break;
@@ -2238,6 +2251,7 @@ extern "C" uint32_t hle_call(uint32_t stub_va, RecState* s) {
   tl_hle_lock = &_hcl;
   tl_hle_ring[(tl_hle_n++) & 31u] = stub_va;
   if (tl_hf) { tl_hf->hle_ring[(tl_hf->hle_n++) & 15u] = stub_va; }
+  if (tl_ht_tid && !tl_is_hfiber) { auto _ti = g_thr.find(tl_ht_tid); if (_ti != g_thr.end()) { _ti->second.hle_ring[(_ti->second.hle_n++) & 15u] = stub_va; } }
   uint32_t _r = hle_call_inner(stub_va, s);
   tl_hle_lock = _prev;
   return _r;
@@ -3628,6 +3642,7 @@ static uint32_t hle_call_inner(uint32_t stub_va, RecState* s) {
       break; }
     case 0x812B2AD0u: {                                               // sceKernelSignalSema
       if (tl_is_hfiber) { static int _sg=0; uint32_t _o=s->r[0]; if ((_o & 0xFFFF0000u)==0x50010000u && _sg++<400) { uint32_t _h=(g_sema.count(_o)?g_sema[_o]:0u); printf("[SEMFIB] SIGNAL obj=%08X cnt=%u have=%u lr=%08X pc=%08X\n", _o, s->r[1], _h, s->r[14], g_cur_block); fflush(stdout); } }
+      { static int _sj=0; uint32_t _o=s->r[0]; if ((_o==0x50011000u||_o==0x50013000u||_o==0x50015000u||_o==0x50012000u||_o==0x50014000u||_o==0x50016000u) && _sj++<200) { uint32_t _h=(g_sema.count(_o)?g_sema[_o]:0u); printf("[JOBSIG] obj=%08X cnt=%u have=%u fib=%08X thr=%08X lr=%08X pc=%08X\n", _o, s->r[1], _h, tl_hf?tl_hf->addr:0u, tl_ht_tid, s->r[14], g_cur_block); fflush(stdout); } }
       uint32_t obj = s->r[0];
       if ((obj & 0xFFFF0000u) == 0x50010000u) { static int _gs=0; if (_gs++ < 160) {
         int _w=0; for (auto& _kv : g_thr) if (_kv.second.waiting && _kv.second.wait_obj==obj) ++_w;
@@ -4704,6 +4719,7 @@ static uint32_t fiber_exec_to_completion(RecState* s) {
     if (pc==0x811DA024u) { RecState* _ps = SPTR(s); g_last_alloc_sz = _ps->r[0]; g_last_alloc_fp = _ps->r[4]; }
     else if ((pc==0x811DA028u||pc==0x811DA02Au||pc==0x811DA030u||pc==0x811DA036u) && SPTR(s)->r[0]==0u && g_allocf_n++ < 24) { RecState* _ps = SPTR(s); printf("[ALLOCFAIL] pc=%08X size=%08X fp=%08X r0=%08X r1=%08X r4=%08X r5=%08X r6=%08X r7=%08X sp=%08X lr=%08X fib=%08X thr=%08X\n", pc, g_last_alloc_sz, g_last_alloc_fp, _ps->r[0],_ps->r[1],_ps->r[4],_ps->r[5],_ps->r[6],_ps->r[7],_ps->r[13],_ps->r[14],g_cur_fiber,g_cur_thr); fflush(stdout); }
     job_probes(pc, SPTR(s));
+    semaw_probe(pc, SPTR(s));
     hf_assert_probe(pc, SPTR(s));
     if ((pc & ~1u) == 0x811EAAE4u) { if (g_ea552_n++ < 60) { printf("[EA552] MATLOOP r0=%08X r1=%08X r2=%08X r7=%08X r9=%08X lr=%08X fib=%08X thr=%08X\n", s->r[0], s->r[1], s->r[2], s->r[7], s->r[9], s->r[14], g_cur_fiber, g_cur_thr); fflush(stdout); } }
     if ((pc & ~1u) == 0x811EAB44u) { if (g_ea552_n++ < 60) { printf("[EA552] AB44 r0=%08X r1=%08X r2=%08X r7=%08X r9=%08X lr=%08X fib=%08X thr=%08X\n", s->r[0], s->r[1], s->r[2], s->r[7], s->r[9], s->r[14], g_cur_fiber, g_cur_thr); fflush(stdout); } }
@@ -5482,6 +5498,8 @@ static void guest_thread_run(uint32_t tid) {
     if (!fn) { if (g_ht_bad_n++ < 20) { printf("[HT-NOBLK] tid=%08X pc=%08X\n", tid, pc); fflush(stdout); } break; }
     g_cur_block = pc;
     if (pc == 0x81160712u) { gfd_atomic_probe(pc, s); pc = s->r[14]; continue; }
+    semaw_probe(pc, s);
+    if (pc == 0x811E5FB8u) { static int _jsb2=0; if (_jsb2++<40) { printf("[JOBSB] fib=0 thr=%08X r0=%08X r1=%08X lr=%08X blk=%u\n", tl_ht_tid, s->r[0], s->r[1], s->r[14], (unsigned)g_blkcnt_total); fflush(stdout); } }
     hf_assert_probe(pc, s);
     uint32_t nx = fn(s);
     if (nx == 0u || nx == 0xFFFFFFF0u || nx == 0xFFFFFFFEu || nx == 0xFFFFFFFDu) break;
@@ -6112,7 +6130,8 @@ int main(int argc, char** argv) {
          { std::lock_guard<std::mutex> _lg(g_hf_lk); for (auto& _kv : g_hf) { HFiber* _f=_kv.second; printf("[HFDBG] addr=%08X entry=%08X st=%d started=%d go=%d owner=%08X pc=%08X blocks=%u\n", _f->addr, _f->entry, 0, (int)_f->started, (int)_f->go, _f->owner_tid, _f->cur_pc, (unsigned)_f->blocks); } }
          { std::lock_guard<std::mutex> _lg(g_hf_lk); for (auto& _kv : g_hf) { HFiber* _f=_kv.second; printf("[HFHLE] addr=%08X n=%u:", _f->addr, _f->hle_n); for (int _i=0;_i<12;++_i) printf(" %08X", _f->hle_ring[(_f->hle_n - 12u + (uint32_t)_i) & 15u]); printf("\n"); } }
          printf("[HFBLOCKS] %u\n", (unsigned)g_hf_blocks);
-         { static int _td=0; if (_td++ < 60) { for (auto& _kv : g_thr) { HThread& _th=_kv.second; printf("[THRDBG] tid=%08X entry=%08X alive=%d ready=%d wait=%d obj=%08X bits=%08X mode=%X pc=%08X sp=%08X r0=%08X blk=%08X\n", _kv.first, _th.entry, _th.alive, _th.ready, _th.waiting, _th.wait_obj, _th.wait_bits, _th.wait_mode, _th.gctx.r[15], _th.gctx.r[13], _th.gctx.r[0], _th.gctx.r[0]); } } }
+         { static int _td=0; if (_td++ < 60) { for (auto& _kv : g_thr) { HThread& _th=_kv.second; printf("[THRDBG] tid=%08X entry=%08X alive=%d ready=%d wait=%d obj=%08X bits=%08X mode=%X pc=%08X sp=%08X r0=%08X blk=%08X\n", _kv.first, _th.entry, _th.alive, _th.ready, _th.waiting, _th.wait_obj, _th.wait_bits, _th.wait_mode, _th.gctx.r[15], _th.gctx.r[13], _th.gctx.r[0], _th.gctx.r[0]);
+             { printf("[THRHLE] tid=%08X n=%u:", _kv.first, _th.hle_n); for (int _i=0;_i<10;++_i) printf(" %08X", _th.hle_ring[(_th.hle_n - 10u + (uint32_t)_i) & 15u]); printf("\n"); } } } }
         for (auto& kv : g_fctx) { printf("[WDCTX] fib=%08X pc=%08X sp=%08X r0=%08X r5=%08X\n", kv.first, kv.second.r[15], kv.second.r[13], kv.second.r[0], kv.second.r[5]); }
 
          if (g_blkcnt_total > 65000000u) { static int _ts=0; if (_ts++ < 40) {
