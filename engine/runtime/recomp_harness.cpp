@@ -2252,6 +2252,22 @@ static void hf_fiber_thread(HFiber* f) {
     if (!fn) { int back=0; uint32_t bq=gbn_back(pc,&back); if (bq && back<=16) { pc=bq; fn=gbn(pc); } }
     if (!fn) { fprintf(stderr, "[HF-NOBLK] fib=%08X pc=%08X\n", f->addr, pc); break; }
     g_cur_block = pc; f->cur_pc = pc; ++f->blocks; ++g_hf_blocks;
+    { static int _gp2=-1; if (_gp2<0) _gp2 = getenv("P5D_GATEPROBE2") ? 1 : 0;
+      if (_gp2 && (pc & ~1u) == 0x811C0654u) { static int _gpn=0; if (_gpn++<12) {
+          uint32_t _fr = s->r[0]; uint32_t _base = 0; uint8_t* _bq = GP(0x816CC6CCu);
+          if (_bq) { uint32_t _ptrs[4]={0,0,0,0}; for(int _i=0;_i<4;++_i) std::memcpy(&_ptrs[_i],_bq+_i*4,4); _base = (_fr<4)?_ptrs[_fr]:0; }
+          uint32_t _c0=0,_c1=0; { uint8_t* q=GP(_base); if(q){ std::memcpy(&_c0,q+0xC,4); std::memcpy(&_c1,q+0x14,4);} }
+          printf("[GATEPROBE2] FUN_811C0654 frame=%u base=%08X A(cell+0xC)=%08X B(cell+0x14)=%08X n=%u\n", _fr, _base, _c0, _c1, g_main_n); fflush(stdout);} } }
+
+    { static int _ch=-1; if (_ch<0) _ch = getenv("P5D_CMDHANDLER") ? 1 : 0;
+      if (_ch) {
+        static uint32_t _prev = 0;
+        if ((pc & ~1u) == 0x811E44D0u) { static int _en=0; if (_en++<16) {
+            uint8_t* _p = GP(s->r[0]);
+            printf("[CMDHANDLERDIAG] enter FUN_811E44D0 r0=%08X valid=%d lr=%08X prev=%08X n=%u\n",
+              s->r[0], _p?1:0, s->r[14], _prev, g_main_n); fflush(stdout);} }
+        _prev = pc; } }
+
     { // CMDRANGEPROBE: watch execution inside FUN_811E44D0 (0x811E44D0..0x811E45CC) and GFD enqueue range
       static int _cr=0;
       if (pc >= 0x811E4400u && pc < 0x811E4600u && _cr++ < 60) {
@@ -5992,6 +6008,13 @@ static uint32_t call_guest_cb(RecState* s, uint32_t entry, uint32_t arg, int max
         int _ni = (q==0x811EBAC0u)?0:((q==0x811EBAB4u)?1:((q==0x811EBB28u)?2:3));
         ++_nc[_ni]; if (_nc[_ni]<=4u || (_nc[_ni]%100u)==0u) { printf("[NESTEDCB] q=%08X n=%u r0=%08X r1=%08X\n", q, _nc[_ni], s->r[0], s->r[1]); fflush(stdout);} } }
     if (q == 0x811E5EC2u) ++g_cb5ec2; else if (q == 0x811E5EC6u) ++g_cb5ec6; else if (q == 0x811E5EF0u) ++g_cb5ef0;
+    { // GATEPROBE2N: nested-path probe of FUN_811C0654 (frame gate) inputs
+      static int _gp2n = -1; if (_gp2n < 0) _gp2n = getenv("P5D_GATEPROBE2") ? 1 : 0;
+      if (_gp2n && q == 0x811C0654u) { static int _gpn2=0; if (_gpn2++<12) {
+          uint32_t _fr = s->r[0]; uint32_t _base = 0; uint8_t* _bq = GP(0x816CC6CCu);
+          if (_bq) { uint32_t _ptrs[4]={0,0,0,0}; for(int _i=0;_i<4;++_i) std::memcpy(&_ptrs[_i],_bq+_i*4,4); _base = (_fr<4)?_ptrs[_fr]:0; }
+          uint32_t _c0=0,_c1=0; { uint8_t* q2=GP(_base); if(q2){ std::memcpy(&_c0,q2+0xC,4); std::memcpy(&_c1,q2+0x14,4);} }
+          printf("[GATEPROBE2N] FUN_811C0654 frame=%u base=%08X A=%08X B=%08X n=%u\n", _fr, _base, _c0, _c1, g_main_n); fflush(stdout);} } }
     { // GATEPROBE: capture app-job frame/flags and FUN_811C0654 return value
       static int _gp=0;
       if (q==0x811F3494u && _gp<6) { ++_gp; uint32_t _st=0,_fl=0; uint8_t* q2=GP(s->r[0]); if(q2){ std::memcpy(&_st,q2,4); std::memcpy(&_fl,q2+4,4);} printf("[GATEPROBE] appjob st=%08X frame=%u flags=%08X n=%u\n", s->r[0], _st, _fl, g_main_n); fflush(stdout);} 
@@ -6035,6 +6058,13 @@ static uint32_t call_guest_cb2(RecState* s, uint32_t entry, uint32_t a0, uint32_
       printf("[REGCB] pc=%08X name=%s r0=%08X r1=%08X r2=%08X r3=%08X lr=%08X sp=%08X fib=%08X thr=%08X\n", pc, _nm, s->r[0], s->r[1], s->r[2], s->r[3], s->r[14], s->r[13], g_cur_fiber, g_cur_thr); fflush(stdout); }
     uint32_t q = pc & ~1u;
     if (q == 0x811E5EC2u) ++g_cb5ec2; else if (q == 0x811E5EC6u) ++g_cb5ec6; else if (q == 0x811E5EF0u) ++g_cb5ef0;
+    { // GATEPROBE3N: nested call_guest_cb2 probe of FUN_811C0654 (frame gate) inputs
+      static int _gp3n = -1; if (_gp3n < 0) _gp3n = getenv("P5D_GATEPROBE2") ? 1 : 0;
+      if (_gp3n && q == 0x811C0654u) { static int _g3=0; if (_g3++<12) {
+          uint32_t _fr = s->r[0]; uint32_t _base = 0; uint8_t* _bq = GP(0x816CC6CCu);
+          if (_bq) { uint32_t _ptrs[4]={0,0,0,0}; for(int _i=0;_i<4;++_i) std::memcpy(&_ptrs[_i],_bq+_i*4,4); _base = (_fr<4)?_ptrs[_fr]:0; }
+          uint32_t _c0=0,_c1=0; { uint8_t* q2=GP(_base); if(q2){ std::memcpy(&_c0,q2+0xC,4); std::memcpy(&_c1,q2+0x14,4);} }
+          printf("[GATEPROBE3N] FUN_811C0654 frame=%u base=%08X A=%08X B=%08X n=%u\n", _fr, _base, _c0, _c1, g_main_n); fflush(stdout);} } }
     { // NESTCMDEXEC: probes for GFD command handlers inside nested guest calls
       if (q==0x811E44D0u||q==0x811E4772u||q==0x811E46BAu||q==0x811E501Cu||q==0x811E5126u||q==0x811EBB90u||q==0x811EFD8Eu||q==0x811EF526u||q==0x811EF5DCu||q==0x811F3494u||q==0x811EC172u||q==0x811EC264u||q==0x811EC104u||q==0x811C0654u||q==0x811EC0A4u||q==0x811C0730u||q==0x811EC280u) {
         static std::map<uint32_t,int> _nc; int nn=++_nc[q]; if (nn<=8) { printf("[NESTCMDEXEC] va=%08X #%d block=%u lr=%08X entry=%08X n=%u\n", q, nn, g_cur_block, s->r[14], entry, g_main_n); fflush(stdout);} } }
