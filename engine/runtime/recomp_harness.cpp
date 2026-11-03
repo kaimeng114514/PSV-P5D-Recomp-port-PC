@@ -5901,6 +5901,8 @@ static uint32_t mb_811E649A(RecState* s) {
       if (_f172) { uint32_t _fi = 0; { uint8_t* q = GP(0x816CC700u); if (q) std::memcpy(&_fi, q, 4); }
         static int _fr=0; if (_fr++<8) { printf("[FORCE172] call FUN_811EC172 frame=%u n=%u\n", _fi, g_main_n); fflush(stdout); }
         (void)call_guest_cb2(s, 0x811EC172u, _fi, 0u, 4000000);
+        // FORCE172_ENDSCENE: FUN_811EC264 is the pass finalizer (calls sceGxmEndScene via FE300E2F).
+        (void)call_guest_cb2(s, 0x811EC264u, _fi, 0u, 4000000);
         (void)call_guest_cb2(s, 0x811EC104u, _fi, 0u, 4000000);
         static int _fr2=0; if (_fr2++<8) { printf("[FORCE172] after r0=%08X\n", s->r[0]); fflush(stdout); } } }
     if (s->r[0] == 2u) node_exec_frame(s);  // NODEEXEC_LEVER: after frame app job
