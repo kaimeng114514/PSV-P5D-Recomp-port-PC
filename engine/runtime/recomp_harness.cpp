@@ -2245,6 +2245,25 @@ static void hf_fiber_thread(HFiber* f) {
     if (!fn) { int back=0; uint32_t bq=gbn_back(pc,&back); if (bq && back<=16) { pc=bq; fn=gbn(pc); } }
     if (!fn) { fprintf(stderr, "[HF-NOBLK] fib=%08X pc=%08X\n", f->addr, pc); break; }
     g_cur_block = pc; f->cur_pc = pc; ++f->blocks; ++g_hf_blocks;
+    if ((pc & ~1u) == 0x811866A6u) {   // M1186: app movie-slot state machine (0x100 slots, stride 0x60, base DAT_81670B48)
+      static int g_mvfast = -1; if (g_mvfast < 0) { const char* _e = getenv("P5D_MOVIEFAST"); g_mvfast = (_e && atoi(_e)) ? 1 : 0; }
+      static int _mv = 0; ++_mv;
+      if (_mv == 1 || _mv == 1000 || _mv == 100000) {
+        printf("[MOVIESLOT] call=%d", _mv);
+        for (int _i=0;_i<4;++_i) { uint32_t _b = 0x81670B48u + (uint32_t)_i*0x60u; uint8_t* _p = GP(_b);
+          if (_p) { uint32_t _act=*(uint32_t*)(_p+0), _cat=0,_st=0,_tot=0,_cur=0;
+            std::memcpy(&_cat,_p+0x10,4); std::memcpy(&_st,_p+0x24,4); std::memcpy(&_tot,_p+0x28,4); std::memcpy(&_cur,_p+0x2c,4);
+            printf(" [%d]act=%u cat=%u st=%u tot=%u cur=%u", _i,_act,_cat,_st,_tot,_cur); } }
+        printf("\n"); fflush(stdout);
+      }
+      if (g_mvfast) { int _n=0;
+        for (int _i=0;_i<0x100;++_i) { uint32_t _b = 0x81670B48u + (uint32_t)_i*0x60u; uint8_t* _p = GP(_b); if (!_p) continue;
+          uint32_t _act=0,_st=0; std::memcpy(&_act,_p+0,4); std::memcpy(&_st,_p+0x24,4);
+          if (_act && _st == 1u) { uint32_t _tot=0,_cur=0; std::memcpy(&_tot,_p+0x28,4); std::memcpy(&_cur,_p+0x2c,4);
+            if (_tot > _cur) { std::memcpy(_p+0x28,&_cur,4); ++_n; } } }
+        static int _mfn=0; if (_n && _mfn++<10) { printf("[MOVIEFAST] forced %d active slots total=cur (call %d)\n", _n, _mv); fflush(stdout); } }
+    }
+
     { static std::map<uint32_t,uint32_t> _hot; static uint64_t _last=0; _hot[pc] += 1;
       if (g_hf_blocks - _last >= 25000000u) { _last = g_hf_blocks;
         std::vector<std::pair<uint32_t,uint32_t>> _v(_hot.begin(), _hot.end());
