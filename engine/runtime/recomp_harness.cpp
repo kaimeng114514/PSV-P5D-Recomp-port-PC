@@ -2670,7 +2670,8 @@ static uint32_t hle_call_inner(uint32_t stub_va, RecState* s) {
       static std::map<uint32_t, uint32_t> _stm2va;
       static uint32_t _cur_vobj = 0;
       static uint32_t _cur_v_ubo = 0, _cur_f_ubo = 0, _pend_vout = 0, _pend_fout = 0;
-static uint32_t _last_ufd_ubo = 0;   // M1249: most recent SetUniformDataF target   // 18.4507 M962
+static uint32_t _last_ufd_ubo = 0;   // M1249: most recent SetUniformDataF target
+static uint32_t _ufd_vert_ubo = 0, _ufd_frag_ubo = 0;   // M1251: per-stage UBO from SetUniformDataF (program stage from GXP flags)   // 18.4507 M962
       static unsigned char _frag_tex[16][16]; static int _frag_tex_n = 0;   // 18.4510 M965: bound fragment textures
       static unsigned char _vert_tex[16][16]; static int _vert_tex_n = 0;
       if (_abi_man_st < 0) { _abi_man_st = 0;
@@ -3074,6 +3075,10 @@ static uint32_t _last_ufd_ubo = 0;   // M1249: most recent SetUniformDataF targe
           { static int _fo=-1; if (_fo<0) _fo=(getenv("P5D_FUBO_ONE")!=nullptr)?1:0;
             if (_fo) { static float _one[16]={1,1,1,1, 1,1,1,1, 1,1,1,1, 1,1,1,1}; p5d::vulkan::update_fragment_uniform_buffer_raw(_one, sizeof(_one));
               static int _fn=0; if(_fn++<6){ printf("[FUBOONE] frag ubo row0-3 = 1 n=%u\n", g_main_n); fflush(stdout);} } }
+          { if (_ufd_vert_ubo) { uint8_t* _src = GP(_ufd_vert_ubo); if (_src) { p5d::vulkan::update_uniform_buffer_raw(_src, 0x1000u);
+                static int _v3=0; if (_v3++<8) { printf("[UFDBIND] vert ubo=%08X first=(%.3f,%.3f,%.3f,%.3f) n=%u\n", _ufd_vert_ubo, ((float*)_src)[0],((float*)_src)[1],((float*)_src)[2],((float*)_src)[3], g_main_n); fflush(stdout);} } }
+            if (_ufd_frag_ubo) { uint8_t* _src = GP(_ufd_frag_ubo); if (_src) { p5d::vulkan::update_fragment_uniform_buffer_raw(_src, 0x1000u);
+                static int _f3=0; if (_f3++<8) { printf("[UFDBIND] frag ubo=%08X first=(%.3f,%.3f,%.3f,%.3f) n=%u\n", _ufd_frag_ubo, ((float*)_src)[0],((float*)_src)[1],((float*)_src)[2],((float*)_src)[3], g_main_n); fflush(stdout);} } } }
           { static int _ub=-1; if (_ub<0) _ub=(getenv("P5D_UFDBOTH")!=nullptr)?1:0;
             if (_ub && _last_ufd_ubo) { uint8_t* _src = GP(_last_ufd_ubo); if (_src) {
                 p5d::vulkan::update_uniform_buffer_raw(_src, 0x1000u);
@@ -3149,14 +3154,15 @@ static uint32_t _last_ufd_ubo = 0;   // M1249: most recent SetUniformDataF targe
         uint8_t* _dst = GP(_ubo); uint8_t* _ssrc = GP(_src);
         if (_dst && _ssrc && _ccnt && _ccnt <= 64u) {
           _last_ufd_ubo = _ubo;
+          { uint32_t _prog = 0;
+            for (uint32_t _o = 0; _o <= 0x80u; _o += 4u) { uint32_t _mg = 0; uint8_t* q = GP(_par + _o); if (!q) break; std::memcpy(&_mg, q, 4); if (_mg == 0x00505847u) { _prog = _par + _o; break; } }
+            if (_prog) { uint32_t _fl = 0; uint8_t* q = GP(_prog + 0x14u); if (q) std::memcpy(&_fl, q, 4);
+              if (_fl & 1u) _ufd_frag_ubo = _ubo; else _ufd_vert_ubo = _ubo;
+              static int _sd=0; if (_sd++<16) { printf("[UFDSTAGE] par=%08X prog=%08X flags=%08X stage=%s ubo=%08X n=%u\n", _par, _prog, _fl, (_fl&1u)?"FRAG":"VERT", _ubo, g_main_n); fflush(stdout);} } }
           size_t _off = (size_t)_res * 16u + (size_t)_coff * 4u;
           if (_off + (size_t)_ccnt * 4u <= 0x1000u) {
             std::memcpy(_dst + _off, _ssrc, (size_t)_ccnt * 4u);
-            { static std::set<uint32_t> _ufd_seen; if (_ufd_seen.find(_ubo)==_ufd_seen.end()) { _ufd_seen.insert(_ubo);
-                printf("[UFDNEW] ubo=%08X res=%u coff=%u cnt=%u first=(%.3f,%.3f,%.3f,%.3f) distinct=%u n=%u\n", _ubo,_res,_coff,_ccnt,
-                  ((float*)_ssrc)[0],((float*)_ssrc)[1],((float*)_ssrc)[2],((float*)_ssrc)[3],(unsigned)_ufd_seen.size(),g_main_n); fflush(stdout);} }
-            static int _un=0; if (_un++<16) { printf("[ABIUFD] ubo=%08X res=%u coff=%u cnt=%u src=%08X first=(%.3f,%.3f,%.3f,%.3f) n=%u\n",
-              _ubo, _res, _coff, _ccnt, _src, ((float*)_ssrc)[0], ((float*)_ssrc)[1], ((float*)_ssrc)[2], ((float*)_ssrc)[3], g_main_n); fflush(stdout); } } }
+            static int _un=0; if (_un++<8) { printf("[ABIUFD] ubo=%08X res=%u coff=%u cnt=%u first=(%.3f,%.3f,%.3f,%.3f) n=%u\n", _ubo,_res,_coff,_ccnt,((float*)_ssrc)[0],((float*)_ssrc)[1],((float*)_ssrc)[2],((float*)_ssrc)[3], g_main_n); fflush(stdout); } } }
         s->r[0] = 0; return s->r[14];
       }
       // 18.4507 M962: capture the reserved default UBO out-pointer, read its value after dispatch
