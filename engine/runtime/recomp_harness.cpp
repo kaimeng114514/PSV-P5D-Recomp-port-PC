@@ -3070,6 +3070,9 @@ static uint32_t hle_call_inner(uint32_t stub_va, RecState* s) {
           { static int _vid2=-1; if (_vid2<0) _vid2=(getenv("P5D_VS_UBO_ID")!=nullptr)?1:0;
             if (_vid2) { static float _id[64]={1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1}; p5d::vulkan::update_uniform_buffer_raw(_id, 64u);
               static int _vc3=0; if(_vc3++<6){ printf("[VSUBOID2] identity vert ubo uploaded AFTER guest data n=%u\n", g_main_n); fflush(stdout);} } }
+          { static int _fo=-1; if (_fo<0) _fo=(getenv("P5D_FUBO_ONE")!=nullptr)?1:0;
+            if (_fo) { static float _one[16]={1,1,1,1, 1,1,1,1, 1,1,1,1, 1,1,1,1}; p5d::vulkan::update_fragment_uniform_buffer_raw(_one, sizeof(_one));
+              static int _fn=0; if(_fn++<6){ printf("[FUBOONE] frag ubo row0-3 = 1 n=%u\n", g_main_n); fflush(stdout);} } }
           if (_cur_f_ubo) { uint8_t* _src = GP(_cur_f_ubo); if (_src) { p5d::vulkan::update_fragment_uniform_buffer_raw(_src, 0x1000u);
             static int _un2=0; if (_un2++<8) { printf("[ABIUBO] upload frag ubo=%08X first=(%.3f,%.3f,%.3f,%.3f) n=%u\n", _cur_f_ubo,
               ((float*)_src)[0], ((float*)_src)[1], ((float*)_src)[2], ((float*)_src)[3], g_main_n); fflush(stdout); } } }
