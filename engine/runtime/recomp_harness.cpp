@@ -5976,6 +5976,13 @@ static uint32_t call_guest_cb(RecState* s, uint32_t entry, uint32_t arg, int max
         int _ni = (q==0x811EBAC0u)?0:((q==0x811EBAB4u)?1:((q==0x811EBB28u)?2:3));
         ++_nc[_ni]; if (_nc[_ni]<=4u || (_nc[_ni]%100u)==0u) { printf("[NESTEDCB] q=%08X n=%u r0=%08X r1=%08X\n", q, _nc[_ni], s->r[0], s->r[1]); fflush(stdout);} } }
     if (q == 0x811E5EC2u) ++g_cb5ec2; else if (q == 0x811E5EC6u) ++g_cb5ec6; else if (q == 0x811E5EF0u) ++g_cb5ef0;
+    { // GATEPROBE: capture app-job frame/flags and FUN_811C0654 return value
+      static int _gp=0;
+      if (q==0x811F3494u && _gp<6) { ++_gp; uint32_t _st=0,_fl=0; uint8_t* q2=GP(s->r[0]); if(q2){ std::memcpy(&_st,q2,4); std::memcpy(&_fl,q2+4,4);} printf("[GATEPROBE] appjob st=%08X frame=%u flags=%08X n=%u\n", s->r[0], _st, _fl, g_main_n); fflush(stdout);} 
+      if (q==0x811F34B6u && _gp<40) { printf("[GATEPROBE] after gate r0=%08X cellC=%08X cell14=%08X\n", s->r[0],
+          ({uint32_t _v=0;uint8_t* q2=GP(0x816CC6CCu);uint32_t _b=0;if(q2)std::memcpy(&_b,q2,4);uint8_t* q3=GP(_b+0xCu);if(q3)std::memcpy(&_v,q3,4);_v;}),
+          ({uint32_t _v=0;uint8_t* q2=GP(0x816CC6CCu);uint32_t _b=0;if(q2)std::memcpy(&_b,q2,4);uint8_t* q3=GP(_b+0x14u);if(q3)std::memcpy(&_v,q3,4);_v;})); fflush(stdout);} }
+
     if (q >= 0xFFFFFF00u || pc == 0u) break;
     BlockFn fn = gbn(pc);
     if (!fn) {
