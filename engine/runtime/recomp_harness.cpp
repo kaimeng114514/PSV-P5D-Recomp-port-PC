@@ -2245,6 +2245,28 @@ static void hf_fiber_thread(HFiber* f) {
     if (!fn) { int back=0; uint32_t bq=gbn_back(pc,&back); if (bq && back<=16) { pc=bq; fn=gbn(pc); } }
     if (!fn) { fprintf(stderr, "[HF-NOBLK] fib=%08X pc=%08X\n", f->addr, pc); break; }
     g_cur_block = pc; f->cur_pc = pc; ++f->blocks; ++g_hf_blocks;
+    { uint32_t _p0 = pc & ~1u;
+      if (_p0 == 0x8116F3C6u || _p0 == 0x81174250u || _p0 == 0x8116F45Eu || _p0 == 0x81174AB2u) {
+        static uint32_t _c1=0,_c2=0,_c3=0,_c4=0;
+        uint32_t* _p=nullptr; const char* _nm="?";
+        if (_p0==0x8116F3C6u){_p=&_c1;_nm="cb16F3C6";} else if (_p0==0x81174250u){_p=&_c2;_nm="cb174250";}
+        else if (_p0==0x8116F45Eu){_p=&_c3;_nm="exec16F45E";} else {_p=&_c4;_nm="exec174AB2";}
+        ++(*_p);
+        if ((*_p)<=8u || ((*_p)%500u)==0u) { printf("[NODEEXEC] %s n=%u r0=%08X r1=%08X r2=%08X hfblk=%u\n", _nm, *_p, s->r[0], s->r[1], s->r[2], (unsigned)g_hf_blocks); fflush(stdout); } } }
+
+    { uint32_t _p0 = pc & ~1u;
+      if (_p0 == 0x811994B0u) { static uint32_t _n=0; ++_n;
+        printf("[FBCALL] n=%u cb=%08X arg=%08X hfblk=%u\n", _n, s->r[6], s->r[0], (unsigned)g_hf_blocks); fflush(stdout); }
+      if (_p0 == 0x811C32ECu) { static uint32_t _n=0; ++_n;
+        if (_n<=12u || (_n%50u)==0u) { printf("[C32EC] n=%u arg=%08X r1=%08X hfblk=%u\n", _n, s->r[0], s->r[1], (unsigned)g_hf_blocks); fflush(stdout); } } }
+    { static uint64_t _gs=0; if (g_hf_blocks - _gs >= 3000000u) { _gs = g_hf_blocks;
+        uint32_t _d8=0,_dc=0,_c664=0,_d8d8=0;
+        { uint8_t* q=GP(0x816CD8D8u); if(q) std::memcpy(&_d8,q,4); }
+        { uint8_t* q=GP(0x816CD8DCu); if(q) std::memcpy(&_dc,q,4); }
+        { uint8_t* q=GP(0x816CC664u); if(q) std::memcpy(&_c664,q,4); }
+        { uint8_t* q=GP(0x816CD8D8u); if(q) std::memcpy(&_d8d8,q,4); }
+        printf("[GFDGLOB] hfblk=%u DAT_816CD8D8=%08X DAT_816CD8DC=%08X DAT_816CC664=%08X\n", (unsigned)g_hf_blocks, _d8d8,_dc,_c664); fflush(stdout); } }
+
     if ((pc & ~1u) == 0x8119934Au) { static uint32_t _fb=0; ++_fb;
       uint32_t _idx=0; { uint8_t* q=GP(0x816CC700u); if(q) std::memcpy(&_idx,q,4); }
       uint32_t _a0=0; { uint8_t* q=GP(0x816CC6CCu + (_idx&7u)*4u); if(q) std::memcpy(&_a0,q,4); }
