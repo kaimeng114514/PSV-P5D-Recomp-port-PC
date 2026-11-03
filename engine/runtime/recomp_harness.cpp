@@ -5931,11 +5931,14 @@ static uint32_t mb_811E649A(RecState* s) {
   static int _en = -1; if (_en < 0) { const char* e = getenv("P5D_SYNCTASK"); _en = (e && atoi(e)) ? 1 : 0; }
   uint32_t desc = s->r[1], fn = 0, arg = 0;
   { uint8_t* p = GP(desc); if (p) std::memcpy(&fn, p, 4); p = GP(desc + 4u); if (p) std::memcpy(&arg, p, 4); }
+  { static int _eq=-1; if (_eq<0) _eq = getenv("P5D_ENQPROBE") ? 1 : 0;
+    if (_eq) { static int _eqn=0; if (_eqn++<80) { printf("[ENQPROBE] #%d desc=%08X fn=%08X arg=%08X lr=%08X n=%u\n", _eqn-1, desc, fn, arg, s->r[14], g_main_n); fflush(stdout);} } }
   BlockFn raw = gbn_raw(0x811E649Au);
   uint32_t nx = raw ? raw(s) : s->r[14];
-  if (_en && fn != 0u) {
+  static int _allj = -1; if (_allj < 0) _allj = getenv("P5D_SYNCTASK_ALL") ? 1 : 0;
+  if (_en && fn != 0u && (_allj || fn == 0x811F3495u)) {
     static int _n = 0;
-    if (_n++ < 24) { printf("[SYNCTASK] #%d fn=%08X arg=%08X desc=%08X r0=%08X\n", _n-1, fn, arg, desc, s->r[0]); fflush(stdout); }
+    if (_n++ < 40) { printf("[SYNCTASK] #%d fn=%08X arg=%08X desc=%08X r0=%08X\n", _n-1, fn, arg, desc, s->r[0]); fflush(stdout); }
     { static int _ar2 = -1; if (_ar2 < 0) _ar2 = (getenv("P5D_APPRUN2") != nullptr) ? 1 : 0;
       if (_ar2) { uint32_t _scr = 0x9FF00000u; uint8_t* _sq = GP(_scr); uint32_t _idx = 0;
         { uint8_t* q = GP(0x816CC700u); if (q) std::memcpy(&_idx, q, 4); }
