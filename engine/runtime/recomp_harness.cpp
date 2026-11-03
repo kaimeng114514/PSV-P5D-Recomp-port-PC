@@ -2694,8 +2694,12 @@ static uint32_t _ufd_vert_ubo = 0, _ufd_frag_ubo = 0;   // M1251: per-stage UBO 
             for (uint32_t _i = 0; _i < _sz; ++_i) { _h ^= (uint64_t)_g[_i]; _h *= 1099511628211ull; } } }
         if (_h) { auto _it = _abi_man.find(_h); if (_it != _abi_man.end()) {
             if (_frag) _abi_fspv = _it->second; else _abi_vspv = _it->second;
-            static int _cn = 0; if (_cn++ < 12) { printf("[ABIGXP] %s obj=%08X gxp=%08X hash=%016llX spv=%s\n", _frag?"frag":"vert", _o, _gxp, (unsigned long long)_h, _it->second.c_str()); fflush(stdout); } } } }
+            { static std::string _lastpair; static int _pc=0; std::string _pair = _abi_vspv + "|" + _abi_fspv;
+              if (_pair != _lastpair) { _lastpair = _pair; if (_pc++ < 120) { printf("[ABIPAIR] #%d v=%s f=%s n=%u lr=%08X blk=%08X\n", _pc, _abi_vspv.c_str(), _abi_fspv.c_str(), g_main_n, s->r[14], g_cur_block); fflush(stdout);} } }
+            static int _cn = 0; if (_cn++ < 24) { printf("[ABIGXP] %s obj=%08X gxp=%08X hash=%016llX spv=%s\n", _frag?"frag":"vert", _o, _gxp, (unsigned long long)_h, _it->second.c_str()); fflush(stdout); } } } }
       if (strncmp(_ge->name, "sceGxmDraw", 10) == 0 && !_abi_vspv.empty() && !_abi_fspv.empty()) {   // 18.4483 M938: only real draws (not PrecomputedDrawInit/Size)
+        { static std::vector<std::string> _pairs; static std::map<std::string,int> _cnt; std::string _cp = _abi_vspv + "|" + _abi_fspv; _cnt[_cp]++;
+          static int _dl=0; if (_dl++<60) { printf("[ABIDR] #%d v=%s f=%s n=%u lr=%08X blk=%08X\n", _dl, _abi_vspv.c_str(), _abi_fspv.c_str(), g_main_n, s->r[14], g_cur_block); fflush(stdout);} }
         std::string _vp = _abi_spvdir + "/" + _abi_vspv, _fp = _abi_spvdir + "/" + _abi_fspv;
         // 18.4498 M953: the real pipeline vertex layout is ONE binding with stride 128 (8 x vec4, locations 0..7);
         // the built-in test_triangle (28-byte stride) does not match it, so nothing rasterizes. Upload a proper
@@ -2971,7 +2975,10 @@ static uint32_t _ufd_vert_ubo = 0, _ufd_frag_ubo = 0;   // M1251: per-stage UBO 
           if (!_frag) { auto _it = _vobj2spv.find(_obj); if (_it != _vobj2spv.end() && _abi_vspv != _it->second) { _abi_vspv = _it->second;
               static int _n3=0; if (_n3++<10) printf("[ABIOBJ] vert obj=%08X spv=%s\n", _obj, _it->second.c_str()); } }
           else { auto _it = _fobj2spv.find(_obj); if (_it != _fobj2spv.end() && _abi_fspv != _it->second) { _abi_fspv = _it->second;
-              static int _n4=0; if (_n4++<10) printf("[ABIOBJ] frag obj=%08X spv=%s\n", _obj, _it->second.c_str()); } } } }
+              static int _n4=0; if (_n4++<10) printf("[ABIOBJ] frag obj=%08X spv=%s\n", _obj, _it->second.c_str()); } }
+          // ABIPAIR2: log the current program pair whenever it changes
+          { static std::string _lastpair2; static int _pc2=0; std::string _pair2 = _abi_vspv + "|" + _abi_fspv;
+            if (_pair2 != _lastpair2) { _lastpair2 = _pair2; if (_pc2++ < 200) { printf("[ABIPAIR2] #%d v=%s f=%s n=%u lr=%08X blk=%08X\n", _pc2, _abi_vspv.c_str(), _abi_fspv.c_str(), g_main_n, s->r[14], g_cur_block); fflush(stdout);} } } } }
       // 18.4502 M957: non-precomputed path - remember the current vertex program object
       if (strstr(_ge->name, "SetVertexProgram")) { _cur_vobj = s->r[1];
         static int _spn=0; if (_spn++<12) { printf("[ABIVP] SetVertexProgram obj=%08X n=%u\n", s->r[1], g_main_n); fflush(stdout); } }
