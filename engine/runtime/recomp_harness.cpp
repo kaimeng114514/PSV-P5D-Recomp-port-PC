@@ -2042,6 +2042,42 @@ static uint32_t p5d_vdec_hle(uint32_t stub_va, RecState* s) {
 }
 
 
+
+// M1157: assert-message probe - the game's assert path is FUN_8115f832(file, line, fmt, flag) which
+// formats "%s\n%s:%d\n" and calls FUN_8115f9c8 to print, then FUN_8115f9ca deliberately null-writes.
+static void hf_dump_str(const char* tag, uint32_t va) {
+  char buf[256]; std::memset(buf, 0, sizeof(buf));
+  uint8_t* p = GP(va);
+  if (p) { for (int i = 0; i < 200; ++i) { char c = (char)p[i]; if (!c) break; buf[i] = (c >= 32 && c < 127) ? c : '.'; } }
+  printf("%s va=%08X [%s]\n", tag, va, buf); fflush(stdout);
+}
+static int g_hfassert_n = 0;
+static void hf_assert_probe(uint32_t pcv, RecState* s) {
+  uint32_t q = pcv & ~1u;
+  if (q == 0x8115F832u) {
+    if (g_hfassert_n++ < 20) { printf("[HFASSERT] ENTER blk=%08X r0=file=%08X r1=line=%08X r2=fmt=%08X r3=%08X lr=%08X thr=%08X\n", g_cur_block, s->r[0], s->r[1], s->r[2], s->r[3], s->r[14], tl_ht_tid); fflush(stdout);
+      hf_dump_str("[HFASSERT] file", s->r[0]); hf_dump_str("[HFASSERT] msg", s->r[2]);
+      printf("[HFASSERT] stack:"); for (int _k=0;_k<12;++_k) { uint32_t _v=0; uint8_t* _p=GP(s->r[13]+ (uint32_t)_k*4u); if(_p) std::memcpy(&_v,_p,4); printf(" %08X", _v); } printf("\n"); fflush(stdout);
+      for (int _k=0;_k<6;++_k) { uint32_t _v=0; uint8_t* _p=GP(s->r[13]+ (uint32_t)_k*4u); if(_p) std::memcpy(&_v,_p,4); if (_v>=0x80600000u && _v<0xB0000000u) { char _tag[48]; snprintf(_tag,sizeof(_tag),"[HFASSERT] arg%d", _k); hf_dump_str(_tag, _v); } }
+    }
+  }
+  if (q == 0x81163508u) {
+    if (g_hfassert_n++ < 30) { uint32_t g38=0,g3c=0,g3d=0,g60=0,g64=0,g65=0; uint8_t* _p;
+      _p=GP(0x81555438u); if(_p) std::memcpy(&g38,_p,4);
+      _p=GP(0x8155543cu); if(_p) { g3c=_p[0]; g3d=_p[1]; }
+      _p=GP(0x81555460u); if(_p) std::memcpy(&g60,_p,4);
+      _p=GP(0x81555464u); if(_p) { g64=_p[0]; g65=_p[1]; }
+      printf("[GFDASSERT] FUN_81163508 r0=%08X r1=%08X lr=%08X | g38=%08X g3c=%02X g3d=%02X g60=%08X g64=%02X g65=%02X blk=%08X\n", s->r[0], s->r[1], s->r[14], g38, g3c, g3d, g60, g64, g65, g_cur_block); fflush(stdout); }
+  }
+  if (q == 0x811634F6u) {
+    if (g_hfassert_n++ < 40) { printf("[GFDKEY] FUN_811634F6 r0=%08X r1=%08X r2=%08X lr=%08X blk=%08X\n", s->r[0], s->r[1], s->r[2], s->r[14], g_cur_block); fflush(stdout); }
+  }
+  if (q == 0x8115F9C8u) {
+    if (g_hfassert_n++ < 40) { printf("[HFASSERT] PRINT blk=%08X r0=%08X lr=%08X thr=%08X\n", g_cur_block, s->r[0], s->r[14], tl_ht_tid); fflush(stdout);
+      { char _b[600]; std::memset(_b,0,sizeof(_b)); uint8_t* _p=GP(s->r[0]); int _i=0; if(_p){ for(;_i<560 && _p[_i];++_i) _b[_i]=(_p[_i]>=32&&_p[_i]<127)?(char)_p[_i]:' '; } printf("[HFASSERT] TEXT[%d]: %s\n", _i, _b); fflush(stdout); } }
+  }
+
+}
 // ===================== M1155 P0: host fibers (one native thread per guest fiber) =====================
 // Model (nativ-style): sceFiberRun/Switch/ReturnToThread map to real std::thread park/resume with
 // condvars; guest code inside a fiber runs the normal AOT dispatcher (gbn) with its own RecState.
@@ -2103,6 +2139,12 @@ static void hf_fiber_thread(HFiber* f) {
     if (!fn) { int back=0; uint32_t bq=gbn_back(pc,&back); if (bq && back<=16) { pc=bq; fn=gbn(pc); } }
     if (!fn) { if (g_hf_n++ < 20) { fprintf(stderr, "[HF-NOBLK] fib=%08X pc=%08X blk=%08X\n", f->addr, pc, g_cur_block); fflush(stderr); } break; }
     g_cur_block = pc; f->cur_pc = pc; ++f->blocks; ++g_hf_blocks;
+    if (pc == 0x8115FF12u) {
+      uint32_t _st=0,_g3c=0; uint8_t* _p=GP(0x81555438u); if(_p) std::memcpy(&_st,_p,4);
+      _p=GP(0x8155543Cu); if(_p) _g3c=_p[0];
+      if ((_st & 1u) && _g3c == 0u) { static int _gsk=0; if (_gsk++ < 40) { printf("[GFDSKIP] input-update skipped: state=%08X val0x3c=0 (UI setter race) blk=%u\n", _st, (unsigned)g_hf_blocks); fflush(stdout); } pc = s->r[14]; continue; }
+    }
+    hf_assert_probe(pc, s);
     uint32_t nx = fn(s);
     if (nx == 0u || nx == 0xFFFFFFF0u || nx == 0xFFFFFFFEu || nx == 0xFFFFFFFDu) break;
     pc = nx;
@@ -3244,8 +3286,9 @@ extern "C" uint32_t hle_call(uint32_t stub_va, RecState* s) {
     case 0x812B1840u: {                                               // sceCtrlReadBufferPositive(pad,count)
       // 18.3807: inject a "confirm" button state so the game's start/menu logic can fire.
       // First 200 polls report CROSS+START pressed, then release (simulates a click).
-      if (s->r[0]) { uint8_t* p = GP(s->r[0]);
-        if (p) { uint32_t vals[4] = { 0u, (g_ctrl_n < 200) ? 0x4008u : 0u, 0u, 0u }; std::memcpy(p, vals, 16); } }
+      { static int _noctrl=-1; if (_noctrl<0) { const char* _e=getenv("P5D_NOCTRL"); _noctrl=(_e&&atoi(_e))?1:0; } 
+        if (s->r[0]) { uint8_t* p = GP(s->r[0]);
+          if (p) { uint32_t vals[4] = { 0u, (!_noctrl && g_ctrl_n < 200) ? 0x4008u : 0u, 0u, 0u }; std::memcpy(p, vals, 16); } } }
       if (g_ctrl_n++ < 6) printf("[CTRL] poll #%d -> buttons=%08X\n", g_ctrl_n, (g_ctrl_n <= 200) ? 0x4008u : 0u);
       r0 = 0; break; }
     case 0x812B2280u: {                                               // 18.3838: path formatter (dest,fmt,r2,r3,[sp]...) - %s only
@@ -4633,6 +4676,7 @@ static uint32_t fiber_exec_to_completion(RecState* s) {
     if (pc==0x811DA024u) { RecState* _ps = SPTR(s); g_last_alloc_sz = _ps->r[0]; g_last_alloc_fp = _ps->r[4]; }
     else if ((pc==0x811DA028u||pc==0x811DA02Au||pc==0x811DA030u||pc==0x811DA036u) && SPTR(s)->r[0]==0u && g_allocf_n++ < 24) { RecState* _ps = SPTR(s); printf("[ALLOCFAIL] pc=%08X size=%08X fp=%08X r0=%08X r1=%08X r4=%08X r5=%08X r6=%08X r7=%08X sp=%08X lr=%08X fib=%08X thr=%08X\n", pc, g_last_alloc_sz, g_last_alloc_fp, _ps->r[0],_ps->r[1],_ps->r[4],_ps->r[5],_ps->r[6],_ps->r[7],_ps->r[13],_ps->r[14],g_cur_fiber,g_cur_thr); fflush(stdout); }
     job_probes(pc, SPTR(s));
+    hf_assert_probe(pc, SPTR(s));
     if ((pc & ~1u) == 0x811EAAE4u) { if (g_ea552_n++ < 60) { printf("[EA552] MATLOOP r0=%08X r1=%08X r2=%08X r7=%08X r9=%08X lr=%08X fib=%08X thr=%08X\n", s->r[0], s->r[1], s->r[2], s->r[7], s->r[9], s->r[14], g_cur_fiber, g_cur_thr); fflush(stdout); } }
     if ((pc & ~1u) == 0x811EAB44u) { if (g_ea552_n++ < 60) { printf("[EA552] AB44 r0=%08X r1=%08X r2=%08X r7=%08X r9=%08X lr=%08X fib=%08X thr=%08X\n", s->r[0], s->r[1], s->r[2], s->r[7], s->r[9], s->r[14], g_cur_fiber, g_cur_thr); fflush(stdout); } }
           for (int _si=0;_si<16;++_si) g_snap_r[_si] = s->r[_si]; g_snap_blk = pc;
@@ -5409,6 +5453,7 @@ static void guest_thread_run(uint32_t tid) {
     if (!fn) { int _bk=0; uint32_t _bq=gbn_back(pc,&_bk); if (_bq && _bk<=16) { pc=_bq; fn=gbn(pc); } }
     if (!fn) { if (g_ht_bad_n++ < 20) { printf("[HT-NOBLK] tid=%08X pc=%08X\n", tid, pc); fflush(stdout); } break; }
     g_cur_block = pc;
+    hf_assert_probe(pc, s);
     uint32_t nx = fn(s);
     if (nx == 0u || nx == 0xFFFFFFF0u || nx == 0xFFFFFFFEu || nx == 0xFFFFFFFDu) break;
     pc = nx;   // 18.4240: follow the block's returned next-pc (not s->r[15]) - this was the host-thread loop bug
