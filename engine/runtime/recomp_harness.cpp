@@ -3679,7 +3679,9 @@ static uint32_t hle_call_inner(uint32_t stub_va, RecState* s) {
       auto eval = [&](uint32_t curv) -> bool { return bits == 0u || (orMode ? ((curv & bits) != 0u) : ((curv & bits) == bits)); };
       uint32_t cur = (g_eflag.count(obj) ? g_eflag[obj] : 0u);
       bool ok = eval(cur);
-      if (tl_ht_tid) { hle_wait_begin(); for (;;) { if (g_shutdown) break; cur = (g_eflag.count(obj) ? g_eflag[obj] : 0u); ok = eval(cur); if (ok) break; if (!g_fastsleep) std::this_thread::sleep_for(std::chrono::microseconds(200)); } hle_wait_end();
+      if (tl_ht_tid) { hle_wait_begin();
+        { static int _hw = 0; if (_hw++ < 120) { uint32_t _w4 = 0; { uint8_t* _q = GP(s->r[13] + 4u); if (_q) std::memcpy(&_w4, _q, 4); } printf("[HTHW] WAIT obj=%08X bits=%08X mode=%X cur=%08X thr=%08X lr=%08X pc=%08X blk=%u [sp+4]=%08X\n", obj, bits, mode, cur, tl_ht_tid, s->r[14], g_cur_block, (unsigned)g_blkcnt_total, _w4); fflush(stdout); } }
+        for (;;) { if (g_shutdown) break; cur = (g_eflag.count(obj) ? g_eflag[obj] : 0u); ok = eval(cur); if (ok) break; if (!g_fastsleep) std::this_thread::sleep_for(std::chrono::microseconds(200)); } hle_wait_end();
         if (outp) { uint8_t* p = GP(outp); if (p) std::memcpy(p, &cur, 4); }
         if (mode & 4u) g_eflag[obj] = 0u; else if (mode & 2u) g_eflag[obj] = cur & ~bits;
         r0 = 0; break; }
@@ -3687,6 +3689,7 @@ static uint32_t hle_call_inner(uint32_t stub_va, RecState* s) {
         for (int _sp = 0; _sp < 2000 && !ok; ++_sp) { g_pump_force = 1; hle_thr_pump(s, 400); g_pump_force = 0; cur = (g_eflag.count(obj) ? g_eflag[obj] : 0u); ok = eval(cur); }
       }
       if (g_evw_n++ < 40) { printf("[EVW] wait obj=%08X bits=%08X mode=%X cur=%08X ok=%d thr=%08X lr=%08X\n", obj, bits, mode, cur, (int)ok, g_cur_thr, s->r[14]); fflush(stdout); }
+      { static int _cew=0; if ((obj & 0xFFFF0000u)==0x60010000u && _cew++<200) { printf("[CRIEW] WAIT obj=%08X bits=%08X mode=%X cur=%08X ok=%d thr=%08X fib=%08X lr=%08X pc=%08X\n", obj,bits,mode,cur,(int)ok,tl_ht_tid,tl_is_hfiber,s->r[14],g_cur_block); fflush(stdout); } }
       if (g_blkcnt_total > 60000000u) { static int _el=0; if (_el++ < 160) { printf("[EVWLATE] obj=%08X bits=%08X mode=%X cur=%08X ok=%d thr=%08X lr=%08X blk=%08X\n", obj, bits, mode, cur, (int)ok, g_cur_thr, s->r[14], g_cur_block); fflush(stdout);} }
       if (ok) {
         if (outp) { uint8_t* p = GP(outp); if (p) std::memcpy(p, &cur, 4); }
@@ -3700,6 +3703,7 @@ static uint32_t hle_call_inner(uint32_t stub_va, RecState* s) {
         r0 = 0; }
       break; }
     case 0x812B2AE0u: {                                               // sceKernelSetEventFlag
+      { static int _ces=0; uint32_t _o=s->r[0]; if ((_o & 0xFFFF0000u)==0x60010000u && _ces++<200) { uint32_t _h=(g_eflag.count(_o)?g_eflag[_o]:0u); printf("[CRIES] SET obj=%08X bits=%08X cur=%08X thr=%08X fib=%08X lr=%08X pc=%08X\n", _o, s->r[1], _h, tl_ht_tid, tl_is_hfiber, s->r[14], g_cur_block); fflush(stdout); } }
       if (g_main_n >= 59000000u) { static int _se_n=0; if (_se_n++ < 200) { printf("[SETEF57] obj=%08X bits=%08X pc=%08X fib=%08X\n", s->r[0], s->r[1], g_cur_block, g_cur_fiber); fflush(stdout); } }
       uint32_t obj = s->r[0], bits = s->r[1];
       g_eflag[obj] |= bits;
