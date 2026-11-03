@@ -5670,6 +5670,26 @@ static void node_exec_slot(RecState* s, int idx, int* pn, char* chans, int* pln)
     { uint8_t* q=GP(_cell+0xCu); if(q) { uint32_t _z=0; std::memcpy(q,&_z,4);} }
     { uint8_t* q=GP(_cell+0x10u); if(q) { uint32_t _z=0; std::memcpy(q,&_z,4);} } }
 }
+// BCHANEXEC: also execute the B-channel (0x816CC6CC) A-head node lists (scene geometry candidates)
+static void bchan_exec_slot(RecState* s, int idx, int* pn, char* chans, int* pln) {
+  uint32_t _base=0; { uint8_t* q=GP(0x816CC6CCu + ((uint32_t)idx&7u)*4u); if(q) std::memcpy(&_base,q,4); }
+  if (!_base) return;
+  for (uint32_t _ty=0;_ty<100u;++_ty) {
+    uint32_t _cell=_base+_ty*0x20u;
+    uint32_t _head=0; { uint8_t* q=GP(_cell+0xCu); if(q) std::memcpy(&_head,q,4); }
+    if (!_head) continue;
+    int _n=0; uint32_t _node=_head; int _guard=0;
+    while (_node && _guard++ < 256) {
+      uint32_t _next=0,_cb=0,_data=0;
+      { uint8_t* q=GP(_node+0x14u); if(q) std::memcpy(&_next,q,4); }
+      { uint8_t* q=GP(_node+0xCu); if(q) std::memcpy(&_cb,q,4); }
+      { uint8_t* q=GP(_node+0x4u); if(q) std::memcpy(&_data,q,4); }
+      if (_cb) { (void)call_guest_cb2(s, _cb & ~1u, _node, _data, 200000); ++(*pn); ++_n; }
+      _node=_next; }
+    if (_n && *pln < 180) { *pln += std::snprintf(chans+*pln, 180-(size_t)*pln, " B%u/%d", _ty, _n); }
+    { uint8_t* q=GP(_cell+0xCu); if(q) { uint32_t _z=0; std::memcpy(q,&_z,4);} }
+    { uint8_t* q=GP(_cell+0x10u); if(q) { uint32_t _z=0; std::memcpy(q,&_z,4);} } }
+}
 static void node_exec_frame(RecState* s) {
   static int _en=-1, _all=-1;
   if (_en<0) { const char* e=getenv("P5D_NODEEXEC"); _en=(e&&atoi(e))?1:0; }
@@ -5677,8 +5697,8 @@ static void node_exec_frame(RecState* s) {
   if (!_en) return;
   uint32_t _idx=0; { uint8_t* q=GP(0x816CC700u); if(q) std::memcpy(&_idx,q,4); }
   ++g_ne_frames; int _n=0; char _ch[200]={0}; int _ln=0;
-  if (_all) { for (int _f=0;_f<3;++_f) node_exec_slot(s,_f,&_n,_ch,&_ln); }
-  else node_exec_slot(s,(int)_idx,&_n,_ch,&_ln);
+  if (_all) { for (int _f=0;_f<3;++_f) { node_exec_slot(s,_f,&_n,_ch,&_ln); bchan_exec_slot(s,_f,&_n,_ch,&_ln); } }
+  else { node_exec_slot(s,(int)_idx,&_n,_ch,&_ln); bchan_exec_slot(s,(int)_idx,&_n,_ch,&_ln); }
   g_ne_n += (uint32_t)_n;
   static int _lf=0; if (_lf++<40) { printf("[NODEEXEC_LEVER] frame=%u idx=%u nodes=%d total=%u chans=[%s] hfblk=%u\n", g_ne_frames, _idx, _n, g_ne_n, _ch, (unsigned)g_hf_blocks); fflush(stdout); } }
 static uint32_t mb_811E649A(RecState* s) {
