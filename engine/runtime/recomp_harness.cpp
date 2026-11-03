@@ -2252,6 +2252,11 @@ static void hf_fiber_thread(HFiber* f) {
     if (!fn) { int back=0; uint32_t bq=gbn_back(pc,&back); if (bq && back<=16) { pc=bq; fn=gbn(pc); } }
     if (!fn) { fprintf(stderr, "[HF-NOBLK] fib=%08X pc=%08X\n", f->addr, pc); break; }
     g_cur_block = pc; f->cur_pc = pc; ++f->blocks; ++g_hf_blocks;
+    { static int _gc=-1; if (_gc<0) _gc = getenv("P5D_GFDCMDEXEC") ? 1 : 0;
+      if (_gc) { uint32_t _p = pc & ~1u;
+        if (_p==0x811E44D0u||_p==0x811E4772u||_p==0x811E46BAu||_p==0x811E501Cu||_p==0x811E5126u||_p==0x811EBB90u||_p==0x811EFD8Eu||_p==0x811EF526u||_p==0x811EF5DCu||_p==0x811EFDEEu) {
+          static std::map<uint32_t,int> _cnt; int n=++_cnt[_p]; if (n<=6) { printf("[GFDCMDEXEC] va=%08X #%d arg0=%08X lr=%08X nblk=%u\n", _p, n, s->r[0], s->r[14], (unsigned)g_hf_blocks); fflush(stdout);} } } }
+
     if ((pc & ~1u) == 0x811C041Cu) { static uint32_t _n=0; ++_n;
       if (_n<=40u) { printf("[REG_LR] n=%u type=%08X node=%08X lr=%08X hfblk=%u\n", _n, s->r[0], s->r[1], s->r[14], (unsigned)g_hf_blocks); fflush(stdout); } }
 
