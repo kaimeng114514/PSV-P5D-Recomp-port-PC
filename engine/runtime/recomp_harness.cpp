@@ -6248,6 +6248,21 @@ static void stalldump_hit(uint32_t pc) {   // STALLDUMP: periodic dump of the ma
   static int _env=-1; if (_env<0) _env = getenv("P5D_STALLDUMP") ? 1 : 0; if (!_env) return;
   static uint64_t _n=0; ++_n; if ((_n % 20000000ull) == 0) { printf("[STALL] blocks=%llu blk=%08X fib=%08X n=%u thr=%08X\n", (unsigned long long)_n, pc&~1u, g_cur_fiber, g_main_n, g_cur_thr); fflush(stdout); }
   if (_n == 30000000ull) { printf("[DECOMPHOT] dump at 30M blocks\n"); fflush(stdout); crihot_dump(); }
+  if (_n == 20000000ull || _n == 60000000ull) { printf("[QUEUEDUMP] blocks=%llu\n",(unsigned long long)_n);
+    for (int _i=0;_i<3;++_i) { uint32_t _p=0; uint8_t* q=GP(0x8169E080u + (uint32_t)_i*4u); if(q) std::memcpy(&_p,q,4);
+      if(!_p){ printf("[QUEUEDUMP] q%d null\n",_i); continue; }
+      uint32_t _sem=0,_ev=0,_base=0,_cap=0,_rd=0,_wr=0,_tot=0;
+      { uint8_t* a=GP(_p); if(a){ std::memcpy(&_sem,a,4); std::memcpy(&_ev,a+8,4); } }
+      { uint8_t* a=GP(_p+0x14u); if(a) std::memcpy(&_base,a,4); }
+      { uint8_t* a=GP(_p+0x18u); if(a) std::memcpy(&_cap,a,4); }
+      { uint8_t* a=GP(_p+0x1Cu); if(a) std::memcpy(&_rd,a,4); }
+      { uint8_t* a=GP(_p+0x20u); if(a) std::memcpy(&_wr,a,4); }
+      { uint8_t* a=GP(_p+0x2Cu); if(a) std::memcpy(&_tot,a,4); }
+      uint32_t _sc = g_sema.count(_sem)?g_sema[_sem]:0xFFFFFFFFu;
+      int _waiters=0; for (auto& kv : g_thr) if (kv.second.waiting && kv.second.wait_obj==_sem) ++_waiters;
+      printf("[QUEUEDUMP] q%d p=%08X sema=%08X semacnt=%u waiters=%d ev=%08X base=%08X cap=%u rd=%u wr=%u tot=%u\n", _i,_p,_sem,_sc,_waiters,_ev,_base,_cap,_rd,_wr,_tot);
+      if(_base && _cap && _cap<64u) { for (uint32_t _s=0;_s<_cap;++_s) { uint32_t _fn=0; uint8_t* a=GP(_base+_s*0x20u); if(a) std::memcpy(&_fn,a,4); if(_fn) printf("[QUEUEDUMP]   q%d slot%u fn=%08X\n",_i,_s,_fn); } } }
+    fflush(stdout); }
 }
 
 static void decomp_hit(uint32_t pc, RecState* s) {   // DECOMPPROBE: decompression call args
