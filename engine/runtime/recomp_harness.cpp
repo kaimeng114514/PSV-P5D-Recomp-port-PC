@@ -2175,6 +2175,17 @@ static void rwatch_arm(uint32_t pcv, RecState* s) {
   static int _arm=0; if (_arm++ < 12) { printf("[RWATCH-ARM] work=%08X reader=%08X status=%08X cur=%08X fib=%08X blk=%u\n", work, reader, g_watch2, g_watch2_val, tl_hf?tl_hf->addr:0u, (unsigned)g_blkcnt_total); fflush(stdout); }
 }
 
+
+static int g_nogfdassert = -1;
+static int no_gfd_assert(uint32_t pcv, RecState* s) {
+  if (g_nogfdassert < 0) { const char* e = getenv("P5D_NOGFDASSERT"); g_nogfdassert = (e && atoi(e)) ? 1 : 0; }
+  if (!g_nogfdassert) return 0;
+  uint32_t q = pcv & ~1u;
+  if (q != 0x81163508u && q != 0x811634F6u) return 0;
+  static int _n = 0; if (_n++ < 40) { printf("[NOPASSERT] skip %08X fib=%08X thr=%08X lr=%08X blk=%u\n", pcv, tl_hf?tl_hf->addr:0u, tl_ht_tid, s->r[14], (unsigned)g_blkcnt_total); fflush(stdout); }
+  return 1;
+}
+
 static void hf_fiber_thread(HFiber* f) {
   tl_hf = f;
   tl_is_hfiber = 1;
@@ -2199,6 +2210,7 @@ static void hf_fiber_thread(HFiber* f) {
     semaw_probe(pc, s);
     if (pc == 0x811E5FB8u) { static int _jsb=0; if (_jsb++<40) { printf("[JOBSB] fib=%08X thr=%08X r0=%08X r1=%08X lr=%08X blk=%u\n", tl_hf?tl_hf->addr:0u, tl_ht_tid, s->r[0], s->r[1], s->r[14], (unsigned)g_hf_blocks); fflush(stdout); } }
     hf_assert_probe(pc, s);
+    if (no_gfd_assert(pc, s)) { pc = s->r[14]; continue; }
     uint32_t nx = fn(s);
     if (nx == 0u || nx == 0xFFFFFFF0u || nx == 0xFFFFFFFEu || nx == 0xFFFFFFFDu) break;
     pc = nx;
@@ -5544,6 +5556,7 @@ static void guest_thread_run(uint32_t tid) {
     semaw_probe(pc, s);
     if (pc == 0x811E5FB8u) { static int _jsb2=0; if (_jsb2++<40) { printf("[JOBSB] fib=0 thr=%08X r0=%08X r1=%08X lr=%08X blk=%u\n", tl_ht_tid, s->r[0], s->r[1], s->r[14], (unsigned)g_blkcnt_total); fflush(stdout); } }
     hf_assert_probe(pc, s);
+    if (no_gfd_assert(pc, s)) { pc = s->r[14]; continue; }
     uint32_t nx = fn(s);
     if (nx == 0u || nx == 0xFFFFFFF0u || nx == 0xFFFFFFFEu || nx == 0xFFFFFFFDu) break;
     pc = nx;   // 18.4240: follow the block's returned next-pc (not s->r[15]) - this was the host-thread loop bug
