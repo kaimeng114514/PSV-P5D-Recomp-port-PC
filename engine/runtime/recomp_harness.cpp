@@ -6122,6 +6122,13 @@ static uint32_t call_guest_cb2(RecState* s, uint32_t entry, uint32_t a0, uint32_
           if (_bq) { uint32_t _ptrs[4]={0,0,0,0}; for(int _i=0;_i<4;++_i) std::memcpy(&_ptrs[_i],_bq+_i*4,4); _base = (_fr<4)?_ptrs[_fr]:0; }
           uint32_t _c0=0,_c1=0; { uint8_t* q2=GP(_base); if(q2){ std::memcpy(&_c0,q2+0xC,4); std::memcpy(&_c1,q2+0x14,4);} }
           printf("[GATEPROBE3N] FUN_811C0654 frame=%u base=%08X A=%08X B=%08X n=%u\n", _fr, _base, _c0, _c1, g_main_n); fflush(stdout);} } }
+    { // CRIPROBE: CRI streaming job FUN_811CB0D8 state
+      static int _cp=-1; if (_cp<0) _cp = getenv("P5D_CRIPROBE") ? 1 : 0;
+      if (_cp && q == 0x811CB0D8u) { static int _cpn=0; if (_cpn++<24) {
+          uint32_t _p0=0,_p1=0,_p2=0,_p3=0; { uint8_t* a=GP(s->r[0]); if(a){ std::memcpy(&_p0,a,4); std::memcpy(&_p1,a+4,4); std::memcpy(&_p2,a+8,4); std::memcpy(&_p3,a+12,4);} }
+          uint32_t _f0=0,_f1=0,_f10=0; { uint8_t* b=GP(_p0); if(b){ std::memcpy(&_f0,b,4); std::memcpy(&_f1,b+4,4); std::memcpy(&_f10,b+40,4);} }
+          printf("[CRIPROBE] p=%08X %08X %08X %08X struct=%08X f0=%08X f1=%08X f10=%08X n=%u\n",
+             s->r[0],_p1,_p2,_p3,_p0,_f0,_f1,_f10,g_main_n); fflush(stdout);} } }
     { // DISPATCHPROBE2: nested FUN_811EDE52(type,value) -> table[type](ctx)
       static int _dp2=-1; if (_dp2<0) _dp2 = getenv("P5D_DISPATCHPROBE") ? 1 : 0;
       if (_dp2 && q == 0x811EDE52u) { static int _dn2=0; if (_dn2++<200) {
