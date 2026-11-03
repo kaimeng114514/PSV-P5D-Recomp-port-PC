@@ -129,6 +129,7 @@ struct RecState { uint32_t r[16]; uint32_t apsr; uint8_t* base; uint32_t mem_siz
 static RecState* SPTR(RecState* x) { return x; }
 template<class T> static RecState* SPTR(T& x) { return &x; }
 extern "C" uint32_t g_cur_block = 0;
+static uint32_t g_qwatch_va[16]; static int g_qwatch_n = 0;   // M1179: queue state write watch
 static int g_thry_n = 0;
 static int g_fact_bit = 0;
 static void fix682a(RecState* s, uint32_t* ppc);
@@ -370,7 +371,7 @@ static uint32_t g_fiber_arg = 0;
 
 struct FCtx { uint32_t r[16]; uint32_t apsr; };
 static std::map<uint32_t, FCtx> g_fctx;
-struct HThread { uint32_t entry, arg, stack; FCtx ctx; int alive, ready, waiting; uint32_t wait_obj, wait_bits, wait_mode; RecState gctx; std::thread* hth; int exit_flag; uint32_t hle_ring[16]; uint32_t hle_n; uint32_t pc_ring[32]; uint32_t pc_n; };
+struct HThread { uint32_t entry, arg, stack; FCtx ctx; int alive, ready, waiting; uint32_t wait_obj, wait_bits, wait_mode; RecState gctx; std::thread* hth; int exit_flag; uint32_t hle_ring[16]; uint32_t hle_n; uint32_t pc_ring[32]; uint32_t pc_n; uint32_t qptr = 0; };
 static std::map<uint32_t, HThread> g_thr;
 static uint32_t g_cur_thr = 0;
 extern "C" uint32_t harness_cur_thr(void) { return g_cur_thr; }
@@ -3746,7 +3747,16 @@ static uint32_t hle_call_inner(uint32_t stub_va, RecState* s) {
       if (tl_ht_tid) { hle_wait_begin();
         { static std::set<unsigned long long> _hw; static int _hwn=0; unsigned long long _k=((unsigned long long)tl_ht_tid<<40)^((unsigned long long)obj<<16)^(bits&0xFFFFu);
           if (_hw.find(_k)==_hw.end() && _hwn++<300) { _hw.insert(_k); printf("[HTHW] WAIT obj=%08X bits=%08X mode=%X cur=%08X thr=%08X lr=%08X pc=%08X blk=%u\n", obj, bits, mode, cur, tl_ht_tid, s->r[14], g_cur_block, (unsigned)g_blkcnt_total); fflush(stdout); } }
-        for (;;) { if (g_shutdown) break; cur = (g_eflag.count(obj) ? g_eflag[obj] : 0u); ok = eval(cur); if (ok) break; if (!g_fastsleep) std::this_thread::sleep_for(std::chrono::microseconds(200)); }
+        { uint32_t _poll = 0;
+          for (;;) { if (g_shutdown) break; cur = (g_eflag.count(obj) ? g_eflag[obj] : 0u); ok = eval(cur); if (ok) break;
+            if ((obj == 0x60011000u || obj == 0x60012000u || obj == 0x60013000u) && ((++_poll & 0xFFFFu) == 0u)) {
+              bool _aw = false;
+              for (auto& _kv : g_thr) { if (_kv.second.entry == 0x811E68C9u && _kv.second.alive) {
+                  uint32_t _ef = 0; if (_kv.second.qptr) { uint8_t* _p = GP(_kv.second.qptr + 8u); if (_p) std::memcpy(&_ef, _p, 4); }
+                  if (_ef == 0u || _ef == obj) { _aw = true; break; } } }
+              if (!_aw) { uint32_t _one = 1u; g_eflag[obj] |= _one; static int _et=0; if (_et++<20) { printf("[EFWAKETO] no GFD worker alive -> force-set obj=%08X bits=%08X (fib=%08X blk=%u)\n", obj, bits, tl_hf?tl_hf->addr:0u, (unsigned)g_blkcnt_total); fflush(stdout); } cur = g_eflag[obj]; ok = eval(cur); if (ok) break; }
+            }
+            if (!g_fastsleep) std::this_thread::sleep_for(std::chrono::microseconds(200)); } }
         if (tl_is_hfiber && (obj == 0x60012000u || obj == 0x60013000u || obj == 0x60011000u)) { static int _fw=0; if (_fw++<40) { printf("[EFWAKE] obj=%08X bits=%08X cur=%08X fib=%08X\n", obj,bits,cur,tl_hf?tl_hf->addr:0u); fflush(stdout); } }hle_wait_end();
         if (outp) { uint8_t* p = GP(outp); if (p) std::memcpy(p, &cur, 4); }
         if (mode & 4u) g_eflag[obj] = 0u; else if (mode & 2u) g_eflag[obj] = cur & ~bits;
@@ -5374,6 +5384,30 @@ static uint32_t mb_8128D570(RecState* s) {   // M1176: computed branch target in
   g_cur_block = 0x8128D570u;
   return 0x8128D6A8u;
 }
+static uint32_t mb_destroy_guard(RecState* s, uint32_t entry, const char* tag) {
+  int _nidx = (entry == 0x811E6330u) ? 1 : 3;
+  uint32_t _all = 1;
+  for (int _i = 0; _i < _nidx; ++_i) {
+    uint32_t _idx = (entry == 0x811E6330u) ? s->r[0] : (uint32_t)_i;
+    uint32_t _q = 0, _st = 0xFFFFu; uint8_t* _p;
+    _p = GP(0x8169E080u + (_idx < 4u ? _idx * 4u : 0u)); if (_p) std::memcpy(&_q, _p, 4);
+    if (_q) { _p = GP(_q + 0x10u); if (_p) std::memcpy(&_st, _p, 4); }
+    if (_st != 2u) { _all = 0; break; }
+  }
+  bool _anyWorker = false;
+  for (auto& _kv : g_thr) { if (_kv.second.entry == 0x811E68C9u && _kv.second.alive) { _anyWorker = true; break; } }
+  if (_all || !_anyWorker) {
+    static int _dg = 0;
+    if (_dg++ < 30) { printf("[DESTROY-SKIP] %s already=%d anyWorker=%d idx=%u -> return without wait (lr=%08X fib=%08X thr=%08X)\n", tag, (int)_all, (int)_anyWorker, s->r[0], s->r[14], tl_hf?tl_hf->addr:0u, tl_ht_tid); fflush(stdout); }
+    s->r[0] = 0u;
+    return s->r[14];
+  }
+  BlockFn raw = gbn_raw(entry);
+  if (raw) return raw(s);
+  return s->r[14];
+}
+static uint32_t mb_811E6330(RecState* s) { return mb_destroy_guard(s, 0x811E6330u, "qDestroy"); }
+static uint32_t mb_811E63CE(RecState* s) { return mb_destroy_guard(s, 0x811E63CEu, "qDestroyAll"); }
 static uint32_t mb_81283D62(RecState* s) {   // M1174: missing AOT block (BL return continuation of 0x81283D54)
   g_cur_block = 0x81283D62u;
   { uint32_t _a = s->r[0], _b = 0x1u, _r = _a - _b;
@@ -5396,6 +5430,8 @@ g_manual_blocks[0x81032CF8u] = (BlockFn)mb_81032CF8;
   g_manual_blocks[0x811EB930u] = (BlockFn)mb_811EB930;   // M845: null display-buffer guard (skip submit instead of abort)
   g_manual_blocks[0x811DACFCu] = (BlockFn)mb_811DACFC;
 g_manual_blocks[0x81283D62u] = (BlockFn)mb_81283D62;
+g_manual_blocks[0x811E6330u] = (BlockFn)mb_811E6330;
+g_manual_blocks[0x811E63CEu] = (BlockFn)mb_811E63CE;
 g_manual_blocks[0x8128D570u] = (BlockFn)mb_8128D570;
 }
 static BlockFn gbn(uint32_t pc) {
@@ -5574,6 +5610,7 @@ static void guest_thread_run(uint32_t tid) {
   HThread* t = nullptr;
   { auto _it = g_thr.find(tid); if (_it == g_thr.end()) return; t = &_it->second; }
   RecState* s = &t->gctx;
+  if (t->entry == 0x811E68C9u && s->r[1]) { uint32_t _qq = 0; uint8_t* _p = GP(s->r[1] + 4u); if (_p) std::memcpy(&_qq, _p, 4); t->qptr = _qq; { static int _qn=0; if (_qn++<12) { printf("[QPTR] tid=%08X argp=%08X q=%08X\n", tid, s->r[1], _qq); fflush(stdout); } } }
   uint32_t pc = s->r[15];
   { static int _hr=0; if (_hr++<200) { printf("[HT-RUN] tid=%08X pc=%08X sp=%08X r0=%08X r1=%08X r4=%08X r5=%08X r9=%08X lr=%08X\n", tid, pc, s->r[13], s->r[0], s->r[1], s->r[4], s->r[5], s->r[9], s->r[14]); fflush(stdout); } }
   while (!t->exit_flag && !g_shutdown) {
@@ -5592,6 +5629,7 @@ static void guest_thread_run(uint32_t tid) {
     semaw_probe(pc, s);
     if (pc == 0x811E5FB8u) { static int _jsb2=0; if (_jsb2++<40) { printf("[JOBSB] fib=0 thr=%08X r0=%08X r1=%08X lr=%08X blk=%u\n", tl_ht_tid, s->r[0], s->r[1], s->r[14], (unsigned)g_blkcnt_total); fflush(stdout); } }
     if ((pc & ~1u) == 0x811E63CEu || (pc & ~1u) == 0x811E6440u || (pc & ~1u) == 0x811E6966u) { static int _gd=0; if (_gd++<40) { printf("[GDESTROY] pc=%08X r0=%08X r1=%08X lr=%08X fib=%08X thr=%08X blk=%u\n", pc, s->r[0], s->r[1], s->r[14], tl_hf?tl_hf->addr:0u, tl_ht_tid, (unsigned)g_blkcnt_total); fflush(stdout); } }
+    if ((pc & ~1u) == 0x811E6330u || (pc & ~1u) == 0x811E63CEu || (pc & ~1u) == 0x811E6440u) { static int _dc=0; if (_dc++<40) { uint32_t _idx=s->r[0]; uint32_t _q=0,_st=0; uint8_t* _qq=GP(0x8169E080u + (_idx<4?_idx*4u:0u)); if(_qq) std::memcpy(&_q,_qq,4); _qq=GP(_q+0x10u); if(_qq) std::memcpy(&_st,_qq,4); printf("[DCALL] pc=%08X idx=%u q=%08X qstate=%08X caller_lr=%08X fib=%08X thr=%08X sp=%08X\n", pc,_idx,_q,_st,s->r[14],tl_hf?tl_hf->addr:0u,tl_ht_tid,s->r[13]); fflush(stdout); } }
     if ((pc & ~1u) == 0x811E6966u) { static int _dj=0; if (_dj++<60) {
         uint32_t _p = s->r[0]; uint32_t _q=0,_sc=0,_nx=0,_q2=0,_q4=0; uint8_t* _x;
         _x=GP(_p); if(_x) std::memcpy(&_q,_x,4);
@@ -5604,6 +5642,7 @@ static void guest_thread_run(uint32_t tid) {
         _x=GP(_q+4u); if(_x) std::memcpy(&_q4b,_x,4);
         _x=GP(_q+8u); if(_x) std::memcpy(&_q8,_x,4);
         _x=GP(_q+0xCu); if(_x) std::memcpy(&_qc,_x,4);
+        if (g_qwatch_n < 14) { g_qwatch_va[g_qwatch_n++] = _q + 0x10u; g_qwatch_va[g_qwatch_n++] = _q + 0x2Cu; }
         printf("[DJOB] param=%08X q=%08X q0=%08X q4=%08X q8=%08X qc=%08X q2c=%08X q10=%08X q18=%08X jobArg18=%08X thr=%08X lr=%08X\n", _p,_q,_q0,_q4b,_q8,_qc,_sc,_q4,_nx,_q2,tl_ht_tid,s->r[14]); fflush(stdout); } }
     hf_assert_probe(pc, s);
     if (no_gfd_assert(pc, s)) { pc = s->r[14]; continue; }
@@ -5921,6 +5960,7 @@ extern "C" void wr16_watch(uint32_t a, uint32_t v) {
       if (g_w16_n++ < 240) { printf("[W16] a=%08X off=%02X v=%04X blk=%08X fib=%08X thr=%08X\n", a, a - g_watch_task, v, g_cur_block, g_cur_fiber, g_cur_thr); fflush(stdout); } } }
 }
 extern "C" void wr32_watch(uint32_t a, uint32_t v) {
+  for (int _i = 0; _i < g_qwatch_n; ++_i) if (a == g_qwatch_va[_i]) { static int _qw=0; if (_qw++<60) { printf("[QSTATEW] a=%08X v=%08X blk=%08X fib=%08X thr=%08X lr=%08X sp=%08X\n", a,v,g_cur_block,g_cur_fiber,g_cur_thr,g_cur_hle_ret_lr,g_snap_r[13]); fflush(stdout); } }
   if (g_cri_reader && a >= g_cri_reader && a < g_cri_reader + 0x120u) { static int _rs=0; if (_rs++ < 120) { printf("[READERSTAT] a=%08X off=%03X v=%08X blk=%08X fib=%08X thr=%08X lr=%08X sp=%08X\n", a, a-g_cri_reader, v, g_cur_block, g_cur_fiber, g_cur_thr, g_cur_hle_ret_lr, g_snap_r[13]); fflush(stdout); } }
   { if (a >= 0x848FC368u && a < 0x848FC4A0u) { static int _pw2=0; if (_pw2++ < 300) { printf("[PROGWR] a=%08X off=%03X v=%08X blk=%u fib=%08X pc=%08X\n", a, a-0x848FC368u, v, g_blkcnt_total, g_cur_fiber, g_cur_block); fflush(stdout); } } }
   { if (a >= 0x848FC368u && a < 0x848FC3B0u) { static int _prw=0; if (_prw++ < 300) { printf("[READERWR] a=%08X off=%03X v=%08X blk=%u fib=%08X pc=%08X\n", a, a-0x848FC368u, v, g_blkcnt_total, g_cur_fiber, g_cur_block); fflush(stdout); } } }
