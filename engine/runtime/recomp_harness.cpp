@@ -3735,6 +3735,7 @@ static uint32_t hle_call_inner(uint32_t stub_va, RecState* s) {
     case 0x812B2930u:                                                 // 18.4259: sceKernelWaitEventFlagCB (NID E737B1DF) - same semantics as WaitEventFlag
     case 0x812B2880u: {                                               // 18.4234: sceKernelWaitEventFlag - old-runtime mode semantics (bit0=OR, bit2=CLEAR, bit3? old uses 4=CLEAR_ALL, 2=CLEAR_BITS)
       uint32_t obj = s->r[0], bits = s->r[1], mode = s->r[2], outp = s->r[3];
+      if (tl_is_hfiber) { static int _ef=0; if (_ef++ < 80) { uint32_t _h=(g_eflag.count(obj)?g_eflag[obj]:0u); printf("[EFIB] WAIT obj=%08X bits=%08X mode=%X cur=%08X fib=%08X thr=%08X lr=%08X pc=%08X blk=%u\n", obj,bits,mode,_h,tl_hf?tl_hf->addr:0u,tl_ht_tid,s->r[14],g_cur_block,(unsigned)g_blkcnt_total); fflush(stdout); } }
       if (obj == 0x60014000u || obj == 0x60015000u) g_eflag[obj] |= 1u;   // 18.4264: auto-wake guest Fios worker threads
 
       bool orMode = (mode & 1u) != 0u;
@@ -3770,6 +3771,7 @@ static uint32_t hle_call_inner(uint32_t stub_va, RecState* s) {
         if (_ces.find(_k2)==_ces.end() && _csn++<300) { _ces.insert(_k2); uint32_t _h=(g_eflag.count(_o)?g_eflag[_o]:0u); printf("[SETUP] obj=%08X bits=%08X cur=%08X thr=%08X fib=%08X lr=%08X pc=%08X\n", _o, _b, _h, tl_ht_tid, tl_is_hfiber, s->r[14], g_cur_block); fflush(stdout); } }
       if (g_main_n >= 59000000u) { static int _se_n=0; if (_se_n++ < 200) { printf("[SETEF57] obj=%08X bits=%08X pc=%08X fib=%08X\n", s->r[0], s->r[1], g_cur_block, g_cur_fiber); fflush(stdout); } }
       uint32_t obj = s->r[0], bits = s->r[1];
+      { static int _sf=0; if (_sf++ < 160) { printf("[EFSET] obj=%08X bits=%08X fib=%08X thr=%08X lr=%08X pc=%08X blk=%u\n", obj, bits, tl_hf?tl_hf->addr:0u, tl_ht_tid, s->r[14], g_cur_block, (unsigned)g_blkcnt_total); fflush(stdout); } }
       g_eflag[obj] |= bits;
       if (g_thr_log_n++ < 80) printf("[EVT] set obj=%08X bits=%08X cur_thr=%08X lr=%08X\n", obj, bits, g_cur_thr, s->r[14]);
       if (g_evt2_n++ < 60) { printf("[EVT2] set obj=%08X bits=%08X thr=%08X lr=%08X\n", obj, bits, g_cur_thr, s->r[14]); fflush(stdout); }
@@ -5365,6 +5367,10 @@ static uint32_t mb_811DACFC(RecState* s) {
     if (_v == 0u) return 0x811DAD4Au; }
   return 0x811DAD02u;
 }
+static uint32_t mb_8128D570(RecState* s) {   // M1176: computed branch target into "b 0x8128D6A8" (block D56E folded the b)
+  g_cur_block = 0x8128D570u;
+  return 0x8128D6A8u;
+}
 static uint32_t mb_81283D62(RecState* s) {   // M1174: missing AOT block (BL return continuation of 0x81283D54)
   g_cur_block = 0x81283D62u;
   { uint32_t _a = s->r[0], _b = 0x1u, _r = _a - _b;
@@ -5387,6 +5393,7 @@ g_manual_blocks[0x81032CF8u] = (BlockFn)mb_81032CF8;
   g_manual_blocks[0x811EB930u] = (BlockFn)mb_811EB930;   // M845: null display-buffer guard (skip submit instead of abort)
   g_manual_blocks[0x811DACFCu] = (BlockFn)mb_811DACFC;
 g_manual_blocks[0x81283D62u] = (BlockFn)mb_81283D62;
+g_manual_blocks[0x8128D570u] = (BlockFn)mb_8128D570;
 }
 static BlockFn gbn(uint32_t pc) {
   { static int _mg_env=-1; if (_mg_env<0) { const char* _e=getenv("P5D_MGRPROBE"); _mg_env=(_e&&atoi(_e)!=0)?1:0; }
