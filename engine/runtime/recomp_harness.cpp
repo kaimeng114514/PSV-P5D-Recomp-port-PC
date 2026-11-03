@@ -5920,9 +5920,10 @@ static uint32_t mb_811E649A(RecState* s) {
         uint32_t _bases[2] = {0,0}; uint8_t* _arr = GP(0x816CC6CCu);
         if (_arr && _frame < 4) for (int _i=0;_i<2;++_i) std::memcpy(&_bases[_i], _arr + _frame*4u + _i*0u, 4);
         uint32_t _base = _bases[0];
-        if (_base) { uint32_t _one = 1u; uint8_t* q1 = GP(_base + 0xCu); if (q1) std::memcpy(q1, &_one, 4);
-          uint8_t* q2 = GP(_base + 0x2Cu); if (q2) std::memcpy(q2, &_one, 4);
-          static int _fgn=0; if (_fgn++<12) { printf("[FORCEGATE] frame=%u base=%08X set A=1 n=%u\n", _frame, _base, g_main_n); fflush(stdout);} } }
+        if (_base) { static uint32_t _faken = 0; if (!_faken) { _faken = hle_malloc(0x100u); if (_faken) std::memset(GP(_faken), 0, 0x100u); }   // FORCEGATE_NODE: valid zeroed fake node
+          uint8_t* q1 = GP(_base + 0xCu); if (q1) std::memcpy(q1, &_faken, 4);
+          uint8_t* q2 = GP(_base + 0x2Cu); if (q2) std::memcpy(q2, &_faken, 4);
+          static int _fgn=0; if (_fgn++<12) { printf("[FORCEGATE] frame=%u base=%08X set A=%08X n=%u\n", _frame, _base, _faken, g_main_n); fflush(stdout);} } }
       (void)call_guest_cb2(s, fn & ~1u, _aa ? arg : (desc + 4u), 0u, 4000000);
       if (_fg) { static int _fe = -1; if (_fe < 0) _fe = getenv("P5D_FORCEGATE_END") ? 1 : 0;
         if (_fe) { uint32_t _fr = 0; { uint8_t* p = GP(desc + 4u); if (p) std::memcpy(&_fr, p, 4); }
