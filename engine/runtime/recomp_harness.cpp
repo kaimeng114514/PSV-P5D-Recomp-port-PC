@@ -2990,10 +2990,11 @@ static uint32_t hle_call_inner(uint32_t stub_va, RecState* s) {
                   int _rc = p5d::vulkan::upload_gxm_control_to_unit((unsigned)_u, _frag_tex[_u], GP(g_movie_va), (unsigned)(g_movie_w * g_movie_h * 4u));
                   static int _mn = 0; if (_mn++ < 12) { printf("[ABIMOVTEX] unit=%u rc=%d %ux%u frame=%ld n=%u\n", (unsigned)_u, _rc, _tw, _th, g_movie_frame, g_main_n); fflush(stdout); } } } } }
           // TEXDUMP: dump all bound fragment texture control blocks for the first few real draws
-          { static int _td=0; if (_td++ < 24) { printf("[TEXDUMP] draw=%d vc=%u\n", _td, _vc);
+          { static int _td=0; if (_td++ < 100) { printf("[TEXDUMP] draw=%d vc=%u\n", _td, _vc);
               for (int _u=0;_u<16;++_u) { if (!_frag_tex[_u][0] && !_frag_tex[_u][1] && !_frag_tex[_u][2] && !_frag_tex[_u][3]) continue;
                 uint32_t _w0=0,_w1=0,_w2=0,_w3=0; std::memcpy(&_w0,_frag_tex[_u],4); std::memcpy(&_w1,_frag_tex[_u]+4,4); std::memcpy(&_w2,_frag_tex[_u]+8,4); std::memcpy(&_w3,_frag_tex[_u]+12,4);
-                printf("[TEXDUMP]  u=%d w=%08X %08X %08X %08X\n", _u, _w0,_w1,_w2,_w3); } fflush(stdout); } }
+                unsigned _w = ((_w1>>12)&0xFFFu)+1u, _h = (_w1&0xFFFu)+1u; unsigned _tp=(_w0>>29)&7u;
+                printf("[TEXDUMP]  u=%d w=%08X %08X %08X %08X  dims=%ux%u tp=%u data=%08X\n", _u, _w0,_w1,_w2,_w3,_w,_h,_tp,_w2); } fflush(stdout); } }
           // MOVIETEX2: if a bound fragment texture's data VA is the engine movie texture (0x96900000) and we have a decoded movie frame, upload it explicitly (bypass materialize cache)
           { static int _mte = -1; if (_mte < 0) _mte = (getenv("P5D_MOVIE_DECODE") != nullptr) ? 1 : 0;
             if (_mte && g_movie_va) {
@@ -3090,6 +3091,8 @@ static uint32_t hle_call_inner(uint32_t stub_va, RecState* s) {
         if (_always || g_gxmabi_n++ < 4000) { printf("[GXMABI] %s va=%08X r0=%08X r1=%08X r2=%08X r3=%08X ret=%08X lr=%08X blk=%08X sp=%08X\n", _ge->name, stub_va, s->r[0], s->r[1], s->r[2], s->r[3], _rv, s->r[14], g_cur_block, s->r[13]); fflush(stdout); } }
       s->r[0] = _rv; return s->r[14];
     }
+    else { static int _um=0; if (stub_va>=0x812B1000u && stub_va<0x812B2000u && _um++<80) {
+        printf("[GXMUNMAPPED] va=%08X r0=%08X r1=%08X r2=%08X r3=%08X lr=%08X blk=%08X\n", stub_va, s->r[0],s->r[1],s->r[2],s->r[3],s->r[14],g_cur_block); fflush(stdout);} }
   }
   if (stub_va == 0x812B2810u) {   // __stack_chk_fail: REPAIR the canary slot and RETRY the compare block
     { static int _rf = -1; if (_rf < 0) { const char* _e = getenv("P5D_RECFATAL"); _rf = (_e && atoi(_e)) ? 1 : 0; }
