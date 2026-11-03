@@ -2245,6 +2245,25 @@ static void hf_fiber_thread(HFiber* f) {
     if (!fn) { int back=0; uint32_t bq=gbn_back(pc,&back); if (bq && back<=16) { pc=bq; fn=gbn(pc); } }
     if (!fn) { fprintf(stderr, "[HF-NOBLK] fib=%08X pc=%08X\n", f->addr, pc); break; }
     g_cur_block = pc; f->cur_pc = pc; ++f->blocks; ++g_hf_blocks;
+    if ((pc & ~1u) == 0x8119934Au) { static uint32_t _fb=0; ++_fb;
+      if (_fb<=2u) {
+        uint32_t _idx=0; { uint8_t* q=GP(0x816CC700u); if(q) std::memcpy(&_idx,q,4); }
+        uint32_t _base=0; { uint8_t* q=GP(0x816CC6D8u + (_idx&7u)*4u); if(q) std::memcpy(&_base,q,4); }
+        printf("[NODEDUMP] fb=%u idx=%u base=%08X\n", _fb, _idx, _base);
+        int _dumps=0;
+        for (uint32_t _ty=0;_ty<100u && _dumps<3u;++_ty) {
+          uint32_t _head=0; uint8_t* q=GP(_base+_ty*0x20u+0xCu); if(q) std::memcpy(&_head,q,4);
+          if (!_head) continue;
+          ++_dumps;
+          printf("[NODEDUMP]  ty=%u head=%08X words:", _ty, _head);
+          for (int _k=0;_k<24;++_k) { uint32_t _v=0; uint8_t* r2=GP(_head + (uint32_t)_k*4u); if(r2) std::memcpy(&_v,r2,4); printf(" %08X",_v); }
+          printf("\n");
+          uint32_t _n2=0; uint8_t* r3=GP(_head+0x14u); if(r3) std::memcpy(&_n2,r3,4);
+          if (_n2) { printf("[NODEDUMP]  next=%08X words2:", _n2);
+            for (int _k=0;_k<16;++_k) { uint32_t _v=0; uint8_t* r2=GP(_n2 + (uint32_t)_k*4u); if(r2) std::memcpy(&_v,r2,4); printf(" %08X",_v); }
+            printf("\n"); } }
+        fflush(stdout); } }
+
     { uint32_t _p0 = pc & ~1u;
       if (_p0 == 0x811EBAC0u || _p0 == 0x811EBAB4u || _p0 == 0x811EBB28u || _p0 == 0x811EFDEEu || _p0 == 0x811C0654u || _p0 == 0x811EC280u || _p0 == 0x811C0AB8u || _p0 == 0x811C0340u || _p0 == 0x811C034Au || _p0 == 0x811C035Eu) {
         static uint32_t _cb[10]={0};
@@ -5605,6 +5624,7 @@ static uint32_t mb_destroy_guard(RecState* s, uint32_t entry, const char* tag) {
 static uint32_t mb_811E6330(RecState* s) { return mb_destroy_guard(s, 0x811E6330u, "qDestroy"); }
 static uint32_t mb_811E63CE(RecState* s) { return mb_destroy_guard(s, 0x811E63CEu, "qDestroyAll"); }
 // NODEEXEC_LEVER: walk this frame's D-list A-heads and invoke node callbacks (original code)
+// node layout (verified via memory dump): +0x0 next?, +0x4 data ptr, +0xC callback, +0x14 list-next, payload at +0x20
 static uint32_t g_ne_n=0, g_ne_frames=0;
 static void node_exec_frame(RecState* s) {
   static int _en=-1; if (_en<0) { const char* e=getenv("P5D_NODEEXEC"); _en=(e&&atoi(e))?1:0; }
@@ -5618,17 +5638,17 @@ static void node_exec_frame(RecState* s) {
     uint32_t _head=0; { uint8_t* q=GP(_cell+0xCu); if(q) std::memcpy(&_head,q,4); }
     if (!_head) continue;
     uint32_t _node=_head; int _guard=0;
-    while (_node && _guard++ < 4096) {
-      uint32_t _next=0,_cb=0,_arg=0;
+    while (_node && _guard++ < 256) {
+      uint32_t _next=0,_cb=0,_data=0;
       { uint8_t* q=GP(_node+0x14u); if(q) std::memcpy(&_next,q,4); }
       { uint8_t* q=GP(_node+0xCu); if(q) std::memcpy(&_cb,q,4); }
-      { uint8_t* q=GP(_node+0x1Cu); if(q) std::memcpy(&_arg,q,4); }
-      if (_cb) { (void)call_guest_cb2(s, _cb & ~1u, _arg, 0u, 200000); ++_n; }
+      { uint8_t* q=GP(_node+0x4u); if(q) std::memcpy(&_data,q,4); }
+      if (_cb) { (void)call_guest_cb2(s, _cb & ~1u, _node, _data, 200000); ++_n; }
       _node=_next; }
     { uint8_t* q=GP(_cell+0xCu); if(q) { uint32_t _z=0; std::memcpy(q,&_z,4);} }
     { uint8_t* q=GP(_cell+0x10u); if(q) { uint32_t _z=0; std::memcpy(q,&_z,4);} } }
   g_ne_n += (uint32_t)_n;
-  static int _lf=0; if (_lf++<24 || (_lf%5)==0) { printf("[NODEEXEC_LEVER] frame=%u idx=%u nodes=%d total=%u hfblk=%u\n", g_ne_frames, _idx, _n, g_ne_n, (unsigned)g_hf_blocks); fflush(stdout); } }
+  static int _lf=0; if (_lf++<40) { printf("[NODEEXEC_LEVER] frame=%u idx=%u nodes=%d total=%u hfblk=%u\n", g_ne_frames, _idx, _n, g_ne_n, (unsigned)g_hf_blocks); fflush(stdout); } }
 static uint32_t mb_811E649A(RecState* s) {
   static int _en = -1; if (_en < 0) { const char* e = getenv("P5D_SYNCTASK"); _en = (e && atoi(e)) ? 1 : 0; }
   uint32_t desc = s->r[1], fn = 0, arg = 0;
