@@ -298,6 +298,7 @@ static int g_cbtr_n = 0;
 static int g_lktr_n = 0;
 static int g_acc_n = 0, g_lkin_n = 0, g_lkout_n = 0;
 extern "C" int g_watch_on = 1;
+extern "C" int g_badmem_safe = 0;   // BADMEM_SAFE: P() returns scratch instead of abort when set
 static void crihot_hit(uint32_t pc);   // CRIHOT_FWD
 static void decomp_hit(uint32_t pc, RecState* s);   // DECOMPPROBE_FWD
 static void stalldump_hit(uint32_t pc, RecState* s);   // STALLDUMP_FWD
@@ -2729,6 +2730,7 @@ extern "C" uint32_t hle_call(uint32_t stub_va, RecState* s) {
 static std::map<uint32_t,int> g_hle_hits;   // HLEHOT
 static void hlehot_dump();
 static uint32_t hle_call_inner(uint32_t stub_va, RecState* s) {
+  { static int _bs=-1; if (_bs<0) { const char* e=getenv("P5D_BADMEM_SAFE"); _bs=(e&&atoi(e))?1:0; g_badmem_safe=_bs; } }
   { static int _hh=-1; if (_hh<0) _hh = getenv("P5D_HLEHOT") ? 1 : 0; if (_hh) { ++g_hle_hits[stub_va]; } }
   if (g_ngs_env < 0) { const char* _ge = getenv("P5D_NGS"); g_ngs_env = (_ge && atoi(_ge) != 0) ? 1 : 0; }
   if (g_main_n < 4000u) { static std::set<uint32_t> _seen; static int _n = 0;
