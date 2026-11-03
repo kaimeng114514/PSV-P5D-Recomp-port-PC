@@ -299,6 +299,7 @@ static int g_lktr_n = 0;
 static int g_acc_n = 0, g_lkin_n = 0, g_lkout_n = 0;
 extern "C" int g_watch_on = 1;
 static void crihot_hit(uint32_t pc);   // CRIHOT_FWD
+static void decomp_hit(uint32_t pc, RecState* s);   // DECOMPPROBE_FWD
 static void stalldump_hit(uint32_t pc);   // STALLDUMP_FWD
 static void cpktrace_hit(uint32_t pc, RecState* s);   // CPKTRACE_FWD
 static void cpkhdr_hit(uint32_t pc, RecState* s);   // CPKHDR_FWD
@@ -2290,6 +2291,7 @@ static void hf_fiber_thread(HFiber* f) {
     if (!fn) { fprintf(stderr, "[HF-NOBLK] fib=%08X pc=%08X\n", f->addr, pc); break; }
     g_cur_block = pc; f->cur_pc = pc; ++f->blocks; ++g_hf_blocks;
     { static int _chh=-1; if (_chh<0) _chh = getenv("P5D_CRIHOT") ? 1 : 0; if (_chh) crihot_hit(pc); }
+    { static int _dp=-1; if (_dp<0) _dp = getenv("P5D_DECOMPPROBE") ? 1 : 0; if (_dp) decomp_hit(pc, s); }
     { static int _sd=-1; if (_sd<0) _sd = getenv("P5D_STALLDUMP") ? 1 : 0; if (_sd) stalldump_hit(pc); }
     { static int _ct=-1; if (_ct<0) _ct = getenv("P5D_CPKTRACE") ? 1 : 0; if (_ct) cpktrace_hit(pc, s); }
     { static int _chx=-1; if (_chx<0) _chx = getenv("P5D_CPKHDR") ? 1 : 0; if (_chx) cpkhdr_hit(pc, s); }
@@ -6184,7 +6186,7 @@ static BlockFn gbn_raw(uint32_t pc) {
 static uint32_t call_guest_cb2(RecState* s, uint32_t entry, uint32_t a0, uint32_t a1, int maxblocks);   // M849 fwd
 static std::map<uint32_t,int> g_cri_hits;   // CRIHOT: function-entry histogram in CRI code ranges
 static void crihot_hit(uint32_t pc) { uint32_t _p = pc & ~1u;   // CRIHOT2
-  if ((_p>=0x81163000u && _p<0x81165000u) || (_p>=0x811CA000u && _p<0x811CC500u) || (_p>=0x811A0000u && _p<0x811B0000u) || (_p>=0x811ED000u && _p<0x811EF000u))
+  if ((_p>=0x81163000u && _p<0x81165000u) || (_p>=0x811CA000u && _p<0x811CC500u) || (_p>=0x811A0000u && _p<0x811B0000u) || (_p>=0x811ED000u && _p<0x811EF000u) || (_p>=0x811D0000u && _p<0x811F0000u))   // DECOMPHOT
     { ++g_cri_hits[_p]; } }
 static void cricall_hit(uint32_t pc, RecState* s) {   // CRICALLPROBE
   static int _cc=-1; if (_cc<0) _cc = getenv("P5D_CRICALL") ? 1 : 0; if (!_cc || !s) return;
@@ -6241,9 +6243,19 @@ static void cpktrace_hit(uint32_t pc, RecState* s) {   // CPKTRACE: log CRI/CPK 
     if (_n++ < 400) { printf("[CPKTRACE] %08X r0=%08X r1=%08X r2=%08X r3=%08X lr=%08X n=%u\n", _p, s->r[0],s->r[1],s->r[2],s->r[3],s->r[14], g_main_n); fflush(stdout); } }
 }
 
+static void crihot_dump();   // DECOMPHOT_FWD
 static void stalldump_hit(uint32_t pc) {   // STALLDUMP: periodic dump of the main fiber's current block
   static int _env=-1; if (_env<0) _env = getenv("P5D_STALLDUMP") ? 1 : 0; if (!_env) return;
-  static uint64_t _n=0; if ((++_n % 20000000ull) == 0) { printf("[STALL] blocks=%llu blk=%08X fib=%08X n=%u thr=%08X\n", (unsigned long long)_n, pc&~1u, g_cur_fiber, g_main_n, g_cur_thr); fflush(stdout); }
+  static uint64_t _n=0; ++_n; if ((_n % 20000000ull) == 0) { printf("[STALL] blocks=%llu blk=%08X fib=%08X n=%u thr=%08X\n", (unsigned long long)_n, pc&~1u, g_cur_fiber, g_main_n, g_cur_thr); fflush(stdout); }
+  if (_n == 30000000ull) { printf("[DECOMPHOT] dump at 30M blocks\n"); fflush(stdout); crihot_dump(); }
+}
+
+static void decomp_hit(uint32_t pc, RecState* s) {   // DECOMPPROBE: decompression call args
+  static int _env=-1; if (_env<0) _env = getenv("P5D_DECOMPPROBE") ? 1 : 0; if (!_env || !s) return;
+  uint32_t _p = pc & ~1u;
+  if (_p == 0x811DF434u) { static int _n=0; ++_n; if (_n<=300) { printf("[DECOMP] #%d 434 r0=%08X r1=%08X r2=%08X r3=%08X lr=%08X n=%u\n", _n, s->r[0],s->r[1],s->r[2],s->r[3],s->r[14], g_main_n); fflush(stdout);} else if ((_n%200)==0) { printf("[DECOMP] 434 calls=%d\n", _n); fflush(stdout);} }
+  if (_p == 0x811DF91Au) { static int _n2=0; ++_n2; if (_n2<=20) { printf("[DECOMP] #%d 1A r0=%08X r1=%08X r2=%08X r3=%08X lr=%08X n=%u\n", _n2, s->r[0],s->r[1],s->r[2],s->r[3],s->r[14], g_main_n); fflush(stdout);} }
+  if (_p == 0x811E56A4u) { static int _n3=0; ++_n3; if (_n3<=20) { printf("[DECOMP] #%d 6A4 r0=%08X r1=%08X r2=%08X r3=%08X lr=%08X n=%u\n", _n3, s->r[0],s->r[1],s->r[2],s->r[3],s->r[14], g_main_n); fflush(stdout);} }
 }
 
 static void crihot_dump() {
@@ -6320,6 +6332,7 @@ static uint32_t call_guest_cb2(RecState* s, uint32_t entry, uint32_t a0, uint32_
       printf("[REGCB] pc=%08X name=%s r0=%08X r1=%08X r2=%08X r3=%08X lr=%08X sp=%08X fib=%08X thr=%08X\n", pc, _nm, s->r[0], s->r[1], s->r[2], s->r[3], s->r[14], s->r[13], g_cur_fiber, g_cur_thr); fflush(stdout); }
     uint32_t q = pc & ~1u;
     { static int _chh2=-1; if (_chh2<0) _chh2 = getenv("P5D_CRIHOT") ? 1 : 0; if (_chh2) crihot_hit(pc); }
+    { static int _dp2=-1; if (_dp2<0) _dp2 = getenv("P5D_DECOMPPROBE") ? 1 : 0; if (_dp2) decomp_hit(pc, s); }
     { static int _ct2=-1; if (_ct2<0) _ct2 = getenv("P5D_CPKTRACE") ? 1 : 0; if (_ct2) cpktrace_hit(pc, s); }
     { static int _chx2=-1; if (_chx2<0) _chx2 = getenv("P5D_CPKHDR") ? 1 : 0; if (_chx2) cpkhdr_hit(pc, s); }
     { static int _chc2=-1; if (_chc2<0) _chc2 = getenv("P5D_CRICALL") ? 1 : 0; if (_chc2) cricall_hit(pc, s); }
