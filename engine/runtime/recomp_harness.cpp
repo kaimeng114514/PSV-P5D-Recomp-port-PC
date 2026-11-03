@@ -6056,11 +6056,17 @@ static BlockFn gbn_raw(uint32_t pc) {
 }
 static uint32_t call_guest_cb2(RecState* s, uint32_t entry, uint32_t a0, uint32_t a1, int maxblocks);   // M849 fwd
 static std::map<uint32_t,int> g_cri_hits;   // CRIHOT: function-entry histogram in CRI code ranges
-static void crihot_hit(uint32_t pc) { uint32_t _p = pc & ~1u;
-  if ((_p>=0x81163000u && _p<0x81165000u) || (_p>=0x811CA000u && _p<0x811CC500u) || (_p>=0x811A0000u && _p<0x811B0000u))
+static void crihot_hit(uint32_t pc) { uint32_t _p = pc & ~1u;   // CRIHOT2
+  if ((_p>=0x81163000u && _p<0x81165000u) || (_p>=0x811CA000u && _p<0x811CC500u) || (_p>=0x811A0000u && _p<0x811B0000u) || (_p>=0x811ED000u && _p<0x811EF000u))
     { ++g_cri_hits[_p]; } }
-static void crihot_dump() { int _n=0; printf("[CRIHOT] unique=%d\n",(int)g_cri_hits.size());
-  for (auto& kv : g_cri_hits) { if (_n++<40) printf("[CRIHOT] va=%08X hits=%d\n", kv.first, kv.second); } fflush(stdout); }
+static void crihot_dump() {
+  printf("[CRIHOT] unique=%d\n",(int)g_cri_hits.size());
+  const uint32_t _keys[8] = {0x811CA85Au,0x811CA6B6u,0x811641D2u,0x811CB0D8u,0x811CB0D9u,0x811632BAu,0x8116332Au,0x811CA7ACu};
+  for (int _k=0;_k<8;++_k) { auto _it=g_cri_hits.find(_keys[_k]); printf("[CRIHOT] KEY %08X hits=%d\n", _keys[_k], _it==g_cri_hits.end()?0:_it->second); }
+  std::vector<std::pair<int,uint32_t>> _v; for (auto& kv : g_cri_hits) _v.push_back({kv.second,kv.first});
+  std::sort(_v.begin(),_v.end(),[](const std::pair<int,uint32_t>&a,const std::pair<int,uint32_t>&b){return a.first>b.first;});
+  for (size_t _i=0;_i<_v.size() && _i<25;++_i) printf("[CRIHOT] TOP va=%08X hits=%d\n", _v[_i].second, _v[_i].first);
+  fflush(stdout); }
 
 static uint32_t call_guest_cb(RecState* s, uint32_t entry, uint32_t arg, int maxblocks) {
   if (!entry) return 0;
