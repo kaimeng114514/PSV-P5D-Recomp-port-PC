@@ -5356,8 +5356,16 @@ static uint32_t mb_811DACFC(RecState* s) {
     if (_v == 0u) return 0x811DAD4Au; }
   return 0x811DAD02u;
 }
+static uint32_t mb_81283D62(RecState* s) {   // M1174: missing AOT block (BL return continuation of 0x81283D54)
+  g_cur_block = 0x81283D62u;
+  { uint32_t _a = s->r[0], _b = 0x1u, _r = _a - _b;
+    uint32_t _c = (_a >= _b) ? 0x20000000u : 0u;
+    uint32_t _v = (((_a ^ _b) & (_a ^ _r)) & 0x80000000u) >> 3;
+    s->apsr = (s->apsr & 0x0FFFFFFFu) | (_r & 0x80000000u) | ((_r == 0) ? 0x40000000u : 0u) | _c | _v; }
+  return 0x81283D64u;
+}
 static void init_manual_blocks(void) {
-  g_manual_blocks[0x81032CF8u] = (BlockFn)mb_81032CF8;
+g_manual_blocks[0x81032CF8u] = (BlockFn)mb_81032CF8;
   g_manual_blocks[0x81032CC8u] = (BlockFn)mb_81032CC8;
   g_manual_blocks[0x81181D90u] = (BlockFn)mb_81181D90;
   g_manual_blocks[0x8118310Au] = (BlockFn)mb_8118310A;
@@ -5369,6 +5377,7 @@ static void init_manual_blocks(void) {
   g_manual_blocks[0x8102A50Eu] = (BlockFn)mb_8102A50E;
   g_manual_blocks[0x811EB930u] = (BlockFn)mb_811EB930;   // M845: null display-buffer guard (skip submit instead of abort)
   g_manual_blocks[0x811DACFCu] = (BlockFn)mb_811DACFC;
+g_manual_blocks[0x81283D62u] = (BlockFn)mb_81283D62;
 }
 static BlockFn gbn(uint32_t pc) {
   { static int _mg_env=-1; if (_mg_env<0) { const char* _e=getenv("P5D_MGRPROBE"); _mg_env=(_e&&atoi(_e)!=0)?1:0; }
