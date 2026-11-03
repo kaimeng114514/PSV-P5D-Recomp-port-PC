@@ -2078,6 +2078,16 @@ static void hf_assert_probe(uint32_t pcv, RecState* s) {
   }
 
 }
+
+static void gfd_atomic_probe(uint32_t pcv, RecState* s) {
+  if ((pcv & ~1u) != 0x81160712u) return;
+  uint32_t p1 = s->r[0] & 0xFFu, p2 = s->r[1] & 0xFFu;
+  uint32_t st = 0; uint8_t* q = GP(0x81555438u); if (q) std::memcpy(&st, q, 4);
+  st |= 1u;
+  if (q) std::memcpy(q, &st, 4);
+  { uint8_t* p = GP(0x8155543Cu); if (p) { p[0] = (uint8_t)p1; p[1] = (uint8_t)p2; } }
+  static int _n = 0; if (_n++ < 30) { printf("[GFDATOMIC] applied p1=%u p2=%u state=%08X blk=%08X thr=%08X\n", p1, p2, st, g_cur_block, tl_ht_tid); fflush(stdout); }
+}
 // ===================== M1155 P0: host fibers (one native thread per guest fiber) =====================
 // Model (nativ-style): sceFiberRun/Switch/ReturnToThread map to real std::thread park/resume with
 // condvars; guest code inside a fiber runs the normal AOT dispatcher (gbn) with its own RecState.
@@ -2139,6 +2149,7 @@ static void hf_fiber_thread(HFiber* f) {
     if (!fn) { int back=0; uint32_t bq=gbn_back(pc,&back); if (bq && back<=16) { pc=bq; fn=gbn(pc); } }
     if (!fn) { if (g_hf_n++ < 20) { fprintf(stderr, "[HF-NOBLK] fib=%08X pc=%08X blk=%08X\n", f->addr, pc, g_cur_block); fflush(stderr); } break; }
     g_cur_block = pc; f->cur_pc = pc; ++f->blocks; ++g_hf_blocks;
+    if (pc == 0x81160712u) { gfd_atomic_probe(pc, s); pc = s->r[14]; continue; }
     if (pc == 0x8115FF12u) {
       uint32_t _st=0,_g3c=0; uint8_t* _p=GP(0x81555438u); if(_p) std::memcpy(&_st,_p,4);
       _p=GP(0x8155543Cu); if(_p) _g3c=_p[0];
@@ -5453,6 +5464,7 @@ static void guest_thread_run(uint32_t tid) {
     if (!fn) { int _bk=0; uint32_t _bq=gbn_back(pc,&_bk); if (_bq && _bk<=16) { pc=_bq; fn=gbn(pc); } }
     if (!fn) { if (g_ht_bad_n++ < 20) { printf("[HT-NOBLK] tid=%08X pc=%08X\n", tid, pc); fflush(stdout); } break; }
     g_cur_block = pc;
+    if (pc == 0x81160712u) { gfd_atomic_probe(pc, s); pc = s->r[14]; continue; }
     hf_assert_probe(pc, s);
     uint32_t nx = fn(s);
     if (nx == 0u || nx == 0xFFFFFFF0u || nx == 0xFFFFFFFEu || nx == 0xFFFFFFFDu) break;
@@ -6052,6 +6064,11 @@ static LONG WINAPI dsh_crash_filter(EXCEPTION_POINTERS* ep) {
   printf("[CRASH] code=%08X addr=%p blk=%08X fib=%08X pc_last=%08X\n",
          ep->ExceptionRecord->ExceptionCode, (void*)ep->ExceptionRecord->ExceptionAddress,
          g_cur_block, g_cur_fiber, g_pc_ring[(g_pc_ring_n - 1) & 63]);
+  { HMODULE _hb = NULL; GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCSTR)ep->ExceptionRecord->ExceptionAddress, &_hb);
+    char _path[MAX_PATH] = {0}; if (_hb) GetModuleFileNameA(_hb, _path, MAX_PATH);
+    uintptr_t _off = (uintptr_t)ep->ExceptionRecord->ExceptionAddress - (uintptr_t)(_hb ? _hb : GetModuleHandleA(NULL));
+    printf("[CRASH] module=%p name=%s modoff=%llX tid=%u curpc=%08X\n", (void*)_hb, _path, (unsigned long long)_off, (unsigned)GetCurrentThreadId(), g_cur_block);
+    printf("[CRASH] tlring:"); for (int _i=0;_i<16;++_i) printf(" %08X", tl_pc_ring[(tl_pc_n - 16u + (uint32_t)_i) & 63u]); printf("\n"); fflush(stdout); }
   printf("[CRASH] pcring:");
   for (int i = 0; i < 24; ++i) printf(" %08X", g_pc_ring[(g_pc_ring_n - 24u + (uint32_t)i) & 63u]);
   printf("\n"); fflush(stdout);
