@@ -2245,6 +2245,14 @@ static void hf_fiber_thread(HFiber* f) {
     if (!fn) { int back=0; uint32_t bq=gbn_back(pc,&back); if (bq && back<=16) { pc=bq; fn=gbn(pc); } }
     if (!fn) { fprintf(stderr, "[HF-NOBLK] fib=%08X pc=%08X\n", f->addr, pc); break; }
     g_cur_block = pc; f->cur_pc = pc; ++f->blocks; ++g_hf_blocks;
+    { static std::map<uint32_t,uint32_t> _hot; static uint64_t _last=0; _hot[pc] += 1;
+      if (g_hf_blocks - _last >= 25000000u) { _last = g_hf_blocks;
+        std::vector<std::pair<uint32_t,uint32_t>> _v(_hot.begin(), _hot.end());
+        std::sort(_v.begin(), _v.end(), [](const std::pair<uint32_t,uint32_t>&a,const std::pair<uint32_t,uint32_t>&b){return a.second>b.second;});
+        printf("[HFHOT] hfblk=%u exacttop:", (unsigned)g_hf_blocks);
+        for (size_t _i=0;_i<_v.size()&&_i<26;++_i) printf(" %08X=%u", _v[_i].first, _v[_i].second);
+        printf("\n"); fflush(stdout); _hot.clear(); } }
+
     rwatch_arm(pc, s);
     rwatch_check(pc);
     tl_pc_ring[tl_pc_n & 63u] = pc; ++tl_pc_n;
