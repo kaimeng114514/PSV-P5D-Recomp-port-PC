@@ -2144,7 +2144,16 @@ static void hf_note(const char* what, HFiber* f, uint32_t a) {
 }
 
 static uint32_t g_cri_reader = 0;
+static int g_forcest = -1;
 static void rwatch_check(uint32_t pcv) {
+  if (g_forcest < 0) { const char* e = getenv("P5D_FORCEST"); g_forcest = (e && atoi(e)) ? 1 : 0; }
+  if (g_forcest && g_cri_reader) {
+    static uint32_t _fsn = 0;
+    if (((++_fsn & 0x3FFFu) == 0u) && (g_watch2 == g_cri_reader + 0xBCu)) {
+      uint32_t st = 0; { uint8_t* q = GP(g_watch2); if (q) std::memcpy(&st, q, 4); }
+      if (st == 1u) { uint32_t two = 2u; uint8_t* q = GP(g_watch2); if (q) std::memcpy(q, &two, 4); printf("[FORCEST] reader=%08X status 1->2 (debug lever) blk=%u\n", g_cri_reader, (unsigned)g_blkcnt_total); fflush(stdout); }
+    }
+  }
   if (!g_watch2) return;
   uint32_t o2 = g_watch2 - IMG_VA_BASE; if (o2 + 4u > IMG_SIZE) return;
   uint32_t v2 = 0; std::memcpy(&v2, gp_img + o2, 4);
