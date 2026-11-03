@@ -929,6 +929,10 @@ static void movie_advance_frame(void) {
     // 18.4516 M971: also feed the host movie layer - present_frame blits g_movie_img fullscreen over the
     // swapchain image (vkCmdBlitImage), so the real movie frame becomes visible regardless of engine shaders.
     if (!g_movie_decode_only) p5d_movie_set_frame(_dst, (int)g_movie_w, (int)g_movie_h);
+    // MOVIETEX0: in decode-only mode write decoded BGRA into the engine's movie texture data VA
+    if (g_movie_decode_only) { uint8_t* _g = GP(0x96900000u);
+      if (_g) { std::memcpy(_g, _dst, (size_t)g_movie_w * g_movie_h * 4u);
+        static int _mt=0; if (_mt++ < 8) { printf("[MOVIETEX] wrote %ux%u BGRA to guest VA 96900000 frame=%ld n=%u\n", g_movie_w, g_movie_h, g_movie_frame, g_main_n); fflush(stdout); } } }
     static int _mn = 0; if (_mn++ < 12) { printf("[MOVIE] frame=%ld/%ld -> scratch=%08X set_texsrc_addr+set_frame\n", g_movie_frame, g_movie_frames, g_movie_va); fflush(stdout); }
   }
   ++g_movie_frame;
@@ -2985,6 +2989,19 @@ static uint32_t hle_call_inner(uint32_t stub_va, RecState* s) {
                 if (_tw == g_movie_w && _th == g_movie_h) {
                   int _rc = p5d::vulkan::upload_gxm_control_to_unit((unsigned)_u, _frag_tex[_u], GP(g_movie_va), (unsigned)(g_movie_w * g_movie_h * 4u));
                   static int _mn = 0; if (_mn++ < 12) { printf("[ABIMOVTEX] unit=%u rc=%d %ux%u frame=%ld n=%u\n", (unsigned)_u, _rc, _tw, _th, g_movie_frame, g_main_n); fflush(stdout); } } } } }
+          // TEXDUMP: dump all bound fragment texture control blocks for the first few real draws
+          { static int _td=0; if (_td++ < 24) { printf("[TEXDUMP] draw=%d vc=%u\n", _td, _vc);
+              for (int _u=0;_u<16;++_u) { if (!_frag_tex[_u][0] && !_frag_tex[_u][1] && !_frag_tex[_u][2] && !_frag_tex[_u][3]) continue;
+                uint32_t _w0=0,_w1=0,_w2=0,_w3=0; std::memcpy(&_w0,_frag_tex[_u],4); std::memcpy(&_w1,_frag_tex[_u]+4,4); std::memcpy(&_w2,_frag_tex[_u]+8,4); std::memcpy(&_w3,_frag_tex[_u]+12,4);
+                printf("[TEXDUMP]  u=%d w=%08X %08X %08X %08X\n", _u, _w0,_w1,_w2,_w3); } fflush(stdout); } }
+          // MOVIETEX2: if a bound fragment texture's data VA is the engine movie texture (0x96900000) and we have a decoded movie frame, upload it explicitly (bypass materialize cache)
+          { static int _mte = -1; if (_mte < 0) _mte = (getenv("P5D_MOVIE_DECODE") != nullptr) ? 1 : 0;
+            if (_mte && g_movie_va) {
+              for (int _u = 0; _u < 16; ++_u) { if (!_frag_tex[_u][0] && !_frag_tex[_u][1]) continue;
+                uint32_t _dva = 0; std::memcpy(&_dva, _frag_tex[_u] + 8, 4);
+                if (_dva == 0x96900000u) {
+                  int _rc = p5d::vulkan::upload_gxm_control_to_unit((unsigned)_u, _frag_tex[_u], GP(g_movie_va), (unsigned)(g_movie_w * g_movie_h * 4u));
+                  static int _mn = 0; if (_mn++ < 12) { printf("[MOVIETEX2] unit=%u rc=%d frame=%ld n=%u\n", (unsigned)_u, _rc, g_movie_frame, g_main_n); fflush(stdout); } } } } }
           // 18.4510 M965: resolve+upload all bound fragment textures (engine ctrl blocks -> backend VkImages)
           for (int _u = 0; _u < 16; ++_u) {
             bool _nz = false; for (int _k = 0; _k < 16; ++_k) if (_frag_tex[_u][_k]) { _nz = true; break; }
