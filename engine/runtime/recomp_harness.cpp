@@ -4047,6 +4047,36 @@ static uint32_t fiber_exec_to_completion(RecState* s) {
     if (pc == 0x811DA54Cu || pc == 0x811DA55Cu) { static int _gc=0; if (_gc++ < 40) { RecState* _ps=SPTR(s); printf("[GCA] pc=%08X r0=%08X r1=%08X r2=%08X lr=%08X fib=%08X thr=%08X\n", pc,_ps->r[0],_ps->r[1],_ps->r[2],_ps->r[14],g_cur_fiber,g_cur_thr); fflush(stdout); } }
     if ((pc & ~1u) == 0x811E5EC6u || (pc & ~1u) == 0x811E5EC2u || (pc & ~1u) == 0x811E5ECEu) { static int _wl=0; if (_wl++ < 12) { RecState* _ps=SPTR(s); uint32_t _r4=_ps->r[4]; uint16_t _st=0; uint32_t _fl=0; uint8_t* q=GP(_r4+2u); if(q) std::memcpy(&_st,q,2); q=GP(0x816CC630u); if(q) std::memcpy(&_fl,q,4); printf("[WAITLOOP] pc=%08X r4=%08X state=%u flag816CC630=%08X r0=%08X r5=%08X sp=%08X fib=%08X thr=%08X\n", pc,_r4,(unsigned)_st,_fl,_ps->r[0],_ps->r[5],_ps->r[13],g_cur_fiber,g_cur_thr); fflush(stdout); } }
     job_probes(pc, SPTR(s));
+    // M1153: appJobQueue dispatch fallback - the guest jobqueue worker thread never dispatches the
+    // render jobs that FUN_81003ccc waits for, so the frame loop spins forever. When the guest checks
+    // job completion (FUN_8101600e, block 8101600E), pop one pending node from the queue (queue = job+0x84)
+    // and run its callback synchronously (call_guest_cb restores the register state afterwards).
+    if ((pc & ~1u) == 0x8101600Eu || (pc & ~1u) == 0x81003D1Au || (pc & ~1u) == 0x81003CF0u) {
+      RecState* _ps = SPTR(s);
+      uint32_t _job = _ps->r[0], _q = 0;
+      if ((pc & ~1u) == 0x8101600Eu) { if (_job >= 0x80600000u && _job < 0x85000000u) _q = _job - 0x84u; }
+      else { uint8_t* _gq = GP(0x81555EA4u); uint32_t _qv = 0; if (_gq) std::memcpy(&_qv, _gq, 4);
+             if (_qv >= 0x80600000u && _qv < 0x85000000u) _q = _qv;          /* M1153B: jobqueue object = DAT_81555EA4 */
+             if (_q) { static int _jq2=0; if (_jq2++ < 20) { printf("[JOBQPTR] q=%08X head=%08X blk=%u \n", _q, [&]{uint32_t _h=0; uint8_t* _p=GP(_q+4u); if(_p) std::memcpy(&_h,_p,4); return _h;}(), (unsigned)g_blkcnt_total); fflush(stdout); } } }
+      if (_q >= 0x80600000u && _q < 0x85000000u) {
+        static int _jd = 0;
+        uint32_t _head = 0, _cb = 0, _arg = 0, _next = 0;
+        { uint8_t* _hp = GP(_q + 4u); if (_hp) std::memcpy(&_head, _hp, 4); }
+        if (_head >= 0x80600000u && _head < 0x85000000u && _jd < 3000) {
+          { uint8_t* _p = GP(_head + 4u); if (_p) std::memcpy(&_cb, _p, 4); }
+          { uint8_t* _p = GP(_head + 8u); if (_p) std::memcpy(&_arg, _p, 4); }
+          { uint8_t* _p = GP(_head + 0xCu); if (_p) std::memcpy(&_next, _p, 4); }
+          if (_cb >= 0x80600000u && _cb < 0x81330000u) {
+            ++_jd;
+            { uint8_t* _w = GP(_q + 4u); if (_w) std::memcpy(_w, &_next, 4); }
+            if (!_next) { uint8_t* _w = GP(_q + 8u); if (_w) { uint32_t _z = 0; std::memcpy(_w, &_z, 4); } }
+            { uint8_t* _w = GP(_head + 4u); if (_w) { uint32_t _z = 0; std::memcpy(_w, &_z, 4); } }
+            if (_jd <= 40) { printf("[JOBDISP] #%d job=%08X q=%08X node=%08X cb=%08X arg=%08X blk=%u fib=%08X\n", _jd, _job, _q, _head, _cb, _arg, (unsigned)g_blkcnt_total, g_cur_fiber); fflush(stdout); }
+            call_guest_cb(_ps, _cb, _arg, 600000);
+          }
+        }
+      }
+    }
     if ((pc & ~1u) == 0x811EAAE4u) {
       if (!g_in_eaa4) { g_in_eaa4 = 1;
         if (g_blkcnt_total >= 14000000u && g_eaa4_ent_n++ < 40)
