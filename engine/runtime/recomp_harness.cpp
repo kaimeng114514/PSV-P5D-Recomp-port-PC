@@ -3746,7 +3746,8 @@ static uint32_t hle_call_inner(uint32_t stub_va, RecState* s) {
       if (tl_ht_tid) { hle_wait_begin();
         { static std::set<unsigned long long> _hw; static int _hwn=0; unsigned long long _k=((unsigned long long)tl_ht_tid<<40)^((unsigned long long)obj<<16)^(bits&0xFFFFu);
           if (_hw.find(_k)==_hw.end() && _hwn++<300) { _hw.insert(_k); printf("[HTHW] WAIT obj=%08X bits=%08X mode=%X cur=%08X thr=%08X lr=%08X pc=%08X blk=%u\n", obj, bits, mode, cur, tl_ht_tid, s->r[14], g_cur_block, (unsigned)g_blkcnt_total); fflush(stdout); } }
-        for (;;) { if (g_shutdown) break; cur = (g_eflag.count(obj) ? g_eflag[obj] : 0u); ok = eval(cur); if (ok) break; if (!g_fastsleep) std::this_thread::sleep_for(std::chrono::microseconds(200)); } hle_wait_end();
+        for (;;) { if (g_shutdown) break; cur = (g_eflag.count(obj) ? g_eflag[obj] : 0u); ok = eval(cur); if (ok) break; if (!g_fastsleep) std::this_thread::sleep_for(std::chrono::microseconds(200)); }
+        if (tl_is_hfiber && (obj == 0x60012000u || obj == 0x60013000u || obj == 0x60011000u)) { static int _fw=0; if (_fw++<40) { printf("[EFWAKE] obj=%08X bits=%08X cur=%08X fib=%08X\n", obj,bits,cur,tl_hf?tl_hf->addr:0u); fflush(stdout); } }hle_wait_end();
         if (outp) { uint8_t* p = GP(outp); if (p) std::memcpy(p, &cur, 4); }
         if (mode & 4u) g_eflag[obj] = 0u; else if (mode & 2u) g_eflag[obj] = cur & ~bits;
         r0 = 0; break; }
@@ -3772,7 +3773,8 @@ static uint32_t hle_call_inner(uint32_t stub_va, RecState* s) {
         if (_ces.find(_k2)==_ces.end() && _csn++<300) { _ces.insert(_k2); uint32_t _h=(g_eflag.count(_o)?g_eflag[_o]:0u); printf("[SETUP] obj=%08X bits=%08X cur=%08X thr=%08X fib=%08X lr=%08X pc=%08X\n", _o, _b, _h, tl_ht_tid, tl_is_hfiber, s->r[14], g_cur_block); fflush(stdout); } }
       if (g_main_n >= 59000000u) { static int _se_n=0; if (_se_n++ < 200) { printf("[SETEF57] obj=%08X bits=%08X pc=%08X fib=%08X\n", s->r[0], s->r[1], g_cur_block, g_cur_fiber); fflush(stdout); } }
       uint32_t obj = s->r[0], bits = s->r[1];
-      { static int _sf=0; if (_sf++ < 160) { printf("[EFSET] obj=%08X bits=%08X fib=%08X thr=%08X lr=%08X pc=%08X blk=%u\n", obj, bits, tl_hf?tl_hf->addr:0u, tl_ht_tid, s->r[14], g_cur_block, (unsigned)g_blkcnt_total); fflush(stdout); } }
+      if (obj == 0x60012000u || obj == 0x60013000u || obj == 0x60011000u) { static int _jg=0; if (_jg++<40) { printf("[JOBSET] obj=%08X bits=%08X fib=%08X thr=%08X lr=%08X pc=%08X\n", obj,bits,tl_hf?tl_hf->addr:0u,tl_ht_tid,s->r[14],g_cur_block); fflush(stdout); } }
+      { static int _sf=0; if (obj != 0x6001C000u && _sf++ < 300) { printf("[EFALL] obj=%08X bits=%08X fib=%08X thr=%08X lr=%08X pc=%08X blk=%u\n", obj, bits, tl_hf?tl_hf->addr:0u, tl_ht_tid, s->r[14], g_cur_block, (unsigned)g_blkcnt_total); fflush(stdout); } }
       g_eflag[obj] |= bits;
       if (g_thr_log_n++ < 80) printf("[EVT] set obj=%08X bits=%08X cur_thr=%08X lr=%08X\n", obj, bits, g_cur_thr, s->r[14]);
       if (g_evt2_n++ < 60) { printf("[EVT2] set obj=%08X bits=%08X thr=%08X lr=%08X\n", obj, bits, g_cur_thr, s->r[14]); fflush(stdout); }
@@ -5590,6 +5592,19 @@ static void guest_thread_run(uint32_t tid) {
     semaw_probe(pc, s);
     if (pc == 0x811E5FB8u) { static int _jsb2=0; if (_jsb2++<40) { printf("[JOBSB] fib=0 thr=%08X r0=%08X r1=%08X lr=%08X blk=%u\n", tl_ht_tid, s->r[0], s->r[1], s->r[14], (unsigned)g_blkcnt_total); fflush(stdout); } }
     if ((pc & ~1u) == 0x811E63CEu || (pc & ~1u) == 0x811E6440u || (pc & ~1u) == 0x811E6966u) { static int _gd=0; if (_gd++<40) { printf("[GDESTROY] pc=%08X r0=%08X r1=%08X lr=%08X fib=%08X thr=%08X blk=%u\n", pc, s->r[0], s->r[1], s->r[14], tl_hf?tl_hf->addr:0u, tl_ht_tid, (unsigned)g_blkcnt_total); fflush(stdout); } }
+    if ((pc & ~1u) == 0x811E6966u) { static int _dj=0; if (_dj++<60) {
+        uint32_t _p = s->r[0]; uint32_t _q=0,_sc=0,_nx=0,_q2=0,_q4=0; uint8_t* _x;
+        _x=GP(_p); if(_x) std::memcpy(&_q,_x,4);
+        _x=GP(_q+0x2Cu); if(_x) std::memcpy(&_sc,_x,4);
+        _x=GP(_q+0x18u); if(_x) std::memcpy(&_nx,_x,4);
+        _x=GP(_q+0x10u); if(_x) std::memcpy(&_q4,_x,4);
+        _x=GP(_p+0x18u); if(_x) std::memcpy(&_q2,_x,4);
+        uint32_t _q0=0,_q4b=0,_q8=0,_qc=0;
+        _x=GP(_q); if(_x) std::memcpy(&_q0,_x,4);
+        _x=GP(_q+4u); if(_x) std::memcpy(&_q4b,_x,4);
+        _x=GP(_q+8u); if(_x) std::memcpy(&_q8,_x,4);
+        _x=GP(_q+0xCu); if(_x) std::memcpy(&_qc,_x,4);
+        printf("[DJOB] param=%08X q=%08X q0=%08X q4=%08X q8=%08X qc=%08X q2c=%08X q10=%08X q18=%08X jobArg18=%08X thr=%08X lr=%08X\n", _p,_q,_q0,_q4b,_q8,_qc,_sc,_q4,_nx,_q2,tl_ht_tid,s->r[14]); fflush(stdout); } }
     hf_assert_probe(pc, s);
     if (no_gfd_assert(pc, s)) { pc = s->r[14]; continue; }
     uint32_t nx = fn(s);
