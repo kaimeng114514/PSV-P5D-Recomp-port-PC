@@ -1118,6 +1118,34 @@ static int guest_format(uint32_t dst, uint32_t cap, uint32_t fmtva, RecState* s)
   if (cap) d[written < cap ? written : cap-1] = 0;
   return (int)written;
 }
+// LIBC_EXT M1256: missing SceLibc helpers (strstr/strcat/strtok/strtol/realloc/printf-family/sscanf/qsort)
+static std::map<uint32_t,uint32_t> g_malloc_sz;
+static int guest_format_vec(uint32_t dst, uint32_t cap, uint32_t fmtva, const uint32_t* a, int an) {
+  uint8_t* d = GP(dst); uint8_t* f = GP(fmtva); if (!d || !f || cap == 0) return 0;
+  uint32_t written = 0; uint32_t argi = 0;
+  auto next = [&]() -> uint32_t { return (argi < (uint32_t)an) ? a[argi++] : 0u; };
+  auto put = [&](char c) { if (written + 1 < cap) d[written] = (uint8_t)c; ++written; };
+  for (uint32_t i = 0; f[i] && written + 1 < cap; ++i) {
+    if (f[i] != '%') { put((char)f[i]); continue; }
+    char c = (char)f[i+1];
+    if (c == '%') { put('%'); ++i; continue; }
+    if (c == 's') { uint32_t pv = next(); uint8_t* q = GP(pv); if (q) for (uint32_t k=0; q[k] && written+1<cap; ++k) put((char)q[k]); ++i; }
+    else if (c == 'c') { put((char)next()); ++i; }
+    else if (c == 'd' || c == 'i') { char b[24]; int32_t v=(int32_t)next(); int n=0; bool ng=v<0; uint32_t uv=ng?(uint32_t)(-(int64_t)v):(uint32_t)v; if(!uv)b[n++]='0'; while(uv&&n<23){b[n++]=(char)('0'+uv%10);uv/=10;} if(ng)b[n++]='-'; while(n>0) put(b[--n]); ++i; }
+    else if (c == 'u') { char b[24]; uint32_t uv=next(); int n=0; if(!uv)b[n++]='0'; while(uv&&n<23){b[n++]=(char)('0'+uv%10);uv/=10;} while(n>0) put(b[--n]); ++i; }
+    else if (c == 'x' || c == 'X') { char b[24]; const char* hx=(c=='x')?"0123456789abcdef":"0123456789ABCDEF"; uint32_t uv=next(); int n=0; if(!uv)b[n++]='0'; while(uv&&n<23){b[n++]=hx[uv&15];uv>>=4;} while(n>0) put(b[--n]); ++i; }
+    else if (c == 'f') { double dv=0; uint32_t lo=next(), hi=next(); uint64_t bits=((uint64_t)hi<<32)|lo; std::memcpy(&dv,&bits,8); char b[32]; int n=std::snprintf(b,sizeof(b),"%.4f",dv); for(int k=0;k<n&&written+1<cap;++k) put(b[k]); ++i; }
+    else { put('%'); }
+  }
+  if (cap) d[written < cap ? written : cap-1] = 0;
+  return (int)written;
+}
+static int hle_va_format(uint32_t dst, uint32_t cap, uint32_t fmtva, uint32_t va_va) {
+  uint32_t a[24]; int an=0; uint8_t* q = GP(va_va);
+  if (q) for (int k=0;k<24;++k) { uint32_t w=0; std::memcpy(&w,q+(uint32_t)k*4u,4); a[an++]=w; }
+  return guest_format_vec(dst,cap,fmtva,a,an);
+}
+static uint32_t hle_fmtbuf() { static uint32_t b=0; if(!b) b=hle_malloc(0x4000); return b; }
 static void hle_eflag_set(uint32_t obj, uint32_t bits) {
   g_eflag[obj] |= bits;
   for (auto& kv : g_thr) if (kv.second.waiting && kv.second.wait_obj == obj) {
@@ -3376,7 +3404,7 @@ static uint32_t _ufd_vert_ubo = 0, _ufd_frag_ubo = 0;   // M1251: per-stage UBO 
   switch (stub_va) {
     case 0x812B2370u: r0 = 0; break;                                   // _sce_set_dso_handle_main
     case 0x812B22A0u: {                                                // malloc
-      uint32_t n = s->r[0]; r0 = hle_malloc(n);
+      uint32_t n = s->r[0]; r0 = hle_malloc(n); if (r0) g_malloc_sz[r0] = n;
       if (n >= 0x1000u && n <= 0x100000u && g_hm_n < 15) { ++g_hm_n;
         printf("[HM] n=%08X -> %08X heap_ptr=%08X lr=%08X block=%08X\n", n, r0, g_heap_ptr, s->r[14], g_cur_block); }
       if (n > 0x100000u) printf("[BIGALLOC] n=%08X -> %08X lr=%08X block=%08X\n", n, r0, s->r[14], g_cur_block);
@@ -3446,6 +3474,82 @@ static uint32_t _ufd_vert_ubo = 0, _ufd_frag_ubo = 0;   // M1251: per-stage UBO 
       uint8_t* a = GP(s->r[0]); uint8_t* b = GP(s->r[1]); uint32_t n = s->r[2]; r0 = 0;
       if (a && b) { for (uint32_t i = 0; i < n; ++i) { if (a[i] != b[i]) { r0 = (a[i] < b[i]) ? (uint32_t)-1 : 1u; break; } if (!a[i]) break; } }
       break; }
+    case 0x812B21D0u: {                                               // LIBC_EXT strstr(haystack,needle)
+      uint8_t* h = GP(s->r[0]); uint8_t* n = GP(s->r[1]); r0 = 0;
+      if (h && n) { size_t nl = std::strlen((const char*)n);
+        if (nl == 0) r0 = s->r[0];
+        else for (uint32_t i = 0; h[i]; ++i) { uint32_t k=0; while (k<nl && h[i+k]==n[k]) ++k; if (k==nl) { r0 = s->r[0]+i; break; } } }
+      { static int _n=0; if(_n++<20) printf("[LIBSTR] strstr(%.48s,%.16s) -> %08X\n", h?(const char*)h:"(null)", n?(const char*)n:"(null)", r0); fflush(stdout); }
+      break; }
+    case 0x812B21E0u: {                                               // LIBC_EXT strcat(dst,src)
+      uint8_t* d=GP(s->r[0]); uint8_t* q=GP(s->r[1]);
+      if (d && q) { uint32_t i=0; while(d[i]) ++i; uint32_t k=0; do { d[i++]=q[k]; } while(q[k++]); }
+      r0 = s->r[0]; break; }
+    case 0x812B21B0u: {                                               // LIBC_EXT realloc(ptr,size)
+      uint32_t p=s->r[0], n=s->r[1];
+      if (!p) { r0 = hle_malloc(n); if (r0) g_malloc_sz[r0]=n; break; }
+      uint32_t np = hle_malloc(n); if (np) { auto it=g_malloc_sz.find(p); uint32_t old=it==g_malloc_sz.end()?0u:it->second;
+        uint8_t* d=GP(np); uint8_t* q=GP(p); if (d&&q&&old) std::memcpy(d,q,old<n?old:n); g_malloc_sz[np]=n; }
+      r0 = np; break; }
+    case 0x812B21C0u: {                                               // LIBC_EXT strtok(str,delim) - stateful tokenizer
+      static uint32_t _st=0; uint32_t sv=s->r[0]?s->r[0]:_st; uint8_t* d=GP(s->r[1]); uint8_t* base=GP(sv); r0=0;
+      auto isd=[&](uint8_t c)->bool{ if(!d) return false; for(uint32_t k=0;d[k];++k) if(d[k]==c) return true; return false; };
+      if (base) { uint32_t off=0; while (base[off] && isd(base[off])) ++off; if (base[off]) { r0=sv+off;
+          while (base[off] && !isd(base[off])) ++off; if (base[off]) { base[off]=0; _st=sv+off+1; } else _st=0; } else _st=0; }
+      break; }
+    case 0x812B21F0u: {                                               // LIBC_EXT strtol(str,endptr,base)
+      uint8_t* p=GP(s->r[0]); int base=(int)s->r[2]; if (base==0) base=10;
+      uint32_t val=0; uint8_t* q=p; bool neg=false;
+      if (p) { while(*q==' '||*q=='\t') ++q; if(*q=='-'){neg=true;++q;} else if(*q=='+')++q;
+        if (base==16 && q[0]=='0' && (q[1]=='x'||q[1]=='X')) q+=2;
+        while (*q) { int dgt=-1; if(*q>='0'&&*q<='9')dgt=*q-'0'; else if(*q>='a'&&*q<='z')dgt=*q-'a'+10; else if(*q>='A'&&*q<='Z')dgt=*q-'A'+10; if(dgt<0||dgt>=base) break; val=(val*base)+(uint32_t)dgt; ++q; } }
+      uint32_t ep=s->r[0]; if (p) ep=s->r[0]+(uint32_t)(q-p);
+      if (s->r[1]) { uint8_t* e=GP(s->r[1]); if(e) std::memcpy(e,&ep,4); }
+      r0 = neg ? (uint32_t)(-(int32_t)val) : val; break; }
+    case 0x812B23C0u: {                                               // LIBC_EXT _Stoul(str, endptr, base)
+      uint8_t* p=GP(s->r[0]); int base=(int)s->r[2]; if (base==0) base=10; uint32_t val=0; uint8_t* q=p;
+      if (p) { while(*q==' '||*q=='\t') ++q;
+        if (base==0) { if(q[0]=='0'&&(q[1]=='x'||q[1]=='X')){base=16;q+=2;} else if(q[0]=='0'){base=8;++q;} else base=10; }
+        if (base==16 && q[0]=='0' && (q[1]=='x'||q[1]=='X')) q+=2;
+        while (*q) { int dgt=-1; if(*q>='0'&&*q<='9')dgt=*q-'0'; else if(*q>='a'&&*q<='z')dgt=*q-'a'+10; else if(*q>='A'&&*q<='Z')dgt=*q-'A'+10; if(dgt<0||dgt>=base) break; val=(val*base)+(uint32_t)dgt; ++q; } }
+      if (s->r[1]) { uint32_t ep=p?(s->r[0]+(uint32_t)(q-p)):s->r[0]; uint8_t* e=GP(s->r[1]); if(e) std::memcpy(e,&ep,4); }
+      r0 = val; break; }
+    case 0x812B22B0u: {                                               // LIBC_EXT vsprintf(dst,fmt,va)
+      uint32_t a[24]; int an=0; uint8_t* q=GP(s->r[2]); if(q) for(int k=0;k<24;++k){uint32_t w=0;std::memcpy(&w,q+(uint32_t)k*4u,4);a[an++]=w;}
+      r0=(uint32_t)guest_format_vec(s->r[0],0x100000u,s->r[1],a,an); break; }
+    case 0x812B2420u: {                                               // LIBC_EXT vsnprintf(dst,size,fmt,va)
+      uint32_t a[24]; int an=0; uint8_t* q=GP(s->r[3]); if(q) for(int k=0;k<24;++k){uint32_t w=0;std::memcpy(&w,q+(uint32_t)k*4u,4);a[an++]=w;}
+      r0=(uint32_t)guest_format_vec(s->r[0],s->r[1],s->r[2],a,an); break; }
+    case 0x812B22F0u: {                                               // LIBC_EXT printf(fmt,...) -> host stdout
+      uint32_t a[24]; int an=0; a[an++]=s->r[1]; a[an++]=s->r[2]; a[an++]=s->r[3];
+      for (int k=0;k<16;++k){ uint8_t* q=GP(s->r[13]+(uint32_t)k*4u); if(!q)break; uint32_t w=0; std::memcpy(&w,q,4); a[an++]=w; }
+      uint32_t b=hle_fmtbuf(); guest_format_vec(b,0x3FFFu,s->r[0],a,an);
+      { uint8_t* p=GP(b); if(p){ static int _pn=0; if(_pn++<40){ printf("[GUEST-PRINTF] %s\n",(const char*)p); fflush(stdout);} } }
+      r0=0; break; }
+    case 0x812B23A0u: {                                               // LIBC_EXT fprintf(stream,fmt,...)
+      uint32_t a[24]; int an=0; a[an++]=s->r[2]; a[an++]=s->r[3];
+      for (int k=0;k<16;++k){ uint8_t* q=GP(s->r[13]+(uint32_t)k*4u); if(!q)break; uint32_t w=0; std::memcpy(&w,q,4); a[an++]=w; }
+      uint32_t b=hle_fmtbuf(); guest_format_vec(b,0x3FFFu,s->r[1],a,an);
+      { uint8_t* p=GP(b); if(p){ static int _pn2=0; if(_pn2++<40){ printf("[GUEST-FPRINTF] %s\n",(const char*)p); fflush(stdout);} } }
+      r0=0; break; }
+    case 0x812B23F0u: {                                               // LIBC_EXT sscanf(str,fmt,...) minimal
+      uint8_t* sv=GP(s->r[0]); uint8_t* f=GP(s->r[1]); uint32_t argi=0; int matched=0;
+      auto argv=[&]()->uint32_t{ uint32_t v=0; if(argi==0){v=s->r[2];} else if(argi==1){v=s->r[3];} else { uint8_t* q=GP(s->r[13]+(argi-2)*4u); if(q) std::memcpy(&v,q,4);} ++argi; return v; };
+      if (sv && f) { uint32_t si=0;
+        for (uint32_t fi=0; f[fi] && sv[si]; ++fi) {
+          if (f[fi]=='%') { char c=(char)f[fi+1]; ++fi;
+            while (sv[si]==' '||sv[si]=='\t'||sv[si]=='\n') ++si;
+            uint32_t dst=argv(); uint8_t* dp=GP(dst);
+            if (c=='d'||c=='u'||c=='x'||c=='i') { int base=(c=='x')?16:10; uint32_t val=0; bool neg=false; if(sv[si]=='-'){neg=true;++si;}
+              while (sv[si]) { int dgt=-1; if(sv[si]>='0'&&sv[si]<='9')dgt=sv[si]-'0'; else if(base==16&&sv[si]>='a'&&sv[si]<='f')dgt=sv[si]-'a'+10; else if(base==16&&sv[si]>='A'&&sv[si]<='F')dgt=sv[si]-'A'+10; if(dgt<0||dgt>=base)break; val=val*base+(uint32_t)dgt; ++si; }
+              if(dp){ uint32_t w=neg?(uint32_t)(-(int32_t)val):val; std::memcpy(dp,&w,4);} ++matched; }
+            else if (c=='s') { if(dp){ uint32_t k=0; while(sv[si]&&sv[si]!=' '&&sv[si]!='\t'&&sv[si]!='\n') dp[k++]=sv[si++]; dp[k]=0; } ++matched; }
+            else if (c=='c') { if(dp) dp[0]=sv[si]; ++si; ++matched; }
+            else { break; } }
+          else { if (f[fi]!=sv[si]) break; ++si; } } }
+      r0=(uint32_t)matched; break; }
+    case 0x812B2330u: r0 = 0; break;                                  // LIBC_EXT qsort (no-op)
+    case 0x812B2240u: r0 = 0; break;                                  // LIBC_EXT _sceLdTlsRegisterModuleInfo
     case 0x812B2320u: {                                               // snprintf(dst,size,fmt,...) [NID A1BFF606]
       r0 = (uint32_t)guest_format(s->r[0], s->r[1], s->r[2], s); break; }
     case 0x812B2300u: {                                               // __errno_loc [NID 9E248B76]
