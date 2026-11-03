@@ -3031,6 +3031,18 @@ static uint32_t hle_call_inner(uint32_t stub_va, RecState* s) {
                 uint32_t _w0=0,_w1=0,_w2=0,_w3=0; std::memcpy(&_w0,_frag_tex[_u],4); std::memcpy(&_w1,_frag_tex[_u]+4,4); std::memcpy(&_w2,_frag_tex[_u]+8,4); std::memcpy(&_w3,_frag_tex[_u]+12,4);
                 unsigned _w = ((_w1>>12)&0xFFFu)+1u, _h = (_w1&0xFFFu)+1u; unsigned _tp=(_w0>>29)&7u;
                 printf("[TEXDUMP]  u=%d w=%08X %08X %08X %08X  dims=%ux%u tp=%u data=%08X\n", _u, _w0,_w1,_w2,_w3,_w,_h,_tp,_w2); } fflush(stdout); } }
+          // MOVIEFORCE2: upload decoded movie frame as unit 0 using a synthetic linear BGRA control block
+          { static int _mf2 = -1; if (_mf2 < 0) _mf2 = (getenv("P5D_MOVIE_FORCE") != nullptr) ? 1 : 0;
+            if (_mf2 && g_movie_va) {
+              unsigned char _blk[16] = {0};
+              abi_tex_encode(_blk, 0x60000000u, 0x96900000u, 0x0C000000u, (unsigned)g_movie_w, (unsigned)g_movie_h, 1u);
+              int _rc = p5d::vulkan::upload_gxm_control_to_unit(0u, _blk, GP(g_movie_va), (unsigned)(g_movie_w*g_movie_h*4u));
+              static int _mfn2=0; if (_mfn2++<12) { printf("[MOVIEFORCE2] unit=0 rc=%d frame=%ld dims=%dx%d n=%u\n", _rc, g_movie_frame, g_movie_w, g_movie_h, g_main_n); fflush(stdout);} } }
+          // MOVIEFORCE: force-upload the decoded movie frame as fragment unit 0's texture (engine-drawn movie test)
+          { static int _mf = -1; if (_mf < 0) _mf = (getenv("P5D_MOVIE_FORCE") != nullptr) ? 1 : 0;
+            if (_mf && g_movie_va) { uint8_t* _mc = GP(0x852A0B08u);
+              if (_mc && (_mc[0] || _mc[1])) { int _rc = p5d::vulkan::upload_gxm_control_to_unit(0u, _mc, GP(g_movie_va), (unsigned)(g_movie_w*g_movie_h*4u));
+                static int _mfn=0; if (_mfn++<12) { printf("[MOVIEFORCE] unit=0 rc=%d frame=%ld n=%u\n", _rc, g_movie_frame, g_main_n); fflush(stdout);} } } }
           // MOVIETEX2: if a bound fragment texture's data VA is the engine movie texture (0x96900000) and we have a decoded movie frame, upload it explicitly (bypass materialize cache)
           { static int _mte = -1; if (_mte < 0) _mte = (getenv("P5D_MOVIE_DECODE") != nullptr) ? 1 : 0;
             if (_mte && g_movie_va) {
