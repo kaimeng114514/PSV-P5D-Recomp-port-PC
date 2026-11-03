@@ -2112,6 +2112,7 @@ struct HFiber {
   HFWait* owner = nullptr;
   int starts = 0, switches = 0, rets = 0;
   uint32_t cur_pc = 0; uint32_t blocks = 0;
+  uint32_t hle_ring[16] = {0}; uint32_t hle_n = 0;   // HF_HLERING: last HLE stubs run by this fiber
 };
 static std::mutex g_hf_lk;
 static std::condition_variable g_hf_cv;
@@ -2236,6 +2237,7 @@ extern "C" uint32_t hle_call(uint32_t stub_va, RecState* s) {
   std::unique_lock<std::recursive_mutex>* _prev = tl_hle_lock;   // M1160: nested calls must restore, not null
   tl_hle_lock = &_hcl;
   tl_hle_ring[(tl_hle_n++) & 31u] = stub_va;
+  if (tl_hf) { tl_hf->hle_ring[(tl_hf->hle_n++) & 15u] = stub_va; }
   uint32_t _r = hle_call_inner(stub_va, s);
   tl_hle_lock = _prev;
   return _r;
@@ -3593,6 +3595,7 @@ static uint32_t hle_call_inner(uint32_t stub_va, RecState* s) {
       if (g_timer_n++ < 30) { printf("[TIMER] time uid=%08X v=%llu lr=%08X\n", s->r[0], (unsigned long long)v, s->r[14]); fflush(stdout); }
       s->r[1] = (uint32_t)(v >> 32); r0 = (uint32_t)v; break; }
     case 0x812B27A0u: {                                               // sceKernelWaitSema
+      if (tl_is_hfiber) { static int _sf=0; uint32_t _o=s->r[0]; if ((_o & 0xFFFF0000u)==0x50010000u && _sf++<400) { uint32_t _h=(g_sema.count(_o)?g_sema[_o]:0u); printf("[SEMFIB] WAIT obj=%08X need=%u have=%u lr=%08X pc=%08X\n", _o, s->r[1], _h, s->r[14], g_cur_block); fflush(stdout); } }
       if (g_main_n >= 59000000u) { static int _ws_n=0; if (_ws_n++ < 200) { uint32_t _o=s->r[0],_nd=s->r[1]; uint32_t _h=(g_sema.count(_o)?g_sema[_o]:0u); printf("[WAITSEMA57] obj=%08X need=%08X have=%08X pc=%08X fib=%08X\n", _o,_nd,_h,g_cur_block,g_cur_fiber); fflush(stdout); } }
       uint32_t obj = s->r[0], need = s->r[1] ? s->r[1] : 1u;
       auto it = g_sema.find(obj);
@@ -3624,6 +3627,7 @@ static uint32_t hle_call_inner(uint32_t stub_va, RecState* s) {
       }
       break; }
     case 0x812B2AD0u: {                                               // sceKernelSignalSema
+      if (tl_is_hfiber) { static int _sg=0; uint32_t _o=s->r[0]; if ((_o & 0xFFFF0000u)==0x50010000u && _sg++<400) { uint32_t _h=(g_sema.count(_o)?g_sema[_o]:0u); printf("[SEMFIB] SIGNAL obj=%08X cnt=%u have=%u lr=%08X pc=%08X\n", _o, s->r[1], _h, s->r[14], g_cur_block); fflush(stdout); } }
       uint32_t obj = s->r[0];
       if ((obj & 0xFFFF0000u) == 0x50010000u) { static int _gs=0; if (_gs++ < 160) {
         int _w=0; for (auto& _kv : g_thr) if (_kv.second.waiting && _kv.second.wait_obj==obj) ++_w;
@@ -6106,6 +6110,7 @@ int main(int argc, char** argv) {
         printf("[WDRING]"); for (int i = 52; i < 64; ++i) printf(" %08X", g_pc_ring[(g_pc_ring_n + (unsigned)i) & 63u]); printf("\n");
         for (auto& kv : g_fctx) { printf("[WDCTX] fib=%08X pc=%08X sp=%08X r0=%08X r5=%08X\n", kv.first, kv.second.r[15], kv.second.r[13], kv.second.r[0], kv.second.r[5]); }
          { std::lock_guard<std::mutex> _lg(g_hf_lk); for (auto& _kv : g_hf) { HFiber* _f=_kv.second; printf("[HFDBG] addr=%08X entry=%08X st=%d started=%d go=%d owner=%08X pc=%08X blocks=%u\n", _f->addr, _f->entry, 0, (int)_f->started, (int)_f->go, _f->owner_tid, _f->cur_pc, (unsigned)_f->blocks); } }
+         { std::lock_guard<std::mutex> _lg(g_hf_lk); for (auto& _kv : g_hf) { HFiber* _f=_kv.second; printf("[HFHLE] addr=%08X n=%u:", _f->addr, _f->hle_n); for (int _i=0;_i<12;++_i) printf(" %08X", _f->hle_ring[(_f->hle_n - 12u + (uint32_t)_i) & 15u]); printf("\n"); } }
          printf("[HFBLOCKS] %u\n", (unsigned)g_hf_blocks);
          { static int _td=0; if (_td++ < 60) { for (auto& _kv : g_thr) { HThread& _th=_kv.second; printf("[THRDBG] tid=%08X entry=%08X alive=%d ready=%d wait=%d obj=%08X bits=%08X mode=%X pc=%08X sp=%08X r0=%08X blk=%08X\n", _kv.first, _th.entry, _th.alive, _th.ready, _th.waiting, _th.wait_obj, _th.wait_bits, _th.wait_mode, _th.gctx.r[15], _th.gctx.r[13], _th.gctx.r[0], _th.gctx.r[0]); } } }
         for (auto& kv : g_fctx) { printf("[WDCTX] fib=%08X pc=%08X sp=%08X r0=%08X r5=%08X\n", kv.first, kv.second.r[15], kv.second.r[13], kv.second.r[0], kv.second.r[5]); }
