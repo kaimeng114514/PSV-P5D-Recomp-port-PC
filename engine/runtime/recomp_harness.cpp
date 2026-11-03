@@ -2217,6 +2217,7 @@ static void hf_fiber_thread(HFiber* f) {
     tl_pc_ring[tl_pc_n & 63u] = pc; ++tl_pc_n;
     if (pc == 0x81160712u) { gfd_atomic_probe(pc, s); pc = s->r[14]; continue; }
     semaw_probe(pc, s);
+    if ((pc & ~1u) == 0x811E63CEu || (pc & ~1u) == 0x811E6440u || (pc & ~1u) == 0x811E6966u) { static int _gd2=0; if (_gd2++<40) { printf("[GDESTROY] pc=%08X r0=%08X r1=%08X lr=%08X fib=%08X thr=%08X blk=%u\n", pc, s->r[0], s->r[1], s->r[14], tl_hf?tl_hf->addr:0u, tl_ht_tid, (unsigned)g_hf_blocks); fflush(stdout); } }
     if (pc == 0x811E5FB8u) { static int _jsb=0; if (_jsb++<40) { printf("[JOBSB] fib=%08X thr=%08X r0=%08X r1=%08X lr=%08X blk=%u\n", tl_hf?tl_hf->addr:0u, tl_ht_tid, s->r[0], s->r[1], s->r[14], (unsigned)g_hf_blocks); fflush(stdout); } }
     hf_assert_probe(pc, s);
     if (no_gfd_assert(pc, s)) { pc = s->r[14]; continue; }
@@ -5588,6 +5589,7 @@ static void guest_thread_run(uint32_t tid) {
     if (pc == 0x81160712u) { gfd_atomic_probe(pc, s); pc = s->r[14]; continue; }
     semaw_probe(pc, s);
     if (pc == 0x811E5FB8u) { static int _jsb2=0; if (_jsb2++<40) { printf("[JOBSB] fib=0 thr=%08X r0=%08X r1=%08X lr=%08X blk=%u\n", tl_ht_tid, s->r[0], s->r[1], s->r[14], (unsigned)g_blkcnt_total); fflush(stdout); } }
+    if ((pc & ~1u) == 0x811E63CEu || (pc & ~1u) == 0x811E6440u || (pc & ~1u) == 0x811E6966u) { static int _gd=0; if (_gd++<40) { printf("[GDESTROY] pc=%08X r0=%08X r1=%08X lr=%08X fib=%08X thr=%08X blk=%u\n", pc, s->r[0], s->r[1], s->r[14], tl_hf?tl_hf->addr:0u, tl_ht_tid, (unsigned)g_blkcnt_total); fflush(stdout); } }
     hf_assert_probe(pc, s);
     if (no_gfd_assert(pc, s)) { pc = s->r[14]; continue; }
     uint32_t nx = fn(s);
