@@ -850,6 +850,7 @@ static void p5d_write_bgra_bmp(const char* path, const void* bgra, int w, int h)
   fclose(_f);
 }
 static FILE* g_movie_fp = nullptr;
+static int g_movie_decode_only = -1;   // M1205: decode frames for ENGINE-DRAWN MOVIE without host overlay
 static long g_movie_frame = 0, g_movie_frames = 0;
 static unsigned g_movie_w = 960, g_movie_h = 544;
 static std::vector<uint8_t> g_movie_nv12;
@@ -895,7 +896,7 @@ static void movie_advance_frame(void) {
       unsigned _rgb = (unsigned)std::strtoul(_mt + 6, nullptr, 16);
       unsigned char _b = (unsigned char)(_rgb & 0xFF), _g = (unsigned char)((_rgb >> 8) & 0xFF), _r = (unsigned char)((_rgb >> 16) & 0xFF);
       for (size_t _i = 0; _i < (size_t)g_movie_w * g_movie_h; ++_i) { _dst[_i*4+0]=_b; _dst[_i*4+1]=_g; _dst[_i*4+2]=_r; _dst[_i*4+3]=255; }
-      p5d_movie_set_frame(_dst, (int)g_movie_w, (int)g_movie_h);
+      if (!g_movie_decode_only) p5d_movie_set_frame(_dst, (int)g_movie_w, (int)g_movie_h);
       static int _sn=0; if (_sn++ < 4) { printf("[MOVIE] solid test color=%06X set_frame\n", _rgb); fflush(stdout); }
       ++g_movie_frame; return; } }
   const uint8_t* _y = g_movie_nv12.data();
@@ -917,7 +918,8 @@ static void movie_advance_frame(void) {
         _p[3] = 255;
       }
     }
-    p5d::vulkan::set_texsrc_addr(g_movie_va);
+    if (g_movie_decode_only < 0) g_movie_decode_only = (getenv("P5D_MOVIE_DECODE") != nullptr) ? 1 : 0;
+    if (!g_movie_decode_only) p5d::vulkan::set_texsrc_addr(g_movie_va);
     // 18.4520 M975: offscreen evidence (no window/desktop capture needed)
     { if (g_moviecap_env < 0) g_moviecap_env = (getenv("P5D_MOVIE_CAPTURE") != nullptr) ? 1 : 0;
       if (g_moviecap_env) { static int _mc = 0; if (_mc < 16) { char _fn[64];
@@ -926,7 +928,7 @@ static void movie_advance_frame(void) {
           printf("[MOVIECAP] saved %s frame=%ld\n", _fn, g_movie_frame); fflush(stdout); _mc++; } } }
     // 18.4516 M971: also feed the host movie layer - present_frame blits g_movie_img fullscreen over the
     // swapchain image (vkCmdBlitImage), so the real movie frame becomes visible regardless of engine shaders.
-    p5d_movie_set_frame(_dst, (int)g_movie_w, (int)g_movie_h);
+    if (!g_movie_decode_only) p5d_movie_set_frame(_dst, (int)g_movie_w, (int)g_movie_h);
     static int _mn = 0; if (_mn++ < 12) { printf("[MOVIE] frame=%ld/%ld -> scratch=%08X set_texsrc_addr+set_frame\n", g_movie_frame, g_movie_frames, g_movie_va); fflush(stdout); }
   }
   ++g_movie_frame;
@@ -2785,7 +2787,8 @@ static uint32_t hle_call_inner(uint32_t stub_va, RecState* s) {
         if (_dq && _data) {
           { static int _nomovie = -1;   // 18.4551 M1006: P5D_NOMOVIE=1 disables the host movie overlay
             if (_nomovie < 0) { const char* _e = getenv("P5D_NOMOVIE"); _nomovie = (_e && atoi(_e)) ? 1 : 0; }
-            if (!_nomovie) movie_advance_frame(); }   // 18.4514 M969: feed the offline-decoded movie frame as the texture source
+            { static int _dec = -1; if (_dec < 0) _dec = (getenv("P5D_MOVIE_DECODE") != nullptr) ? 1 : 0;
+            if (!_nomovie || _dec) movie_advance_frame(); } }   // 18.4514 M969: feed the offline-decoded movie frame as the texture source
           p5d::vulkan::present_frame(_data);
           { static int _sc = 0;   // 18.4516 M971: capture the swapchain (movie layer blitted inside present_frame)
             if (_sc < 8) { char _fn[64]; std::snprintf(_fn, sizeof(_fn), "p5d_swap_%d.bmp", _sc);
