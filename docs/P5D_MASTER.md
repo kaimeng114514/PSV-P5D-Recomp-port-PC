@@ -1160,6 +1160,10 @@
 | M1142 | §18.4687: ★★★★★★★★ **首次让真实的 vkCmdDraw 被发出（`[DRAWST] #1 vc=3 inst=1 pipe=… vbuf=… rp=…`），并定位黑屏的直接原因之一=viewport 退化**：`[DRAWST] vp=-0.0,0.0,0.0,0.0`（GXM viewport 原始参数全 0）→ 没有任何像素落入视口；历史运行（m1047–m1071 的电影路径）曾出现 `vp=0.0,0.0,960.0,544.0` 的正常 viewport，证明后端/管线本身可以光栅化。修复/改动：① 在 sceGxmDraw 钩子中**真正调用 `p5d::vulkan::gxm_draw_arrays(3)`**（此前只 upload_vertex_stream、从未发 draw → 永远黑屏）；② 修正 `sceGxmSetViewport` 参数解码：GXM 签名是 (context, xOff, xScale, yOff, yScale, zOff, zScale)，其中 **yScale/zOffset/zScale 是栈参数**，旧代码只读寄存器导致视图参数错误；③ 测试绘制前强制 `set_gxm_viewport(0,960,0,544,0,1)` + `set_gxm_viewport_enable(1)`。但 m1237 中 `[DRAWST]` 仍显示 vp=-0,0,0,0 → 强制设置未进入 DRAWST 使用的状态（顺序/状态对象问题待查）。当前帧仍全黑（BMP extrema 0），但**绘制链路已从"不发 draw"推进到"draw 已发、viewport 未生效"**，这是出画面的最后一段
 | M1144 | §18.4688 维护：**C 盘被运行日志写满（0 字节可用）→ 完成 C:\dev 大规模清理（C:\dev 从 ~104GB 降到 19.0GB，磁盘可用从 0 → 97.9GB）**；根因=harness 探针 `[GBACK]` 的 `static int _gb_n; if (_gb_n++ < 400)` 在 2^31 次间接跳转解析后**整数溢出变负**，条件恒真 → 无限打印，m1238 单次运行日志达 **14.5GB** 并写满磁盘。修复：改为饱和计数 `if (_gb_n < 400 && ++_gb_n <= 400)`（recomp_harness.cpp gbn_back，M1144）。清理项（全部可再生，未动游戏本体 CPK/源码/工具链/spv_all）：运行日志 48.8GB+20.5GB、p5ds_build 旧实验输出 361 dirs 8.7GB、spv 重复目录 14 dirs 0.9GB、解包游戏数据 data_extracted/vita_extracted 5.8GB（可用 cpkext 从 `C:\dev\p5d_rom` CPK 重新解）、旧构建输出 `C:\dev\out` 4.7GB、p5d_movies NV12 原始帧 2.9GB、旧 Ghidra 工程 0.7GB、安装包/SDK 压缩包 0.7GB、旧 master 备份 0.5GB、旧 tools_backup 大文件 0.3GB、旧日志 4.3GB 等。保留：`C:\dev\p5d_rom`（vita.cpk 2.07GB + data.cpk 1.83GB）、`C:\dev\p5d_build\spv_all`、`C:\dev\tmp\recomp_split`（230291 blocks 的 batch_*.cpp/.o + harness）、`C:\dev\p5dsrc`（docs/kb/tools）、mingw64/ghidra/jdk、P5D-PC 仓库。运行规范：以后跑长任务必须给日志设上限/监控（>2GB 即杀），避免再次写满磁盘。 |
 | M1145 | §18.4689 维护续：**清理后回归修复（ALL_REGRESSIONS_PASS 恢复）**。M1144 清理删除了开发侧可再生的游戏解包数据/捕获轨迹，导致 ①② 回归线 FAIL；本轮修复：① 用 cpkext 库（`C:\dev\cpkext\libs\CriFsV2Lib.dll`）写最小 C# 提取器，从 `C:\dev\p5d_rom\data\data.cpk` **完整重解 10555 文件 / 2884MB 到 `C:\dev\p5dsrc\game\PCSH10109\data_extracted`**（约 1 分钟），恢复 GMD(571)/ARC(135)/GAP(84)/BIN/UI/纹理等全部回归输入；② `offline_regression.ps1` 第 4 步 WAV 语料（`_audio`，vita.cpk 可再生的 28 曲）缺失→改为 **SKIP**（不 FAIL）；③ `render_regression.py` 捕获轨迹（`C:\dev\out\p5d_seq2\*.p5dgpu`，可重捕获）缺失→输出 **RENDER_REGRESSION_SKIP**；④ `run_all_regressions.ps1` 渲染线判定接受 SKIP。结果：**ALL_REGRESSIONS_PASS**（GMD 571 files/verts 3568310/tris 5244958 PASS、GAP_BONE_COUNT 84/84 PASS、ARC_ALL_PASS 135/135 PASS、AOT_TRANSLATOR_SELFTEST_PASS）；KB_AUDIT_PASS sections=3773、DOC_INTEGRITY_PASS；C: 可用 95GB；`C:\dev` 约 21GB
+| M1146 | §18.4690: ★★★★★★★ **viewport 修复生效：强制在 begin_scene_pass 之前 set_gxm_viewport(0,960,0,544)+enable(1) 后，[DRAWST] 的 vp 从 `-0.0,0.0,0.0,0.0` 变为 `-960.0,-544.0,1920.0,1088.0`**（后端换算公式确认：rect=(xo−xs, yo−ys, 2·xs, 2·ys)，即 GXM viewport 的 xo/yo 是中心、xs/ys 是半长）；同时新增 RT 截图探针（M1146：g_abi_cur_cd 记录 scene pass 颜色面，在测试 draw 后立即 save_rt_screenshot）。反向验证：`save_rt_screenshot` 反汇编确认走 `vkCmdCopyImageToBuffer`（读取后端 VkImage，而不是 guest 内存），因此黑图是真实的"无片元"，不是读错内存；`end_scene_pass` 只做 vkCmdEndRenderPass+barrier，**present_frame 才用 vkCmdCopyImage/vkCmdBlitImage 把 RT 贴到 swapchain**。证据：m1240 `[ABIVP2] forced fullscreen viewport before scene pass n=2399`、`[DRAWST] #1 vc=3 … vp=-960.0,-544.0,1920.0,1088.0 sc=0,0,960,544`、`[ABIDRAWRTCAP] cd=8D300000 rc=0`（此时 BMP 仍黑，因片元未产生） |
+| §18.4690 | The viewport fix works: after forcing set_gxm_viewport(0,960,0,544)+enable(1) BEFORE begin_scene_pass, [DRAWST] vp changes from -0.0,0.0,0.0,0.0 to -960.0,-544.0,1920.0,1088.0 (backend conversion confirmed: rect=(xo-xs, yo-ys, 2*xs, 2*ys), i.e. GXM viewport xo/yo are the center and xs/ys the half-extent). Added an RT-capture probe (M1146: g_abi_cur_cd stores the scene-pass color surface; save_rt_screenshot right after the test draw). Reverse-verified: disassembly of save_rt_screenshot shows it uses vkCmdCopyImageToBuffer (reads the backend VkImage, not guest memory), so a black image really means no fragments; end_scene_pass only does vkCmdEndRenderPass+barrier while present_frame uses vkCmdCopyImage/vkCmdBlitImage to blit the RT to the swapchain. Evidence: m1240 [ABIVP2] forced fullscreen viewport before scene pass n=2399; [DRAWST] #1 vc=3 ... vp=-960.0,-544.0,1920.0,1088.0 sc=0,0,960,544; [ABIDRAWRTCAP] cd=8D300000 rc=0 (BMP still black because no fragments yet). |
+| M1149 | §18.4691: ★★★★★★★★★★ **首次出现可见画面（非黑帧）**：m1243 中 `p5d_swap_1.bmp` / `p5d_disp_1.bmp` / `p5d_rt_first.bmp` 出现 **纯红三角 (255,0,0)，non-black 117846 px（22.5% 画面，bbox x0..455 y0..515，max=255）**；图像证据保存 `ghidra_out/p5d_swap_1.png`（960×544，红三角占左半屏）。链路：自制 SPIR-V 管线（`m1147_vert.spv`/`m1147_frag.spv`，glslc 编译）→ `select_real_pipeline`（**必须传完整路径**，后端直接 fopen；游戏自带管线同样走全路径）→ `upload_vertex_stream`(6 verts, stride128, 双绕向排除 back-face culling) → `gxm_draw_arrays(6)` → 游戏自身 `sceGxmDisplayQueueAddEntry` → `end_scene_pass`+`present_frame` → swapchain 截图。关键知识：① 必须用**自定义可用的 VS/FS**（游戏 GXP 的 SPIR-V 管线 draw 仍是黑：[REAL-PIPE] #1 OK 但无片元）；② 双绕向 6 顶点保证任一 cull mode 都可见；③ **在 draw 后立即截图是黑的**（渲染通道未结束/未提交），必须在 present 后截 swapchain 才可见；④ `select_real_pipeline` 参数为完整路径（`C:/dev/p5d_build/spv_all/...`）；⑤ gxm_vk.o 还导出 `gxm_draw_indexed_real(const void*, unsigned, const void*, unsigned, unsigned, unsigned)`、`gxm_draw_arrays`、`upload_gxm_control_*`、`update_uniform_buffer_raw` 等，可用于后续真实 draw 翻译；但**后端无源码（只有 .o）**，只能用其导出 API。下一步：把游戏真实 draw（捕获的 `_stm2va` 顶点流+attr 布局）重打包成 stride128 布局（loc0 pos/loc1 uv/loc2 color），用替换版 2D sprite 着色器（纹理采样×顶点色）+ upload_gxm_control_to_unit 绑定 guest 纹理，经 gxm_draw_arrays/indexed 提交 → S0_LOGO 真实可见 |
+| §18.4691 | First visible frame (non-black) appeared (greatest milestone): in m1243 p5d_swap_1.bmp / p5d_disp_1.bmp / p5d_rt_first.bmp contain a pure red triangle (255,0,0), non-black 117846 px (22.5% of the frame, bbox x0..455 y0..515, max=255); evidence image saved at ghidra_out/p5d_swap_1.png (960x544, red triangle covering the left half). Chain: our own SPIR-V pipeline (m1147_vert.spv/m1147_frag.spv, compiled with glslc) -> select_real_pipeline (MUST pass the full path; the backend fopen()s it directly; the game's own shaders go through full paths too) -> upload_vertex_stream (6 verts, stride128, both windings to rule out back-face culling) -> gxm_draw_arrays(6) -> the game's own sceGxmDisplayQueueAddEntry -> end_scene_pass + present_frame -> swapchain screenshot. Key knowledge: (1) a working custom VS/FS must be used (the game's GXP SPIR-V pipeline still draws black: [REAL-PIPE] #1 OK but no fragments); (2) the dual-winding 6-vertex stream guarantees visibility under any cull mode; (3) a screenshot taken right after the draw is black (render pass not ended / not submitted), so the swapchain must be captured after present; (4) select_real_pipeline takes a full path (C:/dev/p5d_build/spv_all/...); (5) gxm_vk.o also exports gxm_draw_indexed_real(const void*, unsigned, const void*, unsigned, unsigned, unsigned), gxm_draw_arrays, upload_gxm_control_*, update_uniform_buffer_raw etc. usable for future real-draw translation, BUT the backend has no source (only .o), so only its exported API can be used. NEXT: repack the game's real captured vertex streams (_stm2va + attr layout) into the stride128 layout (loc0 pos/loc1 uv/loc2 color), use replacement 2D-sprite shaders (texture sample x vertex color) plus upload_gxm_control_to_unit to bind guest textures, submit via gxm_draw_arrays/indexed -> make S0_LOGO really visible. |
 证据：
 ```
 cpkext minimal extractor（临时改写 Program.cs，用后还原）:
@@ -503820,3 +503824,86 @@ WAV 语料=28 曲（vita.cpk），缺失时回归应 SKIP
 ANTI-FORGETTING ENTRY. Keywords: M1145 cleanup follow-up and regression repair (ALL_REGRESSIONS_PASS restored). M1144's cleanup deleted regenerable dev-side extracted game data and captured traces, making regression lines (1) and (2) FAIL. Fixes: (1) minimal C# CPK extractor referencing C:\dev\cpkext\libs\CriFsV2Lib.dll fully re-extracted C:\dev\p5d_rom\data\data.cpk -> 10555 files / 2884MB into C:\dev\p5dsrc\game\PCSH10109\data_extracted (~1 minute), restoring GMD 571 / ARC 135 / GAP 84 / BIN/UI/textures; (2) offline_regression.ps1 step 4 WAV corpus _audio (28 songs, regenerable from vita.cpk) missing -> SKIP not FAIL; (3) render_regression.py outputs RENDER_REGRESSION_SKIP when captured C:\dev\out\p5d_seq2\*.p5dgpu traces (re-capturable) are missing; (4) run_all_regressions.ps1 accepts that SKIP for the render line. Result: ALL_REGRESSIONS_PASS (GMD 571 files/verts 3568310/tris 5244958 PASS, GAP_BONE_COUNT_PASS 84/84, ARC_ALL_PASS 135/135, AOT_TRANSLATOR_SELFTEST_PASS); KB_AUDIT_PASS sections=3773; DOC_INTEGRITY_PASS; C: free 95GB; C:\dev about 21GB. Evidence: cpkext extractor cpk files=10555, DONE ok=10555 miss=0 skip=0 bytes=3023676598, data_extracted 2884 MB in 10555 files; regression output lines as above. Key knowledge: game data can be fully re-extracted on demand from C:\dev\p5d_rom\data\data.cpk with a minimal C# extractor referencing CriFsV2Lib.dll (~1min for 2.9GB); render_regression depends on captured C:\dev\out\p5d_seq2\q2/q3/q4.p5dgpu traces (re-capturable with the GXM backend P5D_SEQ_* features); _audio WAV corpus is 28 songs from vita.cpk and regression scripts must SKIP when absent rather than FAIL; deleting regenerable data is safe but run_all_regressions must be rerun afterwards with SKIP semantics for missing inputs. Verification: run_all_regressions.ps1 (ALL_REGRESSIONS_PASS), kb_audit.py PASS sections=3773, verify_doc_integrity.ps1 PASS, cpkext restored, disk 95GB free.
 
 LOOKUP: M1145 cleanup follow-up regression repair ALL_REGRESSIONS_PASS restored, minimal C# CPK extractor CriFsV2Lib.dll re-extract C:\dev\p5d_rom\data\data.cpk 10555 files 2884MB data_extracted ~1 minute, restored GMD 571 ARC 135 GAP 84 BIN UI textures, offline_regression.ps1 step 4 WAV _audio 28 songs SKIP, render_regression.py RENDER_REGRESSION_SKIP captured C:\dev\out\p5d_seq2 p5dgpu traces, run_all_regressions.ps1 render line accepts SKIP, ALL_REGRESSIONS_PASS GMD 571 verts 3568310 tris 5244958 GAP_BONE_COUNT_PASS 84/84 ARC_ALL_PASS 135/135 AOT_TRANSLATOR_SELFTEST_PASS, KB_AUDIT_PASS sections 3773 DOC_INTEGRITY_PASS, C free 95GB dev 21GB, re-extract on demand cpkext, render capture P5D_SEQ_* regenerable, SKIP semantics missing dev data -> 18.4688 [relevant: disk cleanup], 18.4687 [relevant: pipeline draw], 18.4686 [relevant: first BMP frames]
+### 18.4690 M1146 viewport 修复生效 + RT 截图探针 + present 链路确认
+
+1) 强制 viewport（在 begin_scene_pass 之前）：
+```
+[ABIVP2] forced fullscreen viewport before scene pass n=2399
+[DRAWST] #1 vc=3 ... vp=-960.0,-544.0,1920.0,1088.0 sc=0,0,960,544
+游戏原值（未修复时）：[DRAWST] vp=-0.0,0.0,0.0,0.0
+```
+2) 后端 GXM viewport 换算公式（由实测值反推）：
+```
+rect = (xo-xs, yo-ys, 2*xs, 2*ys)
+即 GXM viewport 的 xo/yo 是中心，xs/ys 是半长；set_gxm_viewport(0,960,0,544,0,1)+enable(1)
+-> vp=(-960,-544,1920,1088)，覆盖屏幕（NDC ±1 映射到整屏）
+```
+3) RT 截图探针（M1146）：
+```
+g_abi_cur_cd = scene pass 颜色面 VA（ABIBEGIN 记录）
+测试 draw 后 save_rt_screenshot(g_abi_cur_cd,"p5d_drawtest_rt.bmp") -> [ABIDRAWRTCAP] rc=0
+```
+4) 链路语义（反汇编确认）：
+```
+save_rt_screenshot: vkCmdCopyImageToBuffer（读后端 VkImage，不是 guest 内存）
+end_scene_pass: 仅 vkCmdEndRenderPass + vkCmdPipelineBarrier
+present_frame: vkCmdCopyImage / vkCmdBlitImage -> swapchain -> vkQueuePresentKHR
+-> draw 后立即截图是黑的（通道未结束/未提交）；必须在 present 后截 swapchain 才可见
+```
+验证：`m1240_evidence.txt`、`m1242_evidence.txt`、`[TABLE] blocks=230291`。
+
+### 18.4691 PORT M1146+M1149: 首次可见画面 —— 红三角经原版 present 路径上屏（viewport 修复 + 自制管线验证）
+
+1) viewport 修复（M1146）：
+```
+[ABIVP2] forced fullscreen viewport before scene pass n=2399
+[DRAWST] #1 vc=3 … vp=-960.0,-544.0,1920.0,1088.0 sc=0,0,960,544
+```
+后端 GXM viewport 换算确认：rect=(xo−xs, yo−ys, 2·xs, 2·ys)。
+`save_rt_screenshot` 反汇编=vkCmdCopyImageToBuffer（读后端 VkImage，非 guest 内存）→ 黑图=真的无片元。
+`end_scene_pass` 仅 vkCmdEndRenderPass+barrier；`present_frame` 才 vkCmdCopyImage/vkCmdBlitImage 上屏。
+
+2) 自制管线（M1147/M1148）：
+```
+glslc 生成 m1147_vert.spv / m1147_frag.spv（VS: loc0 位置→gl_Position；FS: 纯红）
+[REAL-PIPE] #2 OK v=C:/dev/p5d_build/spv_all/m1147_vert.spv f=…/m1147_frag.spv pipe=…
+[ABITRI] upload_vertex_stream rc=0 (stride128,6 verts,two windings)
+[DRAWST] #1 vc=6 … pipe=<自制管线> vp=-960.0,-544.0,1920.0,1088.0
+```
+关键：select_real_pipeline 参数必须是**完整路径**（后端直接 fopen）。
+
+3) 首次可见帧（M1149，m1243）：
+```
+p5d_swap_1.bmp / p5d_disp_1.bmp / p5d_rt_first.bmp:
+  max=255, non-black=117846 px (22.5%), bbox x0..455 y0..515
+  主色：(255,0,0) 红三角 + (0,0,0) 背景
+证据图像：ghidra_out/p5d_swap_1.png（960×544，红三角占左半屏）
+```
+链路：自制 SPIR-V → select_real_pipeline(全路径) → upload_vertex_stream(6v,stride128,双绕向)
+→ gxm_draw_arrays(6) → 游戏自身 sceGxmDisplayQueueAddEntry → end_scene_pass+present_frame → 截图可见。
+**重要**：draw 后立刻截图是黑的（render pass 未结束/未提交）；必须在 present 后截 swapchain。
+
+4) 后端能力边界（重要约束）：
+```
+gxm_vk.o 无源码，仅导出 API 可用：
+  gxm_draw_arrays(unsigned)
+  gxm_draw_indexed_real(const void*, unsigned, const void*, unsigned, unsigned, unsigned)
+  upload_vertex_stream(const void*, unsigned, unsigned)
+  select_real_pipeline(const char* full_vspv, const char* full_fspv)
+  update_uniform_buffer/_raw, update_fragment_uniform_buffer_raw
+  upload_gxm_control_resolved / upload_gxm_control_to_unit（含纹理像素上传）
+  begin_frame/begin_scene_pass/end_scene_pass/present_frame/set_gxm_viewport(_enable)
+```
+
+5) NEXT（真实游戏绘制可见化）：
+```
+① 捕获游戏真实 draw 的顶点流（_stm2va）与属性布局，重打包为 stride128：loc0=pos, loc1=uv, loc2=color
+② 用替换版 2D sprite VS/FS（纹理采样×顶点色），经 upload_gxm_control_to_unit 绑定 guest 纹理
+③ 对每次真实 draw 调 gxm_draw_arrays / gxm_draw_indexed_real 提交
+④ 验收：S0_LOGO 出现原始 LOGO 图形（BMP extrema/识别度）
+```
+验证：`m1240_evidence.txt`、`m1242_evidence.txt`、`m1243bothwind.txt`、`ghidra_out/p5d_swap_1.png`、`m1147_vert.spv`/`m1147_frag.spv`、`[TABLE] blocks=230291`。
+
+ANTI-FORGETTING ENTRY. Keywords: M1146 + M1149 first visible frame achieved. Viewport fix: forcing set_gxm_viewport(0,960,0,544)+enable(1) BEFORE begin_scene_pass changes [DRAWST] vp from -0.0,0.0,0.0,0.0 to -960.0,-544.0,1920.0,1088.0; backend GXM viewport conversion is rect=(xo-xs, yo-ys, 2*xs, 2*ys) (xo/yo center, xs/ys half-extent). save_rt_screenshot disassembly shows vkCmdCopyImageToBuffer (reads the backend VkImage, not guest memory), so black = no fragments; end_scene_pass only does vkCmdEndRenderPass+barrier while present_frame uses vkCmdCopyImage/vkCmdBlitImage to blit the RT to the swapchain. Custom pipeline: glslc-built m1147_vert.spv/m1147_frag.spv (VS loc0 position -> gl_Position; FS solid red); [REAL-PIPE] #2 OK v=C:/dev/p5d_build/spv_all/m1147_vert.spv; [ABITRI] upload_vertex_stream rc=0 (stride128, 6 verts, two windings); [DRAWST] #1 vc=6 pipe=custom vp=-960,-544,1920,1088; select_real_pipeline MUST receive the FULL path (backend fopen()s directly). FIRST VISIBLE FRAME m1243: p5d_swap_1.bmp / p5d_disp_1.bmp / p5d_rt_first.bmp show a pure red triangle (255,0,0), non-black 117846 px (22.5%), bbox x0..455 y0..515, max=255; evidence image ghidra_out/p5d_swap_1.png (960x544, red triangle covering the left half). Chain: custom SPIR-V -> select_real_pipeline(full path) -> upload_vertex_stream(6v stride128 both windings) -> gxm_draw_arrays(6) -> the game's own sceGxmDisplayQueueAddEntry -> end_scene_pass+present_frame -> visible screenshot. IMPORTANT: a screenshot right after the draw is black (render pass not ended/not submitted); the swapchain must be captured after present. Backend capability boundary: gxm_vk.o has no source, only exported API usable: gxm_draw_arrays(unsigned), gxm_draw_indexed_real(const void*, unsigned, const void*, unsigned, unsigned, unsigned), upload_vertex_stream(const void*, unsigned, unsigned), select_real_pipeline(full paths), update_uniform_buffer/_raw, update_fragment_uniform_buffer_raw, upload_gxm_control_resolved/upload_gxm_control_to_unit (texture pixel upload), begin_frame/begin_scene_pass/end_scene_pass/present_frame/set_gxm_viewport(_enable). NEXT: capture real game draw vertex streams (_stm2va) + attr layout, repack into stride128 (loc0=pos, loc1=uv, loc2=color), use replacement 2D-sprite VS/FS (texture sample x vertex color) with upload_gxm_control_to_unit to bind guest textures, submit via gxm_draw_arrays / gxm_draw_indexed_real -> make S0_LOGO really visible. Verification: m1240_evidence.txt, m1242_evidence.txt, m1243bothwind.txt, ghidra_out/p5d_swap_1.png, m1147_vert.spv/m1147_frag.spv, [TABLE] blocks=230291.
+
+LOOKUP: M1146 M1149 first visible frame red triangle, viewport force before begin_scene_pass DRAWST vp -960,-544,1920,1088 conversion rect xo-xs yo-ys 2xs 2ys, save_rt_screenshot vkCmdCopyImageToBuffer backend image, end_scene_pass only vkCmdEndRenderPass barrier, present_frame vkCmdCopyImage vkCmdBlitImage swapchain, custom SPIR-V m1147_vert m1147_frag glslc solid red, REAL-PIPE #2 OK full path select_real_pipeline fopen, upload_vertex_stream stride128 6 verts two windings, gxm_draw_arrays(6), ABITRI, m1243 p5d_swap_1 non-black 117846 px 22.5% red 255 bbox x0..455 y0..515, evidence p5d_swap_1.png red triangle left half, screenshot after draw black need capture after present, backend no source only exported API gxm_draw_arrays gxm_draw_indexed_real upload_vertex_stream select_real_pipeline update_uniform_buffer_raw upload_gxm_control_to_unit begin_frame begin_scene_pass end_scene_pass present_frame set_gxm_viewport, next capture real vertex streams _stm2va repack stride128 loc0 pos loc1 uv loc2 color replacement 2D sprite shaders texture sample vertex color bind guest textures S0_LOGO visible -> 18.4689 [relevant: regression repair], 18.4687 [relevant: first vkCmdDraw], 18.4686 [relevant: first BMP black]

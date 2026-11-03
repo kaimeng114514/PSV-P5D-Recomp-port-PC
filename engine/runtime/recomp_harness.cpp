@@ -1270,6 +1270,7 @@ namespace p5d { namespace vulkan { int32_t upload_gxm_control_to_unit(unsigned i
 namespace p5d { namespace vulkan { int upload_vertex_stream(const void* data, unsigned int bytes, unsigned int vertex_count); } }   // 18.4498 M953
 namespace p5d { namespace vulkan { void gxm_draw_arrays(unsigned int vertexCount); } }   // M1142: real vkCmdDraw for the uploaded vertex stream
 static uint32_t call_guest_cb4(RecState* s, uint32_t entry, uint32_t a0, uint32_t a1, uint32_t a2, uint32_t a3, int maxblocks);  // M1034 fwd
+static uint32_t g_abi_cur_cd = 0, g_abi_cur_w = 0, g_abi_cur_h = 0;   // M1146: current scene color surface for test-draw RT capture
 static void job_probes(uint32_t pcv, RecState* s) {
   // 18.4579 M1034: P5D_FORCETITLE - call guest FUN_81185616(6,0,0,0) once after page1 has started,
   // to start the TITLE page directly (bypassing the stuck init-chain driver).
@@ -2167,13 +2168,17 @@ extern "C" uint32_t hle_call(uint32_t stub_va, RecState* s) {
         // the built-in test_triangle (28-byte stride) does not match it, so nothing rasterizes. Upload a proper
         // 128-byte-stride test triangle (loc0 = NDC position) to prove the rasterization path.
         { static int _tri = 0; if (!_tri) { _tri = 1;
-            static float _tv[3 * 32];
-            for (int _i = 0; _i < 3 * 32; ++_i) _tv[_i] = 0.0f;
-            static const float _pos[3][4] = {{-0.5f,-0.5f,0.f,1.f},{0.5f,-0.5f,0.f,1.f},{0.f,0.5f,0.f,1.f}};
-            static const float _col[3][4] = {{1.f,0.f,0.f,1.f},{0.f,1.f,0.f,1.f},{0.f,0.f,1.f,1.f}};
-            for (int _i = 0; _i < 3; ++_i) { std::memcpy(&_tv[_i*32+0], _pos[_i], 16); std::memcpy(&_tv[_i*32+4], _col[_i], 16); }
-            int _rr = p5d::vulkan::upload_vertex_stream(_tv, (unsigned)sizeof(_tv), 3u);
-            printf("[ABITRI] upload_vertex_stream rc=%d (stride128,3 verts) n=%u\n", _rr, g_main_n); fflush(stdout); } }
+            // M1148: draw BOTH windings (6 verts, 2 triangles) because the backend pipeline may cull one
+            // face orientation; large NDC coords guarantee screen coverage if any fragment survives.
+            static float _tv[6 * 32];
+            for (int _i = 0; _i < 6 * 32; ++_i) _tv[_i] = 0.0f;
+            static const float _pa[3][4] = {{-0.95f,-0.95f,0.f,1.f},{0.95f,-0.95f,0.f,1.f},{0.f,0.95f,0.f,1.f}};
+            static const float _pb[3][4] = {{-0.95f,-0.95f,0.f,1.f},{0.f,0.95f,0.f,1.f},{0.95f,-0.95f,0.f,1.f}};
+            static const float _ca[3][4] = {{1.f,0.f,0.f,1.f},{0.f,1.f,0.f,1.f},{0.f,0.f,1.f,1.f}};
+            for (int _i = 0; _i < 3; ++_i) { std::memcpy(&_tv[_i*32+0], _pa[_i], 16); std::memcpy(&_tv[_i*32+4], _ca[_i], 16); }
+            for (int _i = 0; _i < 3; ++_i) { std::memcpy(&_tv[(3+_i)*32+0], _pb[_i], 16); std::memcpy(&_tv[(3+_i)*32+4], _ca[_i], 16); }
+            int _rr = p5d::vulkan::upload_vertex_stream(_tv, (unsigned)sizeof(_tv), 6u);
+            printf("[ABITRI] upload_vertex_stream rc=%d (stride128,6 verts,two windings) n=%u\n", _rr, g_main_n); fflush(stdout); } }
         int32_t _rc = p5d::vulkan::select_real_pipeline(_vp.c_str(), _fp.c_str());
         // 18.4496 M951 EXPERIMENT: vertex uniforms are all zero (RINIT zero table) -> the real vertex shader sends every
         // vertex to w=0 -> no fragments -> black even with the red diagnostic FS. Feed identity matrices once.
@@ -2184,13 +2189,20 @@ extern "C" uint32_t hle_call(uint32_t stub_va, RecState* s) {
         // M1142: actually ISSUE the draw for the uploaded test stream. Previously only upload_vertex_stream was
         // called and the real vkCmdDraw never happened, so every captured frame stayed black.
         { static int _tri2 = 0; if (!_tri2) { _tri2 = 1;
+            const char* _tp = getenv("P5D_TESTPIPE");   // M1147: force our own known-good red-triangle pipeline
+            if (_tp && atoi(_tp)) {   // M1147B: backend needs the FULL path (it fopen()s the argument directly)
+              std::string _tvp = _abi_spvdir + "/m1147_vert.spv", _tfp = _abi_spvdir + "/m1147_frag.spv";
+              int _prc = p5d::vulkan::select_real_pipeline(_tvp.c_str(), _tfp.c_str());
+              printf("[ABITESTPIPE] select %s rc=%d n=%u\n", _tvp.c_str(), _prc, g_main_n); fflush(stdout); }
             // M1142C: force a fullscreen viewport using the convention the backend used in the older movie path
             // (DRAWST vp=0,0,960,544 when xo=0,xs=960,yo=0,ys=544) and ENABLE it: the game's last
             // sceGxmSetViewportEnable(0) had disabled the viewport, which kept vp degenerate -> black.
             p5d::vulkan::set_gxm_viewport(0.0f, 960.0f, 0.0f, 544.0f, 0.0f, 1.0f);
             p5d::vulkan::set_gxm_viewport_enable(1);
-            p5d::vulkan::gxm_draw_arrays(3u);
-            printf("[ABIDRAWTEST] gxm_draw_arrays(3) issued n=%u\n", g_main_n); fflush(stdout); } }
+            p5d::vulkan::gxm_draw_arrays(6u);
+            printf("[ABIDRAWTEST] gxm_draw_arrays(3) issued n=%u\n", g_main_n); fflush(stdout);
+            if (g_abi_cur_cd) { int _rc = p5d::vulkan::save_rt_screenshot(g_abi_cur_cd, "p5d_drawtest_rt.bmp");
+              printf("[ABIDRAWRTCAP] cd=%08X rc=%d\n", g_abi_cur_cd, _rc); fflush(stdout); } } }
         static int _pn = 0; if (_pn++ < 20) { printf("[ABIPIPE] v=%s f=%s rc=%d n=%u\n", _abi_vspv.c_str(), _abi_fspv.c_str(), _rc, g_main_n); fflush(stdout); } }
       uint32_t _stk[8];
       for (int _i = 0; _i < 8; ++_i) { uint32_t _v = 0; uint8_t* _q = GP(s->r[13] + (uint32_t)_i * 4u); if (_q) std::memcpy(&_v, _q, 4); _stk[_i] = _v; }
@@ -2238,6 +2250,7 @@ extern "C" uint32_t hle_call(uint32_t stub_va, RecState* s) {
               _csurf = _c; _cw = _w0; _ch = _w4; _cd = _w8; }   // alternate layout: w,h,data
           } }
         printf("[ABIBEGIN] surf=%08X data=%08X %ux%u n=%u\n", _csurf, _cd, _cw, _ch, g_main_n); fflush(stdout);
+        g_abi_cur_cd = _cd; g_abi_cur_w = _cw; g_abi_cur_h = _ch;   // M1146
         // M1143: the backend applies gxm viewport state at scene-pass begin; setting it at draw time was too
         // late (DRAWST still saw vp=0). Force a fullscreen viewport+enable BEFORE the pass begins.
         p5d::vulkan::set_gxm_viewport(0.0f, 960.0f, 0.0f, 544.0f, 0.0f, 1.0f);
