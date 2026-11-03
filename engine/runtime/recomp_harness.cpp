@@ -5872,7 +5872,17 @@ static uint32_t mb_811E649A(RecState* s) {
   if (_en && fn != 0u) {
     static int _n = 0;
     if (_n++ < 24) { printf("[SYNCTASK] #%d fn=%08X arg=%08X desc=%08X r0=%08X\n", _n-1, fn, arg, desc, s->r[0]); fflush(stdout); }
-    (void)call_guest_cb2(s, fn & ~1u, desc + 4u, 0u, 4000000);
+    { static int _ar2 = -1; if (_ar2 < 0) _ar2 = (getenv("P5D_APPRUN2") != nullptr) ? 1 : 0;
+      if (_ar2) { uint32_t _scr = 0x9FF00000u; uint8_t* _sq = GP(_scr); uint32_t _idx = 0;
+        { uint8_t* q = GP(0x816CC700u); if (q) std::memcpy(&_idx, q, 4); }
+        if (_sq) { uint32_t _st[2] = { _idx, 1u }; std::memcpy(_sq, _st, 8); }
+        static int _rn=0; if (_rn++<8) { printf("[APPRUN2] call FUN_811F3494 frame=%u flags=1 scr=%08X n=%u\n", _idx, _scr, g_main_n); fflush(stdout); }
+        (void)call_guest_cb2(s, 0x811F3494u, _scr, 0u, 4000000);
+        static int _rn2=0; if (_rn2++<8) { printf("[APPRUN2] ret r0=%08X\n", s->r[0]); fflush(stdout); }
+        if (s->r[0] == 2u) node_exec_frame(s);
+        return nx; } }
+    static int _aa = -1; if (_aa < 0) _aa = (getenv("P5D_APPARG") != nullptr) ? 1 : 0;
+    (void)call_guest_cb2(s, fn & ~1u, _aa ? arg : (desc + 4u), 0u, 4000000);
     if (s->r[0] == 2u) node_exec_frame(s);  // NODEEXEC_LEVER: after frame app job
   }
   return nx;
