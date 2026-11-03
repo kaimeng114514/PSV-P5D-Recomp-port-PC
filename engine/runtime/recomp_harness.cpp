@@ -2251,6 +2251,22 @@ static void hf_fiber_thread(HFiber* f) {
     if (!fn) { int back=0; uint32_t bq=gbn_back(pc,&back); if (bq && back<=16) { pc=bq; fn=gbn(pc); } }
     if (!fn) { fprintf(stderr, "[HF-NOBLK] fib=%08X pc=%08X\n", f->addr, pc); break; }
     g_cur_block = pc; f->cur_pc = pc; ++f->blocks; ++g_hf_blocks;
+    if ((pc & ~1u) == 0x811C041Cu) { static uint32_t _n=0; ++_n;
+      if (_n<=40u) { printf("[REG_LR] n=%u type=%08X node=%08X lr=%08X hfblk=%u\n", _n, s->r[0], s->r[1], s->r[14], (unsigned)g_hf_blocks); fflush(stdout); } }
+
+    { uint32_t _p0 = pc & ~1u;
+      if (_p0 == 0x8115A36Au) { static uint32_t _n=0; ++_n; if(_n<=10u) { printf("[FRAMECB] n=%u r0=%08X r1=%08X r2=%08X r3=%08X n_ext=%u hfblk=%u\n", _n, s->r[0],s->r[1],s->r[2],s->r[3],(unsigned)g_main_n,(unsigned)g_hf_blocks); fflush(stdout);} }
+      if (_p0 == 0x811C229Eu) { static uint32_t _n=0; ++_n; if(_n<=24u) { printf("[SCENEBIT] n=%u scene=%08X mode=%u scene_plus4=%08X hfblk=%u\n", _n, s->r[0], s->r[1], 0u, (unsigned)g_hf_blocks); fflush(stdout);} }
+      if (_p0 == 0x81007E50u) { static uint32_t _n=0; ++_n; if(_n<=10u) { uint32_t _p=s->r[0]; char _nm[32]={0}; uint8_t* q=GP(_p); if(q){for(int k=0;k<30;++k){char c=(char)q[k];_nm[k]=(c>=32&&c<127)?c:0x2E;if(!c)break;}}
+        printf("[SCENELOOKUP] n=%u name=%s ret? hfblk=%u\n", _n, _nm, (unsigned)g_hf_blocks); fflush(stdout);} } }
+    { static uint64_t _sb=0; if (g_hf_blocks - _sb >= 3000000u) { _sb = g_hf_blocks;
+        uint32_t _f630=0,_f640=0,_f820=0,_sc1=0;
+        { uint8_t* q=GP(0x816CC630u); if(q) std::memcpy(&_f630,q,4); }
+        { uint8_t* q=GP(0x816CC640u); if(q) std::memcpy(&_f640,q,4); }
+        { uint8_t* q=GP(0x813AF820u); if(q) std::memcpy(&_f820,q,4); }
+        { uint8_t* q=GP(0x85B64104u); if(q) std::memcpy(&_sc1,q,4); }
+        printf("[SCENEBITS] hfblk=%u DAT_816CC630=%08X DAT_816CC640=%08X DAT_813AF820=%08X SCENE1+4=%08X\n", (unsigned)g_hf_blocks, _f630,_f640,_f820,_sc1); fflush(stdout); } }
+
     { uint32_t _p0 = pc & ~1u;
       if (_p0 == 0x811C041Cu) { static uint32_t _rn=0; ++_rn;
         if (_rn<=8u || (_rn%2000u)==0u) { uint32_t _idx=0; { uint8_t* q=GP(0x816CC700u); if(q) std::memcpy(&_idx,q,4); }
