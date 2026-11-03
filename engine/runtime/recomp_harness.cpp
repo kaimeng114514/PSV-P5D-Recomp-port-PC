@@ -645,6 +645,7 @@ static uint32_t run_guest(RecState* s, uint32_t entry, uint32_t arg);
 static uint32_t call_guest_cb(RecState* s, uint32_t entry, uint32_t arg, int maxblocks);
 static int g_gxmabi = 0, g_gxmabi_n = 0; static int g_gxmabi_scene_n = 0, g_gxmabi_draw_n = 0; static int g_bs_n = 0; static int g_scene_ent_n = 0; static int g_dea_n = 0; static int g_ab4_n = 0; static int g_830_n = 0, g_830r_n = 0, g_hdl_n = 0; static int g_open_n = 0, g_ld_n = 0; static int g_wk_n = 0; static int g_wkp_n = 0; static int g_reg_n = 0; static uint32_t g_lh_last = 0xDEAD; static uint32_t g_hw_handle=0, g_hw_st=0xDEAD, g_hw_p=0xDEAD, g_hw_sz=0xDEAD; static int g_hw_n=0; static int g_912_n = 0, g_912r_n = 0; static int g_scene_stub_n = 0;
 static uint8_t* gp_img = nullptr;
+static inline float half_to_float(uint16_t h){ uint32_t s=(h>>15)&1u, e=(h>>10)&0x1Fu, m=h&0x3FFu; uint32_t f; if(e==0) f=(s<<31); else if(e==31) f=(s<<31)|0x7F800000u|(m<<13); else { uint32_t ee=e+112u; f=(s<<31)|(ee<<23)|(m<<13);} float r; std::memcpy(&r,&f,4); return r; }
 static inline uint8_t* GP(uint32_t va) {
   uint32_t off;
   if (va >= 0x80600000u && va < 0x84600000u) off = va - 0x80600000u;
@@ -3078,6 +3079,10 @@ static uint32_t _ufd_vert_ubo = 0, _ufd_frag_ubo = 0;   // M1251: per-stage UBO 
           { if (_ufd_vert_ubo) { uint8_t* _src = GP(_ufd_vert_ubo); if (_src) { p5d::vulkan::update_uniform_buffer_raw(_src, 0x1000u);
                 static int _v3=0; if (_v3++<8) { printf("[UFDBIND] vert ubo=%08X first=(%.3f,%.3f,%.3f,%.3f) n=%u\n", _ufd_vert_ubo, ((float*)_src)[0],((float*)_src)[1],((float*)_src)[2],((float*)_src)[3], g_main_n); fflush(stdout);} } }
             if (_ufd_frag_ubo) { uint8_t* _src = GP(_ufd_frag_ubo); if (_src) { p5d::vulkan::update_fragment_uniform_buffer_raw(_src, 0x1000u);
+                { static int _hd=0; if (_hd++<4) { printf("[HALFDUMP] frag ubo=%08X bytes:", _ufd_frag_ubo);
+                    for (int _b=0;_b<32;++_b) printf(" %02X", _src[_b]); printf("\n");
+                    printf("[HALFDUMP] as float:"); for (int _k=0;_k<8;++_k) printf(" %.4f", ((float*)_src)[_k]); printf("\n");
+                    printf("[HALFDUMP] as half :"); for (int _k=0;_k<16;++_k) { uint16_t _h=0; std::memcpy(&_h,_src+_k*2,2); float _f=half_to_float(_h); printf(" %.4f", _f); } printf("\n"); fflush(stdout);} }
                 static int _f3=0; if (_f3++<8) { printf("[UFDBIND] frag ubo=%08X first=(%.3f,%.3f,%.3f,%.3f) n=%u\n", _ufd_frag_ubo, ((float*)_src)[0],((float*)_src)[1],((float*)_src)[2],((float*)_src)[3], g_main_n); fflush(stdout);} } } }
           { static int _ub=-1; if (_ub<0) _ub=(getenv("P5D_UFDBOTH")!=nullptr)?1:0;
             if (_ub && _last_ufd_ubo) { uint8_t* _src = GP(_last_ufd_ubo); if (_src) {
@@ -3154,6 +3159,10 @@ static uint32_t _ufd_vert_ubo = 0, _ufd_frag_ubo = 0;   // M1251: per-stage UBO 
         uint8_t* _dst = GP(_ubo); uint8_t* _ssrc = GP(_src);
         if (_dst && _ssrc && _ccnt && _ccnt <= 64u) {
           _last_ufd_ubo = _ubo;
+          { static std::set<uint32_t> _pdist; if (_pdist.find(_par)==_pdist.end() && _pdist.size()<40) { _pdist.insert(_par);
+              uint32_t _w[6]={0,0,0,0,0,0}; for(int _k=0;_k<6;++_k){uint8_t*q=GP(_par+(uint32_t)(_k*4)); if(q) std::memcpy(&_w[_k],q,4);}
+              char _nm[40]={0}; uint8_t* _nq=GP(_par+0x14); if(_nq){for(int _k=0;_k<32;++_k){char c=(char)_nq[_k];_nm[_k]=(c>31&&c<127)?c:0x2E; if(!c)break;}}
+              printf("[PARDIST] par=%08X w0=%08X w1=%08X w2=%08X w3=%08X w4=%08X w5=%08X name=%s res=%u n=%u\n", _par,_w[0],_w[1],_w[2],_w[3],_w[4],_w[5],_nm,_res,g_main_n); fflush(stdout);} }
           { uint32_t _prog = 0;
             for (uint32_t _o = 0; _o <= 0x80u; _o += 4u) { uint32_t _mg = 0; uint8_t* q = GP(_par + _o); if (!q) break; std::memcpy(&_mg, q, 4); if (_mg == 0x00505847u) { _prog = _par + _o; break; } }
             if (_prog) { uint32_t _fl = 0; uint8_t* q = GP(_prog + 0x14u); if (q) std::memcpy(&_fl, q, 4);
