@@ -2089,54 +2089,43 @@ static void gfd_atomic_probe(uint32_t pcv, RecState* s) {
   { uint8_t* p = GP(0x8155543Cu); if (p) { p[0] = (uint8_t)p1; p[1] = (uint8_t)p2; } }
   static int _n = 0; if (_n++ < 30) { printf("[GFDATOMIC] applied p1=%u p2=%u state=%08X blk=%08X thr=%08X\n", p1, p2, st, g_cur_block, tl_ht_tid); fflush(stdout); }
 }
-// ===================== M1155 P0: host fibers (one native thread per guest fiber) =====================
-// Model (nativ-style): sceFiberRun/Switch/ReturnToThread map to real std::thread park/resume with
-// condvars; guest code inside a fiber runs the normal AOT dispatcher (gbn) with its own RecState.
-// Sync primitives keep using the existing host-thread blocking wait paths (tl_ht_tid != 0).
-struct HFWait { std::mutex m; std::condition_variable cv; bool go=false; uint32_t ret=0; };
+// ===================== M1155/M1160 P0: host fibers (native thread per guest fiber) =====================
+// M1160 rewrite: strict SUSPENDED/RUNNING state machine + ONE global mutex/condvar for all park/resume
+// handoffs. The previous per-fiber std::condition_variable version crashed inside libwinpthread when a
+// ReturnToThread wake raced a new Run resume (a fiber could be resumed before it actually parked, letting
+// two fibers run concurrently and corrupt guest data).
+enum { HF_SUSPENDED = 0, HF_RUNNING = 1 };
+struct HFWait { uint32_t fret_arg = 0; bool fgo = false; };
 struct HFiber {
-  uint32_t addr=0, entry=0, arg_init=0, sp_top=0, tls=0, owner_tid=0;
-  RecState rs; std::thread th; std::mutex m; std::condition_variable cv;
-  bool go=false, started=false, finalize=false;
-  uint32_t run_arg=0, resume_out=0;
-  HFWait* owner=nullptr;
-  int starts=0, switches=0, rets=0;
-  uint32_t cur_pc=0; uint32_t blocks=0;
+  uint32_t addr = 0, entry = 0, arg_init = 0, sp_top = 0, tls = 0, owner_tid = 0;
+  RecState rs; std::thread th;
+  int state = HF_SUSPENDED;
+  bool started = false, finalize = false, go = false;
+  uint32_t run_arg = 0, resume_out = 0;
+  HFWait* owner = nullptr;
+  int starts = 0, switches = 0, rets = 0;
+  uint32_t cur_pc = 0; uint32_t blocks = 0;
 };
 static std::mutex g_hf_lk;
+static std::condition_variable g_hf_cv;
 static std::map<uint32_t,HFiber*> g_hf;
 static thread_local HFiber* tl_hf = nullptr;
-static thread_local HFWait* tl_hfw = nullptr;
-static std::mutex g_hfw_lk;
 static std::map<uint32_t,HFWait*> g_hfw;
 static int g_hf_n = 0, g_hf_ev_n = 0;
-static HFWait* hf_wait_for(uint32_t tid) {
-  std::lock_guard<std::mutex> g(g_hfw_lk);
+static HFWait* hf_wait_for_locked(uint32_t tid) {
   auto it = g_hfw.find(tid); if (it != g_hfw.end()) return it->second;
   HFWait* w = new HFWait(); g_hfw[tid] = w; return w;
 }
-static HFiber* hf_lookup(uint32_t addr) {
-  std::lock_guard<std::mutex> g(g_hf_lk);
+static HFiber* hf_lookup_locked(uint32_t addr) {
   auto it = g_hf.find(addr); if (it != g_hf.end()) return it->second;
   HFiber* f = new HFiber(); f->addr = addr; g_hf[addr] = f; return f;
 }
-static void hf_park(HFiber* f) {
-  std::unique_lock<std::mutex> lk(f->m);
-  f->go = false;
-  f->cv.wait(lk, [&]{ return f->go || f->finalize; });
-  f->go = false;
-}
-static void hf_resume(HFiber* f) {
-  { std::lock_guard<std::mutex> lk(f->m); f->go = true; }
-  f->cv.notify_all();
-}
 static void hf_note(const char* what, HFiber* f, uint32_t a) {
-  if (g_hf_ev_n++ < 200) { printf("[HF-%s] fib=%08X arg=%08X entry=%08X start=%d cur=%08X blk=%u\n", what, f->addr, a, f->entry, f->starts, tl_hf?tl_hf->addr:0u, (unsigned)g_blkcnt_total); fflush(stdout); }
+  if (g_hf_ev_n++ < 200) { printf("[HF-%s] fib=%08X arg=%08X entry=%08X start=%d cur=%08X blk=%u\n", what, f->addr, a, f->entry, f->starts, tl_hf?tl_hf->addr:0u, (unsigned)g_hf_blocks); fflush(stdout); }
 }
 static void hf_fiber_thread(HFiber* f) {
   tl_hf = f;
   tl_ht_tid = f->owner_tid ? f->owner_tid : 0x40010000u;
-  f->tls = 0;
   RecState* s = &f->rs;
   std::memset(s, 0, sizeof(*s));
   s->base = gp_img; s->mem_size = IMG_SIZE;
@@ -2148,93 +2137,83 @@ static void hf_fiber_thread(HFiber* f) {
   while (!g_shutdown) {
     BlockFn fn = gbn(pc);
     if (!fn) { int back=0; uint32_t bq=gbn_back(pc,&back); if (bq && back<=16) { pc=bq; fn=gbn(pc); } }
-    if (!fn) { if (g_hf_n++ < 20) { fprintf(stderr, "[HF-NOBLK] fib=%08X pc=%08X blk=%08X\n", f->addr, pc, g_cur_block); fflush(stderr); } break; }
+    if (!fn) { fprintf(stderr, "[HF-NOBLK] fib=%08X pc=%08X\n", f->addr, pc); break; }
     g_cur_block = pc; f->cur_pc = pc; ++f->blocks; ++g_hf_blocks;
     tl_pc_ring[tl_pc_n & 63u] = pc; ++tl_pc_n;
     if (pc == 0x81160712u) { gfd_atomic_probe(pc, s); pc = s->r[14]; continue; }
-    if (pc == 0x8115FF12u) {
-      uint32_t _st=0,_g3c=0; uint8_t* _p=GP(0x81555438u); if(_p) std::memcpy(&_st,_p,4);
-      _p=GP(0x8155543Cu); if(_p) _g3c=_p[0];
-      if ((_st & 1u) && _g3c == 0u) { static int _gsk=0; if (_gsk++ < 40) { printf("[GFDSKIP] input-update skipped: state=%08X val0x3c=0 (UI setter race) blk=%u\n", _st, (unsigned)g_hf_blocks); fflush(stdout); } pc = s->r[14]; continue; }
-    }
     hf_assert_probe(pc, s);
     uint32_t nx = fn(s);
     if (nx == 0u || nx == 0xFFFFFFF0u || nx == 0xFFFFFFFEu || nx == 0xFFFFFFFDu) break;
     pc = nx;
   }
-  // the SDK forbids an entry returning; treat it as ReturnToThread(r0) and park forever afterwards
-  { HFWait* w = f->owner; if (w) { { std::lock_guard<std::mutex> lk(w->m); w->ret = s->r[0]; w->go = true; } w->cv.notify_all(); } }
-  std::unique_lock<std::mutex> lk(f->m);
-  for (;;) f->cv.wait(lk);
+  { std::unique_lock<std::mutex> lk(g_hf_lk); f->state = HF_SUSPENDED; HFWait* w = f->owner; if (w) { w->fret_arg = s->r[0]; w->fgo = true; } g_hf_cv.notify_all(); }
+  std::unique_lock<std::mutex> lk(g_hf_lk);
+  for (;;) g_hf_cv.wait(lk);
 }
-static void hf_start(HFiber* f) {
-  bool start = false;
-  { std::lock_guard<std::mutex> lk(f->m); if (!f->started) { f->started = true; start = true; } }
-  if (start) { ++f->starts; f->th = std::thread(hf_fiber_thread, f); f->th.detach(); }
-  else hf_resume(f);
+// caller holds g_hf_lk
+static void hf_launch_locked(HFiber* f, uint32_t arg) {
+  f->run_arg = arg;
+  if (!f->started) {
+    f->started = true; ++f->starts; f->state = HF_RUNNING;
+    f->th = std::thread(hf_fiber_thread, f); f->th.detach();
+  } else {
+    f->state = HF_RUNNING;
+  }
+  g_hf_cv.notify_all();
 }
-// sceFiberRun(fiber, arg, out)
 static uint32_t hf_do_run(uint32_t addr, uint32_t arg, uint32_t outp) {
   uint32_t tid = tl_ht_tid ? tl_ht_tid : 0x40010000u;
-  HFiber* f = hf_lookup(addr);
-  f->owner_tid = tid; f->owner = hf_wait_for(tid);
-  { std::lock_guard<std::mutex> lk(f->m); f->run_arg = arg; }
+  std::unique_lock<std::mutex> lk(g_hf_lk);
+  HFiber* f = hf_lookup_locked(addr);
+  f->owner_tid = tid; f->owner = hf_wait_for_locked(tid);
   hf_note("run", f, arg);
-  hf_start(f);
-  HFWait* w = f->owner;
-  std::unique_lock<std::mutex> lk(w->m);
-  w->go = false;
-  w->cv.wait(lk, [&]{ return w->go; });
-  w->go = false;
-  if (outp) { uint8_t* p = GP(outp); if (p) std::memcpy(p, &w->ret, 4); }
+  while (f->started && f->state == HF_RUNNING) g_hf_cv.wait(lk);
+  hf_launch_locked(f, arg);
+  HFWait* w = f->owner; w->fgo = false;
+  while (!w->fgo) g_hf_cv.wait(lk);
+  w->fgo = false;
+  if (outp) { uint8_t* p = GP(outp); if (p) std::memcpy(p, &w->fret_arg, 4); }
   return 0;
 }
-// sceFiberSwitch(fiber, arg, out)
 static uint32_t hf_do_switch(uint32_t addr, uint32_t arg, uint32_t outp) {
   HFiber* cur = tl_hf;
-  if (!cur) return hf_do_run(addr, arg, outp);          // called from thread context
-  HFiber* t = hf_lookup(addr);
+  std::unique_lock<std::mutex> lk(g_hf_lk);
+  if (!cur) { lk.unlock(); return hf_do_run(addr, arg, outp); }
+  HFiber* t = hf_lookup_locked(addr);
   if (t == cur) { if (outp) { uint8_t* p = GP(outp); if (p) std::memcpy(p, &arg, 4); } return 0; }
-  { std::lock_guard<std::mutex> lk(t->m); t->run_arg = arg; t->owner_tid = cur->owner_tid; t->owner = cur->owner; }
-  cur->resume_out = outp;
-  ++cur->switches;
+  t->owner_tid = cur->owner_tid; t->owner = cur->owner;
+  cur->resume_out = outp; ++cur->switches;
   hf_note("switch", t, arg);
-  hf_start(t);
-  hf_park(cur);
+  while (t->started && t->state == HF_RUNNING) g_hf_cv.wait(lk);
+  hf_launch_locked(t, arg);
+  cur->state = HF_SUSPENDED;
+  while (cur->state == HF_SUSPENDED) g_hf_cv.wait(lk);
   if (cur->resume_out) { uint8_t* p = GP(cur->resume_out); if (p) std::memcpy(p, &cur->run_arg, 4); cur->resume_out = 0; }
   return 0;
 }
-// sceFiberReturnToThread(arg)
 static uint32_t hf_do_return(uint32_t arg) {
-  HFiber* cur = tl_hf;
-  if (!cur) return 0;
-  ++cur->rets;
-  hf_note("ret", cur, arg);
-  HFWait* w = cur->owner;
-  if (w) { { std::lock_guard<std::mutex> lk(w->m); w->ret = arg; w->go = true; } w->cv.notify_all(); }
-  hf_park(cur);
+  HFiber* cur = tl_hf; if (!cur) return 0;
+  std::unique_lock<std::mutex> lk(g_hf_lk);
+  ++cur->rets; hf_note("ret", cur, arg);
+  cur->state = HF_SUSPENDED;
+  HFWait* w = cur->owner; if (w) { w->fret_arg = arg; w->fgo = true; }
+  g_hf_cv.notify_all();
+  while (cur->state == HF_SUSPENDED) g_hf_cv.wait(lk);
   if (cur->resume_out) { uint8_t* p = GP(cur->resume_out); if (p) std::memcpy(p, &cur->run_arg, 4); cur->resume_out = 0; }
   return 0;
 }
-// _sceFiberInitializeImpl(fiber, name, entry, arg, ctx_addr, ctx_size) - ctx args from the guest stack
 static uint32_t hf_do_init(RecState* s) {
-  HFiber* f = hf_lookup(s->r[0] & ~1u);
+  std::lock_guard<std::mutex> lk(g_hf_lk);
+  HFiber* f = hf_lookup_locked(s->r[0] & ~1u);
   f->entry = s->r[2] & ~1u; f->arg_init = s->r[3];
   uint32_t sa0 = 0, sa1 = 0;
   { uint8_t* q = GP(s->r[13]); if (q) std::memcpy(&sa0, q, 4); }
   { uint8_t* q = GP(s->r[13] + 4u); if (q) std::memcpy(&sa1, q, 4); }
-  if (sa0 >= 0x80600000u && sa0 < 0xB0000000u && sa1 >= 0x400u && sa1 <= 0x400000u) {
-    uint32_t base = sa0, size = sa1;
-    f->sp_top = (base + size - 0x10u) & ~0xFu;
-  } else {
-    uint32_t st = hle_malloc(0x20000u);
-    f->sp_top = st ? (st + 0x1F000u) : 0xA0D00000u;
-  }
+  if (sa0 >= 0x80600000u && sa0 < 0xB0000000u && sa1 >= 0x400u && sa1 <= 0x400000u) f->sp_top = (sa0 + sa1 - 0x10u) & ~0xFu;
+  else { uint32_t st = hle_malloc(0x20000u); f->sp_top = st ? (st + 0x1F000u) : 0xA0D00000u; }
   if (g_hf_n++ < 40) { printf("[HF-INIT] fib=%08X entry=%08X arg=%08X sp=%08X ctx=%08X/%08X\n", f->addr, f->entry, f->arg_init, f->sp_top, sa0, sa1); fflush(stdout); }
   return 0;
 }
-
-
 // M1159: serialize HLE handlers across host threads. The handlers touch many shared C++ maps
 // (g_sema/g_eflag/g_thr/g_fios_data/g_hostfd/...) that used to be mutated concurrently; a corrupted
 // std::map/allocator showed up as C0000005 inside libwinpthread-1.dll. Blocking waits temporarily
@@ -2246,10 +2225,11 @@ static inline void hle_wait_begin() { if (tl_hle_lock && tl_hle_lock->owns_lock(
 static inline void hle_wait_end() { if (tl_hle_lock && !tl_hle_lock->owns_lock()) tl_hle_lock->lock(); }
 extern "C" uint32_t hle_call(uint32_t stub_va, RecState* s) {
   std::unique_lock<std::recursive_mutex> _hcl(g_hle_call_mtx);
+  std::unique_lock<std::recursive_mutex>* _prev = tl_hle_lock;   // M1160: nested calls must restore, not null
   tl_hle_lock = &_hcl;
   tl_hle_ring[(tl_hle_n++) & 31u] = stub_va;
   uint32_t _r = hle_call_inner(stub_va, s);
-  tl_hle_lock = nullptr;
+  tl_hle_lock = _prev;
   return _r;
 }
 static uint32_t hle_call_inner(uint32_t stub_va, RecState* s) {
