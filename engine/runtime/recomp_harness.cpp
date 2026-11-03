@@ -2317,12 +2317,12 @@ static void hf_fiber_thread(HFiber* f) {
           printf("[NODEINV] fb=%u slot0=%d slot1=%d slot2=%d hfblk=%u\n", _fb2, _tot[0],_tot[1],_tot[2], (unsigned)g_hf_blocks); fflush(stdout); } } }
 
     if ((pc & ~1u) == 0x8119934Au) { static uint32_t _fb=0; ++_fb;
-      if (_fb<=2u) {
+      if (_fb<=8u) {
         uint32_t _idx=0; { uint8_t* q=GP(0x816CC700u); if(q) std::memcpy(&_idx,q,4); }
         uint32_t _base=0; { uint8_t* q=GP(0x816CC6D8u + (_idx&7u)*4u); if(q) std::memcpy(&_base,q,4); }
         printf("[NODEDUMP] fb=%u idx=%u base=%08X\n", _fb, _idx, _base);
         int _dumps=0;
-        for (uint32_t _ty=0;_ty<100u && _dumps<3u;++_ty) {
+        for (uint32_t _ty=0;_ty<100u && _dumps<6u;++_ty) {
           uint32_t _head=0; uint8_t* q=GP(_base+_ty*0x20u+0xCu); if(q) std::memcpy(&_head,q,4);
           if (!_head) continue;
           ++_dumps;
