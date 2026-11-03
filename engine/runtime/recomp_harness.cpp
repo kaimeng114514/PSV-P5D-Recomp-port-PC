@@ -299,6 +299,7 @@ static int g_lktr_n = 0;
 static int g_acc_n = 0, g_lkin_n = 0, g_lkout_n = 0;
 extern "C" int g_watch_on = 1;
 static void crihot_hit(uint32_t pc);   // CRIHOT_FWD
+static void stalldump_hit(uint32_t pc);   // STALLDUMP_FWD
 static void cpktrace_hit(uint32_t pc, RecState* s);   // CPKTRACE_FWD
 static void cpkhdr_hit(uint32_t pc, RecState* s);   // CPKHDR_FWD
 static void hlehot_dump();   // HLEHOT_FWD
@@ -2289,6 +2290,7 @@ static void hf_fiber_thread(HFiber* f) {
     if (!fn) { fprintf(stderr, "[HF-NOBLK] fib=%08X pc=%08X\n", f->addr, pc); break; }
     g_cur_block = pc; f->cur_pc = pc; ++f->blocks; ++g_hf_blocks;
     { static int _chh=-1; if (_chh<0) _chh = getenv("P5D_CRIHOT") ? 1 : 0; if (_chh) crihot_hit(pc); }
+    { static int _sd=-1; if (_sd<0) _sd = getenv("P5D_STALLDUMP") ? 1 : 0; if (_sd) stalldump_hit(pc); }
     { static int _ct=-1; if (_ct<0) _ct = getenv("P5D_CPKTRACE") ? 1 : 0; if (_ct) cpktrace_hit(pc, s); }
     { static int _chx=-1; if (_chx<0) _chx = getenv("P5D_CPKHDR") ? 1 : 0; if (_chx) cpkhdr_hit(pc, s); }
     { static int _chc=-1; if (_chc<0) _chc = getenv("P5D_CRICALL") ? 1 : 0; if (_chc) cricall_hit(pc, s); }
@@ -6237,6 +6239,11 @@ static void cpktrace_hit(uint32_t pc, RecState* s) {   // CPKTRACE: log CRI/CPK 
   if (!_armed) return;
   if (_p >= 0x81260000u && _p < 0x812B0000u) {
     if (_n++ < 400) { printf("[CPKTRACE] %08X r0=%08X r1=%08X r2=%08X r3=%08X lr=%08X n=%u\n", _p, s->r[0],s->r[1],s->r[2],s->r[3],s->r[14], g_main_n); fflush(stdout); } }
+}
+
+static void stalldump_hit(uint32_t pc) {   // STALLDUMP: periodic dump of the main fiber's current block
+  static int _env=-1; if (_env<0) _env = getenv("P5D_STALLDUMP") ? 1 : 0; if (!_env) return;
+  static uint64_t _n=0; if ((++_n % 20000000ull) == 0) { printf("[STALL] blocks=%llu blk=%08X fib=%08X n=%u thr=%08X\n", (unsigned long long)_n, pc&~1u, g_cur_fiber, g_main_n, g_cur_thr); fflush(stdout); }
 }
 
 static void crihot_dump() {
