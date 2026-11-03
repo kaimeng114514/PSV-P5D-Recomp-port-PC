@@ -3090,6 +3090,10 @@ static uint32_t _ufd_vert_ubo = 0, _ufd_frag_ubo = 0;   // M1251: per-stage UBO 
                 p5d::vulkan::update_fragment_uniform_buffer_raw(_src, 0x1000u);
                 static int _un3=0; if (_un3++<8) { printf("[UFDBOTH] ubo=%08X first=(%.3f,%.3f,%.3f,%.3f) n=%u\n", _last_ufd_ubo, ((float*)_src)[0],((float*)_src)[1],((float*)_src)[2],((float*)_src)[3], g_main_n); fflush(stdout);} } } }
           if (_cur_f_ubo) { uint8_t* _src = GP(_cur_f_ubo); if (_src) { p5d::vulkan::update_fragment_uniform_buffer_raw(_src, 0x1000u);
+              { static int _fd=0; if (_fd++<8) { printf("[FUBODUMP] ubo=%08X bytes:", _cur_f_ubo);
+                  for (int _b=0;_b<32;++_b) printf(" %02X", _src[_b]); printf("\n");
+                  printf("[FUBODUMP] float:"); for (int _k=0;_k<8;++_k) printf(" %.4f", ((float*)_src)[_k]);
+                  printf(" half:"); for (int _k=0;_k<16;++_k) { uint16_t _h=0; std::memcpy(&_h,_src+_k*2,2); printf(" %.4f", half_to_float(_h)); } printf("\n"); fflush(stdout);} }
             static int _un2=0; if (_un2++<8) { printf("[ABIUBO] upload frag ubo=%08X first=(%.3f,%.3f,%.3f,%.3f) n=%u\n", _cur_f_ubo,
               ((float*)_src)[0], ((float*)_src)[1], ((float*)_src)[2], ((float*)_src)[3], g_main_n); fflush(stdout); } } }
           if (_ok) {
