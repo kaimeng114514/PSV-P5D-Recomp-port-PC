@@ -3067,8 +3067,9 @@ static uint32_t hle_call_inner(uint32_t stub_va, RecState* s) {
             if (_vid) { static float _id[16]={1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1}; p5d::vulkan::update_uniform_buffer_raw(_id, sizeof(_id));
               static int _vc2=0; if(_vc2++<6){ printf("[VSUBOID] identity vert ubo uploaded n=%u\n", g_main_n); fflush(stdout);} } }
           if (_cur_v_ubo) { uint8_t* _src = GP(_cur_v_ubo); if (_src) { p5d::vulkan::update_uniform_buffer_raw(_src, 0x1000u);
-            static int _un=0; if (_un++<8) { printf("[ABIUBO] upload vert ubo=%08X first=(%.3f,%.3f,%.3f,%.3f) n=%u\n", _cur_v_ubo,
-              ((float*)_src)[0], ((float*)_src)[1], ((float*)_src)[2], ((float*)_src)[3], g_main_n); fflush(stdout); } } }
+            static int _un=0; if (_un++<3) { printf("[ABIUBO] upload vert ubo=%08X n=%u\n", _cur_v_ubo, g_main_n);
+              for (int _r=0;_r<8;++_r) printf("[VUBODUMP] row%d = %.4f %.4f %.4f %.4f\n", _r, ((float*)_src)[_r*4], ((float*)_src)[_r*4+1], ((float*)_src)[_r*4+2], ((float*)_src)[_r*4+3]);
+              fflush(stdout); } } }
           if (_cur_f_ubo) { uint8_t* _src = GP(_cur_f_ubo); if (_src) { p5d::vulkan::update_fragment_uniform_buffer_raw(_src, 0x1000u);
             static int _un2=0; if (_un2++<8) { printf("[ABIUBO] upload frag ubo=%08X first=(%.3f,%.3f,%.3f,%.3f) n=%u\n", _cur_f_ubo,
               ((float*)_src)[0], ((float*)_src)[1], ((float*)_src)[2], ((float*)_src)[3], g_main_n); fflush(stdout); } } }
@@ -3148,6 +3149,11 @@ static uint32_t hle_call_inner(uint32_t stub_va, RecState* s) {
       // 18.4507 M962: capture the reserved default UBO out-pointer, read its value after dispatch
       if (strstr(_ge->name, "ReserveVertexDefaultUniformBuffer")) { _pend_vout = s->r[1]; }
       if (strstr(_ge->name, "ReserveFragmentDefaultUniformBuffer")) { _pend_fout = s->r[1]; }
+      // VUBUF: capture vertex UBO related API calls + all SetUniformDataF ubo addresses
+      { if (strstr(_ge->name, "SetVertexUniformBuffer")) { _cur_v_ubo = s->r[2]; static int _n1=0; if (_n1++<24) { printf("[VUBUF] SetVertexUniformBuffer ctx=%08X idx=%u buf=%08X -> _cur_v_ubo (VUBUF2) n=%u\n", s->r[0], s->r[1], s->r[2], g_main_n); fflush(stdout);} }
+        if (strstr(_ge->name, "ReserveVertex")) { static int _n2=0; if (_n2++<24) { printf("[VUBUF] ReserveVertex out=%08X n=%u\n", s->r[1], g_main_n); fflush(stdout);} }
+        if (strstr(_ge->name, "ReserveFragment")) { static int _n3=0; if (_n3++<24) { printf("[VUBUF] ReserveFragment out=%08X n=%u\n", s->r[1], g_main_n); fflush(stdout);} }
+        if (strstr(_ge->name, "SetUniformDataF")) { static std::set<uint32_t> _seen; uint32_t _u=s->r[0]; if (_seen.find(_u)==_seen.end()) { _seen.insert(_u); printf("[VUBUF] SetUniformDataF NEW ubo=%08X par=%08X coff=%u cnt=%u n=%u (total distinct=%u)\n", _u, s->r[1], s->r[2], s->r[3], g_main_n, (unsigned)_seen.size()); fflush(stdout); } } }
       auto _t0 = std::chrono::steady_clock::now();
       uint32_t _rv = gxm_abi_dispatch(stub_va, s->r, _stk);
       if (_pend_vout) { uint32_t _va = 0; uint8_t* _q = GP(_pend_vout); if (_q) std::memcpy(&_va, _q, 4);
