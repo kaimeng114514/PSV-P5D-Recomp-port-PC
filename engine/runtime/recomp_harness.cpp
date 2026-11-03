@@ -299,6 +299,7 @@ static int g_lktr_n = 0;
 static int g_acc_n = 0, g_lkin_n = 0, g_lkout_n = 0;
 extern "C" int g_watch_on = 1;
 static void crihot_hit(uint32_t pc);   // CRIHOT_FWD
+static void cpkhdr_hit(uint32_t pc, RecState* s);   // CPKHDR_FWD
 static void hlehot_dump();   // HLEHOT_FWD
 static void cricall_hit(uint32_t pc, RecState* s);   // CRICALLPROBE_FWD
 static void criplayer_hit(uint32_t pc, RecState* s);   // CRIPLAYERPROBE_FWD
@@ -2287,6 +2288,7 @@ static void hf_fiber_thread(HFiber* f) {
     if (!fn) { fprintf(stderr, "[HF-NOBLK] fib=%08X pc=%08X\n", f->addr, pc); break; }
     g_cur_block = pc; f->cur_pc = pc; ++f->blocks; ++g_hf_blocks;
     { static int _chh=-1; if (_chh<0) _chh = getenv("P5D_CRIHOT") ? 1 : 0; if (_chh) crihot_hit(pc); }
+    { static int _chx=-1; if (_chx<0) _chx = getenv("P5D_CPKHDR") ? 1 : 0; if (_chx) cpkhdr_hit(pc, s); }
     { static int _chc=-1; if (_chc<0) _chc = getenv("P5D_CRICALL") ? 1 : 0; if (_chc) cricall_hit(pc, s); }
     { static int _chp=-1; if (_chp<0) _chp = getenv("P5D_CRIPLAYER") ? 1 : 0; if (_chp) criplayer_hit(pc, s); }
     { static int _gp2=-1; if (_gp2<0) _gp2 = getenv("P5D_GATEPROBE2") ? 1 : 0;
@@ -6201,9 +6203,29 @@ static void criplayer_hit(uint32_t pc, RecState* s) {   // CRIPLAYERPROBE
 static void hlehot_dump() {   // HLEHOT: top HLE stubs by call count
   std::vector<std::pair<int,uint32_t>> _v; for (auto& kv : g_hle_hits) _v.push_back({kv.second,kv.first});
   std::sort(_v.begin(),_v.end(),[](const std::pair<int,uint32_t>&a,const std::pair<int,uint32_t>&b){return a.first>b.first;});
-  printf("[HLEHOT] unique=%d\n",(int)_v.size());
+  { const uint32_t _ks[24] = {0x812B2870u,0x812B2840u,0x812B28B0u,0x812B29B0u,0x812B2990u,0x812B29A0u,0x812B2980u,0x812B2970u,
+      0x812B19F0u,0x812B19D0u,0x812B1A00u,0x812B19C0u,0x812B19A0u,0x812B1980u,0x812B1960u,0x812B19E0u,
+      0x812B2A50u,0x812B28A0u,0x812B2880u,0x812B2AE0u,0x812B2AD0u,0x812B27A0u,0x812B27B0u,0x812B2830u};
+    for (int _k=0;_k<24;++_k) { auto _it=g_hle_hits.find(_ks[_k]); printf("[HLEHOT] KEY %08X hits=%d\n", _ks[_k], _it==g_hle_hits.end()?0:_it->second); } }
+  printf("[HLEHOT] unique=%d\n",(int)_v.size());   // HLEHOT_KEY
   for (size_t _i=0;_i<_v.size() && _i<40;++_i) printf("[HLEHOT] va=%08X hits=%d\n", _v[_i].second, _v[_i].first);
   fflush(stdout); }
+
+static void cpkhdr_hit(uint32_t pc, RecState* s) {   // CPKHDR: feed real CPK header bytes into the analyzer buffer
+  static int _env=-1; if (_env<0) _env = getenv("P5D_CPKHDR") ? 1 : 0; if (!_env || !s) return;
+  uint32_t _p = pc & ~1u;
+  if (_p != 0x81292794u) return;
+  static std::vector<uint8_t> _hdr[2]; static int _loaded=0;
+  if (!_loaded) { _loaded=1;
+    const char* _f[2] = {"C:/dev/p5d_rom/data/vita.cpk", "C:/dev/p5d_rom/data/data.cpk"};
+    for (int k=0;k<2;++k) { FILE* fp=std::fopen(_f[k],"rb"); if(fp){ _hdr[k].resize(0x74000); size_t n=std::fread(_hdr[k].data(),1,0x74000,fp); _hdr[k].resize(n); std::fclose(fp);
+        printf("[CPKHDR] loaded %s %zu bytes\n", _f[k], n); } } fflush(stdout); }
+  static std::map<uint32_t,int> _bufmap; uint32_t _buf = s->r[2]; uint8_t* _d = GP(_buf);
+  if (_d) { auto _it=_bufmap.find(_buf);
+    if (_it==_bufmap.end()) { _it=_bufmap.insert({_buf,(int)_bufmap.size()&1}).first; }
+    int _k=_it->second; if (_k<2 && !_hdr[_k].empty()) { size_t n=_hdr[_k].size(); if(n>0x74000) n=0x74000; std::memcpy(_d,_hdr[_k].data(),n);
+      static int _n=0; if(_n++<12) { printf("[CPKHDR] buf=%08X filled %zu bytes from %s first=%02X%02X%02X%02X\n", _buf, n, _k?"data.cpk":"vita.cpk", _d[0],_d[1],_d[2],_d[3]); fflush(stdout); } } }
+}
 
 static void crihot_dump() {
   printf("[CRIHOT] unique=%d\n",(int)g_cri_hits.size());
@@ -6279,6 +6301,7 @@ static uint32_t call_guest_cb2(RecState* s, uint32_t entry, uint32_t a0, uint32_
       printf("[REGCB] pc=%08X name=%s r0=%08X r1=%08X r2=%08X r3=%08X lr=%08X sp=%08X fib=%08X thr=%08X\n", pc, _nm, s->r[0], s->r[1], s->r[2], s->r[3], s->r[14], s->r[13], g_cur_fiber, g_cur_thr); fflush(stdout); }
     uint32_t q = pc & ~1u;
     { static int _chh2=-1; if (_chh2<0) _chh2 = getenv("P5D_CRIHOT") ? 1 : 0; if (_chh2) crihot_hit(pc); }
+    { static int _chx2=-1; if (_chx2<0) _chx2 = getenv("P5D_CPKHDR") ? 1 : 0; if (_chx2) cpkhdr_hit(pc, s); }
     { static int _chc2=-1; if (_chc2<0) _chc2 = getenv("P5D_CRICALL") ? 1 : 0; if (_chc2) cricall_hit(pc, s); }
     { static int _chp2=-1; if (_chp2<0) _chp2 = getenv("P5D_CRIPLAYER") ? 1 : 0; if (_chp2) criplayer_hit(pc, s); }
     if (q == 0x811E5EC2u) ++g_cb5ec2; else if (q == 0x811E5EC6u) ++g_cb5ec6; else if (q == 0x811E5EF0u) ++g_cb5ef0;
