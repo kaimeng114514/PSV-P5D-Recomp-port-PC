@@ -666,7 +666,7 @@ static void iopump_from_wait(RecState* s) {
   // loader fiber (tl_hf) or the main thread. Worker/audio threads call DelayThread constantly and
   // used to trigger nested reader execution concurrently, leaving guest LwMutexes held when the
   // nested run hit its block budget -> hard deadlock (owner 4001C000 never released 816A0F18).
-  if (g_hostfiber && !tl_is_hfiber && tl_ht_tid != 0u && tl_ht_tid != 0x40010000u) return;
+  if (g_hostfiber && !tl_is_hfiber && tl_ht_tid != 0u && tl_ht_tid != 0x40010000u) return;   // M1161 gating kept (M1162 experiment B showed no benefit)
   // M1122b: gate to the POST-MOUNT phase only and only pump the file-data reader 848E9678.
   // (Pumping the mount readers 848FC368/848FC5C0 here breaks the CPK analyzer because the
   // main-loop pump applies HDRFIX/TOCFIX before the completion shim, which this path does not.)
