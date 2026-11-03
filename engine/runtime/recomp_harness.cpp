@@ -96,6 +96,7 @@ static int g_lwm_log_n = 0, g_trophy_log_n = 0, g_fdclass_log_n = 0, g_appmgr_lo
 static uint64_t g_mema_total = 0; static int g_mema_n = 0, g_malloc_fail_n = 0;
 static thread_local uint32_t tl_ht_tid = 0;
 static thread_local uint32_t tl_pc_ring[64];
+static thread_local uint32_t tl_hle_ring[32] = {0}; static thread_local uint32_t tl_hle_n = 0;
 static thread_local unsigned tl_pc_n = 0;
 static void guest_thread_run(uint32_t tid);
 static int g_ht_bad_n = 0;
@@ -2149,6 +2150,7 @@ static void hf_fiber_thread(HFiber* f) {
     if (!fn) { int back=0; uint32_t bq=gbn_back(pc,&back); if (bq && back<=16) { pc=bq; fn=gbn(pc); } }
     if (!fn) { if (g_hf_n++ < 20) { fprintf(stderr, "[HF-NOBLK] fib=%08X pc=%08X blk=%08X\n", f->addr, pc, g_cur_block); fflush(stderr); } break; }
     g_cur_block = pc; f->cur_pc = pc; ++f->blocks; ++g_hf_blocks;
+    tl_pc_ring[tl_pc_n & 63u] = pc; ++tl_pc_n;
     if (pc == 0x81160712u) { gfd_atomic_probe(pc, s); pc = s->r[14]; continue; }
     if (pc == 0x8115FF12u) {
       uint32_t _st=0,_g3c=0; uint8_t* _p=GP(0x81555438u); if(_p) std::memcpy(&_st,_p,4);
@@ -2232,7 +2234,25 @@ static uint32_t hf_do_init(RecState* s) {
   return 0;
 }
 
+
+// M1159: serialize HLE handlers across host threads. The handlers touch many shared C++ maps
+// (g_sema/g_eflag/g_thr/g_fios_data/g_hostfd/...) that used to be mutated concurrently; a corrupted
+// std::map/allocator showed up as C0000005 inside libwinpthread-1.dll. Blocking waits temporarily
+// release the lock (hle_wait_begin/end) so the waker's HLE call can proceed.
+static std::recursive_mutex g_hle_call_mtx;
+static thread_local std::unique_lock<std::recursive_mutex>* tl_hle_lock = nullptr;
+static uint32_t hle_call_inner(uint32_t stub_va, RecState* s);
+static inline void hle_wait_begin() { if (tl_hle_lock && tl_hle_lock->owns_lock()) tl_hle_lock->unlock(); }
+static inline void hle_wait_end() { if (tl_hle_lock && !tl_hle_lock->owns_lock()) tl_hle_lock->lock(); }
 extern "C" uint32_t hle_call(uint32_t stub_va, RecState* s) {
+  std::unique_lock<std::recursive_mutex> _hcl(g_hle_call_mtx);
+  tl_hle_lock = &_hcl;
+  tl_hle_ring[(tl_hle_n++) & 31u] = stub_va;
+  uint32_t _r = hle_call_inner(stub_va, s);
+  tl_hle_lock = nullptr;
+  return _r;
+}
+static uint32_t hle_call_inner(uint32_t stub_va, RecState* s) {
   if (g_ngs_env < 0) { const char* _ge = getenv("P5D_NGS"); g_ngs_env = (_ge && atoi(_ge) != 0) ? 1 : 0; }
   if (g_main_n < 4000u) { static std::set<uint32_t> _seen; static int _n = 0;
     if (_seen.insert(stub_va).second && _n++ < 400) {
@@ -2909,12 +2929,17 @@ extern "C" uint32_t hle_call(uint32_t stub_va, RecState* s) {
     case 0x812B2830u: {                                               // sceKernelLockLwMutex (M1156: real blocking, condvar + diagnostics)
       if (g_hostthreads) {
         uint32_t me = tl_ht_tid ? tl_ht_tid : 0x40010000u; uint32_t w = s->r[0];
-        std::unique_lock<std::mutex> _lk(g_lwm_mtx);
-        while (g_lwm_real[w].first != 0u && g_lwm_real[w].first != me && !g_shutdown) {
-          static int _lw=0; if (_lw++ < 60) { printf("[LWMWAIT] work=%08X me=%08X owner=%08X cnt=%u fib=%08X blk=%u\n", w, me, g_lwm_real[w].first, g_lwm_real[w].second, tl_hf?tl_hf->addr:0u, (unsigned)g_hf_blocks); fflush(stdout); }
-          g_lwm_cv.wait_for(_lk, std::chrono::milliseconds(5));
+        uint32_t _own = 0, _cnt = 0; bool _got = false;
+        hle_wait_begin();
+        { std::unique_lock<std::mutex> _lk(g_lwm_mtx);
+          while (g_lwm_real[w].first != 0u && g_lwm_real[w].first != me && !g_shutdown) {
+            static int _lw=0; if (_lw++ < 60) { printf("[LWMWAIT] work=%08X me=%08X owner=%08X cnt=%u fib=%08X blk=%u\n", w, me, g_lwm_real[w].first, g_lwm_real[w].second, tl_hf?tl_hf->addr:0u, (unsigned)g_hf_blocks); fflush(stdout); }
+            g_lwm_cv.wait_for(_lk, std::chrono::milliseconds(5));
+          }
+          g_lwm_real[w].first = me; ++g_lwm_real[w].second; _got = true;
         }
-        g_lwm_real[w].first = me; ++g_lwm_real[w].second;
+        (void)_own; (void)_cnt; (void)_got;
+        hle_wait_end();
       }
       r0 = 0; break; }
     case 0x812B28A0u: {                                               // sceKernelUnlockLwMutex
@@ -2996,7 +3021,7 @@ extern "C" uint32_t hle_call(uint32_t stub_va, RecState* s) {
       fflush(stdout);
       r0 = 0; break; }
     case 0x812B1B80u: {                                               // sceFiberRun(fiber, ...): start/resume the fiber
-      if (g_hostfiber) { { static int _hfr=0; if (_hfr++<40) { printf("[HFRUN] fib=%08X arg=%08X out=%08X lr=%08X blk=%u\n", s->r[0]&~1u, s->r[1], s->r[2], s->r[14], (unsigned)g_blkcnt_total); fflush(stdout); } } r0 = hf_do_run(s->r[0]&~1u, s->r[1], s->r[2]); break; }
+      if (g_hostfiber) { { static int _hfr=0; if (_hfr++<40) { printf("[HFRUN] fib=%08X arg=%08X out=%08X lr=%08X blk=%u\n", s->r[0]&~1u, s->r[1], s->r[2], s->r[14], (unsigned)g_blkcnt_total); fflush(stdout); } } hle_wait_begin(); r0 = hf_do_run(s->r[0]&~1u, s->r[1], s->r[2]); hle_wait_end(); break; }
       { static int _frn = 0; if (_frn++ < 24) { uint32_t _fb = s->r[0] & ~1u; auto _fi = g_fctx.find(_fb);
           printf("[FIBRUN] #%d lr=%08X arg=%08X fb=%08X curfib=%08X hasctx=%d fpc=%08X fentry=%08X farg=%08X\n", _frn-1, s->r[14], s->r[1], _fb, g_cur_fiber, (int)(_fi!=g_fctx.end()), _fi!=g_fctx.end()?_fi->second.r[15]:0u, _fi!=g_fctx.end()?_fi->second.r[14]:0u, _fi!=g_fctx.end()?_fi->second.r[0]:0u); fflush(stdout); } }
       if (g_blkcnt_total > 1400000u) { static int _frl=0; if (_frl++ < 40) { printf("[FRUN2] n=%u r0=%08X cur=%08X fex=%d inexec=%d lr=%08X sp=%08X ring:", g_blkcnt_total, s->r[0], g_cur_fiber, g_in_fex, g_in_fiber_exec, s->r[14], s->r[13]);
@@ -3041,7 +3066,7 @@ extern "C" uint32_t hle_call(uint32_t stub_va, RecState* s) {
       }
       break; }
     case 0x812B1BA0u: {                                               // sceFiberSwitch(fiber, ...): start/resume target
-      if (g_hostfiber) { { static int _hfs=0; if (_hfs++<80) { printf("[HFSW] fib=%08X arg=%08X out=%08X lr=%08X cur=%08X blk=%u\n", s->r[0]&~1u, s->r[1], s->r[2], s->r[14], tl_hf?tl_hf->addr:0u, (unsigned)g_blkcnt_total); fflush(stdout); } } r0 = hf_do_switch(s->r[0]&~1u, s->r[1], s->r[2]); break; }
+      if (g_hostfiber) { { static int _hfs=0; if (_hfs++<80) { printf("[HFSW] fib=%08X arg=%08X out=%08X lr=%08X cur=%08X blk=%u\n", s->r[0]&~1u, s->r[1], s->r[2], s->r[14], tl_hf?tl_hf->addr:0u, (unsigned)g_blkcnt_total); fflush(stdout); } } hle_wait_begin(); r0 = hf_do_switch(s->r[0]&~1u, s->r[1], s->r[2]); hle_wait_end(); break; }
       { static int _fsn = 0; static uint32_t _lastpc = 0xFFFFFFFFu; if (_fsn < 4000) { uint32_t _fb = s->r[0] & ~1u; auto _fi = g_fctx.find(_fb); uint32_t _pc = _fi!=g_fctx.end()?_fi->second.r[15]:0u;
           if (_pc != _lastpc) { _lastpc = _pc; ++_fsn; printf("[FIBSW] #%d n=%u lr=%08X fb=%08X fpc=%08X flr=%08X fr0=%08X blk=%u\n", _fsn-1, g_main_n, s->r[14], _fb, _pc, _fi!=g_fctx.end()?_fi->second.r[14]:0u, _fi!=g_fctx.end()?_fi->second.r[0]:0u, g_blkcnt_total); fflush(stdout); }
           static std::map<uint32_t,uint32_t> _freq; static uint32_t _recent[8]; static int _ri = 0; ++_freq[_pc]; _recent[_ri++ & 7] = _pc;
@@ -3138,7 +3163,7 @@ extern "C" uint32_t hle_call(uint32_t stub_va, RecState* s) {
       rc_restore(s);
       g_in_fiber_exec = 0;
       break; }
-    case 0x812B1B60u: { if (g_hostfiber) { r0 = hf_do_return(s->r[0]); break; } static int _frt = 0; if (_frt++ < 60) { auto _ff=[&](uint32_t fb)->uint32_t { uint8_t* q=GP(fb+0x80u); uint32_t v=0; if(q) std::memcpy(&v,q,4); return v; };
+    case 0x812B1B60u: { if (g_hostfiber) { hle_wait_begin(); r0 = hf_do_return(s->r[0]); hle_wait_end(); break; } static int _frt = 0; if (_frt++ < 60) { auto _ff=[&](uint32_t fb)->uint32_t { uint8_t* q=GP(fb+0x80u); uint32_t v=0; if(q) std::memcpy(&v,q,4); return v; };
         printf("[FIBRT] #%d n=%u curfib=%08X lr=%08X fpc=%08X sp=%08X r0=%08X flagsA=%08X flagsB=%08X\n", _frt-1, g_main_n, g_cur_fiber, s->r[14], g_cur_fiber?(g_fctx.count(g_cur_fiber)?g_fctx[g_cur_fiber].r[15]:0u):0u, s->r[13], s->r[0], _ff(0x84836300u), _ff(0x848463A0u)); fflush(stdout); } }
       r0 = 0; g_fiber_flag_return = 1; break;         // sceFiberReturnToThread
     case 0x812B1BB0u: {                                               // _sceFiberInitializeImpl(fiber, name, entry, arg, ...)
@@ -3346,7 +3371,7 @@ extern "C" uint32_t hle_call(uint32_t stub_va, RecState* s) {
     case 0x812B1810u: {                                               // 18.4243: sceDisplayWaitVblankStartMultiCB (NID 05F27764) - NOT GetFrameBuf!
       uint32_t cnt = s->r[0]; if (cnt == 0u) cnt = 1u; if (cnt > 4u) cnt = 4u;
       ++g_vblank_n;
-      if (tl_ht_tid && !g_fastsleep) std::this_thread::sleep_for(std::chrono::microseconds(16000u * cnt));
+      if (tl_ht_tid && !g_fastsleep) { hle_wait_begin(); std::this_thread::sleep_for(std::chrono::microseconds(16000u * cnt)); hle_wait_end(); }
       // 18.4453 M908: guest-thread mode has no preemption; the app render loop blocks here for vsync
       // on real hardware which lets the loader/worker threads run. Emulate the time slice by advancing
       // the virtual clock and pumping ready guest threads (env-gated experiment).
@@ -3586,7 +3611,7 @@ extern "C" uint32_t hle_call(uint32_t stub_va, RecState* s) {
       uint32_t have = (it == g_sema.end()) ? 0u : it->second;
       if (obj == 0x50018000u) { static int _gfs=0; if (_gfs++ < 100) { printf("[GFS] wait tid=%08X have=%u lr=%08X fib=%08X blk=%08X n=%u\n", g_cur_thr, have, s->r[14], g_cur_fiber, g_cur_block, g_blkcnt_total); fflush(stdout); } }
       if (g_thr_log_n++ < 80) printf("[SEM] wait obj=%08X need=%u have=%u cur_thr=%08X lr=%08X\n", obj, need, have, g_cur_thr, s->r[14]);
-      if (tl_ht_tid) { for (;;) { if (g_shutdown) break; uint32_t _h = (g_sema.count(obj) ? g_sema[obj] : 0u); if (_h >= need) { g_sema[obj] = _h - need; break; } if (!g_fastsleep) std::this_thread::sleep_for(std::chrono::microseconds(200)); } r0 = 0; break; }
+      if (tl_ht_tid) { hle_wait_begin(); for (;;) { if (g_shutdown) break; uint32_t _h = (g_sema.count(obj) ? g_sema[obj] : 0u); if (_h >= need) { g_sema[obj] = _h - need; break; } if (!g_fastsleep) std::this_thread::sleep_for(std::chrono::microseconds(200)); } r0 = 0; break; } hle_wait_end();
       if (g_sem2_n++ < 60) { printf("[SEM2] wait obj=%08X need=%u have=%u thr=%08X lr=%08X\n", obj, need, have, g_cur_thr, s->r[14]); fflush(stdout); }
       { uint32_t _mytok = g_cur_thr ? g_cur_thr : (0xF0000000u | (g_cur_fiber & 0xFFFFFFu));
         if (have < need && g_sema_owner.count(obj) && g_sema_owner[obj] == _mytok) {
@@ -3647,7 +3672,7 @@ extern "C" uint32_t hle_call(uint32_t stub_va, RecState* s) {
       auto eval = [&](uint32_t curv) -> bool { return bits == 0u || (orMode ? ((curv & bits) != 0u) : ((curv & bits) == bits)); };
       uint32_t cur = (g_eflag.count(obj) ? g_eflag[obj] : 0u);
       bool ok = eval(cur);
-      if (tl_ht_tid) { for (;;) { if (g_shutdown) break; cur = (g_eflag.count(obj) ? g_eflag[obj] : 0u); ok = eval(cur); if (ok) break; if (!g_fastsleep) std::this_thread::sleep_for(std::chrono::microseconds(200)); }
+      if (tl_ht_tid) { hle_wait_begin(); for (;;) { if (g_shutdown) break; cur = (g_eflag.count(obj) ? g_eflag[obj] : 0u); ok = eval(cur); if (ok) break; if (!g_fastsleep) std::this_thread::sleep_for(std::chrono::microseconds(200)); } hle_wait_end();
         if (outp) { uint8_t* p = GP(outp); if (p) std::memcpy(p, &cur, 4); }
         if (mode & 4u) g_eflag[obj] = 0u; else if (mode & 2u) g_eflag[obj] = cur & ~bits;
         r0 = 0; break; }
@@ -3808,7 +3833,7 @@ extern "C" uint32_t hle_call(uint32_t stub_va, RecState* s) {
       iopump_from_wait(s);   // M1122: pump criFs load state machines during blocking waits (nested fiber spin loops)
       g_vtime_extra += (uint64_t)(s->r[0] ? s->r[0] : 1u);   // M815: deterministic virtual sleep
       r0 = 0;
-      if (tl_ht_tid) { uint32_t _us = s->r[0]; if (_us > 2000u) _us = 2000u; if (_us < 100u) _us = 100u; if (!g_fastsleep) std::this_thread::sleep_for(std::chrono::microseconds(_us)); break; }
+      if (tl_ht_tid) { hle_wait_begin(); uint32_t _us = s->r[0]; if (_us > 2000u) _us = 2000u; if (_us < 100u) _us = 100u; if (!g_fastsleep) std::this_thread::sleep_for(std::chrono::microseconds(_us)); hle_wait_end(); break; }
       if (g_cur_thr) { static int _dt=0; if ((g_cur_thr == 0x4001B000u || g_cur_thr == 0x4001C000u) && _dt++<300){ printf("[DELAYTHR] tid=%08X usec=%u lr=%08X sp=%08X pc=%08X\n", g_cur_thr, s->r[0], s->r[14], s->r[13], g_cur_block); fflush(stdout);}
         // 18.4454 M909: cooperative yield - let the scheduler run the other guest threads (loader workers)
         if (g_thryield_env && g_main_n >= 100000u) { static int _ty=0; if (_ty++ < 8) { printf("[THRYIELD-GT] tid=%08X usec=%u -> yield\n", g_cur_thr, s->r[0]); fflush(stdout); }
@@ -6068,7 +6093,10 @@ static LONG WINAPI dsh_crash_filter(EXCEPTION_POINTERS* ep) {
     char _path[MAX_PATH] = {0}; if (_hb) GetModuleFileNameA(_hb, _path, MAX_PATH);
     uintptr_t _off = (uintptr_t)ep->ExceptionRecord->ExceptionAddress - (uintptr_t)(_hb ? _hb : GetModuleHandleA(NULL));
     printf("[CRASH] module=%p name=%s modoff=%llX tid=%u curpc=%08X\n", (void*)_hb, _path, (unsigned long long)_off, (unsigned)GetCurrentThreadId(), g_cur_block);
-    printf("[CRASH] tlring:"); for (int _i=0;_i<16;++_i) printf(" %08X", tl_pc_ring[(tl_pc_n - 16u + (uint32_t)_i) & 63u]); printf("\n"); fflush(stdout); }
+    printf("[CRASH] tlring:"); for (int _i=0;_i<16;++_i) printf(" %08X", tl_pc_ring[(tl_pc_n - 16u + (uint32_t)_i) & 63u]); printf("\n");
+    printf("[CRASH] tl_hle:"); for (int _i=0;_i<16;++_i) printf(" %08X", tl_hle_ring[(tl_hle_n - 16u + (uint32_t)_i) & 31u]); printf("\n");
+    printf("[CRASH] tl_ht_tid=%08X cur_fiber_addr=%08X g_cur_thr=%08X blk=%08X\n", tl_ht_tid, tl_hf?tl_hf->addr:0u, g_cur_thr, g_cur_block);
+    fflush(stdout); }
   printf("[CRASH] pcring:");
   for (int i = 0; i < 24; ++i) printf(" %08X", g_pc_ring[(g_pc_ring_n - 24u + (uint32_t)i) & 63u]);
   printf("\n"); fflush(stdout);
