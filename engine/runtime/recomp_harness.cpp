@@ -2687,6 +2687,9 @@ static uint32_t _ufd_vert_ubo = 0, _ufd_frag_ubo = 0;   // M1251: per-stage UBO 
           || strstr(_ge->name, "PrecomputedVertexStateInit") || strstr(_ge->name, "PrecomputedFragmentStateInit")) {
         const bool _frag = (strstr(_ge->name, "SetFragmentProgram") != nullptr) || (strstr(_ge->name, "PrecomputedFragmentStateInit") != nullptr);
         static int _dbg = 0; if (_dbg++ < 8) { printf("[ABICAP] name=%s frag=%d r1=%08X r2=%08X\n", _ge->name, (int)_frag, s->r[1], s->r[2]); fflush(stdout); }
+        { static int _pm=0; if (_pm++ < 40) { uint32_t _r1=s->r[1]; uint32_t _w0=0,_w1=0,_w2=0,_w3=0;
+            uint8_t* q=GP(_r1); if(q){ std::memcpy(&_w0,q,4); if(GP(_r1+4)){uint8_t*q2=GP(_r1+4); std::memcpy(&_w1,q2,4);} if(GP(_r1+8)){uint8_t*q3=GP(_r1+8); std::memcpy(&_w2,q3,4);} if(GP(_r1+0xC)){uint8_t*q4=GP(_r1+0xC); std::memcpy(&_w3,q4,4);} }
+            printf("[PROGIDMAP] name=%s frag=%d r1=%08X w=%08X %08X %08X %08X n=%u\n", _ge->name, (int)_frag, _r1, _w0,_w1,_w2,_w3, g_main_n); fflush(stdout);} }
         uint32_t _o = s->r[1]; uint8_t* _q = GP(_o); uint32_t _gxp = 0; if (_q) std::memcpy(&_gxp, _q, 4);
         uint64_t _h = 0; uint8_t* _g = GP(_gxp);
         if (_g) { uint32_t _mg = 0, _sz = 0; std::memcpy(&_mg, _g, 4); std::memcpy(&_sz, _g + 8, 4);
@@ -2904,6 +2907,16 @@ static uint32_t _ufd_vert_ubo = 0, _ufd_frag_ubo = 0;   // M1251: per-stage UBO 
       // 18.4482 M937: give the app real ShaderPatcher ids / program handles and capture their SPIR-V names.
       { static std::map<uint32_t,std::string> _pid2spv, _vobj2spv, _fobj2spv;
         static uint32_t _nextid = 0x8540B000u, _nextobj = 0x8540C000u;
+        // PIDOBJRESOLVE: resolve SetVertexProgram/SetFragmentProgram fake-object ids to spv names (accurate per-draw pair)
+        if (strstr(_ge->name, "SetVertexProgram") || strstr(_ge->name, "SetFragmentProgram")) {
+          const bool _pfrag = (strstr(_ge->name, "SetFragmentProgram") != nullptr);
+          uint32_t _r1 = s->r[1]; auto _vm = _vobj2spv.find(_r1); auto _fm = _fobj2spv.find(_r1);
+          if (_pfrag && _fm != _fobj2spv.end()) { if (_abi_fspv != _fm->second) { _abi_fspv = _fm->second;
+              static int _pn9=0; if (_pn9++<60) { printf("[ABIPAIR3] v=%s f=%s n=%u lr=%08X\n", _abi_vspv.c_str(), _abi_fspv.c_str(), g_main_n, s->r[14]); fflush(stdout);} } }
+          else if (!_pfrag && _vm != _vobj2spv.end()) { if (_abi_vspv != _vm->second) { _abi_vspv = _vm->second;
+              static int _pn10=0; if (_pn10++<60) { printf("[ABIPAIR3] v=%s f=%s n=%u lr=%08X\n", _abi_vspv.c_str(), _abi_fspv.c_str(), g_main_n, s->r[14]); fflush(stdout);} } }
+          static int _pm9=0; if (_pm9++<24) { printf("[PIDOBJRESOLVE] name=%s r1=%08X hit_v=%d hit_f=%d -> v=%s f=%s n=%u\n", _ge->name, _r1, (int)(_vm != _vobj2spv.end()), (int)(_fm != _fobj2spv.end()), _abi_vspv.c_str(), _abi_fspv.c_str(), g_main_n); fflush(stdout); } }
+
         if (strstr(_ge->name, "ShaderPatcherRegisterProgram")) {
           uint64_t _gh = hle_gxp_hash(s->r[1]); auto _it = _gh ? _abi_man.find(_gh) : _abi_man.end();
           if (_it != _abi_man.end()) { uint8_t* _q = GP(s->r[2]);
@@ -2985,6 +2998,11 @@ static uint32_t _ufd_vert_ubo = 0, _ufd_frag_ubo = 0;   // M1251: per-stage UBO 
             if (_it != _fobj2spv.end()) { _abi_fspv = _it->second;
               static int _n7=0; if (_n7++<30) { printf("[SETPSTATE] frag obj=%08X spv=%s n=%u\n", s->r[1], _it->second.c_str(), g_main_n); fflush(stdout);} }
             else { static int _n8=0; if (_n8++<30) { printf("[SETPSTATE] frag obj=%08X UNKNOWN n=%u\n", s->r[1], g_main_n); fflush(stdout);} } }
+          // PROGIDMAP: at SetVertexProgram/FragmentProgram dump raw object + map lookups
+          if (strstr(_ge->name, "SetVertexProgram") || strstr(_ge->name, "SetFragmentProgram")) { static int _pm=0; if (_pm++<40) {
+              uint32_t _r1 = s->r[1]; uint32_t _w0=0,_w1=0; uint8_t* q=GP(_r1); if(q){std::memcpy(&_w0,q,4); if(GP(_r1+4)){uint8_t* q2=GP(_r1+4); std::memcpy(&_w1,q2,4);} }
+              printf("[PROGIDMAP] name=%s r1=%08X w0=%08X w1=%08X vobj=%d fobj=%d pid=%d n=%u\n", _ge->name, _r1, _w0, _w1,
+                (int)_vobj2spv.count(_r1), (int)_fobj2spv.count(_r1), (int)_pid2spv.count(_r1), g_main_n); fflush(stdout);} }
           // ABIPAIR2: log the current program pair whenever it changes
           { static std::string _lastpair2; static int _pc2=0; std::string _pair2 = _abi_vspv + "|" + _abi_fspv;
             if (_pair2 != _lastpair2) { _lastpair2 = _pair2; if (_pc2++ < 200) { printf("[ABIPAIR2] #%d v=%s f=%s n=%u lr=%08X blk=%08X\n", _pc2, _abi_vspv.c_str(), _abi_fspv.c_str(), g_main_n, s->r[14], g_cur_block); fflush(stdout);} } } } }
