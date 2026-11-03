@@ -2251,6 +2251,26 @@ static void hf_fiber_thread(HFiber* f) {
     if (!fn) { int back=0; uint32_t bq=gbn_back(pc,&back); if (bq && back<=16) { pc=bq; fn=gbn(pc); } }
     if (!fn) { fprintf(stderr, "[HF-NOBLK] fib=%08X pc=%08X\n", f->addr, pc); break; }
     g_cur_block = pc; f->cur_pc = pc; ++f->blocks; ++g_hf_blocks;
+    { uint32_t _p0 = pc & ~1u;
+      if (_p0 == 0x811C041Cu) { static uint32_t _rn=0; ++_rn;
+        if (_rn<=8u || (_rn%2000u)==0u) { uint32_t _idx=0; { uint8_t* q=GP(0x816CC700u); if(q) std::memcpy(&_idx,q,4); }
+          printf("[REGCNT] n=%u type=%08X slot=%u node=%08X hfblk=%u\n", _rn, s->r[0], _idx, s->r[1], (unsigned)g_hf_blocks); fflush(stdout); } }
+      if (_p0 == 0x8119934Au) { static uint32_t _fb2=0; ++_fb2;
+        if (_fb2<=12u) {
+          int _tot[3]={0,0,0};
+          for (int _f=0;_f<3;++_f) { uint32_t _bD=0,_bB=0;
+            { uint8_t* q=GP(0x816CC6D8u + (uint32_t)_f*4u); if(q) std::memcpy(&_bD,q,4); }
+            { uint8_t* q=GP(0x816CC6CCu + (uint32_t)_f*4u); if(q) std::memcpy(&_bB,q,4); }
+            int _nD=0,_nB=0;
+            for (uint32_t _ty=0;_ty<100u;++_ty) { uint32_t _h=0;
+              { uint8_t* q=GP(_bD+_ty*0x20u+0xCu); if(q) std::memcpy(&_h,q,4); }
+              int _g=0; while (_h && _g++<4000) { ++_nD; uint8_t* q=GP(_h+0x14u); if(!q) break; std::memcpy(&_h,q,4); } }
+            for (uint32_t _ty=0;_ty<100u;++_ty) { uint32_t _h=0;
+              { uint8_t* q=GP(_bB+_ty*0x20u+0xCu); if(q) std::memcpy(&_h,q,4); }
+              int _g=0; while (_h && _g++<4000) { ++_nB; uint8_t* q=GP(_h+0x14u); if(!q) break; std::memcpy(&_h,q,4); } }
+            _tot[_f]=_nD+_nB; }
+          printf("[NODEINV] fb=%u slot0=%d slot1=%d slot2=%d hfblk=%u\n", _fb2, _tot[0],_tot[1],_tot[2], (unsigned)g_hf_blocks); fflush(stdout); } } }
+
     if ((pc & ~1u) == 0x8119934Au) { static uint32_t _fb=0; ++_fb;
       if (_fb<=2u) {
         uint32_t _idx=0; { uint8_t* q=GP(0x816CC700u); if(q) std::memcpy(&_idx,q,4); }
@@ -5697,6 +5717,13 @@ static void node_exec_frame(RecState* s) {
   if (!_en) return;
   uint32_t _idx=0; { uint8_t* q=GP(0x816CC700u); if(q) std::memcpy(&_idx,q,4); }
   ++g_ne_frames; int _n=0; char _ch[200]={0}; int _ln=0;
+  { int _pre=0; for (int _f=0;_f<3;++_f) { uint32_t _bD=0,_bB=0;
+      { uint8_t* q=GP(0x816CC6D8u + (uint32_t)_f*4u); if(q) std::memcpy(&_bD,q,4); }
+      { uint8_t* q=GP(0x816CC6CCu + (uint32_t)_f*4u); if(q) std::memcpy(&_bB,q,4); }
+      for (int _arr=0;_arr<2;++_arr) { uint32_t _b=_arr?_bB:_bD; if(!_b) continue;
+        for (uint32_t _ty=0;_ty<100u;++_ty) { uint32_t _h=0; { uint8_t* q=GP(_b+_ty*0x20u+0xCu); if(q) std::memcpy(&_h,q,4); }
+          int _g=0; while(_h && _g++<4096){ ++_pre; uint8_t* q=GP(_h+0x14u); if(!q) break; std::memcpy(&_h,q,4);} } } }
+    static int _pp=0; if (_pp++<20) { printf("[NODEPRE] frame=%u inventory=%d hfblk=%u\n", g_ne_frames, _pre, (unsigned)g_hf_blocks); fflush(stdout); } }
   if (_all) { for (int _f=0;_f<3;++_f) { node_exec_slot(s,_f,&_n,_ch,&_ln); bchan_exec_slot(s,_f,&_n,_ch,&_ln); } }
   else { node_exec_slot(s,(int)_idx,&_n,_ch,&_ln); bchan_exec_slot(s,(int)_idx,&_n,_ch,&_ln); }
   g_ne_n += (uint32_t)_n;
