@@ -5719,7 +5719,11 @@ static void guest_thread_run(uint32_t tid) {
     if (!fn) { int _bk=0; uint32_t _bq=gbn_back(pc,&_bk); if (_bq && _bk<=16) { pc=_bq; fn=gbn(pc); } }
     if (!fn) { if (g_ht_bad_n++ < 20) { printf("[HT-NOBLK] tid=%08X pc=%08X\n", tid, pc); fflush(stdout); } break; }
     g_cur_block = pc;
-    t->pc_ring[(t->pc_n++) & 31u] = pc;
+    t->pc_ring[(t->pc_n++) & 31u] = pc;    if ((pc & ~1u) == 0x811E6928u && tid >= 0x40011000u && tid <= 0x40016000u) { // M1193: GFD worker task dispatch
+      static uint32_t _dn = 0; ++_dn;
+      uint32_t _fn = 0; { uint8_t* _q = GP(s->r[11]); if (_q) std::memcpy(&_fn, _q, 4); }
+      if (_dn <= 12 || (_dn % 500u) == 0u) { printf("[WDISP] n=%u tid=%08X fn=%08X fp=%08X hfblk=%u\n", _dn, tid, _fn, s->r[11], (unsigned)g_hf_blocks); fflush(stdout); } }
+
     if ((pc & ~1u) == 0x81199002u || (pc & ~1u) == 0x81198E2Eu || (pc & ~1u) == 0x811E61FAu || (pc & ~1u) == 0x811991BEu) { // M1191: GFD init/term lifecycle
       static int _a=0,_b=0,_c=0,_d=0; int *_p=nullptr;
       if ((pc&~1u)==0x81199002u) _p=&_a; else if ((pc&~1u)==0x81198E2Eu) _p=&_b; else if ((pc&~1u)==0x811E61FAu) _p=&_c; else _p=&_d;
