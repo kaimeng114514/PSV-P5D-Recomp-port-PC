@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: MIT
 #include <cstdio>
 #include "sce_gxm.h"
 #include "vulkan_backend.h"

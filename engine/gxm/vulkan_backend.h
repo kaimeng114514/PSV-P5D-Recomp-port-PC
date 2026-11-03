@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: MIT
 // Vulkan后端核心
 // 管理Vulkan实例、设备、队列、命令缓冲区、渲染通道、管线、交换链
 #pragma once

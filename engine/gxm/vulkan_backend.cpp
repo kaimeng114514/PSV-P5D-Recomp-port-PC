@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: MIT
 // Vulkan后端核心实现
 // 完整的窗口、表面、交换链、渲染通道、绘制实�?
 #include "vulkan_backend.h"
