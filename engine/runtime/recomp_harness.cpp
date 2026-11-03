@@ -2596,7 +2596,9 @@ static uint32_t hle_call_inner(uint32_t stub_va, RecState* s) {
             printf("[ABIUNI] identity vertex uniforms set n=%u\n", g_main_n); fflush(stdout); } }
         // M1142: actually ISSUE the draw for the uploaded test stream. Previously only upload_vertex_stream was
         // called and the real vkCmdDraw never happened, so every captured frame stayed black.
-        { static int _tri2 = 0; if (!_tri2) { _tri2 = 1;
+        { static int _tri2 = 0; static int _alw = -1; if (_alw < 0) { const char* _e = getenv("P5D_TESTPIPE_ALL"); _alw = (_e && atoi(_e)) ? 1 : 0; }
+          if (!_tri2 || (_alw && _tri2 < 60)) { _tri2++;
+            { static int _da=0; if (_da++<40) { printf("[ABIDRAWARGS] n=%u r0=%08X r1=%08X r2=%08X r3=%08X r4=%08X lr=%08X blk=%08X\n", g_main_n, s->r[0], s->r[1], s->r[2], s->r[3], s->r[4], s->r[14], g_cur_block); fflush(stdout); } }
             const char* _tp = getenv("P5D_TESTPIPE");   // M1147: force our own known-good red-triangle pipeline
             if (_tp && atoi(_tp)) {   // M1147B: backend needs the FULL path (it fopen()s the argument directly)
               std::string _tvp = _abi_spvdir + "/m1147_vert.spv", _tfp = _abi_spvdir + "/m1147_frag.spv";
