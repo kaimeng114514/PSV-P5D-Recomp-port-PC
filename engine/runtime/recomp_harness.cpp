@@ -2245,6 +2245,20 @@ static void hf_fiber_thread(HFiber* f) {
     if (!fn) { int back=0; uint32_t bq=gbn_back(pc,&back); if (bq && back<=16) { pc=bq; fn=gbn(pc); } }
     if (!fn) { fprintf(stderr, "[HF-NOBLK] fib=%08X pc=%08X\n", f->addr, pc); break; }
     g_cur_block = pc; f->cur_pc = pc; ++f->blocks; ++g_hf_blocks;
+    { static uint64_t _qs=0; if (g_hf_blocks - _qs >= 3000000u) { _qs = g_hf_blocks;
+        printf("[QSN] hfblk=%u", (unsigned)g_hf_blocks);
+        for (int _i=0;_i<3;++_i) { uint32_t _q=0; uint8_t* _p=GP(0x8169E080u + (uint32_t)_i*4u); if (_p) std::memcpy(&_q,_p,4);
+          if (!_q) { printf(" q%d=NULL", _i); continue; }
+          uint32_t _sem=0,_rd=0,_wr=0,_pend=0,_st=0;
+          { uint8_t* x=GP(_q); if(x) std::memcpy(&_sem,x,4); }
+          { uint8_t* x=GP(_q+0x1Cu); if(x) std::memcpy(&_rd,x,4); }
+          { uint8_t* x=GP(_q+0x20u); if(x) std::memcpy(&_wr,x,4); }
+          { uint8_t* x=GP(_q+0x2Cu); if(x) std::memcpy(&_pend,x,4); }
+          { uint8_t* x=GP(_q+0x10u); if(x) std::memcpy(&_st,x,4); }
+          uint32_t _have = (g_sema.count(_sem)?g_sema[_sem]:0u);
+          printf(" q%d(sem=%08X have=%u rd=%u wr=%u pend=%u st=%u)", _i,_sem,_have,_rd,_wr,_pend,_st); }
+        printf("\n"); fflush(stdout); } }
+
     { uint32_t _p0 = pc & ~1u;
       if (_p0 == 0x811F37ACu || _p0 == 0x811F3750u || _p0 == 0x811F36C6u || _p0 == 0x811EFDEEu || _p0 == 0x811E649Au) {
         static uint32_t _c1=0,_c2=0,_c3=0,_c4=0,_c5=0;
@@ -3798,7 +3812,8 @@ static uint32_t hle_call_inner(uint32_t stub_va, RecState* s) {
       uint32_t have = (it == g_sema.end()) ? 0u : it->second;
       if (obj == 0x50018000u) { static int _gfs=0; if (_gfs++ < 100) { printf("[GFS] wait tid=%08X have=%u lr=%08X fib=%08X blk=%08X n=%u\n", g_cur_thr, have, s->r[14], g_cur_fiber, g_cur_block, g_blkcnt_total); fflush(stdout); } }
       if (g_thr_log_n++ < 80) printf("[SEM] wait obj=%08X need=%u have=%u cur_thr=%08X lr=%08X\n", obj, need, have, g_cur_thr, s->r[14]);
-      if (tl_ht_tid) { hle_wait_begin(); for (;;) { if (g_shutdown) break; uint32_t _h = (g_sema.count(obj) ? g_sema[obj] : 0u); if (_h >= need) { g_sema[obj] = _h - need; break; } if (!g_fastsleep) std::this_thread::sleep_for(std::chrono::microseconds(200)); } r0 = 0; break; } hle_wait_end();
+      if (tl_ht_tid) { hle_wait_begin(); uint64_t _ws_poll = 0; for (;;) { if (g_shutdown) break; uint32_t _h = (g_sema.count(obj) ? g_sema[obj] : 0u); if (_h >= need) { g_sema[obj] = _h - need; break; } if (((++_ws_poll) % 5000000ull) == 0ull) { static int _ws=0; if (_ws++<60) { printf("[WSTUCK] tid=%08X obj=%08X need=%u have=%u lr=%08X blk=%u\n", tl_ht_tid, obj, need, (g_sema.count(obj)?g_sema[obj]:0u), s->r[14], (unsigned)g_blkcnt_total); fflush(stdout);} }
+        if (!g_fastsleep) std::this_thread::sleep_for(std::chrono::microseconds(200)); } r0 = 0; break; } hle_wait_end();
       if (g_sem2_n++ < 60) { printf("[SEM2] wait obj=%08X need=%u have=%u thr=%08X lr=%08X\n", obj, need, have, g_cur_thr, s->r[14]); fflush(stdout); }
       { uint32_t _mytok = g_cur_thr ? g_cur_thr : (0xF0000000u | (g_cur_fiber & 0xFFFFFFu));
         if (have < need && g_sema_owner.count(obj) && g_sema_owner[obj] == _mytok) {
@@ -5526,6 +5541,19 @@ static uint32_t mb_destroy_guard(RecState* s, uint32_t entry, const char* tag) {
 }
 static uint32_t mb_811E6330(RecState* s) { return mb_destroy_guard(s, 0x811E6330u, "qDestroy"); }
 static uint32_t mb_811E63CE(RecState* s) { return mb_destroy_guard(s, 0x811E63CEu, "qDestroyAll"); }
+static uint32_t mb_811E649A(RecState* s) {
+  static int _en = -1; if (_en < 0) { const char* e = getenv("P5D_SYNCTASK"); _en = (e && atoi(e)) ? 1 : 0; }
+  uint32_t desc = s->r[1], fn = 0, arg = 0;
+  { uint8_t* p = GP(desc); if (p) std::memcpy(&fn, p, 4); p = GP(desc + 4u); if (p) std::memcpy(&arg, p, 4); }
+  BlockFn raw = gbn_raw(0x811E649Au);
+  uint32_t nx = raw ? raw(s) : s->r[14];
+  if (_en && fn != 0u) {
+    static int _n = 0;
+    if (_n++ < 24) { printf("[SYNCTASK] #%d fn=%08X arg=%08X desc=%08X r0=%08X\n", _n-1, fn, arg, desc, s->r[0]); fflush(stdout); }
+    (void)call_guest_cb2(s, fn & ~1u, desc + 4u, 0u, 4000000);
+  }
+  return nx;
+}
 static uint32_t mb_81283D62(RecState* s) {   // M1174: missing AOT block (BL return continuation of 0x81283D54)
   g_cur_block = 0x81283D62u;
   { uint32_t _a = s->r[0], _b = 0x1u, _r = _a - _b;
@@ -5549,6 +5577,7 @@ g_manual_blocks[0x81032CF8u] = (BlockFn)mb_81032CF8;
   g_manual_blocks[0x811DACFCu] = (BlockFn)mb_811DACFC;
 g_manual_blocks[0x81283D62u] = (BlockFn)mb_81283D62;
 g_manual_blocks[0x811E6330u] = (BlockFn)mb_811E6330;
+g_manual_blocks[0x811E649Au] = (BlockFn)mb_811E649A;
 g_manual_blocks[0x811E63CEu] = (BlockFn)mb_811E63CE;
 g_manual_blocks[0x8128D570u] = (BlockFn)mb_8128D570;
 }
