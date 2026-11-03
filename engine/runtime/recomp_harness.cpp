@@ -3063,13 +3063,13 @@ static uint32_t hle_call_inner(uint32_t stub_va, RecState* s) {
           { static int _ne=-1; if (_ne<0) { const char* e=getenv("P5D_NODEEXEC"); _ne=(e&&atoi(e))?1:0; }
             if (_ne) { static int _dc=0; if (_dc++ < 24) { printf("[DRAWCTX] n=%d lr=%08X gcur=%08X vc=%u r0=%08X r1=%08X r2=%08X\n", _dc, s->r[14], g_cur_block, _vc, s->r[0], s->r[1], s->r[2]); fflush(stdout); } } }
           // 18.4507 M962: upload the engine-written default uniform buffers (real VS was receiving zeros)
-          { static int _vid=-1; if (_vid<0) _vid=(getenv("P5D_VS_UBO_ID")!=nullptr)?1:0;
-            if (_vid) { static float _id[16]={1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1}; p5d::vulkan::update_uniform_buffer_raw(_id, sizeof(_id));
-              static int _vc2=0; if(_vc2++<6){ printf("[VSUBOID] identity vert ubo uploaded n=%u\n", g_main_n); fflush(stdout);} } }
           if (_cur_v_ubo) { uint8_t* _src = GP(_cur_v_ubo); if (_src) { p5d::vulkan::update_uniform_buffer_raw(_src, 0x1000u);
             static int _un=0; if (_un++<3) { printf("[ABIUBO] upload vert ubo=%08X n=%u\n", _cur_v_ubo, g_main_n);
               for (int _r=0;_r<8;++_r) printf("[VUBODUMP] row%d = %.4f %.4f %.4f %.4f\n", _r, ((float*)_src)[_r*4], ((float*)_src)[_r*4+1], ((float*)_src)[_r*4+2], ((float*)_src)[_r*4+3]);
               fflush(stdout); } } }
+          { static int _vid2=-1; if (_vid2<0) _vid2=(getenv("P5D_VS_UBO_ID")!=nullptr)?1:0;
+            if (_vid2) { static float _id[64]={1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1}; p5d::vulkan::update_uniform_buffer_raw(_id, 64u);
+              static int _vc3=0; if(_vc3++<6){ printf("[VSUBOID2] identity vert ubo uploaded AFTER guest data n=%u\n", g_main_n); fflush(stdout);} } }
           if (_cur_f_ubo) { uint8_t* _src = GP(_cur_f_ubo); if (_src) { p5d::vulkan::update_fragment_uniform_buffer_raw(_src, 0x1000u);
             static int _un2=0; if (_un2++<8) { printf("[ABIUBO] upload frag ubo=%08X first=(%.3f,%.3f,%.3f,%.3f) n=%u\n", _cur_f_ubo,
               ((float*)_src)[0], ((float*)_src)[1], ((float*)_src)[2], ((float*)_src)[3], g_main_n); fflush(stdout); } } }
