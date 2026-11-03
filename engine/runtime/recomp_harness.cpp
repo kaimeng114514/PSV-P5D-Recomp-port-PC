@@ -3006,6 +3006,8 @@ static uint32_t hle_call_inner(uint32_t stub_va, RecState* s) {
               uint8_t* _src = GP(_mp->second + _v*_stride + _av[_i].offset);
               if (!_src) { _ok = false; break; }
               float _f[4]; abi_decode_attr(_src, _av[_i].fmt, _av[_i].comps, _f);
+              if (_i == 0u) { _f[3] = 1.0f;   // WPOSFIX: position is vec3 -> homogeneous w must be 1
+                static int _zp0=-1; if (_zp0<0) _zp0=(getenv("P5D_ZPOS0")!=nullptr)?1:0; if (_zp0) { _f[2]=0.0f; } }
               std::memcpy(&_vtx[(size_t)_v*32u + (size_t)_i*4u], _f, 16);
             }
             if (!_ok) break;
@@ -3070,11 +3072,24 @@ static uint32_t hle_call_inner(uint32_t stub_va, RecState* s) {
           if (_ok) {
             int _rr = p5d::vulkan::upload_vertex_stream(_vtx.data(), (unsigned)(_vc*128u), _vc);
             { static int _tp=-1; if (_tp<0) _tp = (getenv("P5D_TPRD")!=nullptr)?1:0;
-              if (_tp) { std::string _tvp = _abi_spvdir + "/m1147_vert.spv", _tfp = _abi_spvdir + "/m1147_frag.spv";
+              static int _tph=-1; if (_tph<0) _tph = (getenv("P5D_TPRD_HARD")!=nullptr)?1:0;
+              if (_tp) {
+                static int _vd=0; if (_vd++<4) { printf("[TPRD-VTX] vc=%u floats:", _vc);
+                  for (int _k=0;_k<16 && _k<(int)_vtx.size();++_k) printf(" %.3f", _vtx[_k]); printf("\n");
+                  if (_vc>1 && _vtx.size()>=64) { printf("[TPRD-VTX] v1:"); for (int _k=32;_k<48;++_k) printf(" %.3f", _vtx[_k]); printf("\n"); }
+                  if (_vc>2 && _vtx.size()>=96) { printf("[TPRD-VTX] v2:"); for (int _k=64;_k<80;++_k) printf(" %.3f", _vtx[_k]); printf("\n"); } fflush(stdout); }
+                std::string _tvp = _abi_spvdir + "/m1147_vert.spv", _tfp = _abi_spvdir + "/m1147_frag.spv";
                 int _prc = p5d::vulkan::select_real_pipeline(_tvp.c_str(), _tfp.c_str());
                 p5d::vulkan::set_gxm_viewport(0.0f, 960.0f, 0.0f, 544.0f, 0.0f, 1.0f);
                 p5d::vulkan::set_gxm_viewport_enable(1);
-                p5d::vulkan::gxm_draw_arrays(_vc);
+                if (_tph) {
+                  std::vector<float> _tv((size_t)3*32u, 0.0f);
+                  const float _tri[3][4] = {{-1.f,-1.f,0.f,1.f},{3.f,-1.f,0.f,1.f},{-1.f,3.f,0.f,1.f}};
+                  for (int _i=0;_i<3;++_i) std::memcpy(&_tv[(size_t)_i*32u], _tri[_i], 16);
+                  p5d::vulkan::upload_vertex_stream(_tv.data(), 3u*128u, 3u);
+                  p5d::vulkan::gxm_draw_arrays(3u);
+                  static int _tn2=0; if (_tn2++<8) { printf("[TPRD_HARD] hardcoded fullscreen triangle drawn pipe_rc=%d\n", _prc); fflush(stdout);} }
+                else p5d::vulkan::gxm_draw_arrays(_vc);
                 static int _tn=0; if (_tn++<8) { printf("[TPRD] testpipe with real verts vc=%u rc=%d pipe_rc=%d n=%u\n", _vc, _rr, _prc, g_main_n); fflush(stdout);} } }
             static int _vn=0; if (_vn++<40) { printf("[ABIVTX] #%d vc=%u attrs=%u rc=%d n=%u v0=(%.3f,%.3f,%.3f,%.3f) v1=(%.3f,%.3f,%.3f,%.3f)\n", _vn,
               _vc, (unsigned)_av.size(), _rr, g_main_n, _vtx[0],_vtx[1],_vtx[2],_vtx[3], _vtx[32],_vtx[33],_vtx[34],_vtx[35]); fflush(stdout); }
