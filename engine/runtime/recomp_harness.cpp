@@ -192,6 +192,15 @@ extern "C" const void* get_table_031(unsigned* cnt);
   extern "C" const void* get_table_033(unsigned* cnt);
 extern "C" const void* get_table_034(unsigned* cnt); extern "C" const void* get_table_035(unsigned* cnt); extern "C" const void* get_table_036(unsigned* cnt); extern "C" const void* get_table_037(unsigned* cnt);
 extern "C" BlockFn find_block_034(uint32_t pc); extern "C" BlockFn find_block_035(uint32_t pc); extern "C" BlockFn find_block_036(uint32_t pc); extern "C" BlockFn find_block_037(uint32_t pc);
+extern "C" BlockFn find_gapblk_000(uint32_t pc); extern "C" BlockFn find_gapblk_001(uint32_t pc);
+extern "C" BlockFn find_gapblk_002(uint32_t pc); extern "C" BlockFn find_gapblk_003(uint32_t pc);
+static BlockFn find_gap_block(uint32_t pc) {
+  BlockFn b = find_gapblk_000(pc); if (b) return b;
+  b = find_gapblk_001(pc); if (b) return b;
+  b = find_gapblk_002(pc); if (b) return b;
+  b = find_gapblk_003(pc); if (b) return b;
+  return nullptr;
+}
 static const uint32_t IMG_VA_BASE = 0x80600000;
 static const uint32_t IMG_SIZE = 0x38000000;   // 18.4279: 896MB - extended 224MB tail window for memblock capacity
 static const uint32_t REGIONB_OFF = 0x7000000u;  // region B base -> image+0x7A00000 (VA 0x88000000), no aliasing
@@ -5409,12 +5418,14 @@ static BlockFn gbn(uint32_t pc) {
   pc &= ~1u;   // 18.3939: normalize Thumb bit (block table is keyed by even instruction addresses)
   auto it = std::lower_bound(g_all.begin(), g_all.end(), pc, [](const GBlk&a, uint32_t v){ return a.va < v; });
   if (it != g_all.end() && it->va == pc) return it->fn;
+  { BlockFn fg = find_gap_block(pc); if (fg) return fg; }
   return nullptr;
 }
 static BlockFn gbn_raw(uint32_t pc) {
   pc &= ~1u;
   auto it = std::lower_bound(g_all.begin(), g_all.end(), pc, [](const GBlk&a, uint32_t v){ return a.va < v; });
   if (it != g_all.end() && it->va == pc) return it->fn;
+  { BlockFn fg = find_gap_block(pc); if (fg) return fg; }
   return nullptr;
 }
 static uint32_t call_guest_cb2(RecState* s, uint32_t entry, uint32_t a0, uint32_t a1, int maxblocks);   // M849 fwd
