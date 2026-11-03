@@ -6113,7 +6113,7 @@ static uint32_t mb_811E649A(RecState* s) {
           uint8_t* q1 = GP(_base + 0xCu); if (q1) std::memcpy(q1, &_faken, 4);
           uint8_t* q2 = GP(_base + 0x2Cu); if (q2) std::memcpy(q2, &_faken, 4);
           static int _fgn=0; if (_fgn++<12) { printf("[FORCEGATE] frame=%u base=%08X set A=%08X n=%u\n", _frame, _base, _faken, g_main_n); fflush(stdout);} } }
-      (void)call_guest_cb2(s, fn & ~1u, _aa ? arg : (desc + 4u), 0u, 4000000);
+      (void)call_guest_cb2(s, fn & ~1u, _aa ? arg : (desc + 4u), 0u, 200000000);   // CB2MAX: was 4000000 (job could exceed it and be abandoned mid-way)
       if (_fg) { static int _fe = -1; if (_fe < 0) _fe = getenv("P5D_FORCEGATE_END") ? 1 : 0;
         if (_fe) { uint32_t _fr = 0; { uint8_t* p = GP(desc + 4u); if (p) std::memcpy(&_fr, p, 4); }
           (void)call_guest_cb2(s, 0x811EC264u, _fr, 0u, 4000000);
@@ -6412,6 +6412,7 @@ static uint32_t call_guest_cb2(RecState* s, uint32_t entry, uint32_t a0, uint32_
     if (nx == 0u || nx == 0xFFFFFFF0u || nx == 0xFFFFFFFEu || nx == 0xFFFFFFFDu) break;
     pc = nx;
   }
+  if (n >= maxblocks) { static int _mxn=0; if (_mxn++<20) { printf("[CB2MAX] entry=%08X maxblocks=%d pc=%08X lr=%08X blocks=%u n=%u\n", entry, maxblocks, pc, s->r[14], (unsigned)g_hf_blocks, g_main_n); fflush(stdout); } }   // CB2MAX
   uint32_t _ret = s->r[0];
   if (g_disp_n++ < 12) { printf("[DISPCALL2] cb=%08X a0=%08X a1=%08X blocks=%d ret=%08X\n", entry, a0, a1, n, _ret); fflush(stdout); }
   if ((g_cb5ec2||g_cb5ec6||g_cb5ef0) && g_cb5ec_n++ < 20) { printf("[CB5EC] entry=%08X blocks=%d pro=%d loop=%d epi=%d\n", entry, n, g_cb5ec2, g_cb5ec6, g_cb5ef0); fflush(stdout); g_cb5ec2=0; g_cb5ec6=0; g_cb5ef0=0; }
