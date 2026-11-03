@@ -91,6 +91,7 @@ static int g_ngs_env = -1;   // 18.4416: opt-in SceNgs HLE emulation (P5D_NGS=1)
 static uint32_t g_last_pread_dst = 0;   // M1114: last sceIoPread destination (CPK header buffer)
 static std::mutex g_lwm_mtx;
 static std::map<uint32_t, std::pair<uint32_t,uint32_t> > g_lwm_real;   // work -> (owner_tid, count)
+static std::condition_variable g_lwm_cv;   // M1156
 static int g_lwm_log_n = 0, g_trophy_log_n = 0, g_fdclass_log_n = 0, g_appmgr_log_n = 0, g_drm_n = 0, g_tick_log_n = 0;
 static uint64_t g_mema_total = 0; static int g_mema_n = 0, g_malloc_fail_n = 0;
 static thread_local uint32_t tl_ht_tid = 0;
@@ -653,6 +654,7 @@ static inline uint8_t* GP(uint32_t va) {
 // runs inside nested fiber execution where g_blkcnt_total does not advance, so the main-loop IOPUMP never fires and
 // the reader stays at status +0xBC == 1 forever (observed: reader 848E9678 LOADST #15/#16 statusBC=1 after sound init,
 // then ACF registration fails => W2010110102 / E2013081521). Pump the known post-mount readers here.
+static volatile uint32_t g_hf_blocks = 0;   // M1156: fiber-side block counter (visible to HLE pumps)
 static void iopump_from_wait(RecState* s) {
   static int _env = -1, _busy = 0, _n = 0;
   if (_env < 0) { const char* _e = getenv("P5D_IOPUMP"); _env = (_e && atoi(_e)) ? 1 : 0; }
@@ -662,7 +664,7 @@ static void iopump_from_wait(RecState* s) {
   // main-loop pump applies HDRFIX/TOCFIX before the completion shim, which this path does not.)
   // g_blkcnt_total is frozen during nested fiber waits; mount header reads freeze it around 30-43k,
   // while the post-mount phase runs at >100k, so gate there.
-  if (g_blkcnt_total < 100000u) return;
+  { uint32_t _eff = g_blkcnt_total; if (g_hf_blocks > _eff) _eff = g_hf_blocks; if (_eff < 100000u) return; }
   // M1122d: dynamically discover every criFs reader (progress signature 0x81540460 + back-pointer at
   // reader+0xB0) and pump all with status==1. The ACF read (FUN_812309A4) creates its own reader, so a
   // hardcoded list misses it; rescan rarely to keep the cost low.
@@ -2060,7 +2062,7 @@ static thread_local HFiber* tl_hf = nullptr;
 static thread_local HFWait* tl_hfw = nullptr;
 static std::mutex g_hfw_lk;
 static std::map<uint32_t,HFWait*> g_hfw;
-static int g_hf_n = 0, g_hf_ev_n = 0; static volatile uint32_t g_hf_blocks = 0;
+static int g_hf_n = 0, g_hf_ev_n = 0;
 static HFWait* hf_wait_for(uint32_t tid) {
   std::lock_guard<std::mutex> g(g_hfw_lk);
   auto it = g_hfw.find(tid); if (it != g_hfw.end()) return it->second;
@@ -2851,13 +2853,23 @@ extern "C" uint32_t hle_call(uint32_t stub_va, RecState* s) {
       uint32_t _w = s->r[0]; if (_w) { uint8_t* _p = GP(_w); if (_p) std::memset(_p, 0, 0x20); }
       r0 = 0; break; }
     case 0x812B2800u:                                                 // 18.4464 M919: sceKernelLockLwMutexCB (NID 0x3148C6B6) - alias of LockLwMutex
-    case 0x812B2830u: {                                               // sceKernelLockLwMutex (real lock in host-thread mode, INCLUDING main thread)
-      if (g_hostthreads) { uint32_t me = tl_ht_tid ? tl_ht_tid : 0x40010000u; uint32_t w = s->r[0]; auto& e = g_lwm_real[w];
-        for (;;) { if (e.first == 0u || e.first == me || g_shutdown) break; if (!g_fastsleep) std::this_thread::sleep_for(std::chrono::microseconds(200)); }
-        e.first = me; ++e.second; }
+    case 0x812B2830u: {                                               // sceKernelLockLwMutex (M1156: real blocking, condvar + diagnostics)
+      if (g_hostthreads) {
+        uint32_t me = tl_ht_tid ? tl_ht_tid : 0x40010000u; uint32_t w = s->r[0];
+        std::unique_lock<std::mutex> _lk(g_lwm_mtx);
+        while (g_lwm_real[w].first != 0u && g_lwm_real[w].first != me && !g_shutdown) {
+          static int _lw=0; if (_lw++ < 60) { printf("[LWMWAIT] work=%08X me=%08X owner=%08X cnt=%u fib=%08X blk=%u\n", w, me, g_lwm_real[w].first, g_lwm_real[w].second, tl_hf?tl_hf->addr:0u, (unsigned)g_hf_blocks); fflush(stdout); }
+          g_lwm_cv.wait_for(_lk, std::chrono::milliseconds(5));
+        }
+        g_lwm_real[w].first = me; ++g_lwm_real[w].second;
+      }
       r0 = 0; break; }
     case 0x812B28A0u: {                                               // sceKernelUnlockLwMutex
-      if (g_hostthreads) { uint32_t w = s->r[0]; auto it = g_lwm_real.find(w); if (it != g_lwm_real.end()) { if (it->second.second > 1u) --it->second.second; else { it->second.first = 0u; it->second.second = 0u; } } }
+      if (g_hostthreads) {
+        uint32_t w = s->r[0]; std::lock_guard<std::mutex> _lk(g_lwm_mtx);
+        auto it = g_lwm_real.find(w); if (it != g_lwm_real.end()) { if (it->second.second > 1u) --it->second.second; else { it->second.first = 0u; it->second.second = 0u; } }
+        g_lwm_cv.notify_all();
+      }
       r0 = 0; break; }
     case 0x812B1910u: r0 = 0; break;                                   // sceAppUtilInit
     case 0x812B1B40u: {                                               // 18.4272: sceNpTrophySetupDialogGetStatus -> FINISHED(2): initDataRead step0 hard gate
@@ -6017,6 +6029,7 @@ int main(int argc, char** argv) {
         for (auto& kv : g_fctx) { printf("[WDCTX] fib=%08X pc=%08X sp=%08X r0=%08X r5=%08X\n", kv.first, kv.second.r[15], kv.second.r[13], kv.second.r[0], kv.second.r[5]); }
          { std::lock_guard<std::mutex> _lg(g_hf_lk); for (auto& _kv : g_hf) { HFiber* _f=_kv.second; printf("[HFDBG] addr=%08X entry=%08X st=%d started=%d go=%d owner=%08X pc=%08X blocks=%u\n", _f->addr, _f->entry, 0, (int)_f->started, (int)_f->go, _f->owner_tid, _f->cur_pc, (unsigned)_f->blocks); } }
          printf("[HFBLOCKS] %u\n", (unsigned)g_hf_blocks);
+         { static int _td=0; if (_td++ < 60) { for (auto& _kv : g_thr) { HThread& _th=_kv.second; printf("[THRDBG] tid=%08X entry=%08X alive=%d ready=%d wait=%d obj=%08X bits=%08X mode=%X pc=%08X sp=%08X r0=%08X blk=%08X\n", _kv.first, _th.entry, _th.alive, _th.ready, _th.waiting, _th.wait_obj, _th.wait_bits, _th.wait_mode, _th.gctx.r[15], _th.gctx.r[13], _th.gctx.r[0], _th.gctx.r[0]); } } }
         for (auto& kv : g_fctx) { printf("[WDCTX] fib=%08X pc=%08X sp=%08X r0=%08X r5=%08X\n", kv.first, kv.second.r[15], kv.second.r[13], kv.second.r[0], kv.second.r[5]); }
 
          if (g_blkcnt_total > 65000000u) { static int _ts=0; if (_ts++ < 40) {
