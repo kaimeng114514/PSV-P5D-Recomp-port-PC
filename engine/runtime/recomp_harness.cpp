@@ -300,6 +300,7 @@ static int g_acc_n = 0, g_lkin_n = 0, g_lkout_n = 0;
 extern "C" int g_watch_on = 1;
 static void crihot_hit(uint32_t pc);   // CRIHOT_FWD
 static void cricall_hit(uint32_t pc, RecState* s);   // CRICALLPROBE_FWD
+static void criplayer_hit(uint32_t pc, RecState* s);   // CRIPLAYERPROBE_FWD
 static void crihot_dump();
 static int g_sw8_on = 0, g_sw8_n = 0, g_sw8_special = 0;
 static uint32_t g_stkw_lo = 0xA05FFC10u, g_stkw_hi = 0xA05FFC30u;
@@ -1889,6 +1890,7 @@ static void job_probes(uint32_t pcv, RecState* s) {
 }
 // ===== 18.4270: SceLibKernel/SceIofilemgr host-file IO (guest CRI CPK reader path) =====
 struct HostFd { std::FILE* fp = nullptr; std::vector<uint8_t> mem; bool isMem = true; int64_t pos = 0, size = 0; };
+static std::map<uint32_t, HostFd> g_fios_file;   // FIOS_REALFILE: file-backed FIOS handles (CPK itself / real host files)
 static std::map<uint32_t, HostFd> g_hostfd;
 static uint32_t g_hostfd_id = 0x4000u;
 static int g_io_rn = 0, g_io_pn = 0;
@@ -2257,6 +2259,7 @@ static void hf_fiber_thread(HFiber* f) {
     g_cur_block = pc; f->cur_pc = pc; ++f->blocks; ++g_hf_blocks;
     { static int _chh=-1; if (_chh<0) _chh = getenv("P5D_CRIHOT") ? 1 : 0; if (_chh) crihot_hit(pc); }
     { static int _chc=-1; if (_chc<0) _chc = getenv("P5D_CRICALL") ? 1 : 0; if (_chc) cricall_hit(pc, s); }
+    { static int _chp=-1; if (_chp<0) _chp = getenv("P5D_CRIPLAYER") ? 1 : 0; if (_chp) criplayer_hit(pc, s); }
     { static int _gp2=-1; if (_gp2<0) _gp2 = getenv("P5D_GATEPROBE2") ? 1 : 0;
       if (_gp2 && (pc & ~1u) == 0x811C0654u) { static int _gpn=0; if (_gpn++<12) {
           uint32_t _fr = s->r[0]; uint32_t _base = 0; uint8_t* _bq = GP(0x816CC6CCu);
@@ -3968,7 +3971,7 @@ static uint32_t _ufd_vert_ubo = 0, _ufd_frag_ubo = 0;   // M1251: per-stage UBO 
       if (!path.empty() && cpk_read_any_impl(path, data)) {
         fh = ++g_fh_id; g_fios_data[fh] = std::move(data); g_fios_pos[fh] = 0;
         printf("[FIOS] OPEN '%s' -> fh=0x%X size=%zu\n", path.c_str(), fh, g_fios_data[fh].size());
-      } else {
+      } else if (!path.empty() && [&]{ HostFd _h; std::string _u; if (!io_open_host(path,_h,_u)) return false; fh = ++g_fh_id; g_fios_file[fh] = std::move(_h); static int _rn=0; if(_rn++<20) printf("[FIOS] OPEN-REAL '%s' -> fh=0x%X size=%lld %s\n", path.c_str(), fh, (long long)g_fios_file[fh].size, _u.c_str()); return true; }()) {
         // 18.3798: a MISS returned fh=0xFFFFFFFF and made the game's async op fail (status 6) -> it retried
         // forever. Serve a valid EMPTY handle instead so the loader can make progress (content gaps are logged).
         fh = ++g_fh_id; g_fios_data[fh] = std::vector<uint8_t>(); g_fios_pos[fh] = 0;
@@ -3981,8 +3984,14 @@ static uint32_t _ufd_vert_ubo = 0, _ufd_frag_ubo = 0;   // M1251: per-stage UBO 
       { static int _n=0; if(_n++<60){ uint32_t _sz=0; uint8_t* _q=GP(s->r[13]); if(_q) std::memcpy(&_sz,_q,4); printf("[FIOSHLE] FHRead fh=%08X dst=%08X size=%08X lr=%08X\n", s->r[1], s->r[2], _sz, s->r[14]); fflush(stdout);} }
       if (g_main_n >= 59000000u) { static int _fr_n=0; if (_fr_n++ < 120) { printf("[FHREAD57] fh=%08X dst=%08X size=%08X pc=%08X fib=%08X\n", s->r[1], s->r[2], 0u, g_cur_block, g_cur_fiber); fflush(stdout); } }
       ++g_fread_n;
-      auto it = g_fios_data.find(s->r[1]);
       uint32_t size = 0; { uint8_t* q = GP(s->r[13]); if (q) std::memcpy(&size, q, 4); }
+      { auto _ff = g_fios_file.find(s->r[1]); if (_ff != g_fios_file.end()) { HostFd& _h = _ff->second; uint8_t* _d = GP(s->r[2]); size_t _n = 0;
+          if (_d && size) { if (_h.fp) { _fseeki64(_h.fp, _h.pos, SEEK_SET); _n = std::fread(_d, 1, size, _h.fp); } else if (_h.isMem && _h.pos < (int64_t)_h.mem.size()) { size_t av=(size_t)((int64_t)_h.mem.size()-_h.pos); _n = size<av?size:av; std::memcpy(_d,_h.mem.data()+_h.pos,_n);} }
+          _h.pos += (int64_t)_n; r0 = (uint32_t)_n; g_fread_bytes += _n;
+          hle_eflag_set(0x60014000u, 1u); hle_eflag_set(0x60015000u, 1u);
+          static int _rf=0; if(_rf++<20) printf("[FIOS] READ-REAL fh=%08X size=%u got=%zu\n", s->r[1], size, _n); fflush(stdout);
+          break; } }
+      auto it = g_fios_data.find(s->r[1]);
       if (it == g_fios_data.end()) { r0 = 0; break; }
       size_t& pos = g_fios_pos[s->r[1]];
       size_t avail = it->second.size() - pos;
@@ -3992,7 +4001,8 @@ static uint32_t _ufd_vert_ubo = 0, _ufd_frag_ubo = 0;   // M1251: per-stage UBO 
       pos += n; r0 = n; g_fread_bytes += n;
       hle_eflag_set(0x60014000u, 1u); hle_eflag_set(0x60015000u, 1u);   // 18.4264: op completion notification
       break; }
-    case 0x812B1A00u: { auto it = g_fios_data.find(s->r[0]); r0 = (it == g_fios_data.end()) ? 0u : (uint32_t)it->second.size(); break; } // sceFiosFHGetSize
+    case 0x812B1A00u: { auto _ff = g_fios_file.find(s->r[0]); if (_ff != g_fios_file.end()) { r0 = (uint32_t)_ff->second.size; break; }
+      auto it = g_fios_data.find(s->r[0]); r0 = (it == g_fios_data.end()) ? 0u : (uint32_t)it->second.size(); break; } // sceFiosFHGetSize
     case 0x812B2870u: {                                               // 18.4270: sceIoOpen(path,flags) - guest CRI CPK reader opens the real data.cpk/vita.cpk
       std::string path = io_guest_str(s->r[0]); HostFd hh; std::string used; uint32_t fd = ++g_hostfd_id;
       if (!path.empty() && io_open_host(path, hh, used)) { g_hostfd[fd] = std::move(hh);
@@ -4061,7 +4071,7 @@ static uint32_t _ufd_vert_ubo = 0, _ufd_frag_ubo = 0;   // M1251: per-stage UBO 
     case 0x812B29A0u: case 0x812B2980u: {                             // sceIoClose / sceIoDclose
       auto it = g_hostfd.find(s->r[0]); if (it != g_hostfd.end()) { if (it->second.fp) std::fclose(it->second.fp); g_hostfd.erase(it); }
       r0 = 0; break; }
-    case 0x812B19C0u: case 0x812B19A0u: g_fios_data.erase(s->r[1]); g_fios_pos.erase(s->r[1]); r0 = 0; break;  // FHClose / FHCloseSync
+    case 0x812B19C0u: case 0x812B19A0u: { auto _ff=g_fios_file.find(s->r[1]); if(_ff!=g_fios_file.end()){ if(_ff->second.fp) std::fclose(_ff->second.fp); g_fios_file.erase(_ff);} g_fios_data.erase(s->r[1]); g_fios_pos.erase(s->r[1]); r0 = 0; break; }  // FHClose / FHCloseSync
     case 0x812B1960u: r0 = 1; break;                                  // sceFiosOpIsDone -> done
     case 0x812B1980u: hle_eflag_set(0x60014000u, 1u); hle_eflag_set(0x60015000u, 1u); r0 = 0; break;  // sceFiosOpWait (+ op completion notify)
     case 0x812B1990u: r0 = 0; break;                                  // sceFiosOpCancel
@@ -6068,6 +6078,17 @@ static void cricall_hit(uint32_t pc, RecState* s) {   // CRICALLPROBE
   if (_p == 0x811CA848u) { static int _n2=0; if (_n2++<20) { printf("[CRICALL] CA848 ret r0=%08X lr=%08X\n", s->r[0], s->r[14]); fflush(stdout);} }
 }
 
+static void criplayer_hit(uint32_t pc, RecState* s) {   // CRIPLAYERPROBE
+  static int _pp=-1; if (_pp<0) _pp = getenv("P5D_CRIPLAYER") ? 1 : 0; if (!_pp || !s) return;
+  uint32_t _p = pc & ~1u;
+  if (_p == 0x8129875A) { static int _n=0; if (_n++<12) { uint32_t _st=0,_f=0;
+      { uint8_t* q=GP(s->r[0]); if(q){ std::memcpy(&_st,q+0x84,4); std::memcpy(&_f,q+0xa4,4);} }
+      printf("[CRIPLAYER] START obj=%08X +0x84=%u +0xa4=%u n=%u\n", s->r[0], _st, _f, g_main_n); fflush(stdout);} }
+  if (_p == 0x81278F96) { static int _n2=0; if (_n2++<16) { char _m[96]={0}; uint8_t* q=GP(s->r[1]);
+      if (q) { for (int k=0;k<90;++k){ char c=(char)q[k]; if(!c) break; _m[k]=(c>=32&&c<127)?c:0x2E; } }
+      printf("[CRIPLAYER] LOG arg0=%08X msg=%s n=%u\n", s->r[1], _m, g_main_n); fflush(stdout);} }
+}
+
 static void crihot_dump() {
   printf("[CRIHOT] unique=%d\n",(int)g_cri_hits.size());
   const uint32_t _keys[8] = {0x811CA85Au,0x811CA6B6u,0x811641D2u,0x811CB0D8u,0x811CB0D9u,0x811632BAu,0x8116332Au,0x811CA7ACu};
@@ -6143,6 +6164,7 @@ static uint32_t call_guest_cb2(RecState* s, uint32_t entry, uint32_t a0, uint32_
     uint32_t q = pc & ~1u;
     { static int _chh2=-1; if (_chh2<0) _chh2 = getenv("P5D_CRIHOT") ? 1 : 0; if (_chh2) crihot_hit(pc); }
     { static int _chc2=-1; if (_chc2<0) _chc2 = getenv("P5D_CRICALL") ? 1 : 0; if (_chc2) cricall_hit(pc, s); }
+    { static int _chp2=-1; if (_chp2<0) _chp2 = getenv("P5D_CRIPLAYER") ? 1 : 0; if (_chp2) criplayer_hit(pc, s); }
     if (q == 0x811E5EC2u) ++g_cb5ec2; else if (q == 0x811E5EC6u) ++g_cb5ec6; else if (q == 0x811E5EF0u) ++g_cb5ef0;
     { // GATEPROBE3N: nested call_guest_cb2 probe of FUN_811C0654 (frame gate) inputs
       static int _gp3n = -1; if (_gp3n < 0) _gp3n = getenv("P5D_GATEPROBE2") ? 1 : 0;
