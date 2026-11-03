@@ -299,6 +299,7 @@ static int g_lktr_n = 0;
 static int g_acc_n = 0, g_lkin_n = 0, g_lkout_n = 0;
 extern "C" int g_watch_on = 1;
 static void crihot_hit(uint32_t pc);   // CRIHOT_FWD
+static void hlehot_dump();   // HLEHOT_FWD
 static void cricall_hit(uint32_t pc, RecState* s);   // CRICALLPROBE_FWD
 static void criplayer_hit(uint32_t pc, RecState* s);   // CRIPLAYERPROBE_FWD
 static void crihot_dump();
@@ -2379,6 +2380,7 @@ static void hf_fiber_thread(HFiber* f) {
             uint8_t* q=GP(_va); if(!q) continue; uint32_t _w=0; std::memcpy(&_w,q,4);
             for (int _k=0;_k<8;++_k) if (_w==_tg[_k]) { if (_hits<40) printf("[SCANPTR] va=%08X val=%08X\n", _va, _w); ++_hits; break; } }
           printf("[SCANPTR] total hits=%d\n", _hits); fflush(stdout); } } }
+    if ((pc & ~1u) == 0x8119934Au) { static int _hhd=0; static int _hhev=-1; if (_hhev<0) _hhev=getenv("P5D_HLEHOT")?1:0; if (_hhev && ++_hhd==5) hlehot_dump(); }
     if ((pc & ~1u) == 0x8119934Au) { static int _chd=0; static int _chenv=-1; if (_chenv<0) _chenv=getenv("P5D_CRIHOT")?1:0;
       if (_chenv && ++_chd==5) crihot_dump(); }
     if ((pc & ~1u) == 0x8119934Au) { static int _dt=0; if (!_dt) { _dt=1;
@@ -2667,7 +2669,10 @@ extern "C" uint32_t hle_call(uint32_t stub_va, RecState* s) {
   tl_hle_lock = _prev;
   return _r;
 }
+static std::map<uint32_t,int> g_hle_hits;   // HLEHOT
+static void hlehot_dump();
 static uint32_t hle_call_inner(uint32_t stub_va, RecState* s) {
+  { static int _hh=-1; if (_hh<0) _hh = getenv("P5D_HLEHOT") ? 1 : 0; if (_hh) { ++g_hle_hits[stub_va]; } }
   if (g_ngs_env < 0) { const char* _ge = getenv("P5D_NGS"); g_ngs_env = (_ge && atoi(_ge) != 0) ? 1 : 0; }
   if (g_main_n < 4000u) { static std::set<uint32_t> _seen; static int _n = 0;
     if (_seen.insert(stub_va).second && _n++ < 400) {
@@ -6192,6 +6197,13 @@ static void criplayer_hit(uint32_t pc, RecState* s) {   // CRIPLAYERPROBE
       if (q) { for (int k=0;k<90;++k){ char c=(char)q[k]; if(!c) break; _m[k]=(c>=32&&c<127)?c:0x2E; } }
       printf("[CRIPLAYER] LOG arg0=%08X msg=%s n=%u\n", s->r[1], _m, g_main_n); fflush(stdout);} }
 }
+
+static void hlehot_dump() {   // HLEHOT: top HLE stubs by call count
+  std::vector<std::pair<int,uint32_t>> _v; for (auto& kv : g_hle_hits) _v.push_back({kv.second,kv.first});
+  std::sort(_v.begin(),_v.end(),[](const std::pair<int,uint32_t>&a,const std::pair<int,uint32_t>&b){return a.first>b.first;});
+  printf("[HLEHOT] unique=%d\n",(int)_v.size());
+  for (size_t _i=0;_i<_v.size() && _i<40;++_i) printf("[HLEHOT] va=%08X hits=%d\n", _v[_i].second, _v[_i].first);
+  fflush(stdout); }
 
 static void crihot_dump() {
   printf("[CRIHOT] unique=%d\n",(int)g_cri_hits.size());
