@@ -3069,6 +3069,13 @@ static uint32_t hle_call_inner(uint32_t stub_va, RecState* s) {
               ((float*)_src)[0], ((float*)_src)[1], ((float*)_src)[2], ((float*)_src)[3], g_main_n); fflush(stdout); } } }
           if (_ok) {
             int _rr = p5d::vulkan::upload_vertex_stream(_vtx.data(), (unsigned)(_vc*128u), _vc);
+            { static int _tp=-1; if (_tp<0) _tp = (getenv("P5D_TPRD")!=nullptr)?1:0;
+              if (_tp) { std::string _tvp = _abi_spvdir + "/m1147_vert.spv", _tfp = _abi_spvdir + "/m1147_frag.spv";
+                int _prc = p5d::vulkan::select_real_pipeline(_tvp.c_str(), _tfp.c_str());
+                p5d::vulkan::set_gxm_viewport(0.0f, 960.0f, 0.0f, 544.0f, 0.0f, 1.0f);
+                p5d::vulkan::set_gxm_viewport_enable(1);
+                p5d::vulkan::gxm_draw_arrays(_vc);
+                static int _tn=0; if (_tn++<8) { printf("[TPRD] testpipe with real verts vc=%u rc=%d pipe_rc=%d n=%u\n", _vc, _rr, _prc, g_main_n); fflush(stdout);} } }
             static int _vn=0; if (_vn++<40) { printf("[ABIVTX] #%d vc=%u attrs=%u rc=%d n=%u v0=(%.3f,%.3f,%.3f,%.3f) v1=(%.3f,%.3f,%.3f,%.3f)\n", _vn,
               _vc, (unsigned)_av.size(), _rr, g_main_n, _vtx[0],_vtx[1],_vtx[2],_vtx[3], _vtx[32],_vtx[33],_vtx[34],_vtx[35]); fflush(stdout); }
           } else { static int _fn=0; if (_fn++<6) { printf("[ABIVTX] FAIL vc=%u attrs=%u cur_obj=%08X streams=%zu n=%u\n", _vc,(unsigned)_av.size(),_cur_vobj,_stm2va.size(),g_main_n); fflush(stdout); } }
