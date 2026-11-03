@@ -2684,9 +2684,37 @@ static uint32_t hf_do_init(RecState* s) {
 static std::recursive_mutex g_hle_call_mtx;
 static thread_local std::unique_lock<std::recursive_mutex>* tl_hle_lock = nullptr;
 static uint32_t hle_call_inner(uint32_t stub_va, RecState* s);
-static inline void hle_wait_begin() { if (tl_hle_lock && tl_hle_lock->owns_lock()) tl_hle_lock->unlock(); }
-static inline void hle_wait_end() { if (tl_hle_lock && !tl_hle_lock->owns_lock()) tl_hle_lock->lock(); }
+// WAITDUMP: global host-thread wait registry + independent watchdog thread
+struct WSlot { volatile uint32_t kind; volatile uint32_t hle; volatile uint32_t pc; volatile uint32_t obj; volatile uint32_t fib; volatile uint32_t tid; };
+static WSlot g_wslots[48]; static std::atomic<int> g_wslot_n{0};
+static thread_local int tl_ws = -1;
+static std::atomic<uint64_t> g_blk_total_snap{0};
+static inline void ws_set(uint32_t kind, uint32_t hle, uint32_t obj) {
+  static int _env=-1; if (_env<0) _env = getenv("P5D_WAITDUMP") ? 1 : 0; if(!_env) return;
+  if (tl_ws < 0) tl_ws = g_wslot_n++;
+  if (tl_ws >= 48) return;
+  WSlot& w = g_wslots[tl_ws];
+  w.kind=kind; w.hle=hle; w.obj=obj; w.pc=g_cur_block; w.fib=tl_hf?tl_hf->addr:0u; w.tid=tl_ht_tid;
+}
+static void waitdump_start() {
+  static std::atomic<int> once{0}; if (once.fetch_add(1)) return;
+  static int _env=-1; if (_env<0) _env = getenv("P5D_WAITDUMP") ? 1 : 0; if(!_env) return;
+  std::thread([]{
+    for (int i=0;i<12;++i) {
+      std::this_thread::sleep_for(std::chrono::seconds(10));
+      printf("[WAITDUMP] #%d blocks(hf/total)=%u/%u threads=%d\n", i, (unsigned)g_hf_blocks, (unsigned)g_blkcnt_total, (int)g_wslot_n);
+      for (int k=0;k<48;++k) { WSlot& w=g_wslots[k]; uint32_t kd=w.kind; if(!kd) continue;
+        printf("[WAITDUMP] slot=%d kind=%u hle=%08X obj=%08X pc=%08X fib=%08X tid=%08X\n", k, kd, w.hle, w.obj, w.pc, w.fib, w.tid); }
+      fflush(stdout);
+    }
+  }).detach();
+}
+
+static inline void hle_wait_begin() { ws_set(2u, g_cur_hle_stub, 0u); if (tl_hle_lock && tl_hle_lock->owns_lock()) tl_hle_lock->unlock(); }
+static inline void hle_wait_end() { ws_set(1u, g_cur_hle_stub, 0u); if (tl_hle_lock && !tl_hle_lock->owns_lock()) tl_hle_lock->lock(); }
 extern "C" uint32_t hle_call(uint32_t stub_va, RecState* s) {
+  waitdump_start();
+  ws_set(1u, stub_va, 0u);
   std::unique_lock<std::recursive_mutex> _hcl(g_hle_call_mtx);
   std::unique_lock<std::recursive_mutex>* _prev = tl_hle_lock;   // M1160: nested calls must restore, not null
   tl_hle_lock = &_hcl;
@@ -2695,6 +2723,7 @@ extern "C" uint32_t hle_call(uint32_t stub_va, RecState* s) {
   if (tl_ht_tid && !tl_is_hfiber) { auto _ti = g_thr.find(tl_ht_tid); if (_ti != g_thr.end()) { _ti->second.hle_ring[(_ti->second.hle_n++) & 15u] = stub_va; } }
   uint32_t _r = hle_call_inner(stub_va, s);
   tl_hle_lock = _prev;
+  ws_set(0u, stub_va, 0u);
   return _r;
 }
 static std::map<uint32_t,int> g_hle_hits;   // HLEHOT
