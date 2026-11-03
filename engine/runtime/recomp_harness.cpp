@@ -2252,6 +2252,13 @@ static void hf_fiber_thread(HFiber* f) {
     if (!fn) { int back=0; uint32_t bq=gbn_back(pc,&back); if (bq && back<=16) { pc=bq; fn=gbn(pc); } }
     if (!fn) { fprintf(stderr, "[HF-NOBLK] fib=%08X pc=%08X\n", f->addr, pc); break; }
     g_cur_block = pc; f->cur_pc = pc; ++f->blocks; ++g_hf_blocks;
+    { // CMDRANGEPROBE: watch execution inside FUN_811E44D0 (0x811E44D0..0x811E45CC) and GFD enqueue range
+      static int _cr=0;
+      if (pc >= 0x811E4400u && pc < 0x811E4600u && _cr++ < 60) {
+        printf("[CMDRANGE] pc=%08X r0=%08X r1=%08X r2=%08X lr=%08X nblk=%u thr=%08X\n", pc, s->r[0], s->r[1], s->r[2], s->r[14], (unsigned)g_hf_blocks, g_cur_thr); fflush(stdout); }
+      if (pc >= 0x811E6370u && pc < 0x811E6420u && _cr < 80) { ++_cr;
+        printf("[CMDRANGE2] pc=%08X r0=%08X r1=%08X lr=%08X blk=%08X\n", pc, s->r[0], s->r[1], s->r[14], g_cur_block); fflush(stdout); } }
+
     { static int _gc=-1; if (_gc<0) _gc = getenv("P5D_GFDCMDEXEC") ? 1 : 0;
       if (_gc) { uint32_t _p = pc & ~1u;
         if (_p==0x811E44D0u||_p==0x811E4772u||_p==0x811E46BAu||_p==0x811E501Cu||_p==0x811E5126u||_p==0x811EBB90u||_p==0x811EFD8Eu||_p==0x811EF526u||_p==0x811EF5DCu||_p==0x811EFDEEu) {
@@ -2797,6 +2804,12 @@ static uint32_t _ufd_vert_ubo = 0, _ufd_frag_ubo = 0;   // M1251: per-stage UBO 
             else if (_ww == 0 && _hh == 0 && _w0 >= 64u && _w0 <= 2048u && _w4 >= 64u && _w4 <= 2048u && _w8 >= 0x80000000u && _w8 < 0xC0000000u) {
               _csurf = _c; _cw = _w0; _ch = _w4; _cd = _w8; }   // alternate layout: w,h,data
           } }
+        // LASTVALIDRT: remember the most recent valid scene target; a pass whose args resolve to 0
+        // (e.g. the AE pass invoked through FUN_811EC172 with uninitialized globals) reuses it.
+        static uint32_t _lv_cd = 0, _lv_w = 0, _lv_h = 0;
+        if (_cd && _cw && _ch) { _lv_cd = _cd; _lv_w = _cw; _lv_h = _ch; }
+        else if (_lv_cd) { _cd = _lv_cd; _cw = _lv_w; _ch = _lv_h;
+            static int _fu=0; if (_fu++<8) { printf("[LASTVALIDRT] fallback cd=%08X %ux%u n=%u\n", _cd, _cw, _ch, g_main_n); fflush(stdout);} }
         printf("[ABIBEGIN] surf=%08X data=%08X %ux%u n=%u\n", _csurf, _cd, _cw, _ch, g_main_n); fflush(stdout);
         g_abi_cur_cd = _cd; g_abi_cur_w = _cw; g_abi_cur_h = _ch;   // M1146
         { static int _bp=0; if (_bp++<40) { printf("[PASSRT] begin cd=%08X w=%u h=%u n=%u\n", _cd, _cw, _ch, g_main_n); fflush(stdout);} }
