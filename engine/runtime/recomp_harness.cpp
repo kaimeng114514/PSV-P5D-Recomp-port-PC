@@ -2245,6 +2245,14 @@ static void hf_fiber_thread(HFiber* f) {
     if (!fn) { int back=0; uint32_t bq=gbn_back(pc,&back); if (bq && back<=16) { pc=bq; fn=gbn(pc); } }
     if (!fn) { fprintf(stderr, "[HF-NOBLK] fib=%08X pc=%08X\n", f->addr, pc); break; }
     g_cur_block = pc; f->cur_pc = pc; ++f->blocks; ++g_hf_blocks;
+    { static uint32_t _gx=0; if ((pc & 0xFFFFF000u) == 0x812B1000u) { ++_gx; }
+      if ((pc & 0xFFFFF000u) == 0x812B1000u && (g_hf_blocks % 5000000u) < 2u) { printf("[GXMCNT] hfblk=%u gxm_stub_calls=%u\n", (unsigned)g_hf_blocks, _gx); fflush(stdout); } }
+    if ((pc & ~1u) == 0x811C241Eu) { static uint32_t _n=0; ++_n;
+      if (_n <= 6 || (_n % 1000u) == 0u) { uint32_t _p=s->r[0], _f4=0,_fc=0;
+        { uint8_t* _q=GP(_p+4u); if(_q) std::memcpy(&_f4,_q,4); }
+        { uint8_t* _q=GP(_p+0xCu); if(_q) std::memcpy(&_fc,_q,4); }
+        printf("[APPDISP] n=%u module=%08X f4=%08X fc=%08X hfblk=%u\n", _n, _p, _f4, _fc, (unsigned)g_hf_blocks); fflush(stdout); } }
+
     if ((pc & ~1u) == 0x81199002u || (pc & ~1u) == 0x81198E2Eu || (pc & ~1u) == 0x811E61FAu || (pc & ~1u) == 0x811991BEu) { // M1191: GFD init/term lifecycle
       static int _a=0,_b=0,_c=0,_d=0; int *_p=nullptr;
       if ((pc&~1u)==0x81199002u) _p=&_a; else if ((pc&~1u)==0x81198E2Eu) _p=&_b; else if ((pc&~1u)==0x811E61FAu) _p=&_c; else _p=&_d;
