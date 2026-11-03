@@ -2246,6 +2246,14 @@ static void hf_fiber_thread(HFiber* f) {
     if (!fn) { fprintf(stderr, "[HF-NOBLK] fib=%08X pc=%08X\n", f->addr, pc); break; }
     g_cur_block = pc; f->cur_pc = pc; ++f->blocks; ++g_hf_blocks;
     { uint32_t _p0 = pc & ~1u;
+      if (_p0 == 0x8117306Au || _p0 == 0x8116E734u || _p0 == 0x81173602u || _p0 == 0x81004B8Eu || _p0 == 0x81016296u) {
+        static uint32_t _sys[5]={0,0,0,0,0}; int _i=-1; const char* _nm="?";
+        if (_p0==0x8117306Au){_i=0;_nm="frameUpdate8117306A";} else if (_p0==0x8116E734u){_i=1;_nm="appPadUpdate8116E734";}
+        else if (_p0==0x81173602u){_i=2;_nm="appTouchUpdate81173602";} else if (_p0==0x81004B8Eu){_i=3;_nm="appSysUpdate81004B8E";} else {_i=4;_nm="appListIter81016296";}
+        uint32_t* _p=&_sys[_i]; ++(*_p);
+        if ((*_p)<=6u || ((*_p)%300u)==0u) { printf("[APPSYS] %s n=%u hfblk=%u\n", _nm, *_p, (unsigned)g_hf_blocks); fflush(stdout); } } }
+
+    { uint32_t _p0 = pc & ~1u;
       if (_p0 == 0x8116F3C6u || _p0 == 0x81174250u || _p0 == 0x8116F45Eu || _p0 == 0x81174AB2u) {
         static uint32_t _c1=0,_c2=0,_c3=0,_c4=0;
         uint32_t* _p=nullptr; const char* _nm="?";
