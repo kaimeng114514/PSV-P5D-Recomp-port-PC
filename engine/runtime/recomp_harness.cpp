@@ -2322,6 +2322,27 @@ static void hf_fiber_thread(HFiber* f) {
             _tot[_f]=_nD+_nB; }
           printf("[NODEINV] fb=%u slot0=%d slot1=%d slot2=%d hfblk=%u\n", _fb2, _tot[0],_tot[1],_tot[2], (unsigned)g_hf_blocks); fflush(stdout); } } }
 
+    if ((pc & ~1u) == 0x8119934Au) { static int _cb2=0; if (!_cb2) { _cb2=1;
+        if (getenv("P5D_CBSCAN")) {
+          std::set<uint32_t> _seen;
+          const uint32_t _arrs[3] = {0x816CC6D8u, 0x816CC6CCu, 0x816CC6E4u};
+          const char* _an[3] = {"D","B","A"};
+          for (int _f=0;_f<3;++_f) for (int _ai=0;_ai<3;++_ai) {
+            uint32_t _b=0; { uint8_t* q=GP(_arrs[_ai] + (uint32_t)_f*4u); if(q) std::memcpy(&_b,q,4); }
+            if (!_b) continue;
+            for (uint32_t _ty=0;_ty<100u;++_ty) { uint32_t _h=0; { uint8_t* q=GP(_b+_ty*0x20u+0xCu); if(q) std::memcpy(&_h,q,4); }
+              int _g=0; while (_h && _g++<3000) { uint32_t _cb=0; { uint8_t* q=GP(_h+0xCu); if(q) std::memcpy(&_cb,q,4); }
+                if (_cb && _seen.insert(_cb).second) printf("[CBSCAN] arr=%s f=%d ty=%u cb=%08X node=%08X\n", _an[_ai], _f, _ty, _cb, _h);
+                uint8_t* q=GP(_h+0x14u); if(!q) break; std::memcpy(&_h,q,4); } } }
+          printf("[CBSCAN] unique=%d\n",(int)_seen.size()); fflush(stdout); } } }
+    if ((pc & ~1u) == 0x8119934Au) { static int _sp=0; static int _spd=0; if (!_spd) { _spd=1; _sp = getenv("P5D_SCANPTR") ? 1 : 0; }
+      if (_sp) { static int _spn=0; if (_spn++<1) {
+          const uint32_t _tg[8] = {0x811E44D0u,0x811E44D1u,0x811E4772u,0x811E46BAu,0x811E501Cu,0x811E5126u,0x811EBB90u,0x811EFDEEu};
+          int _hits=0;
+          for (uint32_t _va=0x81000000u; _va<0x8170F4A0u; _va+=4u) {
+            uint8_t* q=GP(_va); if(!q) continue; uint32_t _w=0; std::memcpy(&_w,q,4);
+            for (int _k=0;_k<8;++_k) if (_w==_tg[_k]) { if (_hits<40) printf("[SCANPTR] va=%08X val=%08X\n", _va, _w); ++_hits; break; } }
+          printf("[SCANPTR] total hits=%d\n", _hits); fflush(stdout); } } }
     if ((pc & ~1u) == 0x8119934Au) { static int _dt=0; if (!_dt) { _dt=1;
         printf("[DISPATCHTABLE] table=813B1DDC first 48 entries:\n");
         for (int _k=0;_k<48;++_k) { uint32_t _hp=0; uint8_t* q=GP(0x813B1DDCu + (uint32_t)_k*4u); if(q) std::memcpy(&_hp,q,4);
