@@ -2245,6 +2245,19 @@ static void hf_fiber_thread(HFiber* f) {
     if (!fn) { int back=0; uint32_t bq=gbn_back(pc,&back); if (bq && back<=16) { pc=bq; fn=gbn(pc); } }
     if (!fn) { fprintf(stderr, "[HF-NOBLK] fib=%08X pc=%08X\n", f->addr, pc); break; }
     g_cur_block = pc; f->cur_pc = pc; ++f->blocks; ++g_hf_blocks;
+    if ((pc & ~1u) == 0x811DF91Au) {   // M1187: count Huffman decode invocations (retry-loop detection)
+      static uint32_t _hn = 0;
+      if ((++_hn % 2000u) == 0u) { printf("[HUFFCALL] n=%u src=%08X dst=%08X hfblk=%u\n", _hn, s->r[0], s->r[1], (unsigned)g_hf_blocks); fflush(stdout); } }
+
+    { static uint64_t _ss=0;
+      if (g_hf_blocks - _ss >= 4000000u) { _ss = g_hf_blocks;
+        if (f && f->addr == 0x84847FA0u) {
+          printf("[STACKSAMP] hfblk=%u pc=%08X lr=%08X sp=%08X fib=%08X regs:", (unsigned)g_hf_blocks, pc, s->r[14], s->r[13], f->addr);
+          for (int _k=0;_k<10;++_k) printf(" r%d=%08X", _k, s->r[_k]);
+          printf("\n[STACKSAMP] stack:");
+          for (int _k=0;_k<40;++_k) { uint32_t _v=0; uint8_t* _q=GP(s->r[13] + (uint32_t)_k*4u); if (_q) std::memcpy(&_v,_q,4); printf(" %08X", _v); }
+          printf("\n"); fflush(stdout); } } }
+
     if ((pc & ~1u) == 0x811866A6u) {   // M1186: app movie-slot state machine (0x100 slots, stride 0x60, base DAT_81670B48)
       static int g_mvfast = -1; if (g_mvfast < 0) { const char* _e = getenv("P5D_MOVIEFAST"); g_mvfast = (_e && atoi(_e)) ? 1 : 0; }
       static int _mv = 0; ++_mv;
@@ -2264,13 +2277,7 @@ static void hf_fiber_thread(HFiber* f) {
         static int _mfn=0; if (_n && _mfn++<10) { printf("[MOVIEFAST] forced %d active slots total=cur (call %d)\n", _n, _mv); fflush(stdout); } }
     }
 
-    { static std::map<uint32_t,uint32_t> _hot; static uint64_t _last=0; _hot[pc] += 1;
-      if (g_hf_blocks - _last >= 25000000u) { _last = g_hf_blocks;
-        std::vector<std::pair<uint32_t,uint32_t>> _v(_hot.begin(), _hot.end());
-        std::sort(_v.begin(), _v.end(), [](const std::pair<uint32_t,uint32_t>&a,const std::pair<uint32_t,uint32_t>&b){return a.second>b.second;});
-        printf("[HFHOT] hfblk=%u exacttop:", (unsigned)g_hf_blocks);
-        for (size_t _i=0;_i<_v.size()&&_i<26;++_i) printf(" %08X=%u", _v[_i].first, _v[_i].second);
-        printf("\n"); fflush(stdout); _hot.clear(); } }
+    // M1187: HFHOT per-block map probe removed (it dominated throughput: ~1 map op per guest block)
 
     rwatch_arm(pc, s);
     rwatch_check(pc);
