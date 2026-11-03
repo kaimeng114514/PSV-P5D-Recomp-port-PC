@@ -300,7 +300,7 @@ static int g_acc_n = 0, g_lkin_n = 0, g_lkout_n = 0;
 extern "C" int g_watch_on = 1;
 static void crihot_hit(uint32_t pc);   // CRIHOT_FWD
 static void decomp_hit(uint32_t pc, RecState* s);   // DECOMPPROBE_FWD
-static void stalldump_hit(uint32_t pc);   // STALLDUMP_FWD
+static void stalldump_hit(uint32_t pc, RecState* s);   // STALLDUMP_FWD
 static void cpktrace_hit(uint32_t pc, RecState* s);   // CPKTRACE_FWD
 static void cpkhdr_hit(uint32_t pc, RecState* s);   // CPKHDR_FWD
 static void hlehot_dump();   // HLEHOT_FWD
@@ -2197,6 +2197,22 @@ static std::map<uint32_t,HFiber*> g_hf;
 static thread_local HFiber* tl_hf = nullptr;
 static std::map<uint32_t,HFWait*> g_hfw;
 static int g_hf_n = 0, g_hf_ev_n = 0;
+// HFLOG: host-fiber resume-chain events
+struct HFLogEv { uint8_t kind; uint32_t fib; uint32_t other; uint32_t tid; uint32_t pc; uint32_t arg; uint32_t blocks; };
+static HFLogEv g_hflog[64]; static int g_hflog_n = 0;
+static void hflog_add(int kind, uint32_t fib, uint32_t other, uint32_t pc, uint32_t arg) {
+  static int _env=-1; if (_env<0) _env = getenv("P5D_HFLOG") ? 1 : 0; if (!_env) return;
+  HFLogEv& e = g_hflog[g_hflog_n++ & 63];
+  e.kind=(uint8_t)kind; e.fib=fib; e.other=other; e.tid = tl_ht_tid; e.pc=pc; e.arg=arg; e.blocks=(uint32_t)g_hf_blocks;
+}
+static void hflog_dump() {
+  printf("[HFLOG] events=%d (last 40, kind1=launch 2=run 3=switch 4=return)\n", g_hflog_n);
+  int start = g_hflog_n > 40 ? g_hflog_n-40 : 0;
+  for (int i=start;i<g_hflog_n;++i) { HFLogEv& e = g_hflog[i & 63];
+    printf("[HFLOG] k=%d fib=%08X other=%08X tid=%08X pc=%08X arg=%08X blk=%u\n", (int)e.kind, e.fib, e.other, e.tid, e.pc, e.arg, e.blocks); }
+  fflush(stdout);
+}
+
 static HFWait* hf_wait_for_locked(uint32_t tid) {
   auto it = g_hfw.find(tid); if (it != g_hfw.end()) return it->second;
   HFWait* w = new HFWait(); g_hfw[tid] = w; return w;
@@ -2292,7 +2308,7 @@ static void hf_fiber_thread(HFiber* f) {
     g_cur_block = pc; f->cur_pc = pc; ++f->blocks; ++g_hf_blocks;
     { static int _chh=-1; if (_chh<0) _chh = getenv("P5D_CRIHOT") ? 1 : 0; if (_chh) crihot_hit(pc); }
     { static int _dp=-1; if (_dp<0) _dp = getenv("P5D_DECOMPPROBE") ? 1 : 0; if (_dp) decomp_hit(pc, s); }
-    { static int _sd=-1; if (_sd<0) _sd = getenv("P5D_STALLDUMP") ? 1 : 0; if (_sd) stalldump_hit(pc); }
+    { static int _sd=-1; if (_sd<0) _sd = getenv("P5D_STALLDUMP") ? 1 : 0; if (_sd) stalldump_hit(pc, s); }
     { static int _ct=-1; if (_ct<0) _ct = getenv("P5D_CPKTRACE") ? 1 : 0; if (_ct) cpktrace_hit(pc, s); }
     { static int _chx=-1; if (_chx<0) _chx = getenv("P5D_CPKHDR") ? 1 : 0; if (_chx) cpkhdr_hit(pc, s); }
     { static int _chc=-1; if (_chc<0) _chc = getenv("P5D_CRICALL") ? 1 : 0; if (_chc) cricall_hit(pc, s); }
@@ -2596,6 +2612,7 @@ static void hf_fiber_thread(HFiber* f) {
 // caller holds g_hf_lk
 static void hf_launch_locked(HFiber* f, uint32_t arg) {
   f->run_arg = arg;
+  hflog_add(1, f->addr, 0, f->cur_pc, arg);
   if (!f->started) {
     f->started = true; ++f->starts; f->state = HF_RUNNING;
     f->th = std::thread(hf_fiber_thread, f); f->th.detach();
@@ -2606,6 +2623,7 @@ static void hf_launch_locked(HFiber* f, uint32_t arg) {
 }
 static uint32_t hf_do_run(uint32_t addr, uint32_t arg, uint32_t outp) {
   uint32_t tid = tl_ht_tid ? tl_ht_tid : 0x40010000u;
+  hflog_add(2, addr, 0, g_cur_block, arg);
   std::unique_lock<std::mutex> lk(g_hf_lk);
   HFiber* f = hf_lookup_locked(addr);
   f->owner_tid = tid; f->owner = hf_wait_for_locked(tid);
@@ -2620,6 +2638,7 @@ static uint32_t hf_do_run(uint32_t addr, uint32_t arg, uint32_t outp) {
 }
 static uint32_t hf_do_switch(uint32_t addr, uint32_t arg, uint32_t outp) {
   HFiber* cur = tl_hf;
+  hflog_add(3, addr, tl_hf?tl_hf->addr:0u, g_cur_block, arg);
   std::unique_lock<std::mutex> lk(g_hf_lk);
   if (!cur) { lk.unlock(); return hf_do_run(addr, arg, outp); }
   HFiber* t = hf_lookup_locked(addr);
@@ -2636,6 +2655,7 @@ static uint32_t hf_do_switch(uint32_t addr, uint32_t arg, uint32_t outp) {
 }
 static uint32_t hf_do_return(uint32_t arg) {
   HFiber* cur = tl_hf; if (!cur) return 0;
+  hflog_add(4, cur->addr, 0, g_cur_block, arg);
   std::unique_lock<std::mutex> lk(g_hf_lk);
   ++cur->rets; hf_note("ret", cur, arg);
   cur->state = HF_SUSPENDED;
@@ -6244,10 +6264,11 @@ static void cpktrace_hit(uint32_t pc, RecState* s) {   // CPKTRACE: log CRI/CPK 
 }
 
 static void crihot_dump();   // DECOMPHOT_FWD
-static void stalldump_hit(uint32_t pc) {   // STALLDUMP: periodic dump of the main fiber's current block
+static void stalldump_hit(uint32_t pc, RecState* s) {   // STALLDUMP: periodic dump (STALLREGS)
   static int _env=-1; if (_env<0) _env = getenv("P5D_STALLDUMP") ? 1 : 0; if (!_env) return;
-  static uint64_t _n=0; ++_n; if ((_n % 20000000ull) == 0) { printf("[STALL] blocks=%llu blk=%08X fib=%08X n=%u thr=%08X\n", (unsigned long long)_n, pc&~1u, g_cur_fiber, g_main_n, g_cur_thr); fflush(stdout); }
+  static uint64_t _n=0; ++_n; if ((_n % 20000000ull) == 0) { printf("[STALL] blocks=%llu blk=%08X fib=%08X n=%u thr=%08X r0=%08X r1=%08X r2=%08X r3=%08X lr=%08X sp=%08X\n", (unsigned long long)_n, pc&~1u, g_cur_fiber, g_main_n, g_cur_thr, s?s->r[0]:0, s?s->r[1]:0, s?s->r[2]:0, s?s->r[3]:0, s?s->r[14]:0, s?s->r[13]:0); fflush(stdout); }   // STALLREGS
   if (_n == 30000000ull) { printf("[DECOMPHOT] dump at 30M blocks\n"); fflush(stdout); crihot_dump(); }
+  if (_n == 60000000ull) { hflog_dump(); }
   if (_n == 20000000ull || _n == 60000000ull) { printf("[QUEUEDUMP] blocks=%llu\n",(unsigned long long)_n);
     for (int _i=0;_i<3;++_i) { uint32_t _p=0; uint8_t* q=GP(0x8169E080u + (uint32_t)_i*4u); if(q) std::memcpy(&_p,q,4);
       if(!_p){ printf("[QUEUEDUMP] q%d null\n",_i); continue; }
