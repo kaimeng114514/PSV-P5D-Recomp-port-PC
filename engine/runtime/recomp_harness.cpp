@@ -2245,6 +2245,23 @@ static void hf_fiber_thread(HFiber* f) {
     if (!fn) { int back=0; uint32_t bq=gbn_back(pc,&back); if (bq && back<=16) { pc=bq; fn=gbn(pc); } }
     if (!fn) { fprintf(stderr, "[HF-NOBLK] fib=%08X pc=%08X\n", f->addr, pc); break; }
     g_cur_block = pc; f->cur_pc = pc; ++f->blocks; ++g_hf_blocks;
+    if ((pc & ~1u) == 0x8115A38Au) {   // M1190: result of FUN_81007E50("SCENE1")
+      static int _n=0; ++_n;
+      if (_n<6 || (_n % 2000)==0) { printf("[SCNLOOKUP] n=%d SCENE1_ptr=%08X hfblk=%u\n", _n, s->r[0], (unsigned)g_hf_blocks); fflush(stdout); } }
+    if ((pc & ~1u) == 0x81007E50u || (pc & ~1u) == 0x81007E68u || (pc & ~1u) == 0x81007EC8u) { // scene find/create/set(name,...)
+      static int _sn=0; if (_sn++<40) { const char* _nm="?"; uint8_t* _q=GP(s->r[0]); if(_q) _nm=(const char*)_q;
+        printf("[SCNCALL] pc=%08X name=[%s] a1=%08X a2=%08X hfblk=%u\n", pc, _nm, s->r[1], s->r[2], (unsigned)g_hf_blocks); fflush(stdout); } }
+
+    if ((pc & ~1u) == 0x8115A36Au) {   // M1189: app per-frame callback
+      static int _fc = 0; ++_fc;
+      static int _re = 0; if (_re < 8 || (_fc % 20000) == 0) {
+        uint32_t _lb = 0, _st = 0;
+        { uint8_t* _q = GP(0x813366CCu); if (_q) { uint32_t _p=0; std::memcpy(&_p,_q,4); uint8_t* _r=GP(_p+4u); if(_r) std::memcpy(&_lb,_r,4);} }
+        { uint8_t* _q = GP(0x813AF820u); if (_q) std::memcpy(&_st,_q,4); }
+        printf("[APPFRAMEDBG] n=%d loadctr=%08X flagsAF820=%08X hfblk=%u\n", _fc, _lb, _st, (unsigned)g_hf_blocks); fflush(stdout); }
+    }
+    if ((pc & ~1u) == 0x81159E7Eu) { static int _sn=0; if (_sn++<20) { printf("[SCENESETUP] n=%d param=%u hfblk=%u\n", _sn, s->r[0], (unsigned)g_hf_blocks); fflush(stdout); } }
+
     if ((pc & ~1u) == 0x811DF91Au) {   // M1187: count Huffman decode invocations (retry-loop detection)
       static uint32_t _hn = 0;
       if ((++_hn % 2000u) == 0u) { printf("[HUFFCALL] n=%u src=%08X dst=%08X hfblk=%u\n", _hn, s->r[0], s->r[1], (unsigned)g_hf_blocks); fflush(stdout); } }
@@ -5693,6 +5710,23 @@ static void guest_thread_run(uint32_t tid) {
     if (!fn) { if (g_ht_bad_n++ < 20) { printf("[HT-NOBLK] tid=%08X pc=%08X\n", tid, pc); fflush(stdout); } break; }
     g_cur_block = pc;
     t->pc_ring[(t->pc_n++) & 31u] = pc;
+    if ((pc & ~1u) == 0x8115A38Au) {   // M1190: result of FUN_81007E50("SCENE1")
+      static int _n=0; ++_n;
+      if (_n<6 || (_n % 2000)==0) { printf("[SCNLOOKUP] n=%d SCENE1_ptr=%08X hfblk=%u\n", _n, s->r[0], (unsigned)g_hf_blocks); fflush(stdout); } }
+    if ((pc & ~1u) == 0x81007E50u || (pc & ~1u) == 0x81007E68u || (pc & ~1u) == 0x81007EC8u) { // scene find/create/set(name,...)
+      static int _sn=0; if (_sn++<40) { const char* _nm="?"; uint8_t* _q=GP(s->r[0]); if(_q) _nm=(const char*)_q;
+        printf("[SCNCALL] pc=%08X name=[%s] a1=%08X a2=%08X hfblk=%u\n", pc, _nm, s->r[1], s->r[2], (unsigned)g_hf_blocks); fflush(stdout); } }
+
+    if ((pc & ~1u) == 0x8115A36Au) {   // M1189: app per-frame callback
+      static int _fc = 0; ++_fc;
+      static int _re = 0; if (_re < 8 || (_fc % 20000) == 0) {
+        uint32_t _lb = 0, _st = 0;
+        { uint8_t* _q = GP(0x813366CCu); if (_q) { uint32_t _p=0; std::memcpy(&_p,_q,4); uint8_t* _r=GP(_p+4u); if(_r) std::memcpy(&_lb,_r,4);} }
+        { uint8_t* _q = GP(0x813AF820u); if (_q) std::memcpy(&_st,_q,4); }
+        printf("[APPFRAMEDBG] n=%d loadctr=%08X flagsAF820=%08X hfblk=%u\n", _fc, _lb, _st, (unsigned)g_hf_blocks); fflush(stdout); }
+    }
+    if ((pc & ~1u) == 0x81159E7Eu) { static int _sn=0; if (_sn++<20) { printf("[SCENESETUP] n=%d param=%u hfblk=%u\n", _sn, s->r[0], (unsigned)g_hf_blocks); fflush(stdout); } }
+
     rwatch_check(pc);
     if (pc == 0x81160712u) { gfd_atomic_probe(pc, s); pc = s->r[14]; continue; }
     semaw_probe(pc, s);
