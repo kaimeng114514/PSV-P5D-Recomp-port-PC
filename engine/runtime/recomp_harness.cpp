@@ -2989,6 +2989,8 @@ static uint32_t hle_call_inner(uint32_t stub_va, RecState* s) {
             int _trc = p5d::vulkan::upload_gxm_control_resolved((unsigned)_u, _frag_tex[_u]);
             static int _tn=0; if (_tn++<12) { printf("[ABITEX] unit=%u rc=%d w0=%08X w1=%08X data=%08X n=%u\n", (unsigned)_u, _trc,
               ((uint32_t*)_frag_tex[_u])[0], ((uint32_t*)_frag_tex[_u])[1], ((uint32_t*)_frag_tex[_u])[2], g_main_n); fflush(stdout); } }
+          { static int _ne=-1; if (_ne<0) { const char* e=getenv("P5D_NODEEXEC"); _ne=(e&&atoi(e))?1:0; }
+            if (_ne) { static int _dc=0; if (_dc++ < 24) { printf("[DRAWCTX] n=%d lr=%08X gcur=%08X vc=%u r0=%08X r1=%08X r2=%08X\n", _dc, s->r[14], g_cur_block, _vc, s->r[0], s->r[1], s->r[2]); fflush(stdout); } } }
           // 18.4507 M962: upload the engine-written default uniform buffers (real VS was receiving zeros)
           if (_cur_v_ubo) { uint8_t* _src = GP(_cur_v_ubo); if (_src) { p5d::vulkan::update_uniform_buffer_raw(_src, 0x1000u);
             static int _un=0; if (_un++<8) { printf("[ABIUBO] upload vert ubo=%08X first=(%.3f,%.3f,%.3f,%.3f) n=%u\n", _cur_v_ubo,
@@ -5623,32 +5625,39 @@ static uint32_t mb_destroy_guard(RecState* s, uint32_t entry, const char* tag) {
 }
 static uint32_t mb_811E6330(RecState* s) { return mb_destroy_guard(s, 0x811E6330u, "qDestroy"); }
 static uint32_t mb_811E63CE(RecState* s) { return mb_destroy_guard(s, 0x811E63CEu, "qDestroyAll"); }
-// NODEEXEC_LEVER: walk this frame's D-list A-heads and invoke node callbacks (original code)
-// node layout (verified via memory dump): +0x0 next?, +0x4 data ptr, +0xC callback, +0x14 list-next, payload at +0x20
-static uint32_t g_ne_n=0, g_ne_frames=0;
-static void node_exec_frame(RecState* s) {
-  static int _en=-1; if (_en<0) { const char* e=getenv("P5D_NODEEXEC"); _en=(e&&atoi(e))?1:0; }
-  if (!_en) return;
-  uint32_t _idx=0; { uint8_t* q=GP(0x816CC700u); if(q) std::memcpy(&_idx,q,4); }
-  uint32_t _base=0; { uint8_t* q=GP(0x816CC6D8u + (_idx&7u)*4u); if(q) std::memcpy(&_base,q,4); }
+// NODEEXEC_LEVER v3: walk D-list A-heads (current idx, or all 3 slots with P5D_NODEEXEC_ALL) and invoke node callbacks
+static uint32_t g_ne_n=0, g_ne_frames=0, g_ne_draws=0;
+static void node_exec_slot(RecState* s, int idx, int* pn, char* chans, int* pln) {
+  uint32_t _base=0; { uint8_t* q=GP(0x816CC6D8u + ((uint32_t)idx&7u)*4u); if(q) std::memcpy(&_base,q,4); }
   if (!_base) return;
-  ++g_ne_frames; int _n=0;
   for (uint32_t _ty=0;_ty<100u;++_ty) {
     uint32_t _cell=_base+_ty*0x20u;
     uint32_t _head=0; { uint8_t* q=GP(_cell+0xCu); if(q) std::memcpy(&_head,q,4); }
     if (!_head) continue;
+    int _nlist=0;
     uint32_t _node=_head; int _guard=0;
     while (_node && _guard++ < 256) {
       uint32_t _next=0,_cb=0,_data=0;
       { uint8_t* q=GP(_node+0x14u); if(q) std::memcpy(&_next,q,4); }
       { uint8_t* q=GP(_node+0xCu); if(q) std::memcpy(&_cb,q,4); }
       { uint8_t* q=GP(_node+0x4u); if(q) std::memcpy(&_data,q,4); }
-      if (_cb) { (void)call_guest_cb2(s, _cb & ~1u, _node, _data, 200000); ++_n; }
+      if (_cb) { (void)call_guest_cb2(s, _cb & ~1u, _node, _data, 200000); ++(*pn); ++_nlist; }
       _node=_next; }
+    if (_nlist && *pln < 200) { *pln += std::snprintf(chans+*pln, 200-(size_t)*pln, " D%u/%d", _ty, _nlist); }
     { uint8_t* q=GP(_cell+0xCu); if(q) { uint32_t _z=0; std::memcpy(q,&_z,4);} }
     { uint8_t* q=GP(_cell+0x10u); if(q) { uint32_t _z=0; std::memcpy(q,&_z,4);} } }
+}
+static void node_exec_frame(RecState* s) {
+  static int _en=-1, _all=-1;
+  if (_en<0) { const char* e=getenv("P5D_NODEEXEC"); _en=(e&&atoi(e))?1:0; }
+  if (_all<0) { const char* e=getenv("P5D_NODEEXEC_ALL"); _all=(e&&atoi(e))?1:0; }
+  if (!_en) return;
+  uint32_t _idx=0; { uint8_t* q=GP(0x816CC700u); if(q) std::memcpy(&_idx,q,4); }
+  ++g_ne_frames; int _n=0; char _ch[200]={0}; int _ln=0;
+  if (_all) { for (int _f=0;_f<3;++_f) node_exec_slot(s,_f,&_n,_ch,&_ln); }
+  else node_exec_slot(s,(int)_idx,&_n,_ch,&_ln);
   g_ne_n += (uint32_t)_n;
-  static int _lf=0; if (_lf++<40) { printf("[NODEEXEC_LEVER] frame=%u idx=%u nodes=%d total=%u hfblk=%u\n", g_ne_frames, _idx, _n, g_ne_n, (unsigned)g_hf_blocks); fflush(stdout); } }
+  static int _lf=0; if (_lf++<40) { printf("[NODEEXEC_LEVER] frame=%u idx=%u nodes=%d total=%u chans=[%s] hfblk=%u\n", g_ne_frames, _idx, _n, g_ne_n, _ch, (unsigned)g_hf_blocks); fflush(stdout); } }
 static uint32_t mb_811E649A(RecState* s) {
   static int _en = -1; if (_en < 0) { const char* e = getenv("P5D_SYNCTASK"); _en = (e && atoi(e)) ? 1 : 0; }
   uint32_t desc = s->r[1], fn = 0, arg = 0;
