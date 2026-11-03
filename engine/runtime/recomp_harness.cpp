@@ -2165,6 +2165,7 @@ static void hf_note(const char* what, HFiber* f, uint32_t a) {
 }
 
 static uint32_t g_cri_reader = 0;
+static uint32_t g_cri_readers[24]; static int g_cri_readers_n = 0;   // M1184: all readers polled via criFs status getter
 static int g_forcest = -1;
 static void rwatch_check(uint32_t pcv) {
   if (g_forcest < 0) { const char* e = getenv("P5D_FORCEST"); g_forcest = (e && atoi(e)) ? 1 : 0; }
@@ -2173,6 +2174,15 @@ static void rwatch_check(uint32_t pcv) {
     if (((++_fsn & 0x3FFFu) == 0u) && (g_watch2 == g_cri_reader + 0xBCu)) {
       uint32_t st = 0; { uint8_t* q = GP(g_watch2); if (q) std::memcpy(&st, q, 4); }
       if (st == 1u) { uint32_t two = 2u; uint8_t* q = GP(g_watch2); if (q) std::memcpy(q, &two, 4); printf("[FORCEST] reader=%08X status 1->2 (debug lever) blk=%u\n", g_cri_reader, (unsigned)g_blkcnt_total); fflush(stdout); }
+    }
+    for (int _ri = 0; _ri < g_cri_readers_n; ++_ri) {
+      uint32_t _rd = g_cri_readers[_ri]; if (!_rd) continue;
+      uint8_t* _q = GP(_rd + 0xBCu); if (!_q) continue;
+      uint32_t _st = 0; std::memcpy(&_st, _q, 4);
+      if (_st == 0u || _st == 1u) {
+        uint32_t _two = 2u; std::memcpy(_q, &_two, 4);
+        static int _frn = 0; if (_frn++ < 40) { printf("[FORCEST-ALL] reader=%08X status %u->2 (debug lever) blk=%u\n", _rd, _st, (unsigned)g_blkcnt_total); fflush(stdout); }
+      }
     }
   }
   if (!g_watch2) return;
@@ -2184,6 +2194,8 @@ static void rwatch_arm(uint32_t pcv, RecState* s) {
   if ((pcv & ~1u) == 0x8128E9BCu) {   // CRI reader status getter: r0 = real reader object
     uint32_t rd = s->r[0]; uint32_t st = 0;
     { uint8_t* q = GP(rd + 0xBCu); if (q) std::memcpy(&st, q, 4); }
+    if (rd) { bool _known=false; for (int _k=0;_k<g_cri_readers_n;++_k) if (g_cri_readers[_k]==rd) _known=true;
+              if (!_known && g_cri_readers_n < 24) { g_cri_readers[g_cri_readers_n++] = rd; static int _rn=0; if (_rn++<20) { printf("[CRIREG] reader=%08X blk=%u\n", rd, (unsigned)g_blkcnt_total); fflush(stdout); } } }
     if (rd) { static int _cg=0; if (_cg++ < 40) { printf("[CRIGET] reader=%08X status=%08X call_from_lr=%08X fib=%08X thr=%08X blk=%u\n", rd, st, s->r[14], tl_hf?tl_hf->addr:0u, tl_ht_tid, (unsigned)g_blkcnt_total); fflush(stdout); }
               if (rd != g_cri_reader || (g_watch2 != rd + 0xBCu)) { g_cri_reader = rd; g_watch2 = rd + 0xBCu; g_watch2_val = st; } }
   }
