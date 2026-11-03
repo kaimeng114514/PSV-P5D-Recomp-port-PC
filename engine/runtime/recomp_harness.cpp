@@ -2245,6 +2245,16 @@ static void hf_fiber_thread(HFiber* f) {
     if (!fn) { int back=0; uint32_t bq=gbn_back(pc,&back); if (bq && back<=16) { pc=bq; fn=gbn(pc); } }
     if (!fn) { fprintf(stderr, "[HF-NOBLK] fib=%08X pc=%08X\n", f->addr, pc); break; }
     g_cur_block = pc; f->cur_pc = pc; ++f->blocks; ++g_hf_blocks;
+    { uint32_t _p0 = pc & ~1u;
+      if (_p0 == 0x811C041Cu || _p0 == 0x811EB930u || _p0 == 0x811EBAC0u || _p0 == 0x811EBAB4u || _p0 == 0x811BFCD8u || _p0 == 0x811BFE28u || _p0 == 0x811EB930u) {
+        static uint32_t _nr=0,_ex=0,_ca=0,_cb=0,_nb1=0,_nb2=0;
+        uint32_t* _p=nullptr; const char* _nm="?";
+        if (_p0==0x811C041Cu){_p=&_nr;_nm="reg";} else if (_p0==0x811EB930u){_p=&_ex;_nm="execute";}
+        else if (_p0==0x811EBAC0u){_p=&_ca;_nm="cbA";} else if (_p0==0x811EBAB4u){_p=&_cb;_nm="cbB";}
+        else if (_p0==0x811BFCD8u){_p=&_nb1;_nm="buildA";} else {_p=&_nb2;_nm="buildB";}
+        ++(*_p);
+        if ((*_p) <= 5 || ((*_p) % 2000u) == 0u) { printf("[NODEREG] %s n=%u r0=%08X r1=%08X hfblk=%u\n", _nm, *_p, s->r[0], s->r[1], (unsigned)g_hf_blocks); fflush(stdout); } } }
+
     { static uint32_t _gx=0; if ((pc & 0xFFFFF000u) == 0x812B1000u) { ++_gx; }
       if ((pc & 0xFFFFF000u) == 0x812B1000u && (g_hf_blocks % 5000000u) < 2u) { printf("[GXMCNT] hfblk=%u gxm_stub_calls=%u\n", (unsigned)g_hf_blocks, _gx); fflush(stdout); } }
     if ((pc & ~1u) == 0x811C241Eu) { static uint32_t _n=0; ++_n;
