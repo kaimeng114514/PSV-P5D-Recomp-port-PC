@@ -5883,6 +5883,12 @@ static uint32_t mb_811E649A(RecState* s) {
         return nx; } }
     static int _aa = -1; if (_aa < 0) _aa = (getenv("P5D_APPARG") != nullptr) ? 1 : 0;
     (void)call_guest_cb2(s, fn & ~1u, _aa ? arg : (desc + 4u), 0u, 4000000);
+    { static int _f172 = -1; if (_f172 < 0) _f172 = (getenv("P5D_FORCE172") != nullptr) ? 1 : 0;
+      if (_f172) { uint32_t _fi = 0; { uint8_t* q = GP(0x816CC700u); if (q) std::memcpy(&_fi, q, 4); }
+        static int _fr=0; if (_fr++<8) { printf("[FORCE172] call FUN_811EC172 frame=%u n=%u\n", _fi, g_main_n); fflush(stdout); }
+        (void)call_guest_cb2(s, 0x811EC172u, _fi, 0u, 4000000);
+        (void)call_guest_cb2(s, 0x811EC104u, _fi, 0u, 4000000);
+        static int _fr2=0; if (_fr2++<8) { printf("[FORCE172] after r0=%08X\n", s->r[0]); fflush(stdout); } } }
     if (s->r[0] == 2u) node_exec_frame(s);  // NODEEXEC_LEVER: after frame app job
   }
   return nx;
@@ -6007,7 +6013,7 @@ static uint32_t call_guest_cb2(RecState* s, uint32_t entry, uint32_t a0, uint32_
     uint32_t q = pc & ~1u;
     if (q == 0x811E5EC2u) ++g_cb5ec2; else if (q == 0x811E5EC6u) ++g_cb5ec6; else if (q == 0x811E5EF0u) ++g_cb5ef0;
     { // NESTCMDEXEC: probes for GFD command handlers inside nested guest calls
-      if (q==0x811E44D0u||q==0x811E4772u||q==0x811E46BAu||q==0x811E501Cu||q==0x811E5126u||q==0x811EBB90u||q==0x811EFD8Eu||q==0x811EF526u||q==0x811EF5DCu||q==0x811F3494u||q==0x811EC172u||q==0x811EC264u||q==0x811EC104u) {
+      if (q==0x811E44D0u||q==0x811E4772u||q==0x811E46BAu||q==0x811E501Cu||q==0x811E5126u||q==0x811EBB90u||q==0x811EFD8Eu||q==0x811EF526u||q==0x811EF5DCu||q==0x811F3494u||q==0x811EC172u||q==0x811EC264u||q==0x811EC104u||q==0x811C0654u||q==0x811EC0A4u||q==0x811C0730u||q==0x811EC280u) {
         static std::map<uint32_t,int> _nc; int nn=++_nc[q]; if (nn<=8) { printf("[NESTCMDEXEC] va=%08X #%d block=%u lr=%08X entry=%08X n=%u\n", q, nn, g_cur_block, s->r[14], entry, g_main_n); fflush(stdout);} } }
     if (q >= 0xFFFFFF00u || pc == 0u) break;
     BlockFn fn = gbn(pc);
