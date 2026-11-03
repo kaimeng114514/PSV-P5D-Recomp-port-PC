@@ -2551,6 +2551,11 @@ static uint32_t hle_call_inner(uint32_t stub_va, RecState* s) {
         const bool _dq = true;
         uint32_t _data = 0; { uint8_t* _sp = GP(s->r[2]); if (_sp) std::memcpy(&_data, _sp, 4); }
         p5d::vulkan::end_scene_pass();
+        { const char* _e = getenv("P5D_SCENECAP"); static int _sc2 = 0;
+          if (_e && atoi(_e) && g_abi_cur_cd && _sc2 < 4) {
+            char _fn2[64]; std::snprintf(_fn2, sizeof(_fn2), "p5d_scene_%d.bmp", _sc2);
+            int _r2 = p5d::vulkan::save_rt_screenshot(g_abi_cur_cd, _fn2);
+            printf("[SCENECAP] cd=%08X rc=%d n=%u -> %s\n", g_abi_cur_cd, _r2, g_main_n, _fn2); fflush(stdout); _sc2++; } }
         if (_dq && _data) {
           { static int _nomovie = -1;   // 18.4551 M1006: P5D_NOMOVIE=1 disables the host movie overlay
             if (_nomovie < 0) { const char* _e = getenv("P5D_NOMOVIE"); _nomovie = (_e && atoi(_e)) ? 1 : 0; }
