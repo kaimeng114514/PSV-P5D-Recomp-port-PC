@@ -299,6 +299,7 @@ static int g_lktr_n = 0;
 static int g_acc_n = 0, g_lkin_n = 0, g_lkout_n = 0;
 extern "C" int g_watch_on = 1;
 static void crihot_hit(uint32_t pc);   // CRIHOT_FWD
+static void cricall_hit(uint32_t pc, RecState* s);   // CRICALLPROBE_FWD
 static void crihot_dump();
 static int g_sw8_on = 0, g_sw8_n = 0, g_sw8_special = 0;
 static uint32_t g_stkw_lo = 0xA05FFC10u, g_stkw_hi = 0xA05FFC30u;
@@ -2255,6 +2256,7 @@ static void hf_fiber_thread(HFiber* f) {
     if (!fn) { fprintf(stderr, "[HF-NOBLK] fib=%08X pc=%08X\n", f->addr, pc); break; }
     g_cur_block = pc; f->cur_pc = pc; ++f->blocks; ++g_hf_blocks;
     { static int _chh=-1; if (_chh<0) _chh = getenv("P5D_CRIHOT") ? 1 : 0; if (_chh) crihot_hit(pc); }
+    { static int _chc=-1; if (_chc<0) _chc = getenv("P5D_CRICALL") ? 1 : 0; if (_chc) cricall_hit(pc, s); }
     { static int _gp2=-1; if (_gp2<0) _gp2 = getenv("P5D_GATEPROBE2") ? 1 : 0;
       if (_gp2 && (pc & ~1u) == 0x811C0654u) { static int _gpn=0; if (_gpn++<12) {
           uint32_t _fr = s->r[0]; uint32_t _base = 0; uint8_t* _bq = GP(0x816CC6CCu);
@@ -6059,6 +6061,13 @@ static std::map<uint32_t,int> g_cri_hits;   // CRIHOT: function-entry histogram 
 static void crihot_hit(uint32_t pc) { uint32_t _p = pc & ~1u;   // CRIHOT2
   if ((_p>=0x81163000u && _p<0x81165000u) || (_p>=0x811CA000u && _p<0x811CC500u) || (_p>=0x811A0000u && _p<0x811B0000u) || (_p>=0x811ED000u && _p<0x811EF000u))
     { ++g_cri_hits[_p]; } }
+static void cricall_hit(uint32_t pc, RecState* s) {   // CRICALLPROBE
+  static int _cc=-1; if (_cc<0) _cc = getenv("P5D_CRICALL") ? 1 : 0; if (!_cc || !s) return;
+  uint32_t _p = pc & ~1u;
+  if (_p == 0x811ED8B6u) { static int _n=0; if (_n++<20) { printf("[CRICALL] ED8B6 p0=%08X p1=%08X p2=%08X p3=%08X lr=%08X\n", s->r[0],s->r[1],s->r[2],s->r[3],s->r[14]); fflush(stdout);} }
+  if (_p == 0x811CA848u) { static int _n2=0; if (_n2++<20) { printf("[CRICALL] CA848 ret r0=%08X lr=%08X\n", s->r[0], s->r[14]); fflush(stdout);} }
+}
+
 static void crihot_dump() {
   printf("[CRIHOT] unique=%d\n",(int)g_cri_hits.size());
   const uint32_t _keys[8] = {0x811CA85Au,0x811CA6B6u,0x811641D2u,0x811CB0D8u,0x811CB0D9u,0x811632BAu,0x8116332Au,0x811CA7ACu};
@@ -6133,6 +6142,7 @@ static uint32_t call_guest_cb2(RecState* s, uint32_t entry, uint32_t a0, uint32_
       printf("[REGCB] pc=%08X name=%s r0=%08X r1=%08X r2=%08X r3=%08X lr=%08X sp=%08X fib=%08X thr=%08X\n", pc, _nm, s->r[0], s->r[1], s->r[2], s->r[3], s->r[14], s->r[13], g_cur_fiber, g_cur_thr); fflush(stdout); }
     uint32_t q = pc & ~1u;
     { static int _chh2=-1; if (_chh2<0) _chh2 = getenv("P5D_CRIHOT") ? 1 : 0; if (_chh2) crihot_hit(pc); }
+    { static int _chc2=-1; if (_chc2<0) _chc2 = getenv("P5D_CRICALL") ? 1 : 0; if (_chc2) cricall_hit(pc, s); }
     if (q == 0x811E5EC2u) ++g_cb5ec2; else if (q == 0x811E5EC6u) ++g_cb5ec6; else if (q == 0x811E5EF0u) ++g_cb5ef0;
     { // GATEPROBE3N: nested call_guest_cb2 probe of FUN_811C0654 (frame gate) inputs
       static int _gp3n = -1; if (_gp3n < 0) _gp3n = getenv("P5D_GATEPROBE2") ? 1 : 0;
