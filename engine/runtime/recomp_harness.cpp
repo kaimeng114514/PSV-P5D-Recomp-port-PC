@@ -2758,7 +2758,8 @@ static uint32_t _ufd_vert_ubo = 0, _ufd_frag_ubo = 0;   // M1251: per-stage UBO 
             printf("[ABIDRAWTEST] gxm_draw_arrays(3) issued n=%u\n", g_main_n); fflush(stdout);
             if (g_abi_cur_cd) { int _rc = p5d::vulkan::save_rt_screenshot(g_abi_cur_cd, "p5d_drawtest_rt.bmp");
               printf("[ABIDRAWRTCAP] cd=%08X rc=%d\n", g_abi_cur_cd, _rc); fflush(stdout); } } }
-        static int _pn = 0; if (_pn++ < 20) { printf("[ABIPIPE] v=%s f=%s rc=%d n=%u\n", _abi_vspv.c_str(), _abi_fspv.c_str(), _rc, g_main_n); fflush(stdout); } }
+        static int _pn = 0; if (_pn++ < 20) { printf("[ABIPIPE] v=%s f=%s rc=%d n=%u\n", _abi_vspv.c_str(), _abi_fspv.c_str(), _rc, g_main_n); fflush(stdout); }
+        else { static int _pn2 = 0; if (_pn2++ < 120) { printf("[ABIPIPE2] v=%s f=%s rc=%d rt=%08X dvc=%u n=%u lr=%08X\n", _abi_vspv.c_str(), _abi_fspv.c_str(), _rc, g_abi_cur_cd, (unsigned)(s->r[4]), g_main_n, s->r[14]); fflush(stdout);} } }
       uint32_t _stk[8];
       for (int _i = 0; _i < 8; ++_i) { uint32_t _v = 0; uint8_t* _q = GP(s->r[13] + (uint32_t)_i * 4u); if (_q) std::memcpy(&_v, _q, 4); _stk[_i] = _v; }
       // 18.4484 M939: EndScene / DisplayQueueAddEntry -> submit + present (backend end_frame does both)
