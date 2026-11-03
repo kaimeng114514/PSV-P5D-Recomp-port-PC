@@ -77,7 +77,8 @@ static void abi_tex_encode(unsigned char* t, unsigned int typeMask, unsigned int
 namespace p5d { namespace mem { void register_region(unsigned int vaddr, unsigned int size, void* host, const char* name); } }
 static int g_loadclear_env = 0;
 static int g_hostthreads = 0; static int g_hostfiber = 0;   // M1155: every guest fiber = host thread (P0)
-static thread_local int tl_is_hfiber = 0;   // M1161: current host thread executes a guest fiber
+static thread_local int tl_is_hfiber = 0;
+   // M1161: current host thread executes a guest fiber
 static volatile int g_shutdown = 0;
 static uint32_t g_last_alloc_sz = 0, g_last_alloc_fp = 0;
 static int g_allocf_n = 0;
@@ -131,6 +132,7 @@ template<class T> static RecState* SPTR(T& x) { return &x; }
 extern "C" uint32_t g_cur_block = 0;
 static uint32_t g_qwatch_va[16]; static int g_qwatch_n = 0;   // M1179: queue state write watch
 static uint32_t g_cwatch_va[8]; static int g_cwatch_n = 0;   // M1182: COMSE object field-4 write watch
+static int msg_has_leavecs(const char* m) { return (m && strstr(m, "LeaveCs")) ? 1 : 0; }
 static int g_thry_n = 0;
 static int g_fact_bit = 0;
 static void fix682a(RecState* s, uint32_t* ppc);
@@ -1599,7 +1601,15 @@ static void job_probes(uint32_t pcv, RecState* s) {
       if ((_a0 == 0x81278F96u || _a0 == 0x81279176u || _a0 == 0x81279486u || _a0 == 0x81279520u) && _lg_n++ < 200) {
         uint32_t _fp = (_a0 == 0x81278F96u) ? s->r[1] : s->r[1]; char _msg[200] = {0};
         { uint8_t* _q = GP(_fp); if (_q) { for (int _k = 0; _k < 190; ++_k) { char _c = (char)_q[_k]; if (!_c) break; _msg[_k] = (_c >= 32 && _c < 127) ? _c : 0x2E; } } }
-        printf("[CRILOG] at=%08X n=%u r0=%08X r1=%08X r2=%08X r3=%08X lr=%08X blk=%08X fib=%08X msg=%s\n", _a0, g_main_n, s->r[0], s->r[1], s->r[2], s->r[3], s->r[14], g_cur_block, g_cur_fiber, _msg); fflush(stdout); } } }
+        printf("[CRILOG] at=%08X n=%u r0=%08X r1=%08X r2=%08X r3=%08X lr=%08X blk=%08X fib=%08X msg=%s\n", _a0, g_main_n, s->r[0], s->r[1], s->r[2], s->r[3], s->r[14], g_cur_block, g_cur_fiber, _msg); fflush(stdout);
+        if (msg_has_leavecs(_msg)) { static int _cs_n = 0; if (_cs_n++ < 3) {
+          printf("[CRICS] regs r4=%08X r5=%08X r6=%08X r7=%08X r8=%08X r9=%08X r10=%08X r11=%08X sp=%08X lr=%08X\n", s->r[4],s->r[5],s->r[6],s->r[7],s->r[8],s->r[9],s->r[10],s->r[11],s->r[13],s->r[14]);
+          printf("[CRICS] stack:");
+          for (int _k = 0; _k < 32; ++_k) { uint32_t _v = 0; uint8_t* _q = GP(s->r[13] + (uint32_t)_k*4u); if (_q) std::memcpy(&_v, _q, 4); printf(" %08X", _v); }
+          printf("\n"); fflush(stdout);
+          printf("[CRICS] pcring:");
+          for (int _k = 0; _k < 24; ++_k) printf(" %08X", g_pc_ring[(g_pc_ring_n - 24u + (uint32_t)_k) & 63u]);
+          printf("\n"); fflush(stdout); } } } } }
   { uint32_t _a0 = pcv & ~1u;
     if (_a0 == 0x81285E86u || _a0 == 0x81286336u || _a0 == 0x81286368u || _a0 == 0x812864B4u || _a0 == 0x8128665Au || _a0 == 0x8128E394u) {
       static int _bd_n = 0; static int _bd_late = 0; ++_bd_n;
