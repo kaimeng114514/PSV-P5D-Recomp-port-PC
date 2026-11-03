@@ -2976,6 +2976,15 @@ static uint32_t _ufd_vert_ubo = 0, _ufd_frag_ubo = 0;   // M1251: per-stage UBO 
               static int _n3=0; if (_n3++<10) printf("[ABIOBJ] vert obj=%08X spv=%s\n", _obj, _it->second.c_str()); } }
           else { auto _it = _fobj2spv.find(_obj); if (_it != _fobj2spv.end() && _abi_fspv != _it->second) { _abi_fspv = _it->second;
               static int _n4=0; if (_n4++<10) printf("[ABIOBJ] frag obj=%08X spv=%s\n", _obj, _it->second.c_str()); } }
+          // SETPSTATE: track sceGxmSetPrecomputedVertexState / FragmentState (object -> spv pair)
+          if (strstr(_ge->name, "SetPrecomputedVertexState")) { auto _it = _vobj2spv.find(s->r[1]);
+            if (_it != _vobj2spv.end()) { _abi_vspv = _it->second;
+              static int _n5=0; if (_n5++<30) { printf("[SETPSTATE] vert obj=%08X spv=%s n=%u\n", s->r[1], _it->second.c_str(), g_main_n); fflush(stdout);} }
+            else { static int _n6=0; if (_n6++<30) { printf("[SETPSTATE] vert obj=%08X UNKNOWN n=%u\n", s->r[1], g_main_n); fflush(stdout);} } }
+          if (strstr(_ge->name, "SetPrecomputedFragmentState")) { auto _it = _fobj2spv.find(s->r[1]);
+            if (_it != _fobj2spv.end()) { _abi_fspv = _it->second;
+              static int _n7=0; if (_n7++<30) { printf("[SETPSTATE] frag obj=%08X spv=%s n=%u\n", s->r[1], _it->second.c_str(), g_main_n); fflush(stdout);} }
+            else { static int _n8=0; if (_n8++<30) { printf("[SETPSTATE] frag obj=%08X UNKNOWN n=%u\n", s->r[1], g_main_n); fflush(stdout);} } }
           // ABIPAIR2: log the current program pair whenever it changes
           { static std::string _lastpair2; static int _pc2=0; std::string _pair2 = _abi_vspv + "|" + _abi_fspv;
             if (_pair2 != _lastpair2) { _lastpair2 = _pair2; if (_pc2++ < 200) { printf("[ABIPAIR2] #%d v=%s f=%s n=%u lr=%08X blk=%08X\n", _pc2, _abi_vspv.c_str(), _abi_fspv.c_str(), g_main_n, s->r[14], g_cur_block); fflush(stdout);} } } } }
@@ -3193,6 +3202,9 @@ static uint32_t _ufd_vert_ubo = 0, _ufd_frag_ubo = 0;   // M1251: per-stage UBO 
         if (strstr(_ge->name, "ReserveVertex")) { static int _n2=0; if (_n2++<24) { printf("[VUBUF] ReserveVertex out=%08X n=%u\n", s->r[1], g_main_n); fflush(stdout);} }
         if (strstr(_ge->name, "ReserveFragment")) { static int _n3=0; if (_n3++<24) { printf("[VUBUF] ReserveFragment out=%08X n=%u\n", s->r[1], g_main_n); fflush(stdout);} }
         if (strstr(_ge->name, "SetUniformDataF")) { static std::set<uint32_t> _seen; uint32_t _u=s->r[0]; if (_seen.find(_u)==_seen.end()) { _seen.insert(_u); printf("[VUBUF] SetUniformDataF NEW ubo=%08X par=%08X coff=%u cnt=%u n=%u (total distinct=%u)\n", _u, s->r[1], s->r[2], s->r[3], g_main_n, (unsigned)_seen.size()); fflush(stdout); } } }
+      // DRAWCALLS: log all draw-path API calls (incl. Precomputed) with counters
+      { if (strstr(_ge->name, "Draw")) { static std::map<std::string,int> _dc; static int _dl=0; _dc[_ge->name]++; 
+          if (_dl++ < 80) { printf("[DRAWCALLS] name=%s #%d n=%u r0=%08X r1=%08X r2=%08X r3=%08X lr=%08X blk=%08X\n", _ge->name, _dc[_ge->name], g_main_n, s->r[0],s->r[1],s->r[2],s->r[3], s->r[14], g_cur_block); fflush(stdout);} } }
       auto _t0 = std::chrono::steady_clock::now();
       uint32_t _rv = gxm_abi_dispatch(stub_va, s->r, _stk);
       if (_pend_vout) { uint32_t _va = 0; uint8_t* _q = GP(_pend_vout); if (_q) std::memcpy(&_va, _q, 4);
