@@ -77,6 +77,7 @@ static void abi_tex_encode(unsigned char* t, unsigned int typeMask, unsigned int
 namespace p5d { namespace mem { void register_region(unsigned int vaddr, unsigned int size, void* host, const char* name); } }
 static int g_loadclear_env = 0;
 static int g_hostthreads = 0; static int g_hostfiber = 0;   // M1155: every guest fiber = host thread (P0)
+static thread_local int tl_is_hfiber = 0;   // M1161: current host thread executes a guest fiber
 static volatile int g_shutdown = 0;
 static uint32_t g_last_alloc_sz = 0, g_last_alloc_fp = 0;
 static int g_allocf_n = 0;
@@ -659,7 +660,13 @@ static volatile uint32_t g_hf_blocks = 0;   // M1156: fiber-side block counter (
 static void iopump_from_wait(RecState* s) {
   static int _env = -1, _busy = 0, _n = 0;
   if (_env < 0) { const char* _e = getenv("P5D_IOPUMP"); _env = (_e && atoi(_e)) ? 1 : 0; }
-  if (!_env || _busy) return;
+  if (!_env) return;
+  static std::mutex _iop_mtx; { std::lock_guard<std::mutex> _g(_iop_mtx); if (_busy) return; _busy = 1; }
+  // M1161: under the host-fiber model the nested call_guest_cb2 below must only run from the
+  // loader fiber (tl_hf) or the main thread. Worker/audio threads call DelayThread constantly and
+  // used to trigger nested reader execution concurrently, leaving guest LwMutexes held when the
+  // nested run hit its block budget -> hard deadlock (owner 4001C000 never released 816A0F18).
+  if (g_hostfiber && !tl_is_hfiber && tl_ht_tid != 0u && tl_ht_tid != 0x40010000u) return;
   // M1122b: gate to the POST-MOUNT phase only and only pump the file-data reader 848E9678.
   // (Pumping the mount readers 848FC368/848FC5C0 here breaks the CPK analyzer because the
   // main-loop pump applies HDRFIX/TOCFIX before the completion shim, which this path does not.)
@@ -699,7 +706,7 @@ static void iopump_from_wait(RecState* s) {
       if (_n++ < 20) { printf("[IOPUMP_WAIT] pumped reader=%08X pstate=%u size=%08X blk=%u\n", _r, _pst, _sz, g_blkcnt_total); fflush(stdout); }
     }
   }
-  _busy = 0;
+  { std::lock_guard<std::mutex> _g(_iop_mtx); _busy = 0; }
 }
 static uint32_t loadpump_task(void) {   // 18.4282: pump a live Fios task - prefer the MAIN WAIT-LOOP object (r4 at 0x811E5ED4) when its state is valid 0..8, else the global task head [0x816CDA2C]; never pump stale/freed pointers
   uint32_t _t = g_wait_task;
@@ -2125,6 +2132,7 @@ static void hf_note(const char* what, HFiber* f, uint32_t a) {
 }
 static void hf_fiber_thread(HFiber* f) {
   tl_hf = f;
+  tl_is_hfiber = 1;
   tl_ht_tid = f->owner_tid ? f->owner_tid : 0x40010000u;
   RecState* s = &f->rs;
   std::memset(s, 0, sizeof(*s));
@@ -3810,7 +3818,7 @@ static uint32_t hle_call_inner(uint32_t stub_va, RecState* s) {
     case 0x812B2A80u:                                                 // 18.4272: sceKernelDelayThreadCB
       g_vtime_extra += (uint64_t)(s->r[0] ? s->r[0] : 1u);   // M815: deterministic virtual sleep (CriFs wait-loop lr=0x8127C0F8; 72,518 calls/100M blocks)
     case 0x812B2A50u: {                                               // sceKernelDelayThread -> cooperative yield (per-frame pacing)
-      iopump_from_wait(s);   // M1122: pump criFs load state machines during blocking waits (nested fiber spin loops)
+      hle_wait_begin(); iopump_from_wait(s); hle_wait_end();   // M1161: release HLE lock during nested reader execution
       g_vtime_extra += (uint64_t)(s->r[0] ? s->r[0] : 1u);   // M815: deterministic virtual sleep
       r0 = 0;
       if (tl_ht_tid) { hle_wait_begin(); uint32_t _us = s->r[0]; if (_us > 2000u) _us = 2000u; if (_us < 100u) _us = 100u; if (!g_fastsleep) std::this_thread::sleep_for(std::chrono::microseconds(_us)); hle_wait_end(); break; }
