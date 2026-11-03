@@ -5924,6 +5924,11 @@ static uint32_t mb_811E649A(RecState* s) {
           uint8_t* q2 = GP(_base + 0x2Cu); if (q2) std::memcpy(q2, &_one, 4);
           static int _fgn=0; if (_fgn++<12) { printf("[FORCEGATE] frame=%u base=%08X set A=1 n=%u\n", _frame, _base, g_main_n); fflush(stdout);} } }
       (void)call_guest_cb2(s, fn & ~1u, _aa ? arg : (desc + 4u), 0u, 4000000);
+      if (_fg) { static int _fe = -1; if (_fe < 0) _fe = getenv("P5D_FORCEGATE_END") ? 1 : 0;
+        if (_fe) { uint32_t _fr = 0; { uint8_t* p = GP(desc + 4u); if (p) std::memcpy(&_fr, p, 4); }
+          (void)call_guest_cb2(s, 0x811EC264u, _fr, 0u, 4000000);
+          (void)call_guest_cb2(s, 0x811EC104u, _fr, 0u, 4000000);
+          static int _fen=0; if (_fen++<12) { printf("[FORCEGATE_END] 264/104 called frame=%u n=%u\n", _fr, g_main_n); fflush(stdout);} } }   // FORCEGATE_END
       if (_fg) { uint32_t _frame = 0; { uint8_t* p = GP(desc + 4u); if (p) std::memcpy(&_frame, p, 4); }
         uint32_t _base = 0; uint8_t* _arr = GP(0x816CC6CCu);
         if (_arr && _frame < 4) std::memcpy(&_base, _arr + _frame*4u, 4);
