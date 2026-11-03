@@ -2296,6 +2296,12 @@ static void hf_fiber_thread(HFiber* f) {
         { uint8_t* q=GP(0x85B64104u); if(q) std::memcpy(&_sc1,q,4); }
         printf("[SCENEBITS] hfblk=%u DAT_816CC630=%08X DAT_816CC640=%08X DAT_813AF820=%08X SCENE1+4=%08X\n", (unsigned)g_hf_blocks, _f630,_f640,_f820,_sc1); fflush(stdout); } }
 
+    { // DISPATCHPROBE: FUN_811EDE52(type, value) -> dispatch table 0x813B1DDC[type](ctx)
+      static int _dp=-1; if (_dp<0) _dp = getenv("P5D_DISPATCHPROBE") ? 1 : 0;
+      if (_dp && (pc & ~1u) == 0x811EDE52u) { static int _dpn=0; if (_dpn++<40) {
+          uint32_t _ty = s->r[0]; uint32_t _hb = 0; uint8_t* q2 = GP(0x813B1DDCu + _ty*4u);
+          if (q2) std::memcpy(&_hb,q2,4);
+          printf("[DISPATCHPROBE] type=%u val=%08X handler=%08X lr=%08X n=%u\n", _ty, s->r[1], _hb, s->r[14], g_main_n); fflush(stdout); } } }
     { uint32_t _p0 = pc & ~1u;
       if (_p0 == 0x811C041Cu) { static uint32_t _rn=0; ++_rn;
         if (_rn<=8u || (_rn%2000u)==0u) { uint32_t _idx=0; { uint8_t* q=GP(0x816CC700u); if(q) std::memcpy(&_idx,q,4); }
@@ -6087,6 +6093,11 @@ static uint32_t call_guest_cb2(RecState* s, uint32_t entry, uint32_t a0, uint32_
           if (_bq) { uint32_t _ptrs[4]={0,0,0,0}; for(int _i=0;_i<4;++_i) std::memcpy(&_ptrs[_i],_bq+_i*4,4); _base = (_fr<4)?_ptrs[_fr]:0; }
           uint32_t _c0=0,_c1=0; { uint8_t* q2=GP(_base); if(q2){ std::memcpy(&_c0,q2+0xC,4); std::memcpy(&_c1,q2+0x14,4);} }
           printf("[GATEPROBE3N] FUN_811C0654 frame=%u base=%08X A=%08X B=%08X n=%u\n", _fr, _base, _c0, _c1, g_main_n); fflush(stdout);} } }
+    { // DISPATCHPROBE2: nested FUN_811EDE52(type,value) -> table[type](ctx)
+      static int _dp2=-1; if (_dp2<0) _dp2 = getenv("P5D_DISPATCHPROBE") ? 1 : 0;
+      if (_dp2 && q == 0x811EDE52u) { static int _dn2=0; if (_dn2++<40) {
+          uint32_t _ty=s->r[0]; uint32_t _hb=0; uint8_t* q2=GP(0x813B1DDCu + _ty*4u); if(q2) std::memcpy(&_hb,q2,4);
+          printf("[DISPATCHPROBE2] type=%u val=%08X handler=%08X lr=%08X n=%u\n", _ty, s->r[1], _hb, s->r[14], g_main_n); fflush(stdout);} } }
     { // NESTCMDEXEC: probes for GFD command handlers inside nested guest calls
       if (q==0x811E44D0u||q==0x811E4772u||q==0x811E46BAu||q==0x811E501Cu||q==0x811E5126u||q==0x811EBB90u||q==0x811EFD8Eu||q==0x811EF526u||q==0x811EF5DCu||q==0x811F3494u||q==0x811EC172u||q==0x811EC264u||q==0x811EC104u||q==0x811C0654u||q==0x811EC0A4u||q==0x811C0730u||q==0x811EC280u) {
         static std::map<uint32_t,int> _nc; int nn=++_nc[q]; if (nn<=8) { printf("[NESTCMDEXEC] va=%08X #%d block=%u lr=%08X entry=%08X n=%u\n", q, nn, g_cur_block, s->r[14], entry, g_main_n); fflush(stdout);} } }
