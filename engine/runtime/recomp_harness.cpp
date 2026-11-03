@@ -2827,6 +2827,8 @@ static uint32_t _ufd_vert_ubo = 0, _ufd_frag_ubo = 0;   // M1251: per-stage UBO 
         if (_cd && _cw && _ch) { _lv_cd = _cd; _lv_w = _cw; _lv_h = _ch; }
         else if (_lv_cd) { _cd = _lv_cd; _cw = _lv_w; _ch = _lv_h;
             static int _fu=0; if (_fu++<8) { printf("[LASTVALIDRT] fallback cd=%08X %ux%u n=%u\n", _cd, _cw, _ch, g_main_n); fflush(stdout);} }
+        else { _cd = 0x8D300000u; _cw = 960u; _ch = 544u;   // LASTVALIDRT_DEF: no valid scene target seen yet (AE pass first)
+            static int _fd=0; if (_fd++<8) { printf("[LASTVALIDRT_DEF] default cd=%08X 960x544 n=%u\n", _cd, g_main_n); fflush(stdout);} }
         printf("[ABIBEGIN] surf=%08X data=%08X %ux%u n=%u\n", _csurf, _cd, _cw, _ch, g_main_n); fflush(stdout);
         g_abi_cur_cd = _cd; g_abi_cur_w = _cw; g_abi_cur_h = _ch;   // M1146
         { static int _bp=0; if (_bp++<40) { printf("[PASSRT] begin cd=%08X w=%u h=%u n=%u\n", _cd, _cw, _ch, g_main_n); fflush(stdout);} }
