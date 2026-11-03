@@ -5912,7 +5912,21 @@ static uint32_t mb_811E649A(RecState* s) {
         if (s->r[0] == 2u) node_exec_frame(s);
         return nx; } }
     static int _aa = -1; if (_aa < 0) _aa = (getenv("P5D_APPARG") != nullptr) ? 1 : 0;
-    (void)call_guest_cb2(s, fn & ~1u, _aa ? arg : (desc + 4u), 0u, 4000000);
+    { static int _fg = -1; if (_fg < 0) _fg = (getenv("P5D_FORCEGATE") != nullptr) ? 1 : 0;
+      if (_fg) { uint32_t _frame = 0; { uint8_t* p = GP(desc + 4u); if (p) std::memcpy(&_frame, p, 4); }
+        { uint8_t* pf = GP(desc + 8u); if (pf) { uint32_t _one2 = 1u; std::memcpy(pf, &_one2, 4); } }   // FORCEGATE_FLAGS: set app-job flags bit0
+        uint32_t _bases[2] = {0,0}; uint8_t* _arr = GP(0x816CC6CCu);
+        if (_arr && _frame < 4) for (int _i=0;_i<2;++_i) std::memcpy(&_bases[_i], _arr + _frame*4u + _i*0u, 4);
+        uint32_t _base = _bases[0];
+        if (_base) { uint32_t _one = 1u; uint8_t* q1 = GP(_base + 0xCu); if (q1) std::memcpy(q1, &_one, 4);
+          uint8_t* q2 = GP(_base + 0x2Cu); if (q2) std::memcpy(q2, &_one, 4);
+          static int _fgn=0; if (_fgn++<12) { printf("[FORCEGATE] frame=%u base=%08X set A=1 n=%u\n", _frame, _base, g_main_n); fflush(stdout);} } }
+      (void)call_guest_cb2(s, fn & ~1u, _aa ? arg : (desc + 4u), 0u, 4000000);
+      if (_fg) { uint32_t _frame = 0; { uint8_t* p = GP(desc + 4u); if (p) std::memcpy(&_frame, p, 4); }
+        uint32_t _base = 0; uint8_t* _arr = GP(0x816CC6CCu);
+        if (_arr && _frame < 4) std::memcpy(&_base, _arr + _frame*4u, 4);
+        if (_base) { uint32_t _z = 0; uint8_t* q1 = GP(_base + 0xCu); if (q1) std::memcpy(q1, &_z, 4);
+          uint8_t* q2 = GP(_base + 0x2Cu); if (q2) std::memcpy(q2, &_z, 4); } } }
     { static int _f172 = -1; if (_f172 < 0) _f172 = (getenv("P5D_FORCE172") != nullptr) ? 1 : 0;
       if (_f172) { uint32_t _fi = 0; { uint8_t* q = GP(0x816CC700u); if (q) std::memcpy(&_fi, q, 4); }
         static int _fr=0; if (_fr++<8) { printf("[FORCE172] call FUN_811EC172 frame=%u n=%u\n", _fi, g_main_n); fflush(stdout); }
