@@ -2246,6 +2246,18 @@ static void hf_fiber_thread(HFiber* f) {
     if (!fn) { fprintf(stderr, "[HF-NOBLK] fib=%08X pc=%08X\n", f->addr, pc); break; }
     g_cur_block = pc; f->cur_pc = pc; ++f->blocks; ++g_hf_blocks;
     { uint32_t _p0 = pc & ~1u;
+      if (_p0 == 0x811EBAC0u || _p0 == 0x811EBAB4u || _p0 == 0x811EBB28u || _p0 == 0x811EFDEEu || _p0 == 0x811C0654u || _p0 == 0x811EC280u || _p0 == 0x811C0AB8u || _p0 == 0x811C0340u || _p0 == 0x811C034Au || _p0 == 0x811C035Eu) {
+        static uint32_t _cb[10]={0};
+        int _i=-1; const char* _nm="?";
+        if (_p0==0x811EBAC0u){_i=0;_nm="cbM4(811EBAC0)";} else if (_p0==0x811EBAB4u){_i=1;_nm="cbM5(811EBAB4)";}
+        else if (_p0==0x811EBB28u){_i=2;_nm="cbM?(811EBB28)";} else if (_p0==0x811EFDEEu){_i=3;_nm="cmdBuild(811EFDEE)";}
+        else if (_p0==0x811C0654u){_i=4;_nm="C0654";} else if (_p0==0x811EC280u){_i=5;_nm="EC280";}
+        else if (_p0==0x811C0AB8u){_i=6;_nm="C0AB8";} else if (_p0==0x811C0340u){_i=7;_nm="nodecb340";}
+        else if (_p0==0x811C034Au){_i=8;_nm="nodecb34A";} else {_i=9;_nm="nodecb35E";}
+        uint32_t* _p=&_cb[_i]; ++(*_p);
+        if ((*_p)<=6u || ((*_p)%200u)==0u) { printf("[NODECB] %s n=%u r0=%08X r1=%08X hfblk=%u\n", _nm, *_p, s->r[0], s->r[1], (unsigned)g_hf_blocks); fflush(stdout); } } }
+
+    { uint32_t _p0 = pc & ~1u;
       if (_p0 == 0x8117306Au || _p0 == 0x8116E734u || _p0 == 0x81173602u || _p0 == 0x81004B8Eu || _p0 == 0x81016296u) {
         static uint32_t _sys[5]={0,0,0,0,0}; int _i=-1; const char* _nm="?";
         if (_p0==0x8117306Au){_i=0;_nm="frameUpdate8117306A";} else if (_p0==0x8116E734u){_i=1;_nm="appPadUpdate8116E734";}
@@ -2275,24 +2287,24 @@ static void hf_fiber_thread(HFiber* f) {
         { uint8_t* q=GP(0x816CD8D8u); if(q) std::memcpy(&_d8d8,q,4); }
         printf("[GFDGLOB] hfblk=%u DAT_816CD8D8=%08X DAT_816CD8DC=%08X DAT_816CC664=%08X\n", (unsigned)g_hf_blocks, _d8d8,_dc,_c664); fflush(stdout); } }
 
-    if ((pc & ~1u) == 0x8119934Au) { static uint32_t _fb=0; ++_fb;
-      uint32_t _idx=0; { uint8_t* q=GP(0x816CC700u); if(q) std::memcpy(&_idx,q,4); }
-      uint32_t _a0=0; { uint8_t* q=GP(0x816CC6CCu + (_idx&7u)*4u); if(q) std::memcpy(&_a0,q,4); }
-      uint32_t _a1=0; { uint8_t* q=GP(0x816CC6D8u + (_idx&7u)*4u); if(q) std::memcpy(&_a1,q,4); }
-      uint32_t _pa=0; { uint8_t* q=GP(0x816CC6E4u + (_idx&7u)*4u); if(q) std::memcpy(&_pa,q,4); }
-      uint32_t _ca=0; { uint8_t* r2=GP(_pa+0xCu); if(r2) std::memcpy(&_ca,r2,4); }
-      uint32_t _n6f4=0; { uint8_t* q=GP(0x816CC6F4u); if(q) std::memcpy(&_n6f4,q,4); }
-      printf("[FRAMEBODY] n=%u idx=%u chAptr=%08X chAhead=%08X Bbase=%08X Dbase=%08X Dn=%u", _fb,_idx,_pa,_ca,_a0,_a1,_n6f4);
-      for (uint32_t _i=0;_i<(_n6f4<100u?_n6f4:100u);++_i) { uint32_t _h=0,_t=0;
-        { uint8_t* q=GP(_a1 + _i*0x20u + 0x14u); if(q) std::memcpy(&_h,q,4); }
-        { uint8_t* q=GP(_a1 + _i*0x20u + 0x18u); if(q) std::memcpy(&_t,q,4); }
-        if(_h||_t) printf(" D%u[h=%08X t=%08X]",_i,_h,_t); }
-      for (uint32_t _i=0;_i<3u;++_i) { uint32_t _h=0; { uint8_t* q=GP(_a0 + _i*0x20u + 0x14u); if(q) std::memcpy(&_h,q,4); }
-        if(_h) printf(" B%u[h=%08X]",_i,_h); }
-      printf(" hfblk=%u\n", (unsigned)g_hf_blocks); fflush(stdout); }
-    if ((pc & ~1u) == 0x811C041Cu) { static uint32_t _rn=0; ++_rn;
-      if (_rn<=24u || (_rn%2000u)==0u) { uint32_t _idx=0; { uint8_t* q=GP(0x816CC700u); if(q) std::memcpy(&_idx,q,4); }
-        printf("[REGIDX] n=%u type=%08X idx=%u node=%08X hfblk=%u\n", _rn, s->r[0], _idx, s->r[1], (unsigned)g_hf_blocks); fflush(stdout); } }
+    { uint32_t _p0 = pc & ~1u;
+      if (_p0 == 0x8119934Au || _p0 == 0x811F3494u) {
+        static uint32_t _fb=0,_aj=0; const char* _tag="FRAMEBODY"; uint32_t _n=0;
+        if (_p0==0x8119934Au) { _n=++_fb; } else { _n=++_aj; _tag="APPJOB"; }
+        uint32_t _idx=0; { uint8_t* q=GP(0x816CC700u); if(q) std::memcpy(&_idx,q,4); }
+        uint32_t _pa=0; { uint8_t* q=GP(0x816CC6E4u + (_idx&7u)*4u); if(q) std::memcpy(&_pa,q,4); }
+        uint32_t _ca=0; { uint8_t* r2=GP(_pa+0xCu); if(r2) std::memcpy(&_ca,r2,4); }
+        uint32_t _n6f4=0; { uint8_t* q=GP(0x816CC6F4u); if(q) std::memcpy(&_n6f4,q,4); }
+        int _cnt=0; char _list[256]={0}; int _ln=0;
+        for (uint32_t _i=0;_i<(_n6f4<100u?_n6f4:100u);++_i) { uint32_t _h=0,_h2=0;
+          { uint8_t* q=GP(0x816CC6D8u + (_idx&7u)*4u); uint32_t _b=0; if(q) std::memcpy(&_b,q,4);
+            { uint8_t* r2=GP(_b + _i*0x20u + 0xCu); if(r2) std::memcpy(&_h,r2,4); }
+            { uint8_t* r2=GP(_b + _i*0x20u + 0x14u); if(r2) std::memcpy(&_h2,r2,4); } }
+          if(_h||_h2){ ++_cnt; if(_ln<220) _ln += std::snprintf(_list+_ln,sizeof(_list)-_ln," D%u[A=%08X B=%08X]",_i,_h,_h2); } }
+        for (uint32_t _i=0;_i<3u;++_i) { uint32_t _b=0,_h=0; { uint8_t* q=GP(0x816CC6CCu + (_idx&7u)*4u); if(q) std::memcpy(&_b,q,4); }
+          { uint8_t* r2=GP(_b + _i*0x20u + 0x14u); if(r2) std::memcpy(&_h,r2,4); }
+          if(_h){ ++_cnt; if(_ln<220) _ln += std::snprintf(_list+_ln,sizeof(_list)-_ln," B%u[B=%08X]",_i,_h); } }
+        printf("[%s] n=%u idx=%u chAhead=%08X nonzero=%d%s hfblk=%u\n", _tag, _n, _idx, _ca, _cnt, _list, (unsigned)g_hf_blocks); fflush(stdout); } }
 
     { static uint64_t _qs=0; if (g_hf_blocks - _qs >= 3000000u) { _qs = g_hf_blocks;
         printf("[QSN] hfblk=%u", (unsigned)g_hf_blocks);
@@ -5592,6 +5604,31 @@ static uint32_t mb_destroy_guard(RecState* s, uint32_t entry, const char* tag) {
 }
 static uint32_t mb_811E6330(RecState* s) { return mb_destroy_guard(s, 0x811E6330u, "qDestroy"); }
 static uint32_t mb_811E63CE(RecState* s) { return mb_destroy_guard(s, 0x811E63CEu, "qDestroyAll"); }
+// NODEEXEC_LEVER: walk this frame's D-list A-heads and invoke node callbacks (original code)
+static uint32_t g_ne_n=0, g_ne_frames=0;
+static void node_exec_frame(RecState* s) {
+  static int _en=-1; if (_en<0) { const char* e=getenv("P5D_NODEEXEC"); _en=(e&&atoi(e))?1:0; }
+  if (!_en) return;
+  uint32_t _idx=0; { uint8_t* q=GP(0x816CC700u); if(q) std::memcpy(&_idx,q,4); }
+  uint32_t _base=0; { uint8_t* q=GP(0x816CC6D8u + (_idx&7u)*4u); if(q) std::memcpy(&_base,q,4); }
+  if (!_base) return;
+  ++g_ne_frames; int _n=0;
+  for (uint32_t _ty=0;_ty<100u;++_ty) {
+    uint32_t _cell=_base+_ty*0x20u;
+    uint32_t _head=0; { uint8_t* q=GP(_cell+0xCu); if(q) std::memcpy(&_head,q,4); }
+    if (!_head) continue;
+    uint32_t _node=_head; int _guard=0;
+    while (_node && _guard++ < 4096) {
+      uint32_t _next=0,_cb=0,_arg=0;
+      { uint8_t* q=GP(_node+0x14u); if(q) std::memcpy(&_next,q,4); }
+      { uint8_t* q=GP(_node+0xCu); if(q) std::memcpy(&_cb,q,4); }
+      { uint8_t* q=GP(_node+0x1Cu); if(q) std::memcpy(&_arg,q,4); }
+      if (_cb) { (void)call_guest_cb2(s, _cb & ~1u, _arg, 0u, 200000); ++_n; }
+      _node=_next; }
+    { uint8_t* q=GP(_cell+0xCu); if(q) { uint32_t _z=0; std::memcpy(q,&_z,4);} }
+    { uint8_t* q=GP(_cell+0x10u); if(q) { uint32_t _z=0; std::memcpy(q,&_z,4);} } }
+  g_ne_n += (uint32_t)_n;
+  static int _lf=0; if (_lf++<24 || (_lf%5)==0) { printf("[NODEEXEC_LEVER] frame=%u idx=%u nodes=%d total=%u hfblk=%u\n", g_ne_frames, _idx, _n, g_ne_n, (unsigned)g_hf_blocks); fflush(stdout); } }
 static uint32_t mb_811E649A(RecState* s) {
   static int _en = -1; if (_en < 0) { const char* e = getenv("P5D_SYNCTASK"); _en = (e && atoi(e)) ? 1 : 0; }
   uint32_t desc = s->r[1], fn = 0, arg = 0;
@@ -5601,8 +5638,8 @@ static uint32_t mb_811E649A(RecState* s) {
   if (_en && fn != 0u) {
     static int _n = 0;
     if (_n++ < 24) { printf("[SYNCTASK] #%d fn=%08X arg=%08X desc=%08X r0=%08X\n", _n-1, fn, arg, desc, s->r[0]); fflush(stdout); }
-    { uint64_t _b0 = g_hf_blocks; uint32_t _rc = call_guest_cb2(s, fn & ~1u, desc + 4u, 0u, 4000000); uint64_t _b1 = g_hf_blocks;
-      static int _se=0; if (_se++ < 30) { printf("[SYNCEND] fn=%08X rc=%08X blocks=%llu hfblk=%u\n", fn, _rc, (unsigned long long)(_b1-_b0), (unsigned)g_hf_blocks); fflush(stdout); } }
+    (void)call_guest_cb2(s, fn & ~1u, desc + 4u, 0u, 4000000);
+    if (s->r[0] == 2u) node_exec_frame(s);  // NODEEXEC_LEVER: after frame app job
   }
   return nx;
 }
@@ -5685,6 +5722,9 @@ static uint32_t call_guest_cb(RecState* s, uint32_t entry, uint32_t arg, int max
       uint32_t _pa=s->r[0]; char _nm[64]={0}; uint8_t* _p=GP(_pa); if(_p){ for(int _k=0;_k<60;++_k){ char _c=(char)_p[_k]; _nm[_k]=(_c>=32&&_c<127)?_c:0x2E; if(!_c) break; } }
       printf("[REGCB] pc=%08X name=%s r0=%08X r1=%08X r2=%08X r3=%08X lr=%08X sp=%08X fib=%08X thr=%08X\n", pc, _nm, s->r[0], s->r[1], s->r[2], s->r[3], s->r[14], s->r[13], g_cur_fiber, g_cur_thr); fflush(stdout); }
     uint32_t q = pc & ~1u;
+    { if (q==0x811EBAC0u||q==0x811EBAB4u||q==0x811EBB28u||q==0x811EFDEEu) { static uint32_t _nc[4]={0};
+        int _ni = (q==0x811EBAC0u)?0:((q==0x811EBAB4u)?1:((q==0x811EBB28u)?2:3));
+        ++_nc[_ni]; if (_nc[_ni]<=4u || (_nc[_ni]%100u)==0u) { printf("[NESTEDCB] q=%08X n=%u r0=%08X r1=%08X\n", q, _nc[_ni], s->r[0], s->r[1]); fflush(stdout);} } }
     if (q == 0x811E5EC2u) ++g_cb5ec2; else if (q == 0x811E5EC6u) ++g_cb5ec6; else if (q == 0x811E5EF0u) ++g_cb5ef0;
     if (q >= 0xFFFFFF00u || pc == 0u) break;
     BlockFn fn = gbn(pc);
