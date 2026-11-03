@@ -361,7 +361,7 @@ static uint32_t g_fiber_arg = 0;
 
 struct FCtx { uint32_t r[16]; uint32_t apsr; };
 static std::map<uint32_t, FCtx> g_fctx;
-struct HThread { uint32_t entry, arg, stack; FCtx ctx; int alive, ready, waiting; uint32_t wait_obj, wait_bits, wait_mode; RecState gctx; std::thread* hth; int exit_flag; uint32_t hle_ring[16]; uint32_t hle_n; };
+struct HThread { uint32_t entry, arg, stack; FCtx ctx; int alive, ready, waiting; uint32_t wait_obj, wait_bits, wait_mode; RecState gctx; std::thread* hth; int exit_flag; uint32_t hle_ring[16]; uint32_t hle_n; uint32_t pc_ring[32]; uint32_t pc_n; };
 static std::map<uint32_t, HThread> g_thr;
 static uint32_t g_cur_thr = 0;
 extern "C" uint32_t harness_cur_thr(void) { return g_cur_thr; }
@@ -2151,6 +2151,12 @@ static void rwatch_check(uint32_t pcv) {
   if (v2 != g_watch2_val) { printf("[RWATCH] pc=%08X old=%08X new=%08X reader=%08X fib=%08X thr=%08X blk=%u\n", pcv, g_watch2_val, v2, g_cri_reader, tl_hf?tl_hf->addr:0u, tl_ht_tid, (unsigned)g_blkcnt_total); fflush(stdout); g_watch2_val = v2; }
 }
 static void rwatch_arm(uint32_t pcv, RecState* s) {
+  if ((pcv & ~1u) == 0x8128E9BCu) {   // CRI reader status getter: r0 = real reader object
+    uint32_t rd = s->r[0]; uint32_t st = 0;
+    { uint8_t* q = GP(rd + 0xBCu); if (q) std::memcpy(&st, q, 4); }
+    if (rd) { static int _cg=0; if (_cg++ < 40) { printf("[CRIGET] reader=%08X status=%08X call_from_lr=%08X fib=%08X thr=%08X blk=%u\n", rd, st, s->r[14], tl_hf?tl_hf->addr:0u, tl_ht_tid, (unsigned)g_blkcnt_total); fflush(stdout); }
+              if (rd != g_cri_reader || (g_watch2 != rd + 0xBCu)) { g_cri_reader = rd; g_watch2 = rd + 0xBCu; g_watch2_val = st; } }
+  }
   if ((pcv & ~1u) != 0x81293BC4u) return;
   uint32_t work = s->r[0];
   uint32_t reader = 0; { uint8_t* q = GP(work + 4u); if (q) std::memcpy(&reader, q, 4); }
@@ -5523,6 +5529,7 @@ static void guest_thread_run(uint32_t tid) {
     if (!fn) { int _bk=0; uint32_t _bq=gbn_back(pc,&_bk); if (_bq && _bk<=16) { pc=_bq; fn=gbn(pc); } }
     if (!fn) { if (g_ht_bad_n++ < 20) { printf("[HT-NOBLK] tid=%08X pc=%08X\n", tid, pc); fflush(stdout); } break; }
     g_cur_block = pc;
+    t->pc_ring[(t->pc_n++) & 31u] = pc;
     rwatch_check(pc);
     if (pc == 0x81160712u) { gfd_atomic_probe(pc, s); pc = s->r[14]; continue; }
     semaw_probe(pc, s);
@@ -5842,6 +5849,7 @@ extern "C" void wr16_watch(uint32_t a, uint32_t v) {
       if (g_w16_n++ < 240) { printf("[W16] a=%08X off=%02X v=%04X blk=%08X fib=%08X thr=%08X\n", a, a - g_watch_task, v, g_cur_block, g_cur_fiber, g_cur_thr); fflush(stdout); } } }
 }
 extern "C" void wr32_watch(uint32_t a, uint32_t v) {
+  if (g_cri_reader && a >= g_cri_reader && a < g_cri_reader + 0x120u) { static int _rs=0; if (_rs++ < 120) { printf("[READERSTAT] a=%08X off=%03X v=%08X blk=%08X fib=%08X thr=%08X lr=%08X sp=%08X\n", a, a-g_cri_reader, v, g_cur_block, g_cur_fiber, g_cur_thr, g_cur_hle_ret_lr, g_snap_r[13]); fflush(stdout); } }
   { if (a >= 0x848FC368u && a < 0x848FC4A0u) { static int _pw2=0; if (_pw2++ < 300) { printf("[PROGWR] a=%08X off=%03X v=%08X blk=%u fib=%08X pc=%08X\n", a, a-0x848FC368u, v, g_blkcnt_total, g_cur_fiber, g_cur_block); fflush(stdout); } } }
   { if (a >= 0x848FC368u && a < 0x848FC3B0u) { static int _prw=0; if (_prw++ < 300) { printf("[READERWR] a=%08X off=%03X v=%08X blk=%u fib=%08X pc=%08X\n", a, a-0x848FC368u, v, g_blkcnt_total, g_cur_fiber, g_cur_block); fflush(stdout); } } }
   { if (g_scwatch && a >= g_scwatch && a < g_scwatch + 0x50u) { static int _scw=0; if (_scw++ < 240) { std::fprintf(stderr,"[SCW] a=%08X off=%02X v=%08X blk=%08X fib=%08X thr=%08X\n", a, a-g_scwatch, v, g_cur_block, g_cur_fiber, g_cur_thr); std::fflush(stderr); } } }
@@ -6158,7 +6166,8 @@ int main(int argc, char** argv) {
          { std::lock_guard<std::mutex> _lg(g_hf_lk); for (auto& _kv : g_hf) { HFiber* _f=_kv.second; printf("[HFHLE] addr=%08X n=%u:", _f->addr, _f->hle_n); for (int _i=0;_i<12;++_i) printf(" %08X", _f->hle_ring[(_f->hle_n - 12u + (uint32_t)_i) & 15u]); printf("\n"); } }
          printf("[HFBLOCKS] %u\n", (unsigned)g_hf_blocks);
          { static int _td=0; if (_td++ < 60) { for (auto& _kv : g_thr) { HThread& _th=_kv.second; printf("[THRDBG] tid=%08X entry=%08X alive=%d ready=%d wait=%d obj=%08X bits=%08X mode=%X pc=%08X sp=%08X r0=%08X blk=%08X\n", _kv.first, _th.entry, _th.alive, _th.ready, _th.waiting, _th.wait_obj, _th.wait_bits, _th.wait_mode, _th.gctx.r[15], _th.gctx.r[13], _th.gctx.r[0], _th.gctx.r[0]);
-             { printf("[THRHLE] tid=%08X n=%u:", _kv.first, _th.hle_n); for (int _i=0;_i<10;++_i) printf(" %08X", _th.hle_ring[(_th.hle_n - 10u + (uint32_t)_i) & 15u]); printf("\n"); } } } }
+             { printf("[THRHLE] tid=%08X n=%u:", _kv.first, _th.hle_n); for (int _i=0;_i<10;++_i) printf(" %08X", _th.hle_ring[(_th.hle_n - 10u + (uint32_t)_i) & 15u]); printf("\n"); }
+             if (_kv.first == 0x4001A000u || _kv.first == 0x4001B000u || _kv.first == 0x4001C000u || _kv.first == 0x4001D000u || _kv.first == 0x40020000u) { printf("[TPCRING] tid=%08X n=%u:", _kv.first, _th.pc_n); for (int _i=0;_i<24;++_i) printf(" %08X", _th.pc_ring[(_th.pc_n - 24u + (uint32_t)_i) & 31u]); printf("\n"); } } } }
         for (auto& kv : g_fctx) { printf("[WDCTX] fib=%08X pc=%08X sp=%08X r0=%08X r5=%08X\n", kv.first, kv.second.r[15], kv.second.r[13], kv.second.r[0], kv.second.r[5]); }
 
          if (g_blkcnt_total > 65000000u) { static int _ts=0; if (_ts++ < 40) {
