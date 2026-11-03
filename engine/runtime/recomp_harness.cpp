@@ -2187,6 +2187,15 @@ static void rwatch_arm(uint32_t pcv, RecState* s) {
 
 
 static int g_nogfdassert = -1;
+static int g_noabort = -1;
+static int no_abort(uint32_t pcv, RecState* s) {
+  if (g_noabort < 0) { const char* e = getenv("P5D_NOABORT"); g_noabort = (e && atoi(e)) ? 1 : 0; }
+  if (!g_noabort) return 0;
+  if ((pcv & ~1u) != 0x8115F9CAu) return 0;
+  static int _n = 0; if (_n++ < 20) { printf("[NOABORT] skip fatal abort fn at pc=%08X lr=%08X fib=%08X blk=%u\n", pcv, s->r[14], tl_hf?tl_hf->addr:0u, (unsigned)g_blkcnt_total); fflush(stdout); }
+  s->r[0] = 0u;
+  return 1;
+}
 static int no_gfd_assert(uint32_t pcv, RecState* s) {
   if (g_nogfdassert < 0) { const char* e = getenv("P5D_NOGFDASSERT"); g_nogfdassert = (e && atoi(e)) ? 1 : 0; }
   if (!g_nogfdassert) return 0;
@@ -2222,6 +2231,7 @@ static void hf_fiber_thread(HFiber* f) {
     if (pc == 0x811E5FB8u) { static int _jsb=0; if (_jsb++<40) { printf("[JOBSB] fib=%08X thr=%08X r0=%08X r1=%08X lr=%08X blk=%u\n", tl_hf?tl_hf->addr:0u, tl_ht_tid, s->r[0], s->r[1], s->r[14], (unsigned)g_hf_blocks); fflush(stdout); } }
     hf_assert_probe(pc, s);
     if (no_gfd_assert(pc, s)) { pc = s->r[14]; continue; }
+    if (no_abort(pc, s)) { pc = s->r[14]; continue; }
     uint32_t nx = fn(s);
     if (nx == 0u || nx == 0xFFFFFFF0u || nx == 0xFFFFFFFEu || nx == 0xFFFFFFFDu) break;
     pc = nx;
@@ -5646,6 +5656,7 @@ static void guest_thread_run(uint32_t tid) {
         printf("[DJOB] param=%08X q=%08X q0=%08X q4=%08X q8=%08X qc=%08X q2c=%08X q10=%08X q18=%08X jobArg18=%08X thr=%08X lr=%08X\n", _p,_q,_q0,_q4b,_q8,_qc,_sc,_q4,_nx,_q2,tl_ht_tid,s->r[14]); fflush(stdout); } }
     hf_assert_probe(pc, s);
     if (no_gfd_assert(pc, s)) { pc = s->r[14]; continue; }
+    if (no_abort(pc, s)) { pc = s->r[14]; continue; }
     uint32_t nx = fn(s);
     if (nx == 0u || nx == 0xFFFFFFF0u || nx == 0xFFFFFFFEu || nx == 0xFFFFFFFDu) break;
     pc = nx;   // 18.4240: follow the block's returned next-pc (not s->r[15]) - this was the host-thread loop bug

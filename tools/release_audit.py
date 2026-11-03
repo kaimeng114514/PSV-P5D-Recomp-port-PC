@@ -114,3 +114,14 @@ def main(argv):
 
 if __name__ == "__main__":
     sys.exit(main(sys.argv[1:]))
+
+# --- UTF-8 / mojibake guard (added M1181) ---
+import subprocess as _sp, sys as _sys
+try:
+    _r = _sp.run([_sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'check_text_encoding.py'), os.getcwd()], capture_output=True, text=True)
+    print(_r.stdout.strip() or _r.stderr.strip())
+    if _r.returncode != 0:
+        _sys.exit(1)
+except Exception as _e:
+    print('[ENCODING] guard error:', _e)
+    _sys.exit(1)

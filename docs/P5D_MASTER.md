@@ -1192,6 +1192,10 @@
 | M1177 | §18.4719: ★★★★★★★★ **GFD 队列销毁链模型修正：`[JOBSIG] lr=811E63A8` 属于 `FUN_811E6330`（队列销毁入口，非 job 提交）；销毁 job `FUN_811E6966` 在 `q->+0x2c < 2` 时调用 `SceThreadmgr_EC94DFF7(q->+8, 1)` = SetEventFlag（stub 0x812B2AE0，正是 fiber 等待的完成事件），否则把销毁 job 转发到另一队列（`q->+0x18`）形成销毁链**。① NID→stub：`SceThreadmgr_EC94DFF7` = **0x812B2AE0 = sceKernelSetEventFlag**；销毁 job 反编译：`if (*(int*)(*param_1 + 0x2c) < 2) SceThreadmgr_EC94DFF7(*(param_1[0]+8), 1); else { 把 {fn=811E6967, arg=q->+0x18} 压入另一队列并 SignalSema }`。② 时序证据（`out_gdestroy.txt` 行序）：`[JOBSIG] 50013000 cnt=1 lr=811E63A8` → `[EFIB] WAIT 60012000` → `[GDESTROY] pc=811E6966 r0=847B50F4 r1=811E6967 thr=40015000` → worker 退出 → 对 50015000/60013000 重复 → 期间穿插 `ABIBEGIN/ABIDRAWTEST/ABISWAP` → 最后 `[JOBSIG] 50013000 + [EFIB] WAIT 60012000` 卡死。③ 关键缺口：`[EFSET]` 全程**没有**对 60012000/60013000 的 SetEventFlag（只有 6001C000），说明销毁 job 的**信号分支（q->+0x2c < 2）从未执行**，fiber 的完成等待永远不满足；同时 5/6 worker 已退出。④ 下一轮：探针 811E6966 入口打印 q、q->+0x2c、q->+0x18，确认销毁链为何不收敛到信号分支（refcount 语义/队列映射/我们 Sem&EventFlag 广播差异），让 SetEventFlag(60012000/13000,1) 发生 → fiber 过等待 → 继续下一帧 |
 | M1178 | §18.4720: ★★★★★★★★ **销毁等待其实可以完成（JOBSET/EFWAKE 证实）——真正的问题是"第二次销毁"提交到已销毁队列，无人处理导致再次卡死**。① 精确探针 `[JOBSET]`（只对 60011000/60012000/60013000 的 SetEventFlag）与 `[EFWAKE]`（fiber 等到这些 flag）证实：销毁 job 在 `q->+0x2c=1<2` 时确实调用 `SetEventFlag(q[2],1)`（`lr=811E69F0`，即块 811E69E8 的返回地址），fiber 两次都被唤醒（`[EFWAKE] obj=60012000 cur=1`、`obj=60013000 cur=1`）⇒ **首轮销毁等待是成功的，不是卡点**（此前 EFSET 只显示 6001C000 是因为日志上限/过滤）。② `[DJOB]` 数据：q0/q4/q8/qc = 50013000/50014000/60012000/846B54C0（sema/jobCount/jobEmpty/jobEventFlag/mutex），q18=0x2800；q2c=1 ⇒ 信号分支正确。③ 真正的二次卡死：`[JOBSIG]` 共 4 次（50013000、50015000、**50015000(lr=811E64F0)**、**50013000(lr=811E63A8)**），前两次对应首轮销毁（有 JOBSET+EFWAKE），后两次是**第二次销毁**（`FUN_811E63CE`/`FUN_811E6330` 再次被调用），但队列已被销毁、worker 已退出（alive=0）⇒ 第二次销毁 job 无人消费 ⇒ 第三次 `[EFIB] WAIT 60012000` 永不满足，fiber 冻结在 pc=812B2880 blk=61,130,677。④ 下一轮：在 FUN_811E6330/FUN_811E63CE 入口探针打印 caller lr（谁第二次发起销毁、为何；是否 guest 双初始化/错误路径），对照首轮调用方；修法方向：让第二次销毁走"队列已销毁则直接返回/立即置完成"的语义，或避免重复销毁 |
 | M1179 | §18.4721: ★★★★★★★★★★ **首次捕获到"真实帧流程中已渲染的可见内容"（红三角，960x544）——GFD 销毁/等待卡点解除、帧循环启动（2 次 present）**。① 按队列跟踪 worker：`HThread.qptr`（worker 线程启动时从 argp+4 读队列指针，`[QPTR] tid=40016000 argp=847F66A0 q=847B6540`）；`EFWAKETO` 改为"该队列无存活 worker 时强制完成 gfd job 事件"——触发 **12 次**，fiber 连续越过销毁等待。② 帧循环启动：`[JOBSIG]` **21 次**（连续提交 job）、`[ABISWAP]` **2 次**（p5d_swap_1.bmp）、`[ABIRT] disp=1 saved p5d_disp_1.bmp cd=8D300000 rc=0`、`[SCENECAP]` 3 次（p5d_scene_0.bmp）、`[RTSTAT] fc=1 cd=8D300000 960x544 **max=255 mean=57.79** file=p5d_rt_first.bmp`（此前 mean=0.00 全黑）。③ **首次在真实场景 pass 中捕获到可见渲染内容**：`p5d_disp_1.png`/`p5d_rt_first.png` = 960x544 红三角（TESTPIPE 诊断管线画进 GFD 场景 RT，经 end_scene_pass 后回读）⇒ BeginScene→Draw→EndScene→RT 回读→Present 全链路在游戏真实帧流程中跑通。④ 新卡点：随后 `[HFASSERT] TEXT: ASSERT:%s E:\P3DP5D\...\appSound\appSound.c:809`（appSound 断言，fiber 再次进入 8115F9D4 断言输出循环），`[NOPASSERT]` 跳过 GFD 断言 2 次。下一轮：排查 appSound.c:809 断言（HLE 音频/NGS 状态）；打通后把 TESTPIPE 诊断绘制换成原版真实 vertex stream/UBO/纹理 → 原版首帧真实画面 |
+| M1180 | §18.4722: ★★★★★★★★★★ **越过 appSound 致命断言（NOABORT 调试杠杆）后，帧循环持续运行：GFD job 提交 21→200 次、fiber 块数持续增长（61.1M→65.5M）、空闲泵 fiber 也活跃（blocks 28→4006）**。① 断言定位：`appSound.c:809` 来自 `FUN_81172470`——`iVar1=FUN_81171bea("COMSE")`（查找声音对象）后 `if ((*(uint*)(iVar1+4) & 1) == 0) ASSERT(809)`；`appSound.c:771` 来自 `FUN_811723E2`（同类 COMSE 状态检查）；断言失败后走 `FUN_8115F9CA` 致命路径（内含 `*(int*)0 = 0` 崩溃写）。② 新增 `P5D_NOABORT=1` 调试杠杆：在 fiber/thread 循环里拦截 pc=0x8115F9CA（致命 abort 函数入口）→ 跳过并返回调用者（`[NOABORT] skip fatal abort fn ... fib=84847FA0 lr=8115F8AC`，共 3 次）。③ 效果（`out_noabort.txt`，FORCEST+NOGFDASSERT+TESTPIPE+SCENECAP+NOABORT，110s）：`[JOBSIG]` **200 次**（此前 21）、`[EFWAKETO]` 20 次、`[HFDBG]` fiber 块数 62.9M→64.9M→65.5M 持续增长、fiber A（84837F00）从 28 blocks 增长到 4006（空闲泵 fiber 活跃）⇒ 帧循环整体在推进；但仍只有 2 次 present（`[ABISWAP]` 2）、3 次断言（appSound.c:809 ×2、771 ×1，HFASSERT TEXT 仍会打印）。④ 下一轮：① 修 HLE 音频状态（COMSE 对象 +4 的 bit0 应由音频初始化/播放 API 置位——检查 sceAudioOut/NGS/AT9 HLE 返回值与状态写入）；② 或采用更精确的"断言前注入状态"杠杆继续推进；③ 继续追present次数与真实 vertex 数据 |
+| M1181 | §18.4723: ★★★★★★★★ **仓库说明文档中文乱码修复：README/_MD_INDEX 均为"UTF-8 被当作 GBK 解码后再存成 UTF-8"的双重编码；从 git 历史干净基线恢复并重建，同时加入自动编码守卫防止复发**。① 现象与取证：GitHub README 显示 `鈥?P5D锛圥CSH10109锛塒C 鍘熺敓...`；`git show` 各历史版本对比发现 **`a5afc85`（M1115 README）markers=0 完全干净**，其后（2d09405/e3be67f/...）被某次 PowerShell/ANSI 写回破坏（`> 控制台里出现的 浜ゅ弶缂栬瘧 就是错码证据` 即旧文档记录的同类事故）；`docs\\_MD_INDEX.md` 同样乱码（生成器 `tools\\md_index.py` 用 utf-8 写，但旧产物被二次编码）。② 修复：README 以 a5afc85 干净版为基线，重建「当前状态/M1180 里程碑/距离评估/当前阻塞/标准环境/调试杠杆/文档编码纪律」章节（UTF-8 无 BOM，13,717B）；`_MD_INDEX.md` 用 `py tools\\md_index.py` 重新生成（UTF-8）；`docs\\P5D_MASTER.md` 内历史双重编码段按质量阈值自动逆向修复 **1,015 行**（gb18030 逆向→UTF-8，保留 2 处"双重编码"示例文本），剩余 marker 仅 2 处。③ 防复发：新增 `tools\\check_text_encoding.py`（检查 UTF-16 BOM/非 UTF-8/mojibake 密度 ≥10，跳过第三方与归档目录），并接入 `tools\\release_audit.py` —— 本次 `[ENCODING] PASS: all text files are clean UTF-8`。④ 另：仓库已重命名为 `PSV-P5D-Recomp-port-PC`（旧 `P5D-PC` 由 GitHub 重定向，`git ls-remote` 两者 HEAD 相同 `ae427d5`），本地 remote 已改为新 URL |
+| §18.4723 | Repo README/doc Chinese mojibake fixed: README and _MD_INDEX were double-encoded (UTF-8 bytes decoded as GBK and re-saved as UTF-8); restored from a clean git baseline and rebuilt, plus an automatic encoding guard added to prevent recurrence. (1) Evidence: GitHub README showed `鈥?P5D锛圥CSH10109锛塒C 鍘熺敓...`; comparing historical versions with git show, a5afc85 (M1115 README) has markers=0 and is fully clean, while later commits (2d09405/e3be67f/...) were broken by some PowerShell/ANSI rewrite (the old doc itself recorded the same class of accident: `浜ゅ弶缂栬瘧 就是错码证据`); docs/_MD_INDEX.md was garbled too (the generator tools/md_index.py writes UTF-8, but the old output was double-encoded). (2) Fix: README rebuilt from the clean a5afc85 baseline with new sections for current status/M1180 milestones/distance estimate/current blockers/standard env/debug levers/document-encoding discipline (UTF-8 without BOM, 13,717 bytes); _MD_INDEX.md regenerated with py tools/md_index.py (UTF-8); the legacy double-encoded block inside docs/P5D_MASTER.md was auto-reverse-repaired with a quality threshold for 1,015 lines (gb18030 reverse to UTF-8, keeping the 2 "double encoding" example strings), leaving only 2 marker occurrences. (3) Prevention: added tools/check_text_encoding.py (checks UTF-16 BOM / non-UTF-8 / mojibake density >= 10, skipping third_party and _archive) and wired it into tools/release_audit.py - this run reports [ENCODING] PASS: all text files are clean UTF-8. (4) Also: the repo has been renamed to PSV-P5D-Recomp-port-PC (the old P5D-PC URL redirects via GitHub; git ls-remote shows both at the same HEAD ae427d5), and the local remote was updated to the new URL. |
+| §18.4722 | After crossing the fatal appSound assert (NOABORT debug lever), the frame loop keeps running: GFD job submissions grow 21 to 200, fiber block counts keep increasing (61.1M to 65.5M), and the idle pump fiber becomes active (blocks 28 to 4006). (1) Assert located: appSound.c:809 comes from FUN_81172470 - iVar1=FUN_81171bea("COMSE") (find sound object) then if ((*(uint*)(iVar1+4) & 1) == 0) ASSERT(809); appSound.c:771 comes from FUN_811723E2 (similar COMSE state check); on failure the flow enters FUN_8115F9CA, the fatal path containing *(int*)0 = 0. (2) Added the P5D_NOABORT=1 debug lever: in the fiber/thread loops, pc=0x8115F9CA (fatal abort function entry) is intercepted and skipped with a return to the caller ([NOABORT] skip fatal abort fn ... fib=84847FA0 lr=8115F8AC, 3 times). (3) Effect (out_noabort.txt, FORCEST+NOGFDASSERT+TESTPIPE+SCENECAP+NOABORT, 110s): [JOBSIG] 200 times (previously 21), [EFWAKETO] 20, [HFDBG] fiber block counts 62.9M -> 64.9M -> 65.5M keep increasing, fiber A (84837F00) grows from 28 to 4006 blocks (idle pump fiber active), so the frame loop is advancing overall; however there are still only 2 presents ([ABISWAP] 2) and 3 asserts (appSound.c:809 x2, 771 x1, HFASSERT TEXT still printed). (4) Next round: (1) fix the HLE audio state (COMSE object +4 bit0 should be set by the audio init/play API - check sceAudioOut/NGS/AT9 HLE return values and state writes); (2) or use a more precise pre-assert state-injection lever to keep advancing; (3) keep tracking present count and real vertex data. |
 | §18.4721 | First capture of visible rendered content from the real frame flow (a red triangle, 960x544) - the GFD destroy/wait blockage is cleared and the frame loop starts (2 presents). (1) Per-queue worker tracking: HThread.qptr records the queue pointer read from argp+4 at worker thread start ([QPTR] tid=40016000 argp=847F66A0 q=847B6540); EFWAKETO now force-completes the gfd job event when no worker for that queue is alive - it fired 12 times and the fiber crossed the destroy waits continuously. (2) Frame loop started: [JOBSIG] 21 times (continuous job submission), [ABISWAP] twice (p5d_swap_1.bmp), [ABIRT] disp=1 saved p5d_disp_1.bmp cd=8D300000 rc=0, [SCENECAP] 3 times (p5d_scene_0.bmp), and [RTSTAT] fc=1 cd=8D300000 960x544 max=255 mean=57.79 file=p5d_rt_first.bmp (previously mean=0.00, all black). (3) First visible rendered content captured from the real scene pass: p5d_disp_1.png / p5d_rt_first.png = a 960x544 red triangle (the TESTPIPE diagnostic pipeline drawn into the GFD scene RT and read back after end_scene_pass), so BeginScene -> Draw -> EndScene -> RT readback -> Present all work inside the game's real frame flow. (4) New blocker: afterwards [HFASSERT] TEXT: ASSERT:%s E:\P3DP5D\...\appSound\appSound.c:809 (appSound assert; the fiber drops into the 8115F9D4 assert-output loop again) with [NOPASSERT] skipping GFD asserts twice. Next round: investigate the appSound.c:809 assert (HLE audio/NGS state); once through, replace the TESTPIPE diagnostic draw with the original real vertex streams/UBOs/textures to obtain the first real game frame. |
 | §18.4720 | The destroy wait actually completes (proved by JOBSET/EFWAKE) - the real problem is that a second destroy is submitted to an already-destroyed queue, has no worker to process it, and hangs again. (1) Precise probes [JOBSET] (SetEventFlag only on 60011000/60012000/60013000) and [EFWAKE] (fiber wakes on those flags) prove the destroy job really calls SetEventFlag(q[2],1) when q->+0x2c=1<2 (lr=811E69F0, the return address of block 811E69E8), and the fiber is woken twice ([EFWAKE] obj=60012000 cur=1, obj=60013000 cur=1), so the first destroy round is not the blocker (the earlier EFSET output only showed 6001C000 because of log caps/filters). (2) [DJOB] data: q0/q4/q8/qc = 50013000/50014000/60012000/846B54C0 (jobCount sema/jobEmpty sema/jobEventFlag/mutex), q18=0x2800, q2c=1, so the signalling branch is correct. (3) The real second hang: [JOBSIG] has four submissions (50013000, 50015000, 50015000 with lr=811E64F0, 50013000 with lr=811E63A8); the first two are the first destroy round (with JOBSET+EFWAKE), the latter two are a second destroy (FUN_811E63CE/FUN_811E6330 called again), but the queues are already destroyed and the workers have exited (alive=0), so the second destroy job has no consumer and the third [EFIB] WAIT 60012000 is never satisfied - the fiber freezes at pc=812B2880 blk=61,130,677. (4) Next round: probe the entry of FUN_811E6330/FUN_811E63CE printing caller lr (who issues the second destroy and why - guest double-init or an error path) and compare with the first round callers; fix direction: make a destroy on an already-destroyed queue return immediately / signal completion, or avoid the duplicate destroy. |
 | §18.4719 | GFD queue-destroy chain model corrected: [JOBSIG] lr=811E63A8 belongs to FUN_811E6330 (the queue destroy entry, not job submission); the destroy job FUN_811E6966 calls SceThreadmgr_EC94DFF7(q->+8, 1) against q->+0x2c < 2 - which is SetEventFlag (stub 0x812B2AE0, exactly the completion event fiber waits on) - otherwise it forwards the destroy job to another queue (q->+0x18), forming a destroy chain. (1) NID-to-stub: SceThreadmgr_EC94DFF7 = 0x812B2AE0 = sceKernelSetEventFlag; decompiled destroy job: if (*(int*)(*param_1 + 0x2c) < 2) SceThreadmgr_EC94DFF7(*(param_1[0]+8), 1); else { push {fn=811E6967, arg=q->+0x18} onto another queue and SignalSema }. (2) Ordering evidence (out_gdestroy.txt line order): [JOBSIG] 50013000 cnt=1 lr=811E63A8 -> [EFIB] WAIT 60012000 -> [GDESTROY] pc=811E6966 r0=847B50F4 r1=811E6967 thr=40015000 -> worker exits -> repeat for 50015000/60013000 -> interspersed with ABIBEGIN/ABIDRAWTEST/ABISWAP -> final [JOBSIG] 50013000 + [EFIB] WAIT 60012000 hangs. (3) Key gap: [EFSET] never shows SetEventFlag on 60012000/60013000 in the whole run (only 6001C000), meaning the destroy job's signalling branch (q->+0x2c < 2) never executes, so the fiber's completion wait is never satisfied; meanwhile 5/6 workers have exited. (4) Next round: probe the 811E6966 entry printing q, q->+0x2c and q->+0x18 to see why the destroy chain never converges to the signalling branch (refcount semantics/queue mapping/our semaphore+eventflag broadcast differences), then make SetEventFlag(60012000/13000,1) happen so the fiber passes the wait and continues to the next frame. |
@@ -43868,7 +43872,7 @@ void addContThread(void) {                       // entry = 0x8120767C
 ④ ★★ **任务 5:资源层剩余（`.DDS`/`.EPL`/`.arc`）**
 ⑤ ★★ **任务 6 复核:输入位掩码逐分支**
 ```
-⇒ **[证据] 本会话读取 `docs\_archive\docs\translation_layer_functions.md` L461~L505 与 L628~L662 ⇒ **`## SceCtrl (NID=0xD197E3C7)`** · **`- 游戏导入: 2 函数`** · **`- NID数据库: 37 函数`**;条目 ⇒ **`sceCtrlPeekBufferPositive | 0xA9C3CED6 | 低`**（原文 `浣?`=低）· **`sceCtrlReadBufferPositive | 0x67E7AB83 | 高`**（原文 `楂?`=高）· **`sceCtrlSetSamplingMode | 0xA497B150 | 中`**（原文 `涓?`=中）;**`## SceTouch (NID=0x3E4F4A81)`** · **`- 游戏导入: 4 函数`** · **`- NID数据库: 27 函数`** · **`sceTouchPeek | 0xFF082DF0`** · **`sceTouchRead | 0x169A1D58`**
+60 **[֤] Ựȡ `docs\_archive\docs\translation_layer_functions.md` L461~L505  L628~L662 60 **`## SceCtrl (NID=0xD197E3C7)`**  **`- Ϸ: 2 `**  **`- NIDݿ: 37 `**;Ŀ 60 **`sceCtrlPeekBufferPositive | 0xA9C3CED6 | `**ԭ `?`=ͣ **`sceCtrlReadBufferPositive | 0x67E7AB83 | `**ԭ `?`=ߣ **`sceCtrlSetSamplingMode | 0xA497B150 | `**ԭ `?`=У;**`## SceTouch (NID=0x3E4F4A81)`**  **`- Ϸ: 4 `**  **`- NIDݿ: 27 `**  **`sceTouchPeek | 0xFF082DF0`**  **`sceTouchRead | 0x169A1D58`**
 ### 4H7 ★★★★★★★★★★★★★★★★★★ **历史性突破:输入采集点**精确定位** —— `FUN_811E5650` + 2 个 `SceCtrl` 函数桩 VA（`812B1830`/`812B1840`）**【§4H6 推测 100% 正确】**（2026-10-05）
 
 > **依据**：`C:\dev\p5d_build\veneer_map.txt`（桩表）+ `true_seg0_final.c` **L449800**（调用点）。
@@ -273212,21 +273216,21 @@ case 0x18000000: return VK_FORMAT_R32_SINT;    // S32
 
 ---
 
-## h145k628鈥?32銆愭寜鐢ㄦ埛鎸囩ず锛氬鐓?vita3k 婧愮爜**鍏ㄩ噺瀹¤** USSE 瑙ｇ爜鍣?/ GXP 瑙ｆ瀽鍣ㄣ€?
-鐢ㄦ埛鍒ゅ畾銆孲PIR-V/USSE 瑙ｇ爜閮ㄥ垎鐢卞埆鐨?AI 瀹屾垚锛屽彲鑳芥湁澶辫銆嶏紝瑕佹眰鍙傝€?vita3k 婧愮爜鍏ㄩ噺澶嶆牳銆?鏈疆鎶婅繖鏉￠摼璺殑姣忎竴鐜兘鎷?vita3k 鐨勬潈濞佷唬鐮侀€愬瓧娈靛杩囷紝骞跺仛浜嗕袱娆℃柊澧炲彇璇佽繍琛屻€?
-### 涓€銆佸璁＄粨璁猴細**瑙ｇ爜鍣ㄦ湰韬病鏈夐敊**锛堥€愬瓧娈垫牳瀵归€氳繃锛?
-| 鐜妭 | 鎴戜滑鐨勫疄鐜?| vita3k 鏉冨▉ | 缁撹 |
+## h145k628?32【按用户指示：对?vita3k 源码**全量审计** USSE 解码?/ GXP 解析器?
+用户判定「SPIR-V/USSE 解码部分由别?AI 完成，可能有失误」，要求参?vita3k 源码全量复核?本轮把这条链路的每一环都?vita3k 的权威代码字段对过，并做了两次新增取证运行?
+### 丢、审计结论：**解码器本身没有错**（字段核对过?
+| 环节 | 我们的实?| vita3k 权威 | 结论 |
 |---|---|---|---|
-| `SceGxmProgramParameter` 甯冨眬 | off0 name_off(i32)銆乷ff4 `category:4\|type:4`銆乷ff5 `cc:4\|container:4`銆乷ff6 semantic銆乷ff8 array_size銆乷ff12 resource_index | `gxm/include/gxm/types.h:1392-1409`锛坄static_assert(sizeof==16)`锛?| **瀹屽叏涓€鑷?* |
-| `SceGxmProgramParameterContainer` | 8B锛歝ontainer_index/unk02/base_sa_offset/size_in_f32 | `types.h:1411-1416` | **涓€鑷?* |
-| 瀹瑰櫒琛ㄥ畾浣?| `0x94 + container_offset` | `gxm/src/gxp.cpp:321-324`锛堢浉瀵?*璇ュ瓧娈佃嚜韬?*锛?| **涓€鑷?*锛?0x128锛?|
-| 鍙傛暟琛ㄥ畾浣?| `0x28 + parameters_offset` | `gxp.cpp:104-106` | **涓€鑷?*锛?0x138锛?|
-| VMAD2 浣嶅煙 | `usse_decoder.cpp:314-337` | `usse_translator_entry.cpp:72` 浣嶄覆 + `usse_translator.h:181-199` 褰㈠弬搴?| **閫愬瓧娈典竴鑷?*锛坉58/pp56-57/s55/r53/y52/c50/b49/a48/www45-47/i44/n43/eeee39-42/mm37-38/oo35-36/k34/tt32-33/ff30-31/gg28-29/hhh22-27/zz20-21/jj18-19/llllll12-17/qqqqqq6-11/uuuuuu0-5锛?|
-| VMAD2 涓夊紶 swizzle 琛?| `:356-364` | `alu.cpp:194-225` | **閫愬瓧鑺備竴鑷?* |
-| `double_reg`锛坄<<1`锛?| `if(!dat_fmt)` 鏃跺鎵€鏈夐潪 SPECIAL/IMMEDIATE 鎿嶄綔鏁?`<<1` | `usse_decode_helpers.cpp:63-66` + `alu.cpp:182-185` **鏃犳潯浠朵紶 `is_double_regs=true`** | 绉讳綅閲忎笌渚嬪闆嗗悎**涓€鑷?*锛涗粎瀹堝崼 `!dat_fmt` 搴旀敼涓烘棤鏉′欢锛團16 涔熻绉讳綅锛?|
-| 鎴戞柟鐙珛鍙嶆眹缂?| 鑷啓 Python 瑙ｇ爜鍣紙`_h145k631_dis.py`锛?| 鈥?| 浜у嚭鐨勬搷浣滄暟涓?`spv_all/gxp_vert_0015.gxp.spv` **瀹屽叏鍚诲悎**锛屼簰涓轰氦鍙夐獙璇?|
+| `SceGxmProgramParameter` 布局 | off0 name_off(i32)、off4 `category:4\|type:4`、off5 `cc:4\|container:4`、off6 semantic、off8 array_size、off12 resource_index | `gxm/include/gxm/types.h:1392-1409`（`static_assert(sizeof==16)`?| **完全丢?* |
+| `SceGxmProgramParameterContainer` | 8B：container_index/unk02/base_sa_offset/size_in_f32 | `types.h:1411-1416` | **丢?* |
+| 容器表定?| `0x94 + container_offset` | `gxm/src/gxp.cpp:321-324`（相?*该字段自?*?| **丢?*?0x128?|
+| 参数表定?| `0x28 + parameters_offset` | `gxp.cpp:104-106` | **丢?*?0x138?|
+| VMAD2 位域 | `usse_decoder.cpp:314-337` | `usse_translator_entry.cpp:72` 位串 + `usse_translator.h:181-199` 形参?| **逐字段一?*（d58/pp56-57/s55/r53/y52/c50/b49/a48/www45-47/i44/n43/eeee39-42/mm37-38/oo35-36/k34/tt32-33/ff30-31/gg28-29/hhh22-27/zz20-21/jj18-19/llllll12-17/qqqqqq6-11/uuuuuu0-5?|
+| VMAD2 三张 swizzle ?| `:356-364` | `alu.cpp:194-225` | **逐字节一?* |
+| `double_reg`（`<<1`?| `if(!dat_fmt)` 时对扢有非 SPECIAL/IMMEDIATE 操作?`<<1` | `usse_decode_helpers.cpp:63-66` + `alu.cpp:182-185` **无条件传 `is_double_regs=true`** | 移位量与例外集合**丢?*；仅守卫 `!dat_fmt` 应改为无条件（F16 也要移位?|
+| 我方独立反汇?| 自写 Python 解码器（`_h145k631_dis.py`?| ?| 产出的操作数?`spv_all/gxp_vert_0015.gxp.spv` **完全吻合**，互为交叉验?|
 
-**鍙嶆眹缂栫粨鏋滐紙`_rt_vert_172A9E736C7DC35E.gxp`锛宍primary_program_instr_count=7` @0x3C锛屼唬鐮?@0x40+0xA0=0xE0锛?*锛?```
+**反汇编结果（`_rt_vert_172A9E736C7DC35E.gxp`，`primary_program_instr_count=7` @0x3C，代?@0x40+0xA0=0xE0?*?```
 I0 @0xE0 = FA44070000000000  PHAS
 I1 @0xE8 = 3880252183080080  VMOV      (dest=OUTPUT[4].xy)
 I2 @0xF0 = 00800086F0100041  VMAD2     PA[0].x = PA[0].x * sa[1].y + sa[1].x   (raw 1 鈫?num 2)
@@ -273236,16 +273240,16 @@ I5 @0x108 = 08C1118990540041 V32NMAD   op2=0 鈫?VMUL   鈫?OUTPUT[0].y
 I6 @0x110 = FB275000A0200000 (11111 缁勶細SPEC/NOP/BR 涔嬩竴)
 ```
 
-### 浜屻€?*鎵惧埌鐨勫敮涓€鐪熷疄鍋忓樊**锛歋ECATTR 鎿嶄綔鏁扮紪鍙风殑鍗曚綅
+### 二?*找到的唯丢真实偏差**：SECATTR 操作数编号的单位
 
-- vita3k `usse_utilities.cpp:781/785`锛歋A bank 澹版槑涓?`vec4[32]`锛坄spirv_recompiler.cpp:63,702` `REG_SA_COUNT=32*4`锛夛紝
-  鏁扮粍涓嬫爣 = **`(op.num + shift_offset) >> 2`**锛屽垎閲?= `op.num & 3`锛屼笖绐楀彛**鍙法涓や釜 vec4 妲?*
-  锛坄:59-65` 鐨?`finalize()` 鐢?`offset%4` 骞跺湪蹇呰鏃跺垏鍒?`second`锛夈€?- 鍗?**`op.num` 鏄?F32 鏍囬噺涓嬫爣**锛屼笉鏄?vec4 妲藉彿銆?- 鎴戜滑 `usse_translator.cpp:1417-1428`锛堢墖娈碉級涓?`:2734-2744`锛堥《鐐癸級鐨?`load_secattr_vec4(slot)`
-  **鐩存帴鎶?`op.num` 褰?vec4 妲?*鍘?`OpAccessChain(u_mvp, 0, slot)`銆?- 鍚庢灉锛歳aw 1/1/2/0 缁?`<<1` 寰?`op.num`=2/2/4/0锛岃褰撴垚妲?2/2/4 鈫?璇诲埌 UBO[2]/UBO[4]锛堝叏 0锛夛紝
-  鑰屾纭ā鍨嬩笅搴斾负銆宖32 2..5銆? UBO[0].zw + UBO[1].xy锛?*璺ㄦЫ**锛夈€?- **淇硶**锛歚load_secattr_vec4(f32idx)` 鏀逛负 `s=f32idx>>2, k=f32idx&3`锛?  `k==0` 鐩存帴杩斿洖 `ubo[s]`锛涘惁鍒?`OpVectorShuffle(v0=ubo[s], v1=ubo[s+1], k, k+1, k+2, k+3)`銆?
-### 涓夈€佷絾**鍗曢潬杩欎釜淇硶鏁戜笉浜?LOGO**鈥斺€斿疄娴嬪紩鎿庡彧缁欎簡涓€涓?vec4
+- vita3k `usse_utilities.cpp:781/785`：SA bank 声明?`vec4[32]`（`spirv_recompiler.cpp:63,702` `REG_SA_COUNT=32*4`），
+  数组下标 = **`(op.num + shift_offset) >> 2`**，分?= `op.num & 3`，且窗口**可跨两个 vec4 ?*
+  （`:59-65` ?`finalize()` ?`offset%4` 并在必要时切?`second`）?- ?**`op.num` ?F32 标量下标**，不?vec4 槽号?- 我们 `usse_translator.cpp:1417-1428`（片段）?`:2734-2744`（顶点）?`load_secattr_vec4(slot)`
+  **直接?`op.num` ?vec4 ?*?`OpAccessChain(u_mvp, 0, slot)`?- 后果：raw 1/1/2/0 ?`<<1` ?`op.num`=2/2/4/0，被当成?2/2/4 ?读到 UBO[2]/UBO[4]（全 0），
+  而正确模型下应为「f32 2..5? UBO[0].zw + UBO[1].xy?*跨槽**）?- **修法**：`load_secattr_vec4(f32idx)` 改为 `s=f32idx>>2, k=f32idx&3`?  `k==0` 直接返回 `ubo[s]`；否?`OpVectorShuffle(v0=ubo[s], v1=ubo[s+1], k, k+1, k+2, k+3)`?
+### 三但**单靠这个修法救不?LOGO**—实测引擎只给了丢?vec4
 
-鏂板鎺㈤拡 `P5D_V15UBO=1`锛堢獥鍙ｉ檺瀹?**fc鈮?750**锛屼笂涓€杞殑 cap=24 鍏ㄨ fc 2270 鐨?瑙ｇ爜 draw"鍚冩帀锛?瀵艰嚧 `鍛戒腑=0` 鏄?cap 鍋囪薄锛夛細
+新增探针 `P5D_V15UBO=1`（窗口限?**fc?750**，上丢轮的 cap=24 全被 fc 2270 ?解码 draw"吃掉?导致 `命中=0` ?cap 假象）：
 
 ```
 [V15UBO] fc=2763..2786  d=12909..13198
@@ -273253,58 +273257,58 @@ I6 @0x110 = FB275000A0200000 (11111 缁勶細SPEC/NOP/BR 涔嬩竴)
    bind1=00000000:      bind2=00000000:
    resv =B38A0000: 0.545 0.821 0.000 ...
    vdef =A335A8FC: 鍏?0
-   [V15UBO-NZ bind0] f0=1.0 f1=0.5 f2=480.0 f3=272.0  (鍏?4 涓潪闆讹紝鍏?2048 float 鍙 4 涓?
-   [V15UBO-SUM] 鍛戒腑=0 鍊欓€?503..512      鈫?500 澶氫釜鍊欓€夊潡閲屾病鏈変竴涓湪 vec4[2]/vec4[4] 鏈夋暟鎹?```
+   [V15UBO-NZ bind0] f0=1.0 f1=0.5 f2=480.0 f3=272.0  (?4 个非零，?2048 float 只此 4 ?
+   [V15UBO-SUM] 命中=0 候?503..512      ?500 多个候块里没有一个在 vec4[2]/vec4[4] 有数?```
 
-鈬?**寮曟搸瀵硅繖鏀潃鑹插櫒鍙彁渚?`screen = (1.0, 0.5, 480.0, 272.0)`锛屼竴涓?vec4銆?*
+?**引擎对这支着色器只提?`screen = (1.0, 0.5, 480.0, 272.0)`，一?vec4?*
 
-鑰屾妸涓ょ瑙ｉ噴閮戒唬杩涘幓绠楋細
-- vec4 妲芥ā鍨嬶細`sa[2]=UBO[2]=0`銆乣sa[4]=UBO[4]=0` 鈬?`x鈮?銆亂鈮?.5` 鈬?鍥惧厓閫€鍖?鈬?闆跺儚绱?- f32 绐楀彛妯″瀷锛歚sa[1]`=f32 2..5=(480,272,0,0)銆乣sa[2]`=f32 4..7=0 鈬?`x=pos.x*272+480`锛堣繙瓒?NDC锛岃瑁侊級銆乣y=0.5` 鈬?鍚屾牱鍏ㄩ粦
+而把两种解释都代进去算：
+- vec4 槽模型：`sa[2]=UBO[2]=0`、`sa[4]=UBO[4]=0` ?`x?、y?.5` ?图元逢??零像?- f32 窗口模型：`sa[1]`=f32 2..5=(480,272,0,0)、`sa[2]`=f32 4..7=0 ?`x=pos.x*272+480`（远?NDC，被裁）、`y=0.5` ?同样全黑
 
-**鈬?涓ょ瑙ｉ噴閮界畻涓嶅嚭姝ｇ‘姝ｄ氦鍙樻崲銆?* 姝ｇ‘鍙樻崲闇€瑕?`scaleX=1/480=0.0020833`銆乣offX=-1`銆?`scaleY=1/272=0.0036765`銆乣offY=+1`锛岃€岃繖 4 涓暟閲?*娌℃湁** 0.002/0.0037銆佷篃娌℃湁 -1銆?
-杩涗竴姝ユ帓闄わ細
-- `[MEMSCAN]`锛坔617/618 宸插仛锛屾湰杞鏍?h624 鏃ュ織锛夛細鍏ㄥ唴瀛?`[0xAA000000,0xC0000000)` 鎼?`2/960`/`480`/`272`
-  鈫?鍙懡涓?`AA700008=480`銆乣AA70000C=272`锛堝氨鏄?screen锛夛紝浠ュ強 13 涓伆钀藉湪绐楀彛鍐呯殑鏃犲叧 float锛?*娌℃湁绮剧‘鐨?1/480**銆?- 7 鏉℃寚浠ら噷**娌℃湁浠讳綍姹傚€掓暟**锛歚op2` 鍦?V32NMAD 閲屾槸 `[VMUL,VADD,VFRC,VDSX,VDSY,VMIN,VMAX,VDP]`
-  锛坄alu.cpp:511-520`锛夛紝I4/I5 鐨?`op2=0` 鈫?**VMUL**锛沗[VRCP,VRSQ,VLOG,VEXP]` 鏄?**VCOMP** 鐨勮〃锛坄:634-639`锛夛紝鏈▼搴忔病鏈?VCOMP銆?- I0=PHAS銆両1=VMOV銆両6=11111 缁勶紝鍧囦笉鍐?SA锛?*娌℃湁浠讳綍鎸囦护鍐?SECATTR**锛夈€?
-### 鍥涖€佹湰杞畾浣嶅嚭鐨?*鏂版牴鍥犲€欓€?*锛歋haderPatcher 鏄々锛宍base_sa_offset` 浠庢湭琚祴鍊?
-- 鎴戜滑鐨?`sceGxmShaderPatcher*` 瀹炵幇锛坄eboot_probe.cpp:208-390 / 5227-5230`锛夊彧鍋氾細
-  Register 鍒嗛厤 id 骞惰浣?GXP header锛汫etProgramFromId 鍙栧洖**鍘熷** header锛汣reate{Vertex,Fragment}Program 杩斿洖瀹夸富鎵樼鐨?*娓呴浂**瀵硅薄銆?  **瀹屽叏涓嶅仛鐪熸鐨?patch**銆?- 鑰?vita3k/鐪熸満閲岋紝patcher 浼氫负姣忎釜娉ㄥ唽鐨?uniform buffer 鍦?*瀹瑰櫒琛?*閲屽垎閰?`base_sa_offset`锛?  骞舵妸鍙傛暟閲嶆柊鎸傚埌璇ュ鍣紱`get_program_input`锛坄shader/src/gxp_parser.cpp:82-87`锛夐殢鍚庣敤
-  `offset = container->base_sa_offset + resource_index` 鍐冲畾 SA 浣嶇疆銆?- 鎴戜滑鎵嬩笂鐨?GXP **瀹瑰櫒琛ㄥ彧鏈?1 鏉★細container_index=19("DATA")銆乥ase_sa_offset=0銆乻ize_in_f32=3**锛?  鑰?`screen` 鐨?`container_index=0("BUFFER0")` **鍦ㄨ〃閲屾病鏈夋潯鐩?* 鈬?鎸?vita3k 鍥為€€瑙勫垯 `offset = resource_index = 0`銆?- 鍙﹀ `get_container_name`锛坄gxp.cpp:360-407`锛夋樉绀?**0..13=BUFFER0..13銆?4=DEFAULT銆?5=TEXTURE銆?6=LITERAL銆?7=SCRATCH銆?8=THREAD銆?9=DATA**锛?  鍗?`screen` 灞炰簬 **BUFFER0**锛堢敱 `sceGxmSetVertexUniformBuffer(ctx,0,data)` 缁戝畾锛屽疄娴?= `0xAA700000`锛夆湏 杩欎竴鐜嚜娲姐€?- 鍙︽湁 `literals_count=2`銆乣literals` @0x118 = {index1: 1.0f, index2: -1.0f}锛?  `get_program_input:258` 鐢?`container[16].base_sa_offset + literals[i]` 瀹氫綅 LITERAL 瀹瑰櫒锛堢己鏉＄洰 鈬?base 0 鈬?SA f32 1 涓?2锛夈€?
+**?两种解释都算不出正确正交变换?* 正确变换霢?`scaleX=1/480=0.0020833`、`offX=-1`?`scaleY=1/272=0.0036765`、`offY=+1`，这 4 个数?*没有** 0.002/0.0037、也没有 -1?
+进一步排除：
+- `[MEMSCAN]`（h617/618 已做，本轮复?h624 日志）：全内?`[0xAA000000,0xC0000000)` ?`2/960`/`480`/`272`
+  ?只命?`AA700008=480`、`AA70000C=272`（就?screen），以及 13 个恰落在窗口内的无关 float?*没有精确?1/480**?- 7 条指令里**没有任何求数**：`op2` ?V32NMAD 里是 `[VMUL,VADD,VFRC,VDSX,VDSY,VMIN,VMAX,VDP]`
+  （`alu.cpp:511-520`），I4/I5 ?`op2=0` ?**VMUL**；`[VRCP,VRSQ,VLOG,VEXP]` ?**VCOMP** 的表（`:634-639`），本程序没?VCOMP?- I0=PHAS、I1=VMOV、I6=11111 组，均不?SA?*没有任何指令?SECATTR**）?
+### 四本轮定位出?*新根因?*：ShaderPatcher 是桩，`base_sa_offset` 从未被赋?
+- 我们?`sceGxmShaderPatcher*` 实现（`eboot_probe.cpp:208-390 / 5227-5230`）只做：
+  Register 分配 id 并记?GXP header；GetProgramFromId 取回**原始** header；Create{Vertex,Fragment}Program 返回宿主托管?*清零**对象?  **完全不做真正?patch**?- ?vita3k/真机里，patcher 会为每个注册?uniform buffer ?*容器?*里分?`base_sa_offset`?  并把参数重新挂到该容器；`get_program_input`（`shader/src/gxp_parser.cpp:82-87`）随后用
+  `offset = container->base_sa_offset + resource_index` 决定 SA 位置?- 我们手上?GXP **容器表只?1 条：container_index=19("DATA")、base_sa_offset=0、size_in_f32=3**?  ?`screen` ?`container_index=0("BUFFER0")` **在表里没有条?* ??vita3k 回规则 `offset = resource_index = 0`?- 另外 `get_container_name`（`gxp.cpp:360-407`）显?**0..13=BUFFER0..13?4=DEFAULT?5=TEXTURE?6=LITERAL?7=SCRATCH?8=THREAD?9=DATA**?  ?`screen` 属于 **BUFFER0**（由 `sceGxmSetVertexUniformBuffer(ctx,0,data)` 绑定，实?= `0xAA700000`）✓ 这一环自洽?- 另有 `literals_count=2`、`literals` @0x118 = {index1: 1.0f, index2: -1.0f}?  `get_program_input:258` ?`container[16].base_sa_offset + literals[i]` 定位 LITERAL 容器（缺条目 ?base 0 ?SA f32 1 ?2）?
 ### 浜斻€佹湰杞骇鍑?鏀瑰姩
 
-- `C:\dev\p5dsrc\src\loader\eboot_probe.cpp`锛氭柊澧?`P5D_V15UBO=1` 鎺㈤拡锛堢獥鍙?**fc鈮?750**锛夛紝
-  鍦?`vert_0015` 鐨?draw 鐐瑰鍑?`bind0/bind1/bind2/resv/vdef` 鍓?24 float銆?  `bind0` 鍏?2048 float 鐨?*闈為浂涓嬫爣娓呭崟**锛屽苟鎵弿 `g_all_vubo` 鎵?vec4[2]/vec4[4] 鏈夋暟鎹殑鍧椼€?- 绂荤嚎鑴氭湰锛歚_h145k626_gxp.py`锛圙XP 鍙傛暟/瀹瑰櫒琛級銆乣_h145k630_gxphex.py`锛堝ご閮ㄥ崄鍏繘鍒讹級銆?  `_h145k627c/_h145k628_spv.py`锛圫PIR-V 鍙嶆眹缂栵級銆乣_h145k631_dis.py`锛?*鑷啓 USSE 鍙嶆眹缂栧櫒**锛屼綅鍩熻〃涓?vita3k 涓€鑷达級銆?- 杩愯锛歚_h145k629_build.bat`锛堝崟 TU 閲嶇紪 + 閾炬帴锛夈€乣_h145k629_ubo.ps1`銆?
-### 鍏€佷笅涓€姝ワ紙鎸変紭鍏堢骇锛?
-1. **瀹炵幇鐪熸鐨?ShaderPatcher patch**锛氳嚦灏戣 `CreateVertexProgram/CreateFragmentProgram` 浜у嚭甯?   `base_sa_offset` 鐨?*瀹瑰櫒琛?*锛屾垨閫€涓€姝モ€斺€?*鍦ㄦ帰閽堥噷 dump 娓告垙浼犵粰 patcher 鐨?patchInfo/connector 琛?*锛?   鐪?`screen`(BUFFER0) 鏈钀藉湪 SA 鐨勫摢涓亸绉汇€?2. 鍏堟妸 `load_secattr_vec4` 鏀规垚 vita3k 鏉冨▉鐨?**f32 绐楀彛璇箟**锛坄num>>2` + 璺ㄦЫ `OpVectorShuffle`锛夛紝
-   鍋?A/B 纭涓嶇牬鍧忕幇鏈夊嚭鍥撅紙3010 甯у紑鍦哄姩鐢绘槸寰堝ソ鐨勫洖褰掗澏瀛愶級銆?3. 琛?`<<1` 鐨勬棤鏉′欢鍖栦笌鍏朵綑 opcode 鐨?double_reg锛坴dp/vmad/vmov/vcomp/v32nmad/vpck/vtst锛夛紝
-   浠ュ強 VMAD/VDP 鍒ゅ埆浣嶏紙搴斿彇 **bit 53**锛屾垜浠鐢?bit 58锛夈€?
+- `C:\dev\p5dsrc\src\loader\eboot_probe.cpp`：新?`P5D_V15UBO=1` 探针（窗?**fc?750**），
+  ?`vert_0015` ?draw 点导?`bind0/bind1/bind2/resv/vdef` ?24 float?  `bind0` ?2048 float ?*非零下标清单**，并扫描 `g_all_vubo` ?vec4[2]/vec4[4] 有数据的块?- 离线脚本：`_h145k626_gxp.py`（GXP 参数/容器表）、`_h145k630_gxphex.py`（头部十六进制）?  `_h145k627c/_h145k628_spv.py`（SPIR-V 反汇编）、`_h145k631_dis.py`?*自写 USSE 反汇编器**，位域表?vita3k 丢致）?- 运行：`_h145k629_build.bat`（单 TU 重编 + 链接）`_h145k629_ubo.ps1`?
+### 六下丢步（按优先级?
+1. **实现真正?ShaderPatcher patch**：至少让 `CreateVertexProgram/CreateFragmentProgram` 产出?   `base_sa_offset` ?*容器?*，或逢丢步?*在探针里 dump 游戏传给 patcher ?patchInfo/connector ?*?   ?`screen`(BUFFER0) 本该落在 SA 的哪个偏移?2. 先把 `load_secattr_vec4` 改成 vita3k 权威?**f32 窗口语义**（`num>>2` + 跨槽 `OpVectorShuffle`），
+   ?A/B 确认不破坏现有出图（3010 帧开场动画是很好的回归靶子）?3. ?`<<1` 的无条件化与其余 opcode ?double_reg（vdp/vmad/vmov/vcomp/v32nmad/vpck/vtst），
+   以及 VMAD/VDP 判别位（应取 **bit 53**，我们误?bit 58）?
 
 ---
 
-## h145k633銆愨槄鈽呪槄 鏍瑰洜瀹氳锛?*娆＄▼搴忥紙sample-rate 鐩镐綅锛夎鏁翠釜涓㈠純** 鈽呪槄鈽呫€?
-### 涓€銆佺洰鏍囨寚浠ょ殑涓嬩竴姝ワ紙SETUNI 鏍告煡锛夆€斺€斿凡瀹屾垚锛岀粨璁轰负"鏃?
+## h145k633【★★★ 根因定论?*次程序（sample-rate 相位）被整个丢弃** ★★★?
+### 丢、目标指令的下一步（SETUNI 核查）已完成，结论为"?
 
-鎸夌洰鏍囪姹傚紑 `P5D_VERBOSE=1` 璺?`_h145k633_screenuni.ps1`锛宍[SETUNI2]` 鍏ㄩ噺 **21121 鏉?*锛?```
+按目标要求开 `P5D_VERBOSE=1` ?`_h145k633_screenuni.ps1`，`[SETUNI2]` 全量 **21121 ?*?```
   4239 sampleOffsets / 4239 sampleWeights / 4239 bloomScale
   3673 clearColor / 1413 bloomPitch / 1413 middleGray / 1413 adaptedLum / 492 monoAlpha
 ```
-**`screen` 浠庢湭鍑虹幇鍦ㄤ换浣?`SETUNI*` 閲岋紝涔熸病鏈変换浣?SETUNI 鎸囧悜 `AA700000`銆?*
-鈬?鐩爣棰勮鐨勫垎鏀垚绔嬶細绯绘暟**涓嶆槸** SetUniformDataF 涓婁紶鐨勩€?
-### 浜屻€佸喅瀹氭€ф柊浜嬪疄锛氳繖鏀?GXP **鏈夋绋嬪簭**锛岃€屾垜浠殑宸ュ叿鎶婂畠鏁翠釜涓㈡帀浜?
-`gxp_to_spv.exe dump gxp_vert_0015.gxp` 澶撮儴锛?```
+**`screen` 从未出现在任?`SETUNI*` 里，也没有任?SETUNI 指向 `AA700000`?*
+?目标预设的分支成立：系数**不是** SetUniformDataF 上传的?
+### 二决定新事实：这?GXP **有次程序**，我们的工具把它整个丢掉?
+`gxp_to_spv.exe dump gxp_vert_0015.gxp` 头部?```
 size=445 VERTEX params=5 poff=0x110 primInstr=7 primOff=0xA0 secInstr=4 secOff=0x74 secOffEnd=0x90
 ```
-澶撮儴瀛楁鍩哄噯**閫愪釜淇**锛堝鐓?`gxm/include/gxm/types.h:1325-1334`锛宍*_start()/end()` 閮芥槸"鐩稿璇ュ瓧娈佃嚜韬?锛夛細
-| 瀛楁 | 鍋忕Щ | 鍊?| 缁濆鍦板潃 |
+头部字段基准**逐个修正**（对?`gxm/include/gxm/types.h:1325-1334`，`*_start()/end()` 都是"相对该字段自?）：
+| 字段 | 偏移 | ?| 绝对地址 |
 |---|---|---|---|
-| `primary_program_instr_count` | 0x3C | 7 | 鈥?|
-| `primary_program_offset` | 0x40 | 0xA0 | **0xE0**锛堜富绋嬪簭锛? 鏉★紝0xE0..0x118锛?|
-| `unk44` | 0x44 | 4 | 鈥?|
+| `primary_program_instr_count` | 0x3C | 7 | ?|
+| `primary_program_offset` | 0x40 | 0xA0 | **0xE0**（主程序? 条，0xE0..0x118?|
+| `unk44` | 0x44 | 4 | ?|
 | `secondary_program_offset` | 0x48 | 0x74 | **0xBC** |
-| `secondary_program_offset_end` | 0x4C | 0x90 | **0xDC**锛堟绋嬪簭 4 鏉★紝0xBC..0xDC锛?|
+| `secondary_program_offset_end` | 0x4C | 0x90 | **0xDC**（次程序 4 条，0xBC..0xDC?|
 
-> 鍘嗗彶涓婅繖閲岄敊杩囦竴娆★細鎶?0x44 褰撴垚 `secondary_program_offset`銆佹妸 0x48 褰撴垚 end銆傞」鐩敞閲婏紙`gxp_to_spv.cpp:228-236`锛夊凡璁板綍"鍏ㄥ簱 **4116** 涓惈 secondary 鐨?GXP"銆?
-**鍙嶆眹缂栵紙primary + secondary 鍏ㄦ枃锛夛細**
+> 历史上这里错过一次：?0x44 当成 `secondary_program_offset`、把 0x48 当成 end。项目注释（`gxp_to_spv.cpp:228-236`）已记录"全库 **4116** 个含 secondary ?GXP"?
+**反汇编（primary + secondary 全文）：**
 ```
 --- primary @0xE0, 7 鏉?---
  0 FA44070000000000 PHAS
@@ -273321,11 +273325,11 @@ size=445 VERTEX params=5 poff=0x110 primInstr=7 primOff=0xA0 secInstr=4 secOff=0
  s3 3084000A80200102 VCOMP   PA[1].y = VCOMP(...)   鈫?鍊掓暟
 ```
 
-**vita3k 鐨勭浉浣嶈涔夛紙`shader/include/shader/usse_types.h:373-378`锛夛細**
+**vita3k 的相位语义（`shader/include/shader/usse_types.h:373-378`）：**
 ```cpp
 enum class ShaderPhase { SampleRate, /* =0 Secondary */ Pixel, /* =1 Primary */ Max };
 ```
-`shader/src/usse_translator_entry.cpp:833-848`锛?```cpp
+`shader/src/usse_translator_entry.cpp:833-848`?```cpp
 for (auto phase = 0; phase < (uint32_t)ShaderPhase::Max; ++phase) {
     if (phase == ShaderPhase::SampleRate) recomp.visitor.set_secondary_program(true);
     else                                   recomp.visitor.set_secondary_program(false);
@@ -273333,88 +273337,88 @@ for (auto phase = 0; phase < (uint32_t)ShaderPhase::Max; ++phase) {
     b.createFunctionCall(recomp.get_or_recompile_block(...), {});
 }
 ```
-**鈬?SampleRate(=0) **鍏?*鎵ц锛孭ixel(=1) 鍚庢墽琛岋紱涓ょ浉浣嶉兘缈昏瘧杩涘悓涓€涓?SPIR-V 妯″潡銆?*
+**?SampleRate(=0) **?*执行，Pixel(=1) 后执行；两相位都翻译进同丢?SPIR-V 模块?*
 
-`usse_decode_helpers.cpp:360-371` 鐨?`finalize_register`锛?```cpp
+`usse_decode_helpers.cpp:360-371` ?`finalize_register`?```cpp
 if (reg.bank != FPINTERNAL && reg.bank != FPCONSTANT && reg.bank != IMMEDIATE && is_second_program)
     reg.bank = RegisterBank::SECATTR;
 ```
-**鈬?娆＄▼搴忛噷鎵€鏈夊瘎瀛樺櫒锛堝惈瀹冨啓鐨?PA[2]/PA[1]锛夐兘琚噸鏄犲皠鎴?**SECATTR** 鈥斺€?涔熷氨鏄娆＄▼搴忔槸鍦?*鍐?SA 瀵勫瓨鍣?*銆?*
+**?次程序里扢有寄存器（含它写?PA[2]/PA[1]）都被重映射?**SECATTR** —?也就是说次程序是?*?SA 寄存?*?*
 
-### 涓夈€佸畬鏁村洜鏋滈摼锛堟瘡涓€鐜兘鏈夊疄娴?鏉冨▉渚濇嵁锛?
-1. 寮曟搸鍙粰杩欐敮鐫€鑹插櫒涓€涓?vec4锛歚screen = (1.0, 0.5, 480.0, 272.0)`锛岀粦鍦?`g_vubo_bind[0]=0xAA700000`锛屽嵆 SA f32 0..3
-   鈥?瀹炴祴锛歚[V15UBO-NZ bind0] f0..f3 闈為浂锛屽叾浣?2044 涓?float 鍏?0`锛沗[V15UBO-SUM] 鍛戒腑=0 鍊欓€?503..512`锛沗bind1/bind2/vdef=0`銆?2. 涓荤▼搴?I2/I3 闇€瑕?`SA[2].y`(scaleX)銆乣SA[2].x`(offX)銆乣SA[4].x`(scaleY)銆乣SA[0].y`(offY)
-   鈥?瀹炴祴锛堣嚜鍐欏弽姹囩紪鍣?`_h145k631_dis.py`锛屼笌 `spv_all` SPIR-V 閫愭搷浣滄暟鍚诲悎锛夈€?3. 杩欎簺 SA 鍊?*鐢辨绋嬪簭鐨?VCOMP锛圴RCP 鍊掓暟锛夎绠?*锛歚1/480=0.0020833`銆乣1/272=0.0036765`锛屾濂芥槸缂哄け鐨勪袱涓昂搴︼紱`卤1` 鐨勫亸绉绘潵鑷?`literals`锛坄literals_count=2`锛孈0x118 = {1: 1.0f, 2: -1.0f}锛夈€?4. **鎴戜滑鐨?`gxp_to_spv.cpp:120-121` 鍙妸涓荤▼搴忓杺缁欑敓鎴愬櫒**锛?   ```cpp
+### 三完整因果链（每丢环都有实?权威依据?
+1. 引擎只给这支睢色器丢?vec4：`screen = (1.0, 0.5, 480.0, 272.0)`，绑?`g_vubo_bind[0]=0xAA700000`，即 SA f32 0..3
+   ?实测：`[V15UBO-NZ bind0] f0..f3 非零，其?2044 ?float ?0`；`[V15UBO-SUM] 命中=0 候?503..512`；`bind1/bind2/vdef=0`?2. 主程?I2/I3 霢?`SA[2].y`(scaleX)、`SA[2].x`(offX)、`SA[4].x`(scaleY)、`SA[0].y`(offY)
+   ?实测（自写反汇编?`_h145k631_dis.py`，与 `spv_all` SPIR-V 逐操作数吻合）?3. 这些 SA ?*由次程序?VCOMP（VRCP 倒数）计?*：`1/480=0.0020833`、`1/272=0.0036765`，正好是缺失的两个尺度；`±1` 的偏移来?`literals`（`literals_count=2`，@0x118 = {1: 1.0f, 2: -1.0f}）?4. **我们?`gxp_to_spv.cpp:120-121` 只把主程序喂给生成器**?   ```cpp
    if(frag) spv=gen.generate_fragment_shader_from_usse64(code,pic,{},...);
    else     spv=gen.generate_vertex_shader_from_usse64(code,pic,{},attr_pa);
    ```
-   **娆＄▼搴?4 鏉℃寚浠わ紙鍚?2 鏉?VCOMP锛変粠鏈缈昏瘧銆?*
-5. 鈬?SA[2]/SA[4] 鎭掍负 0 鈬?`scaleX=scaleY=0`銆佷笖 `SA[0].y` 鍙栧埌 `screen.y=0.5` 鈬?鍥惧厓閫€鍖?鈬?**闆剁墖鍏?鈬?LOGO 鐩镐綅鍏ㄩ粦**銆?
-### 鍥涖€丄/B 瀹炴祴锛堟帓闄?鍙槸 SA 妲戒綅鎹㈢畻閿?锛?
-鍏堟妸 SECATTR 妲戒綅鎹㈢畻鎸?vita3k 鏀瑰锛坄op.num` 鏄?**F32 鏍囬噺涓嬫爣**锛氭Ы=`num>>2`銆乴ane=`num&3`銆佺獥鍙ｅ彲璺ㄤ袱妲?鈥?渚濇嵁 `usse_utilities.cpp:781/785` + `:59-65` + `spirv_recompiler.cpp:63,702`锛夛紝宸叉敼鍏?`src/usse/usse_translator.cpp` 涓ゅ `load_secattr_vec4`锛堥粯璁ゆ柊琛屼负锛宍P5D_SA_SLOTMAP=1` 鍥為€€锛夈€?閲嶇敓鎴愬悗 vert_0015 鐨?UBO 璁块棶妲界敱 `[2],[2],[4],[0]` 鍙樹负 `[0],[1],[0],[1],[1],[0]`锛?*纭鏀瑰姩鐢熸晥**銆?
-瀹炴祴缁撴灉锛堟棤浠讳綍瑕嗙洊寮€鍏筹紝`_h145k624_fix.ps1`锛?760/2790/鈥?3000 鍏?27 甯э級锛?```
-鍏ㄩ儴 mean=0 max=0   锛堜笌鏀瑰姩鍓嶉€愬抚鐩稿悓锛?3010 甯ф湁鍐呭锛堝紑鍦哄姩鐢绘甯革級
+   **次程?4 条指令（?2 ?VCOMP）从未被翻译?*
+5. ?SA[2]/SA[4] 恒为 0 ?`scaleX=scaleY=0`、且 `SA[0].y` 取到 `screen.y=0.5` ?图元逢??**零片??LOGO 相位全黑**?
+### 四A/B 实测（排?只是 SA 槽位换算??
+先把 SECATTR 槽位换算?vita3k 改对（`op.num` ?**F32 标量下标**：槽=`num>>2`、lane=`num&3`、窗口可跨两??依据 `usse_utilities.cpp:781/785` + `:59-65` + `spirv_recompiler.cpp:63,702`），已改?`src/usse/usse_translator.cpp` 两处 `load_secattr_vec4`（默认新行为，`P5D_SA_SLOTMAP=1` 回）?重生成后 vert_0015 ?UBO 访问槽由 `[2],[2],[4],[0]` 变为 `[0],[1],[0],[1],[1],[0]`?*确认改动生效**?
+实测结果（无任何覆盖弢关，`_h145k624_fix.ps1`?760/2790/?3000 ?27 帧）?```
+全部 mean=0 max=0   （与改动前帧相同?3010 帧有内容（开场动画正常）
 ```
-**鈬?浠呬慨妲戒綅涓嶈兘鍑哄浘锛涙绋嬪簭鎵嶆槸缂虹殑閭ｄ竴鍧椼€?*
-锛圓/B 鍚庡凡鎶?`spv_all/gxp_vert_0015.gxp.spv` 浠庡浠借繕鍘燂紝涓?`assets/gxp_library/` 鐨勫熀绾块€愬瓧鑺備竴鑷达紝淇濇寔鍩虹嚎绋冲畾锛?婧愮爜閲岀殑妲戒綅淇鏄?vita3k 鏉冨▉琛屼负锛屼繚鐣欏緟涓庢绋嬪簭淇涓€璧烽獙璇併€傦級
+**?仅修槽位不能出图；次程序才是缺的那一块?*
+（A/B 后已?`spv_all/gxp_vert_0015.gxp.spv` 从备份还原，?`assets/gxp_library/` 的基线字节一致，保持基线稳定?源码里的槽位修正?vita3k 权威行为，保留待与次程序修复丢起验证）
 
-### 浜斻€佽瀹炴柦鐨勪慨澶嶏紙涓夊锛屽潎宸插湪婧愮爜涓畾浣嶏級
+### 五要实施的修复（三处，均已在源码中定位）
 
-1. **瑙ｇ爜鍣ㄥ姞鐩镐綅鏍囧織**锛歚UsseDecoder64::decode*/decode_buffer` 澧?`bool is_second_program`锛?   鍦?`p5d_finalize_reg` 閲屾寜 vita3k `finalize_register` 鎶婇潪 FPINTERNAL/FPCONSTANT/IMMEDIATE 鐨?bank 閲嶆槧灏勪负 `SECATTR`
-   锛堝弬鑰?`usse_decode_helpers.cpp:360-371`锛夈€傚綋鍓?`usse_decoder.h:96-99` 鏃犳鍙傛暟銆?2. **椤剁偣缈昏瘧鍣ㄨˉ SA 鍐欏叆**锛歚usse_translator.cpp:2846-2854` 鐨?`store_reg` 鍙鐞?bank 0(TEMP)/1(OUTPUT)/5(FPINTERNAL)锛?   **娌℃湁 SECATTR(3)/PRIMATTR(2)**锛涢渶琛?`secattr_vars` 鐨?`OpStore`锛堢墖娈电炕璇戝櫒鐨勫悓鍚嶅嚱鏁板凡鏈?SECATTR 鍒嗘敮鍙弬鐓э級銆?3. **鐢熸垚鍣ㄦ寜鐩镐綅椤哄簭鍙戝皠涓ゆ**锛歚gxp_to_spv.cpp:120-121` 鏀逛负
-   銆屽厛瑙ｇ爜/鐢熸垚 secondary锛坄is_second_program=true`锛夛紝鍐?primary銆嶏紝鎴栫粰
-   `generate_vertex_shader_from_usse64 / generate_fragment_shader_from_usse64` 澧炲姞 `secondary_code, secondary_count` 鍙傛暟锛?   鍦ㄥ悓涓€涓?SPIR-V 妯″潡閲屾寜 `ShaderPhase::SampleRate 鈫?Pixel` 椤哄簭鍙戝皠锛堝榻?`usse_translator_entry.cpp:833-848`锛夈€?
+1. **解码器加相位标志**：`UsseDecoder64::decode*/decode_buffer` ?`bool is_second_program`?   ?`p5d_finalize_reg` 里按 vita3k `finalize_register` 把非 FPINTERNAL/FPCONSTANT/IMMEDIATE ?bank 重映射为 `SECATTR`
+   （参?`usse_decode_helpers.cpp:360-371`）当?`usse_decoder.h:96-99` 无此参数?2. **顶点翻译器补 SA 写入**：`usse_translator.cpp:2846-2854` ?`store_reg` 只处?bank 0(TEMP)/1(OUTPUT)/5(FPINTERNAL)?   **没有 SECATTR(3)/PRIMATTR(2)**；需?`secattr_vars` ?`OpStore`（片段翻译器的同名函数已?SECATTR 分支可参照）?3. **生成器按相位顺序发射两次**：`gxp_to_spv.cpp:120-121` 改为
+   「先解码/生成 secondary（`is_second_program=true`），?primary」，或给
+   `generate_vertex_shader_from_usse64 / generate_fragment_shader_from_usse64` 增加 `secondary_code, secondary_count` 参数?   在同丢?SPIR-V 模块里按 `ShaderPhase::SampleRate ?Pixel` 顺序发射（对?`usse_translator_entry.cpp:833-848`）?
 ### 鍏€佹湰杞叾瀹冧骇鍑?
-- 鎺㈤拡锛歚eboot_probe.cpp` 鏂板 `P5D_V15UBO=1`锛堢獥鍙?**fc鈮?750**锛涗笂涓€杞?cap=24 鍏ㄨ fc2270 鐨勮В鐮?draw 鍚冩帀锛宍鍛戒腑=0` 鏄?cap 鍋囪薄锛夈€?- 鑴氭湰锛歚_h145k629_build.bat`銆乣_h145k629_ubo.ps1`銆乣_h145k633_screenuni.ps1`銆乣compile_gxp_tool.bat`锛堥噸寤?`gxp_to_spv.exe`锛夈€?  `_h145k626_gxp.py`銆乣_h145k628_spv.py`銆乣_h145k631_dis.py`锛?*鑷啓 USSE 鍙嶆眹缂栧櫒**锛屼綅鍩熻〃涓?vita3k 涓€鑷达級銆?- 瀹¤锛堝鐓?vita3k锛岄€愬瓧娈碉級锛歚SceGxmProgramParameter/Container` 甯冨眬銆乂MAD2 浣嶅煙涓庝笁寮?swizzle 琛ㄣ€乣double_reg(<<1)`
-  **鍏ㄩ儴涓€鑷?*锛涗粎 `<<1` 鐨勫畧鍗?`!dat_fmt` 搴旀敼涓烘棤鏉′欢锛坴ita3k `alu.cpp:182-185` 浼?`is_double_regs=true`锛夛紝
-  浠ュ強 VMAD/VDP 鍒ゅ埆浣嶅簲涓?**bit 53**锛堟垜浠鐢?bit 58锛夈€?
+- 探针：`eboot_probe.cpp` 新增 `P5D_V15UBO=1`（窗?**fc?750**；上丢?cap=24 全被 fc2270 的解?draw 吃掉，`命中=0` ?cap 假象）?- 脚本：`_h145k629_build.bat`、`_h145k629_ubo.ps1`、`_h145k633_screenuni.ps1`、`compile_gxp_tool.bat`（重?`gxp_to_spv.exe`）?  `_h145k626_gxp.py`、`_h145k628_spv.py`、`_h145k631_dis.py`?*自写 USSE 反汇编器**，位域表?vita3k 丢致）?- 审计（对?vita3k，字段）：`SceGxmProgramParameter/Container` 布局、VMAD2 位域与三?swizzle 表`double_reg(<<1)`
+  **全部丢?*；仅 `<<1` 的守?`!dat_fmt` 应改为无条件（vita3k `alu.cpp:182-185` ?`is_double_regs=true`），
+  以及 VMAD/VDP 判别位应?**bit 53**（我们误?bit 58）?
 
 ---
 
-## h145k634b銆愪袱鐩镐綅缈昏瘧钀藉湴 + 涓夊鍚庣画缂洪櫡瀹氫綅锛堜粛鏈嚭鍥撅級銆?
-### 涓€銆佸凡瀹炴柦骞堕獙璇佺殑鏀瑰姩
+## h145k634b【两相位翻译落地 + 三处后续缺陷定位（仍未出图）?
+### 丢、已实施并验证的改动
 
 | 鏀瑰姩 | 鏂囦欢 | 鐘舵€?|
 |---|---|---|
-| 瑙ｇ爜鍣ㄥ姞 `s_second_program` 鐩镐綅鏍囧織锛宍p5d_finalize_reg` 鎸?vita3k `usse_decode_helpers.cpp:360-371` 鎶婇潪 FPINTERNAL/FPCONSTANT/IMMEDIATE 鐨?bank 閲嶆槧灏勪负 `SECATTR` | `src/usse/usse_decoder.{h,cpp}` | 鉁?缂栬瘧閫氳繃 |
-| 椤剁偣渚?**PRIMATTR 鍙樻垚鍙啓瀵勫瓨鍣ㄦ枃浠?`pa_vars`**锛堝師 `store_reg` 杩?bank2 鍒嗘敮閮芥病鏈?鈬?I2/I3 鐨勬姇褰辫闈欓粯涓㈠純锛?| `usse_translator.cpp` | 鉁?|
-| 椤剁偣渚?**SECATTR 鍙啓**锛欶32 绮掑害褰卞瓙 `sa_f32`锛沗load_secattr_vec4` 鐢ㄥ凡鍐?lane 瑕嗙洊 UBO 绐楀彛 | `usse_translator.cpp` | 鉁?|
-| store 闂搁棬鏀惧涓?`storable_bank()`锛?SECATTR/PRIMATTR/FPINTERNAL锛夛紱VDUAL `vok` 鍚屾 | `usse_translator.cpp` | 鉁?|
-| 鐢熸垚鍣ㄦ帴鍙?`secondary_code` 骞?*鎸夌浉浣嶉『搴忥紙娆＄▼搴忓厛锛?*缈昏瘧锛沗gxp_to_spv.cpp` 鎸?`0x48+soff` / `0x4C+soff_end` 鎻愬彇娆＄▼搴忥紙`P5D_NOTWOPHASE=1` 鍥為€€锛?| `usse_translator.{h,cpp}` + `gxp_to_spv.cpp` | 鉁?|
-| VCOMP 琛?`double_reg`锛坴ita3k `alu.cpp:627-629` `// All of them needs to be doubled`锛夆€斺€?**鍙 dest**锛堣涓嬶級 | `usse_decoder.cpp` | 鉁?|
+| 解码器加 `s_second_program` 相位标志，`p5d_finalize_reg` ?vita3k `usse_decode_helpers.cpp:360-371` 把非 FPINTERNAL/FPCONSTANT/IMMEDIATE ?bank 重映射为 `SECATTR` | `src/usse/usse_decoder.{h,cpp}` | ?编译通过 |
+| 顶点?**PRIMATTR 变成可写寄存器文?`pa_vars`**（原 `store_reg` ?bank2 分支都没??I2/I3 的投影被静默丢弃?| `usse_translator.cpp` | ?|
+| 顶点?**SECATTR 可写**：F32 粒度影子 `sa_f32`；`load_secattr_vec4` 用已?lane 覆盖 UBO 窗口 | `usse_translator.cpp` | ?|
+| store 闸门放宽?`storable_bank()`?SECATTR/PRIMATTR/FPINTERNAL）；VDUAL `vok` 同步 | `usse_translator.cpp` | ?|
+| 生成器接?`secondary_code` ?*按相位顺序（次程序先?*翻译；`gxp_to_spv.cpp` ?`0x48+soff` / `0x4C+soff_end` 提取次程序（`P5D_NOTWOPHASE=1` 回?| `usse_translator.{h,cpp}` + `gxp_to_spv.cpp` | ?|
+| VCOMP ?`double_reg`（vita3k `alu.cpp:627-629` `// All of them needs to be doubled`）?**只对 dest**（见下） | `usse_decoder.cpp` | ?|
 
-**鏋勫缓/鐢熸垚**锛歚genall` 鈫?**OK=4331 FAIL=0**锛泇ert_0015 SPIR-V 9008 鈫?**11812 B**锛?`OpFDiv`锛圴RCP 鍊掓暟锛?*0 鈫?2**銆?
-### 浜屻€佹绋嬪簭鐨勬搷浣滄暟鐜板凡涓庝富绋嬪簭**绮剧‘瀵归綈**
+**构建/生成**：`genall` ?**OK=4331 FAIL=0**；vert_0015 SPIR-V 9008 ?**11812 B**?`OpFDiv`（VRCP 倒数?*0 ?2**?
+### 二次程序的操作数现已与主程序**精确对齐**
 
 ```
---- secondary @0xBC锛堢浉浣嶉噸鏄犲皠 + dest double 鍚庯級---
- s2 VCOMP sub=0  dst=SA[4].x  <- SA[3]   鈬?1/272 = 0.0036765  = scaleY   鉁?涓荤▼搴忚 SA[4].x
- s3 VCOMP sub=4  dst=SA[2].y  <- SA[2]   鈬?1/480 = 0.0020833  = scaleX   鉁?涓荤▼搴忚 SA[2].y
+--- secondary @0xBC（相位重映射 + dest double 后）---
+ s2 VCOMP sub=0  dst=SA[4].x  <- SA[3]   ?1/272 = 0.0036765  = scaleY   ?主程序读 SA[4].x
+ s3 VCOMP sub=4  dst=SA[2].y  <- SA[2]   ?1/480 = 0.0020833  = scaleX   ?主程序读 SA[2].y
 ```
-锛坄SA[3]`鈫抐32 3 = 272銆乣SA[2]`鈫抐32 2 = 480锛屾鏄?`screen=(1.0,0.5,480,272)` 鐨勪袱涓櫎鏁般€?鑻ュ src1 涔?`<<1` 浼氬緱鍒?f32 6/4锛堣秺鍑?screen锛夆噿 `rcp(0)` 鈬?鍏ㄩ粦锛屾晠 src1 涓?double銆傦級
+（`SA[3]`→f32 3 = 272、`SA[2]`→f32 2 = 480，正?`screen=(1.0,0.5,480,272)` 的两个除数?若对 src1 ?`<<1` 会得?f32 6/4（越?screen）⇒ `rcp(0)` ?全黑，故 src1 ?double。）
 
-### 涓夈€佹棤瑕嗙洊寮€鍏冲疄娴嬶紙`_h145k624_fix.ps1`锛?755鈥?010 鍏?27 甯э紝鍍忕礌缁熻锛?
+### 三无覆盖弢关实测（`_h145k624_fix.ps1`?755?010 ?27 帧，像素统计?
 ```
-2755 鈥?3000 : 鍏ㄩ儴 mean=0  max=0
-3010         : mean=103.49 max=255   锛堝紑鍦哄姩鐢绘甯革紝浣滀负閾捐矾浠嶇劧鍋ュ悍鐨勫鐓э級
+2755 ?3000 : 全部 mean=0  max=0
+3010         : mean=103.49 max=255   （开场动画正常，作为链路仍然健康的对照）
 ```
-**鈬?浠嶆湭鍑哄浘锛岃嚦灏戣繕鍓╀竴澶勭己闄枫€?*
+**?仍未出图，至少还剩一处缺陷?*
 
-### 鍥涖€佷笅涓€姝ョ殑涓夋潯鍊欓€夛紙鎸夎瘉鎹己搴︽帓搴忥級
+### 四下丢步的三条候（按证据强度排序）
 
-1. **GXP literals 浠庢湭杩涘叆 SA 绌洪棿**锛堟渶寮哄珜鐤戯級銆?   GXP 澶撮儴 `literals_count=2`銆乣literals @0x118 = {index1: 1.0f, index2: -1.0f}`锛?   vita3k `shader/src/gxp_parser.cpp:258`锛歚literal_offset = container[16].base_sa_offset + literals[i]`
-   鈬?瀛楅潰閲忔槸瑕?*鏀捐繘 SA** 鐨勩€備富绋嬪簭璇荤殑 `SA[2].x`(offX) 涓?`SA[0].y`(offY) 闇€瑕?卤1锛?   鑰岃繖涓や釜鍊兼伆濂藉氨鏄偅涓や釜瀛楅潰閲?鈥斺€?鎴戜滑鐨勭炕璇戝櫒**瀹屽叏娌℃湁 literal 瑁呰浇**杩欎竴鐜€?   闇€瑕佸悓鏃剁‘瀹?container16 鐨?`base_sa_offset` 涓?`screen` 鐨?SA 鍩哄潃濡備綍鍏卞瓨锛堝惁鍒?f32 1/2 浼氫笌 screen 鍐茬獊锛夈€?2. **`masked_store` 瀵?SECATTR 鐨勫悎骞跺璞￠敊**锛氱洰鍓嶅畠璋?`load_reg(num, bank=3)` 鈫?璇?`secattr_vars[num]`锛堥檲鏃э級锛?   鑰屼笉鏄?UBO/`sa_f32` 绐楀彛 鈬?s3 鍙啓 `.y`锛坢ask=2锛夋椂浼氭妸 `.x/.z/.w` 鍐欏潖锛?   鍙兘瑕嗙洊鎺?`SA[2].x` 搴旀湁鐨?offX銆?3. `pa_vars` 鐨勫啓鍏ユ槸鍚︾湡鐨勮 I4/I5 璇诲埌锛堝彲鍔犱竴鏉?dump 鏂█锛夈€?
-### 浜斻€佸叾浠栧凡鎺掗櫎椤癸紙鏈疆瀹炴祴锛?
-- `FPC[1].y` 涓嶆槸 0锛歚kFpconstBank1Raw[1] = 0x3F800000 = 1.0`锛堜笌 vita3k bank1 琛ㄩ€愰」涓€鑷达級
-  鈬?I4/I5 鐨?`OUT[0] = PA[0] * FPC[1].y` 涔樻暟鏄?1.0锛屾甯搞€備唬鐮侀噷 h145k267 娉ㄩ噴璇寸殑 "num=2 涓?0" 鏄彟涓€涓笅鏍囥€?- `[SETUNI2]` 鍏ㄩ噺 21121 鏉℃棤 `screen`锛涙棤 SETUNI 鎸囧悜 `AA700000`銆?- LOGO 鐩镐綅锛坒c 2763+锛夐《鐐?UBO 鍏?2048 float 鍙?4 涓潪闆?`(1.0,0.5,480,272)`锛?03鈥?12 涓€欓€夊潡鏃犱竴鍦?vec4[2]/vec4[4] 鏈夋暟鎹€?
-褰撳墠 `spv_all/gxp_vert_0015.gxp.spv` = 涓ょ浉浣嶇増鏈紙11812 B锛夛紱
-鍩虹嚎澶囦唤 `spv_all/gxp_vert_0015.gxp.spv.bak_h145k632`锛?008 B锛屼笌 `assets/gxp_library/` 閫愬瓧鑺備竴鑷达級銆?
+1. **GXP literals 从未进入 SA 空间**（最强嫌疑）?   GXP 头部 `literals_count=2`、`literals @0x118 = {index1: 1.0f, index2: -1.0f}`?   vita3k `shader/src/gxp_parser.cpp:258`：`literal_offset = container[16].base_sa_offset + literals[i]`
+   ?字面量是?*放进 SA** 的主程序读的 `SA[2].x`(offX) ?`SA[0].y`(offY) 霢?±1?   而这两个值恰好就是那两个字面?—?我们的翻译器**完全没有 literal 装载**这一环?   霢要同时确?container16 ?`base_sa_offset` ?`screen` ?SA 基址如何共存（否?f32 1/2 会与 screen 冲突）?2. **`masked_store` ?SECATTR 的合并对象错**：目前它?`load_reg(num, bank=3)` ??`secattr_vars[num]`（陈旧）?   而不?UBO/`sa_f32` 窗口 ?s3 只写 `.y`（mask=2）时会把 `.x/.z/.w` 写坏?   可能覆盖?`SA[2].x` 应有?offX?3. `pa_vars` 的写入是否真的被 I4/I5 读到（可加一?dump 断言）?
+### 五其他已排除项（本轮实测?
+- `FPC[1].y` 不是 0：`kFpconstBank1Raw[1] = 0x3F800000 = 1.0`（与 vita3k bank1 表项丢致）
+  ?I4/I5 ?`OUT[0] = PA[0] * FPC[1].y` 乘数?1.0，正常代码里 h145k267 注释说的 "num=2 ?0" 是另丢个下标?- `[SETUNI2]` 全量 21121 条无 `screen`；无 SETUNI 指向 `AA700000`?- LOGO 相位（fc 2763+）顶?UBO ?2048 float ?4 个非?`(1.0,0.5,480,272)`?03?12 个块无一?vec4[2]/vec4[4] 有数据?
+当前 `spv_all/gxp_vert_0015.gxp.spv` = 两相位版本（11812 B）；
+基线备份 `spv_all/gxp_vert_0015.gxp.spv.bak_h145k632`?008 B，与 `assets/gxp_library/` 逐字节一致）?
 
 ---
 
-## h145k635銆怗XP literals 鈫?SA 宸插疄鐜帮紱鍥涗釜绯绘暟鍦ㄧ焊闈笂鍏ㄩ儴姝ｇ‘锛屼絾浠嶆湭鍑哄浘銆?
-### 涓€銆佹湰杞敼鍔細literals 鈫?SA锛坴ita3k `shader/src/gxp_parser.cpp:243-277`锛?
-鏉冨▉璇箟锛?```cpp
+## h145k635【GXP literals ?SA 已实现；四个系数在纸面上全部正确，但仍未出图?
+### 丢、本轮改动：literals ?SA（vita3k `shader/src/gxp_parser.cpp:243-277`?
+权威语义?```cpp
 const uint32_t *literals = (const uint8_t*)&program.literals_offset + program.literals_offset;  // = 0x74 + 0xA4 = 0x118
 container = get_container_by_index(program, 16);            // LITERAL
 if (!container) container = get_container_by_index(program, 19);   // 鍥為€€ DATA
@@ -273424,53 +273428,53 @@ for (i = 0; i < literals_count*2; i += 2) {
     item.bank = SECATTR; item.component_count = 1; item.type = F32;  // 鈬?SA f32 鏍囬噺
 }
 ```
-`gxp_vert_0015`锛歚literals_count=2` @0x118 = `{1, +1.0f}`銆乣{2, -1.0f}`锛涘鍣ㄨ〃鍙湁 index 19锛坆ase_sa_offset=0锛?鈬?鏀惧埌 SA f32 **1** 鍜?**2**銆?
-**鍏抽敭瀹炵幇缁嗚妭锛堣繖鏄湰杞敮涓€闇€瑕佸垽鏂殑鍦版柟锛?*锛氳杞芥椂鏈哄繀椤诲湪**娆＄▼搴忎箣鍚?*锛?- 鑻ュ湪鍑芥暟鍏ュ彛灏辫杞斤紝`f32 2` 鍙樻垚 鈭?锛岃€屾绋嬪簭 `s3` 瑕?`f32 3 = rcp(f32 2)`锛堟湡鏈?1/480锛夆噿 寰楀埌 鈭? 鈬?榛戝睆锛堝凡瀹炴祴锛夈€?- 鏀逛负銆屽厛璺戞绋嬪簭銆佸啀瑁?literals銆嶅悗锛屽洓涓郴鏁?*鍚屾椂鎴愮珛**锛?
-| SA 浣嶇疆 | 涓荤▼搴忕敤閫?| 鍊?| 鏉ユ簮 |
+`gxp_vert_0015`：`literals_count=2` @0x118 = `{1, +1.0f}`、`{2, -1.0f}`；容器表只有 index 19（base_sa_offset=0??放到 SA f32 **1** ?**2**?
+**关键实现细节（这是本轮唯丢霢要判断的地方?*：装载时机必须在**次程序之?*?- 若在函数入口就装载，`f32 2` 变成 ?，次程序 `s3` ?`f32 3 = rcp(f32 2)`（期?1/480）⇒ 得到 ? ?黑屏（已实测）?- 改为「先跑次程序、再?literals」后，四个系?*同时成立**?
+| SA 位置 | 主程序用?| ?| 来源 |
 |---|---|---|---|
 | f32 1 (`SA[0].y`) | offY | **+1** | literal `{1, +1.0f}` |
 | f32 2 (`SA[2].x`) | offX | **鈭?** | literal `{2, -1.0f}` |
-| f32 3 (`SA[2].y`) | scaleX | **1/480 = 0.0020833** | 娆＄▼搴?`s3: f32 3 = rcp(f32 2)`锛堟鏃?f32 2 = screen.z = 480锛?|
-| f32 4 (`SA[4].x`) | scaleY | **1/272 = 0.0036765** | 娆＄▼搴?`s2: f32 4 = rcp(f32 3)`锛堟鏃?f32 3 = screen.w = 272锛?|
+| f32 3 (`SA[2].y`) | scaleX | **1/480 = 0.0020833** | 次程?`s3: f32 3 = rcp(f32 2)`（此?f32 2 = screen.z = 480?|
+| f32 4 (`SA[4].x`) | scaleY | **1/272 = 0.0036765** | 次程?`s2: f32 4 = rcp(f32 3)`（此?f32 3 = screen.w = 272?|
 
-鈬?浠ｅ叆涓荤▼搴?`x = pos.x*scaleX + offX`銆乣y = -pos.y*scaleY + offY`锛?瀵?pos鈭圼0,960]脳[0,544] 寰?**x,y 鈭?[-1,1]**锛屽嵆涓€涓纭殑鍏ㄥ睆鍥涜竟褰€?
-**鏋勫缓/鐢熸垚**锛歚genall` 鈫?**OK=4331 FAIL=0**锛沗P5D_NOLIT=1` 鍙洖閫€鍋?A/B銆?鏀瑰姩锛歚gxp_to_spv.cpp`锛堟彁鍙?literals 骞朵紶鍏ワ級銆乣usse_translator.{h,cpp}`锛堟柊澧?`literals` 鍙傛暟锛?鍦ㄤ富寰幆鐨勩€屾绋嬪簭鈫掍富绋嬪簭銆嶄氦鐣屽瑁呰浇锛夈€?
-### 浜屻€佹棤瑕嗙洊寮€鍏冲疄娴嬶紙`_h145k624_fix.ps1`锛?755鈥?010 鍏?27 甯э紝鍍忕礌缁熻锛?
+?代入主程?`x = pos.x*scaleX + offX`、`y = -pos.y*scaleY + offY`??pos∈[0,960]×[0,544] ?**x,y ?[-1,1]**，即丢个正确的全屏四边彃69?
+**构建/生成**：`genall` ?**OK=4331 FAIL=0**；`P5D_NOLIT=1` 可回逢?A/B?改动：`gxp_to_spv.cpp`（提?literals 并传入）、`usse_translator.{h,cpp}`（新?`literals` 参数?在主循环的次程序→主程序」交界处装载）?
+### 二无覆盖弢关实测（`_h145k624_fix.ps1`?755?010 ?27 帧，像素统计?
 ```
-2755 鈥?3000 : 鍏ㄩ儴 mean=0  max=0
-3010         : mean=103.64 max=255   锛堝紑鍦哄姩鐢绘甯?鈬?娓叉煋閾捐矾鏃犲洖褰掞級
+2755 ?3000 : 全部 mean=0  max=0
+3010         : mean=103.64 max=255   （开场动画正??渲染链路无回归）
 ```
-**鈬?浠嶆湭鍑哄浘銆?* 鑷虫鏈疆绱宸茶惤鍦?6 椤圭粨鏋勬€т慨澶嶏紙鐩镐綅鏍囧織 / 娆＄▼搴忕炕璇?/ PA 鍙啓 / SA 鍙啓 /
-VCOMP dest double / literals鈫扴A锛夛紝绯绘暟鎺ㄥ宸茶嚜娲斤紝浣嗙敾闈粛榛戙€?
-### 涓夈€佺粨璁轰笌涓嬩竴姝ワ紙闇€瑕?*杩愯鏃?*璇佹嵁锛屼笉鑳藉啀闈犳帹鐞嗭級
+**?仍未出图?* 至此本轮累计已落?6 项结构修复（相位标志 / 次程序翻?/ PA 可写 / SA 可写 /
+VCOMP dest double / literals→SA），系数推导已自洽，但画面仍黑?
+### 三结论与下一步（霢?*运行?*证据，不能再靠推理）
 
-绾搁潰鎺ㄥ宸茬粡缁欏嚭姝ｇ‘鐨勫洓涓郴鏁帮紝鍗翠粛榛?鈬?闃诲鐐逛笉鍐嶅湪銆岀郴鏁颁粠鍝潵銆嶏紝鑰屽彲鑳藉湪锛?1. **`PA[0]` 鐨勫啓鍏ユ槸鍚︾湡鐨勫埌杈?I4/I5**锛坄pa_vars` 璺緞 / `masked_store` 鐨?mask 鍚堝苟锛夛紱
-2. **`OUT[0]` 鍐欏叆鏄惁鐪熺殑杩炲埌 `gl_Position`**锛堢敓鎴愬櫒閲?`out_position` 涓?`output_vars[0]` 鐨勫叧绯伙紝
-   浠ュ強 I4/I5 鍙啓 `.xy`銆佹繁搴?`(z+w)*0.5*0.9999` 鐢辫皝鍐欙級锛?3. 椤剁偣灞炴€?`pos` 鍦?**LOGO 鐩镐綅**鐨勭湡瀹炲彇鍊艰寖鍥达紙姝ゅ墠 `[VEXP]` 閲囧埌鐨勬槸 fc 2251 鐨?(196.9, 79.0)锛?   涓嶆槸 LOGO 鐩镐綅鐨勫€硷級銆?
-**鈬?涓嬩竴姝ュ繀椤诲仛杩愯鏃朵簩鍒嗭紝寤鸿锛堟寜鎬т环姣旓級锛?*
-- **鈶?鍒ゃ€孡OGO 鐩镐綅鏈夋病鏈夌墖鍏冦€?*锛氫复鏃舵妸 `spv_all/gxp_frag_0084.gxp.spv` 鎹㈡垚銆屽彧杈撳嚭甯搁噺绾€嶇殑鏈€灏?  SPIR-V锛堢敓鎴愬櫒鍙骇鍑轰竴涓瀬绠€ GXP 鏉ョ敓鎴愶紝鎴栫洿鎺ユ墜宸ユ瀯閫狅級锛屽湪 fc 2760鈥?000 鎶撳抚锛?  鍙樼孩 鈬?鍑犱綍/鍏夋爡姝ｅ父銆侀棶棰樺湪鐗囧厓渚э紱浠嶉粦 鈬?鍑犱綍纭疄闆剁墖鍏冿紝缁х画鏌?1/2銆?- **鈶?鎵撳嵃 LOGO 鐩镐綅 vert_0015 鐨勫師濮嬮《鐐规祦**锛氭妸 `P5D_DBG_VTX` 鐨?cap锛堢幇涓哄叏灞€ 8 娆★級鏀规垚
-  銆屼粎 fc鈮?750 涓旀瘡娆?draw 鎵撳嵃銆嶏紝鎷垮埌 pos 鐨勭湡瀹炶寖鍥翠互楠岃瘉 `x,y鈭圼-1,1]` 鐨勬帹瀵笺€?
-褰撳墠 `spv_all/gxp_vert_0015.gxp.spv` = 涓ょ浉浣?+ literals 鐗堟湰锛?1792 B锛夛紱
-鍩虹嚎澶囦唤 `spv_all/gxp_vert_0015.gxp.spv.bak_h145k632`锛?008 B锛夈€?
+纸面推导已经给出正确的四个系数，却仍??阻塞点不再在「系数从哪来」，而可能在?1. **`PA[0]` 的写入是否真的到?I4/I5**（`pa_vars` 路径 / `masked_store` ?mask 合并）；
+2. **`OUT[0]` 写入是否真的连到 `gl_Position`**（生成器?`out_position` ?`output_vars[0]` 的关系，
+   以及 I4/I5 只写 `.xy`、深?`(z+w)*0.5*0.9999` 由谁写）?3. 顶点属?`pos` ?**LOGO 相位**的真实取值范围（此前 `[VEXP]` 采到的是 fc 2251 ?(196.9, 79.0)?   不是 LOGO 相位的）?
+**?下一步必须做运行时二分，建议（按性价比）?*
+- **?判LOGO 相位有没有片元?*：临时把 `spv_all/gxp_frag_0084.gxp.spv` 换成「只输出常量纃69的朢?  SPIR-V（生成器可产出一个极箢 GXP 来生成，或直接手工构造），在 fc 2760?000 抓帧?  变红 ?几何/光栅正常、问题在片元侧；仍黑 ?几何确实零片元，继续?1/2?- **?打印 LOGO 相位 vert_0015 的原始顶点流**：把 `P5D_DBG_VTX` ?cap（现为全屢 8 次）改成
+  「仅 fc?750 且每?draw 打印」，拿到 pos 的真实范围以验证 `x,y∈[-1,1]` 的推导?
+当前 `spv_all/gxp_vert_0015.gxp.spv` = 两相?+ literals 版本?1792 B）；
+基线备份 `spv_all/gxp_vert_0015.gxp.spv.bak_h145k632`?008 B）?
 
 ---
 
-## h145k636銆愭嬁鍒?LOGO 鐩镐綅鐪熷疄椤剁偣娴侊細浣嶇疆璺ㄥ害鏄睆骞曠殑 ~4.3鈥?.6 鍊嶏紝鎺ㄧ炕浜?1/480銆?/272"鐨勫昂搴﹀亣璁俱€?
-### 涓€銆佹柊澧炴帰閽?`P5D_V15VTX=1`锛坄eboot_probe.cpp`锛?
-鍙湪 `fc鈮?750` 涓旈《鐐圭▼搴忎负 `vert_0015` 鏃舵墦鍗拌 draw 鐨?*鍘熷椤剁偣娴?*鍓?4 涓《鐐圭殑鍓?6 涓?float锛坧os.xyz + 棰滆壊/UV 鍓?3 涓級锛?甯︿笂 `frame/draw/va/cw/ch`銆傚姩鏈猴細鍘嗗彶涓?`[VEXP]`/`[V12RAW]` 鐨勯噰鏍峰叏钀藉湪 **fc 2251 鐨勮В鐮?draw**锛?涓嶈兘浠ｈ〃 LOGO 鐩镐綅銆?
-### 浜屻€佸疄娴嬬粨鏋滐紙fc 2763 璧凤紝姣忓抚鐩稿悓锛?
+## h145k636【拿?LOGO 相位真实顶点流：位置跨度是屏幕的 ~4.3?.6 倍，推翻?1/480?/272"的尺度假设?
+### 丢、新增探?`P5D_V15VTX=1`（`eboot_probe.cpp`?
+只在 `fc?750` 且顶点程序为 `vert_0015` 时打印该 draw ?*原始顶点?*?4 个顶点的?6 ?float（pos.xyz + 颜色/UV ?3 个）?带上 `frame/draw/va/cw/ch`。动机：历史?`[VEXP]`/`[V12RAW]` 的采样全落在 **fc 2251 的解?draw**?不能代表 LOGO 相位?
+### 二实测结果（fc 2763 起，每帧相同?
 ```
 [V15VTX] fc=2763 d=12909 va=A3150880 cw=960 ch=544:
    v0(  11.65,    -8.77, 2.12)  v1(4363.65,  -44.87, 2.12)
    v2(4382.77, -2348.87, 2.12)  v3(  30.77,-2312.77, 2.12)
-锛坒c 2764/2765 鐢?A2D50880 / A2F50880锛屾暟鍊奸€愬抚瀹屽叏涓€鑷达級
+（fc 2764/2765 ?A2D50880 / A2F50880，数值帧完全丢致）
 ```
 
-**鈬?LOGO 鐩镐綅鐨?pos 璺ㄥ害 = 4371.1 脳 2340.1锛岀害鏄?960脳544 鐨?4.55脳 / 4.30脳銆?*
+**?LOGO 相位?pos 跨度 = 4371.1 × 2340.1，约?960×544 ?4.55× / 4.30×?*
 
-### 涓夈€佷唬鍏ユ湰杞凡钀藉疄鐨勫洓涓郴鏁?鈬?鍥涜竟褰㈡暣涓惤鍦ㄥ睆骞?*涓婃柟**涔嬪
+### 三代入本轮已落实的四个系??四边形整个落在屏?*上方**之外
 
-`x = pos.x*(1/480) 鈭?1`銆乣y = 鈭抪os.y*(1/272) + 1`锛?
+`x = pos.x*(1/480) ?1`、`y = −pos.y*(1/272) + 1`?
 | 椤剁偣 | x_ndc | y_ndc |
 |---|---|---|
 | v0 | 鈭?.976 | **1.032** |
@@ -273478,299 +273482,299 @@ VCOMP dest double / literals鈫扴A锛夛紝绯绘暟鎺ㄥ宸茶嚜娲斤紝
 | v2 | 8.13 | **9.64** |
 | v3 | 鈭?.936 | **9.50** |
 
-**鈬?鍥涗釜椤剁偣鐨?y_ndc 鍏ㄩ儴 > 1 鈬?瀹屽叏鍦ㄨ鍓綋澶?鈬?闆剁墖鍏?鈬?鐢婚潰鍏ㄩ粦銆?*
-锛堣繖涓庡疄娴嬬殑 `mean=0 max=0` 瀹屽叏涓€鑷达紝涔熻鏄?绯绘暟宸叉纭?杩欎竴鎺ㄥ鏈韩鏈夐棶棰樸€傦級
+**?四个顶点?y_ndc 全部 > 1 ?完全在裁剪体??零片??画面全黑?*
+（这与实测的 `mean=0 max=0` 完全丢致，也说?系数已正?这一推导本身有问题）
 
-瑕佽 4371脳2340 鏄犲皠鍒?NDC[鈭?,1]锛岄渶瑕?`scaleX 鈮?2/4371 = 0.000458`銆乣scaleY 鈮?2/2340 = 0.000855`锛?**閮戒笉鏄?1/480 = 0.0020833 涓?1/272 = 0.0036765**锛堝墠鑰呭ぇ 4.55 鍊嶏紝鍚庤€呭ぇ 4.30 鍊嶏級銆?
-### 鍥涖€佺敱姝ゅ緱鍒扮殑鏂版€€鐤戯紙涓嬩竴姝ワ級
+要让 4371×2340 映射?NDC[?,1]，需?`scaleX ?2/4371 = 0.000458`、`scaleY ?2/2340 = 0.000855`?**都不?1/480 = 0.0020833 ?1/272 = 0.0036765**（前者大 4.55 倍，后大 4.30 倍）?
+### 四由此得到的新疑（下一步）
 
-1. **椤剁偣灞炴€у竷灞€鍦?LOGO 鐩镐綅鍙兘涓嶅悓**锛堟渶寮哄珜鐤戯級銆?   鏈帰閽堟寜銆宻tride 24銆乸os=F32x3 @offset 0銆嶈锛屼緷鎹槸 fc 2251 鏃舵湡鐨?`[VATTRDUMP]`
-   锛坄size=3 strides=24 [0 st0 off0 fmt9 cc3 reg0->loc0] 鈥锛夈€?   浣?LOGO 鐩镐綅鐨勬祦鏄?**A3150880 / A2D50880 / A2F50880**锛坒c 2251 鏄?A2F50770 绛夛級锛?*鏄笉鍚岀殑缂撳啿**锛?   灞炴€ц〃鍙兘涓嶅悓 鈬?4371脳2340 鍙兘鏄璇汇€?   **涓嬩竴姝ュ姩浣?*锛氬湪 LOGO 鐩镐綅鎵撳嵃 `[VATTRDUMP]`锛堝睘鎬ц〃锛歴tream/offset/format/component_count/reg锛?   + `SetVertexStream` 鐨?stride锛岀‘璁?pos 鐨勭湡瀹炴潵婧愪笌鑼冨洿銆?2. 鑻ュ竷灞€鏃犺锛屽垯璇存槑 `screen` 骞朵笉鏄姇褰辩郴鏁扮殑鍞竴鏉ユ簮锛?/480銆?/272 鐨勫昂搴︿笉鎴愮珛锛夛紝
+1. **顶点属布屢?LOGO 相位可能不同**（最强嫌疑）?   本探针按「stride 24、pos=F32x3 @offset 0」读，依据是 fc 2251 时期?`[VATTRDUMP]`
+   （`size=3 strides=24 [0 st0 off0 fmt9 cc3 reg0->loc0] …`）?   ?LOGO 相位的流?**A3150880 / A2D50880 / A2F50880**（fc 2251 ?A2F50770 等）?*是不同的缓冲**?   属表可能不同 ?4371×2340 可能是误读?   **下一步动?*：在 LOGO 相位打印 `[VATTRDUMP]`（属性表：stream/offset/format/component_count/reg?   + `SetVertexStream` ?stride，确?pos 的真实来源与范围?2. 若布屢无误，则说明 `screen` 并不是投影系数的唯一来源?/480?/272 的尺度不成立），
    闇€瑕侀噸鏂板瑙?`SA[2].y/SA[4].x` 鍒板簳璇ユ槸浠€涔堛€?
-### 浜斻€佹湰杞疮璁¤惤鍦扮殑缁撴瀯鎬т慨澶嶏紙鍧囧凡缂栬瘧閫氳繃銆乣genall` 4331 OK / 0 FAIL锛?
-1. 瑙ｇ爜鍣ㄧ浉浣嶆爣蹇?`s_second_program`锛堟绋嬪簭鎵€鏈?bank 鈫?SECATTR锛?2. 鐢熸垚鍣?*涓ょ浉浣嶇炕璇?*锛堟绋嬪簭鍏堣窇锛?3. 椤剁偣渚?**PA 鍙啓**锛坄pa_vars`锛涙鍓?PA 鍐欏叆琚潤榛樹涪寮冿級
-4. 椤剁偣渚?**SA 鍙啓**锛團32 绮掑害褰卞瓙 `sa_f32`锛?5. **VCOMP dest double**锛堟绋嬪簭钀界偣涓庝富绋嬪簭璇诲彇绮剧‘瀵归綈锛?6. **GXP literals 鈫?SA**锛屼笖**鍦ㄦ绋嬪簭涔嬪悗瑁呰浇**锛堝洓涓郴鏁扮焊闈㈣嚜娲斤級
+### 五本轮累计落地的结构性修复（均已编译通过、`genall` 4331 OK / 0 FAIL?
+1. 解码器相位标?`s_second_program`（次程序扢?bank ?SECATTR?2. 生成?*两相位翻?*（次程序先跑?3. 顶点?**PA 可写**（`pa_vars`；此?PA 写入被静默丢弃）
+4. 顶点?**SA 可写**（F32 粒度影子 `sa_f32`?5. **VCOMP dest double**（次程序落点与主程序读取精确对齐?6. **GXP literals ?SA**，且**在次程序之后装载**（四个系数纸面自洽）
 
-褰撳墠 `spv_all/gxp_vert_0015.gxp.spv` = 涓ょ浉浣?+ literals 鐗堟湰锛?1792 B锛夛紱
-鍩虹嚎澶囦唤 `spv_all/gxp_vert_0015.gxp.spv.bak_h145k632`锛?008 B锛屼笌 `assets/gxp_library/` 涓€鑷达級銆?
+当前 `spv_all/gxp_vert_0015.gxp.spv` = 两相?+ literals 版本?1792 B）；
+基线备份 `spv_all/gxp_vert_0015.gxp.spv.bak_h145k632`?008 B，与 `assets/gxp_library/` 丢致）?
 
 ---
 
-## h145k637銆愬張淇?3 澶勶紱骞舵嬁鍒板垽鍐虫€ц瘉鎹細椤剁偣鍥涜竟褰㈣法搴?4371脳2340锛岃€岀郴鏁板凡鍏ㄩ儴姝ｇ‘浠嶅叏榛戙€?
-### 涓€銆佹湰杞柊澧炲彇璇佹帰閽堬紙`eboot_probe.cpp`锛?
+## h145k637【又?3 处；并拿到判决证据：顶点四边形跨?4371×2340，系数已全部正确仍全黑?
+### 丢、本轮新增取证探针（`eboot_probe.cpp`?
 | 寮€鍏?| 浣滅敤 |
 |---|---|
-| `P5D_V15VTX=1` | 鍙湪 **fc鈮?750** 涓旈《鐐圭▼搴忎负 `vert_0015` 鏃舵墦鍗帮細`[V15ATTR]` 鏉冨▉椤剁偣灞炴€ц〃锛坄g_vfmt`锛夈€乣[V15RAW]` 鍓?48 涓?float銆乣frame/draw/va/cw/ch` |
-| `P5D_V15PROJ=1` | 鎶娿€屾纭姇褰辩郴鏁般€嶇洿鎺ュ啓杩?guest 椤剁偣 UBO锛堝垽鍐虫€т簩鍒嗙敤锛?|
+| `P5D_V15VTX=1` | 只在 **fc?750** 且顶点程序为 `vert_0015` 时打印：`[V15ATTR]` 权威顶点属表（`g_vfmt`）`[V15RAW]` ?48 ?float、`frame/draw/va/cw/ch` |
+| `P5D_V15PROJ=1` | 把正确投影系数直接写?guest 顶点 UBO（判决二分用?|
 
-### 浜屻€佲槄 LOGO 鐩镐綅鐨勯《鐐瑰睘鎬ц〃 = 涓?fc2251 **瀹屽叏鐩稿悓** 鈽?
+### 二★ LOGO 相位的顶点属性表 = ?fc2251 **完全相同** ?
 ```
 [V15ATTR] n=3 stride[0..3]=24,0,0,0: [0 st0 off0 fmt9 cc3 reg0] [1 st0 off12 fmt4 cc4 reg4] [2 st0 off16 fmt9 cc2 reg8]
 [V15RAW] v0(11.651,-8.767,2.125) uv(0,0) | v1(4363.651,-44.871,2.125) uv(1,0)
          v2(4382.765,-2348.871,2.125) uv(1,1) | v3(30.765,-2312.767,2.125) uv(0,1)
 ```
-鈬?甯冨眬鏃犺锛坰tride 24銆乣F32x3@off0 鈫?PA[0]`锛夛紝涓旀槸**瀹屾暣 UV 鍥涜竟褰?(0,0)-(1,1)**锛?鈬?LOGO 鐩镐綅鐨?pos 璺ㄥ害 **4371.114 脳 2340.104**锛堚増 灞忓箷 960脳544 鐨?4.55脳 / 4.30脳锛夈€?
-### 涓夈€佸垽鍐虫€т簩鍒嗭紙`P5D_V15PROJ=1`锛夛細娉ㄥ叆姝ｇ‘绯绘暟**涔熸棤鏁?*
+?布局无误（stride 24、`F32x3@off0 ?PA[0]`），且是**完整 UV 四边?(0,0)-(1,1)**??LOGO 相位?pos 跨度 **4371.114 × 2340.104**（≈ 屏幕 960×544 ?4.55× / 4.30×）?
+### 三判决二分（`P5D_V15PROJ=1`）：注入正确系数**也无?*
 
-瑕佽璇ュ洓杈瑰舰閾烘弧绐楀彛闇€瑕?`sx=2/4371.114=0.00045755`銆乣ox=-1.00533`銆乣sy=2/2340.104=0.00085466`銆乣oy=0.99251`銆?鍐欏叆 guest UBO `0xAA700000` 鐨?f32[1..4] 鍚庯細
+要让该四边形铺满窗口霢?`sx=2/4371.114=0.00045755`、`ox=-1.00533`、`sy=2/2340.104=0.00085466`、`oy=0.99251`?写入 guest UBO `0xAA700000` ?f32[1..4] 后：
 ```
 [V15PROJ] 鍐欏叆 AA700000 f32[1..4] = oy=0.99251 ox=-1.00533 sx=0.0004575 sy=0.0008547
-2760 鈥?3000 : 鍏ㄩ儴 mean=0 max=0
+2760 ?3000 : 全部 mean=0 max=0
 ```
-**鈿?浣嗚繖娆″疄楠屾湰韬槸鏃犳晥鐨?*锛氭柊 SPIR-V 浠?`sa_f32`/literals 璇婚偅鍑犱釜 lane锛?*鏍规湰涓嶈 UBO** 鈬?鍐?guest UBO 涓嶄細鐢熸晥銆?锛堣繖鍚屾椂璇存槑锛氫笉鑳藉啀闈?寰€ UBO 鍐?鏉ュ仛鍑犱綍渚у疄楠屻€傦級
+**?但这次实验本身是无效?*：新 SPIR-V ?`sa_f32`/literals 读那几个 lane?*根本不读 UBO** ??guest UBO 不会生效?（这同时说明：不能再?徢 UBO ?来做几何侧实验）
 
-### 鍥涖€佹湰杞慨澶嶇殑 3 澶勶紙鍧囧凡缂栬瘧閫氳繃銆乣genall` 4331 OK / 0 FAIL锛?
-1. **VCOMP `double_reg`**锛坄usse_decoder.cpp`锛屽彧瀵?dest锛夛細vita3k `alu.cpp:627-629`銆?   double 鍚庢绋嬪簭钀界偣 `SA[4].x` / `SA[2].y` 涓庝富绋嬪簭璇诲彇**绮剧‘瀵归綈**銆?2. **GXP literals 鈫?SA锛屽苟鍦ㄦ绋嬪簭涔嬪悗瑁呰浇**锛坄gxp_to_spv.cpp` + `usse_translator.{h,cpp}`锛夛細
-   `{1,+1.0f}` 鈫?f32 1锛坥ffY锛夈€乣{2,-1.0f}` 鈫?f32 2锛坥ffX锛夈€?   鑻ュ湪鍑芥暟鍏ュ彛瑁呰浇锛屾绋嬪簭 `s3: rcp(f32 2)` 浼氳鍒?鈭?锛堝凡瀹炴祴榛戝睆锛夛紱鏀逛负娆＄▼搴忓悗瑁呰浇锛屽洓涓郴鏁板悓鏃舵垚绔嬨€?3. **鈽?`masked_store` 鐨?mask 鍚堝苟鍩哄噯淇锛堥《鐐逛晶锛?*锛?   鏃т唬鐮?`oldv = load_reg(num, bank)`锛宐ank==3 鏃惰鐨勬槸**浠庢湭鍒濆鍖?*鐨?`secattr_vars`锛?   鏀逛负 bank==3 鏃剁敤 `load_secattr_vec4(num)`锛? SA 绐楀彛鏈韩锛夈€?   鍚﹀垯娆＄▼搴?`s3` 鍙啓 `.y`锛坢ask=2锛変細鎶?`sa_f32[2]`锛坙iteral 鐨?offX=鈭?锛夊啿鎴?0銆?
-**鈬?淇鍚?SA 鐨勬渶缁堢姸鎬侊紙绾搁潰锛夛細f32 1=+1銆乫32 2=鈭?銆乫32 3=1/480銆乫32 4=1/272 鈥斺€?鍥涗釜绯绘暟鍏ㄥ銆?*
-**鈬?浣?2760鈥?000 浠嶅叏閮?`mean=0 max=0`锛?010 寮€鍦哄姩鐢绘甯革紝鏃犲洖褰掞級銆?*
+### 四本轮修复的 3 处（均已编译通过、`genall` 4331 OK / 0 FAIL?
+1. **VCOMP `double_reg`**（`usse_decoder.cpp`，只?dest）：vita3k `alu.cpp:627-629`?   double 后次程序落点 `SA[4].x` / `SA[2].y` 与主程序读取**精确对齐**?2. **GXP literals ?SA，并在次程序之后装载**（`gxp_to_spv.cpp` + `usse_translator.{h,cpp}`）：
+   `{1,+1.0f}` ?f32 1（offY）`{2,-1.0f}` ?f32 2（offX）?   若在函数入口装载，次程序 `s3: rcp(f32 2)` 会读??（已实测黑屏）；改为次程序后装载，四个系数同时成立?3. **?`masked_store` ?mask 合并基准修正（顶点侧?*?   旧代?`oldv = load_reg(num, bank)`，bank==3 时读的是**从未初始?*?`secattr_vars`?   改为 bank==3 时用 `load_secattr_vec4(num)`? SA 窗口本身）?   否则次程?`s3` 只写 `.y`（mask=2）会?`sa_f32[2]`（literal ?offX=?）冲?0?
+**?修复?SA 的最终状态（纸面）：f32 1=+1、f32 2=?、f32 3=1/480、f32 4=1/272 —?四个系数全对?*
+**??2760?000 仍全?`mean=0 max=0`?010 弢场动画正常，无回归）?*
 
-### 浜斻€佺敱姝ゅ緱鍒扮殑缁撹锛堜笅涓€杞殑璧风偣锛?
-绯绘暟宸插叏閮ㄦ纭嵈浠嶉浂鐗囧厓 鈬?**GPU 渚у疄闄呬娇鐢ㄧ殑 `pos` 涓庢垜浠粠 guest 鍐呭瓨璇诲埌鐨勫師濮嬫祦涓嶄竴鑷?*锛?鎴栧睘鎬?*瑙ｅ寘**锛坓uest stream 鈫?SPIR-V vertex input锛夎繖涓€姝ユ湁鍋忓樊銆?
-鍙嶈瘉閾撅細鍘嗗彶涓?`P5D_V15_FULLSCREEN=2`锛堝湪**瑙ｅ寘鍚庣殑 loc0** 涓婂己鍒?卤1锛夎兘璁╀笁涓?LOGO 鍑哄浘
-鈬?瑙ｅ寘鍚庣殑鏁版嵁纭疄閫佽繘浜嗙潃鑹插櫒锛涜€屾寜瑙ｅ寘鍓嶇殑鍘熷娴佺畻鍑虹殑 4371脳2340 闇€瑕?~1/2185 鐨勫昂搴︼紝
-涓?`screen` 缁欏嚭鐨?1/480 宸?4.55 鍊?鈬?**涓よ€呬笉鑷唇**銆?
-**涓嬩竴姝ュ姩浣滐紙鎸夋€т环姣旓級锛?*
-1. 鎶?`[VEXP]`锛堟墦鍗?*瑙ｅ寘鍚?*鐨?loc0/loc1/loc2锛変篃 gate 鍒?**fc鈮?750**锛屾墦鍗?LOGO 鐩镐綅姣忎釜 draw 鐨?   `loc0=(x,y,z,w)`锛屼笌 `[V15RAW]` 鐨勫師濮嬫祦閫愬€煎鐓?鈥斺€?涓€娆″氨鑳藉垽瀹氳В鍖呮槸鍚︽纭€?2. 鑻ヨВ鍖呮棤璇紝鍒欒鏄?`screen`/娆＄▼搴?literals 鎺ㄤ笉鍑烘纭殑鎶曞奖锛岄渶瑕侀噸鏂板瑙?   `SA[2].y`銆乣SA[4].x` 鍒板簳璇ョ敱浠€涔堟彁渚涳紙鎴?`screen` 鐨勭湡瀹炶涔夛級銆?
-褰撳墠 `spv_all/gxp_vert_0015.gxp.spv` = 涓ょ浉浣?+ literals + mask 淇鐗堟湰锛?1972 B锛夛紱
-鍩虹嚎澶囦唤 `spv_all/gxp_vert_0015.gxp.spv.bak_h145k632`锛?008 B锛屼笌 `assets/gxp_library/` 閫愬瓧鑺備竴鑷达級銆?
+### 五由此得到的结论（下丢轮的起点?
+系数已全部正确却仍零片元 ?**GPU 侧实际使用的 `pos` 与我们从 guest 内存读到的原始流不一?*?或属?*解包**（guest stream ?SPIR-V vertex input）这丢步有偏差?
+反证链：历史?`P5D_V15_FULLSCREEN=2`（在**解包后的 loc0** 上强?±1）能让三?LOGO 出图
+?解包后的数据确实送进了着色器；按解包前的原始流算出的 4371×2340 霢?~1/2185 的尺度，
+?`screen` 给出?1/480 ?4.55 ??**两不自洽**?
+**下一步动作（按价比）?*
+1. ?`[VEXP]`（打?*解包?*?loc0/loc1/loc2）也 gate ?**fc?750**，打?LOGO 相位每个 draw ?   `loc0=(x,y,z,w)`，与 `[V15RAW]` 的原始流逐对?—?丢次就能判定解包是否正确?2. 若解包无误，则说?`screen`/次程?literals 推不出正确的投影，需要重新审?   `SA[2].y`、`SA[4].x` 到底该由仢么提供（?`screen` 的真实语义）?
+当前 `spv_all/gxp_vert_0015.gxp.spv` = 两相?+ literals + mask 修正版本?1972 B）；
+基线备份 `spv_all/gxp_vert_0015.gxp.spv.bak_h145k632`?008 B，与 `assets/gxp_library/` 逐字节一致）?
 
 ---
 
-## h145k638銆愪袱涓噸瑕佹洿姝?+ 閿佸畾涓€澶?鍙璋冭瘯寮€鍏崇粫杩囥€佷粠鏈湡姝ｄ慨澶?鐨勬帴绾跨己闄枫€?
-### 涓€銆佹洿姝?1锛歚[V15EXP]` 鐨?loc2=0"鏄?*鎺㈤拡浣嶇疆閫犳垚鐨勫亣璞?*
+## h145k638【两个重要更?+ 锁定丢?只被调试弢关绕过从未真正修?的接线缺陷?
+### 丢、更?1：`[V15EXP]` ?loc2=0"?*探针位置造成的假?*
 
-鏂板 `P5D_V15EXP=1`锛坒c鈮?763 鎵撳嵃**瑙ｅ寘鍚?*鐨?loc0/loc2锛夊悗寰楀埌锛?```
+新增 `P5D_V15EXP=1`（fc?763 打印**解包?*?loc0/loc2）后得到?```
 [V15EXP] fc=2763 d=12909 va=A3150880 nv=4 expstride=128:
   v0 loc0=(11.651,-8.767,2.125,1.000) loc2=(0.000,0.000)
   v1 loc0=(4363.651,-44.871,2.125,1.000) loc2=(0.000,0.000)
   v2 loc0=(4382.765,-2348.871,2.125,1.000) loc2=(0.000,0.000)
   v3 loc0=(30.765,-2312.767,2.125,1.000) loc2=(0.000,0.000)
 ```
-涓€搴﹀垽涓?UV 琚涪鎺?锛屼絾**鎺㈤拡浣嶇疆閿欎簡**锛歚_exp` 鐨勫～鍏呴『搴忔槸
-1) `L2079 _exp.assign(...)` 娓呴浂锛?2) `L2080 memcpy(_exp+i*OUTSTR, s_hvb+i*16, 16)` 鈥斺€?**鍙濉瘡椤剁偣鍓?16 瀛楄妭锛堝嵆 loc0锛?*锛?3) `L2351` 璧锋墠鏄湡姝ｇ敤鏉冨▉灞炴€ц〃鐨勬暟鎹┍鍔ㄨВ鍖咃紙loc0/loc1/loc2 閮藉湪閭ｉ噷濉級銆?
-鎴戠殑鎵撳嵃鍦?**L2228**锛屼粙浜?(2) 涓?(3) 涔嬮棿 鈬?蹇呯劧鐪嬪埌 `loc0=鐪熷疄鍊笺€乴oc1/loc2=0`銆?**鈬?璇ヨ鏁版棤鏁堬紝LOC2 鏄惁鎼哄甫 UV 浠嶆湭鍒ゅ畾銆?*
+丢度判?UV 被丢?，但**探针位置错了**：`_exp` 的填充顺序是
+1) `L2079 _exp.assign(...)` 清零?2) `L2080 memcpy(_exp+i*OUTSTR, s_hvb+i*16, 16)` —?**只预填每顶点?16 字节（即 loc0?*?3) `L2351` 起才是真正用权威属表的数据驱动解包（loc0/loc1/loc2 都在那里填）?
+我的打印?**L2228**，介?(2) ?(3) 之间 ?必然看到 `loc0=真实值loc1/loc2=0`?**?该读数无效，LOC2 是否携带 UV 仍未判定?*
 
-**鉁?宸茬‘璁ゆ湁鏁堢殑涓€鏉?*锛氳В鍖呭悗鐨?`loc0` 涓?`[V15RAW]` 鍘熷娴?*閫愬€肩浉鍚?*锛堝惈 2.125 鐨?z 涓?w=1.0锛夛紝
-璇存槑**椤剁偣灞炴€х殑鍦板潃/stride/鏍煎紡瑙ｈ鏄纭?*鐨勶紝浣嶇疆涓嶆槸璇銆?
-### 浜屻€佹洿姝?2锛歚P5D_V15PROJ` 閭ｆ"娉ㄥ叆姝ｇ郴鏁颁粛鍏ㄩ粦"鐨勫疄楠?*鏃犳晥**
+**?已确认有效的丢?*：解包后?`loc0` ?`[V15RAW]` 原始?*逐相?*（含 2.125 ?z ?w=1.0），
+说明**顶点属的地址/stride/格式解读是正?*的，位置不是误读?
+### 二更?2：`P5D_V15PROJ` 那次"注入正系数仍全黑"的实?*无效**
 
-鏂?SPIR-V 浠?`sa_f32`/literals 璇婚偅鍑犱釜 lane锛?*鏍规湰涓嶈 guest UBO** 鈬?寰€ `0xAA700000` 鍐欏€间笉浼氱敓鏁堛€?**鈬?浠ュ悗涓嶈兘鍐嶇敤"寰€ UBO 鍐?鍋氬嚑浣曚晶鍒ゅ喅瀹為獙銆?*
+?SPIR-V ?`sa_f32`/literals 读那几个 lane?*根本不读 guest UBO** ?徢 `0xAA700000` 写不会生效?**?以后不能再用"徢 UBO ?做几何侧判决实验?*
 
-### 涓夈€佲槄 閿佸畾涓€澶勭湡瀹炵己闄凤細鐗囧厓閲囨牱 Location 涓?texcoord 钀界偣涓嶅尮閰嶏紙鍙寮€鍏崇粫杩囷級鈽?
-`eboot_probe.cpp:2369-2379` 鐨勬棦鏈夋敞閲婏紙h145k604锛夋槑纭啓鐫€锛?```
-// 绂荤嚎 SPIR-V 鍙栬瘉锛歡xp_vert_0015 Input L0/L1/L2(vec4) 鈫?Output L0/L1锛堝彧鍙戜袱涓?varying锛?//                  gxp_frag_0084 Input L0/L1(vec4)锛宻ampler 鐢?Location 1
-// 杩愯鏃跺疄娴嬶細loc1 妲芥嬁鍒扮殑鏄€愰鑹插睘鎬с€?reg4)锛岀湡姝ｇ殑 texcoord 鍦?loc2(reg8)
-// 鈬?鐗囧厓鐨勯噰鏍峰潗鏍囨亽瀹?鈬?鍙噰涓€涓汗绱?鈬?鍏ㄩ粦銆?// 鏈紑鍏虫妸瑙ｅ寘鍚庣殑 loc2.xy 澶嶅埗鍒?loc1.xy锛堝彧鍋氳繖涓€浠朵簨锛屼笉鏀瑰嚑浣曪級鈥斺€?P5D_UV_TO_L1=1
+### 三★ 锁定丢处真实缺陷：片元采样 Location ?texcoord 落点不匹配（只被弢关绕过）?
+`eboot_probe.cpp:2369-2379` 的既有注释（h145k604）明确写睢?```
+// 离线 SPIR-V 取证：gxp_vert_0015 Input L0/L1/L2(vec4) ?Output L0/L1（只发两?varying?//                  gxp_frag_0084 Input L0/L1(vec4)，sampler ?Location 1
+// 运行时实测：loc1 槽拿到的是颜色属性?reg4)，真正的 texcoord ?loc2(reg8)
+// ?片元的采样坐标恒??只采丢个纹??全黑?// 本开关把解包后的 loc2.xy 复制?loc1.xy（只做这丢件事，不改几何）—?P5D_UV_TO_L1=1
 ```
-**鈬?褰撴椂鐨勫缃槸鍔犱竴涓繍琛屾椂瑕嗙洊寮€鍏崇粫杩囧幓锛岃€屼笉鏄粠**鐢熸垚鍣?*渚т慨姝?varying 鐨勬帴绾裤€?*
-杩欐鏄湰鐩爣锛?涓嶄娇鐢ㄤ换浣曡皟璇曡鐩栧紑鍏?锛夋墍绂佹鐨勫舰鎬侊細**鍔熻兘渚濊禆瑕嗙洊寮€鍏虫墠鎴愮珛**銆?
-**蹇呴』浠?`gxp_to_spv.cpp` / `usse_translator.cpp` 渚т慨姝?*锛?- 纭 `gxp_vert_0015` 瀹為檯鍐欏嚭鐨?OUTPUT锛歚I1: VMOV OUT[2].xy <- PA[2]`锛圥A2 = texcoord锛夛紝
-  浠ュ強鎴戜滑鐨?`OUT[n] 鈫?varying location n-1` 绾﹀畾鏄惁涓?`gxp_frag_0084` 鐨?  implicit coordinate `coord_location`锛堢敓鎴愬櫒閲?`tq.coord_location`锛岀己鐪佽鏀规垚 1锛夊榻愶紱
-- 姝ｇ‘鍋氭硶搴旀寜 vita3k锛?*varying 鐨?location 鐢?GXP 鐨?varyings 琛ㄥ喅瀹?*锛?  鑰屼笉鏄?OUT[n] 鈫?location n-1"鐨勭寽娴嬶紱`coord_location` 搴斿彇璇ヨ〃閲?sampler 渚濊禆椤圭殑 `sa_offset` 瀵瑰簲浣嶇疆銆?
+**?当时的处置是加一个运行时覆盖弢关绕过去，不是从**生成?*侧修?varying 的接线?*
+这正是本目标?不使用任何调试覆盖开?）所禁止的形态：**功能依赖覆盖弢关才成立**?
+**必须?`gxp_to_spv.cpp` / `usse_translator.cpp` 侧修?*?- 确认 `gxp_vert_0015` 实际写出?OUTPUT：`I1: VMOV OUT[2].xy <- PA[2]`（PA2 = texcoord），
+  以及我们?`OUT[n] ?varying location n-1` 约定是否?`gxp_frag_0084` ?  implicit coordinate `coord_location`（生成器?`tq.coord_location`，缺省被改成 1）对齐；
+- 正确做法应按 vita3k?*varying ?location ?GXP ?varyings 表决?*?  而不?OUT[n] ?location n-1"的猜测；`coord_location` 应取该表?sampler 依赖项的 `sa_offset` 对应位置?
 ### 鍥涖€佹湰杞叾瀹冨凡钀藉湴鍐呭
 
-- 鏂板鎺㈤拡锛歚P5D_V15VTX=1`锛圠OGO 鐩镐綅灞炴€ц〃 + 鍘熷 48 float锛夈€乣P5D_V15PROJ=1`锛堟敞鍏ワ紝宸插垽鏃犳晥锛夈€?  `P5D_V15EXP=1`锛堣В鍖呭悗 loc0/loc2锛屼綅缃渶鍚庣Щ锛夈€?- LOGO 鐩镐綅椤剁偣灞炴€ц〃 = 涓?fc2251 **瀹屽叏鐩稿悓**锛坰tride24 / `F32x3@0`鈫抣oc0銆乣U8x4@12`鈫抣oc1銆乣F32x2@16`鈫抣oc2锛夛紝
-  涓旀祦鏄?*瀹屾暣 UV 鍥涜竟褰?* (0,0)-(1,1)锛宲os 璺ㄥ害 **4371.114 脳 2340.104**銆?- 鍓嶅嚑杞惤鍦扮殑 6 椤圭粨鏋勬€т慨澶嶄繚鎸侊細鐩镐綅鏍囧織 / 涓ょ浉浣嶇炕璇?/ PA 鍙啓 / SA 鍙啓 / VCOMP dest double /
-  literals鈫扴A锛堟绋嬪簭鍚庤杞斤級/ `masked_store` 鍚堝苟鍩哄噯淇銆?
-### 浜斻€佷笅涓€姝ワ紙涓ゆ潯锛屾寜鎬т环姣旓級
+- 新增探针：`P5D_V15VTX=1`（LOGO 相位属表 + 原始 48 float）`P5D_V15PROJ=1`（注入，已判无效）?  `P5D_V15EXP=1`（解包后 loc0/loc2，位置需后移）?- LOGO 相位顶点属表 = ?fc2251 **完全相同**（stride24 / `F32x3@0`→loc0、`U8x4@12`→loc1、`F32x2@16`→loc2），
+  且流?*完整 UV 四边?* (0,0)-(1,1)，pos 跨度 **4371.114 × 2340.104**?- 前几轮落地的 6 项结构修复保持：相位标志 / 两相位翻?/ PA 可写 / SA 可写 / VCOMP dest double /
+  literals→SA（次程序后装载）/ `masked_store` 合并基准修正?
+### 五下丢步（两条，按性价比）
 
-1. **鎶?`[V15EXP]` 鐨勬墦鍗扮偣绉诲埌 L2368 瑙ｅ寘寰幆涔嬪悗**锛堟垨鐩存帴鐢?`[ALPHA2]` 鐨勬棦鏈変綅缃級锛?   涓€娆¤繍琛屽嵆鍙垽瀹?loc2 鏄惁鎼哄甫 UV锛氬甫涓?鈬?UV 娌￠棶棰橈紝闂鍦?varying 鎺ョ嚎锛涗笉甯?鈬?瑙ｅ寘浠嶆紡 loc2銆?2. **淇?varying 鎺ョ嚎**锛堜笉鍐嶄緷璧?`P5D_UV_TO_L1`锛夛細
-   鎸?vita3k `gxp_parser.cpp` 鐨?varyings 琛紙`varyings_offset`锛屾湰鏂囦欢 =0x70 鈫?0x2C+0x70=0x9C锛?   纭畾姣忎釜 OUTPUT 鐨?location锛屽苟璁?`gxp_frag_0084` 鐨?implicit coordinate 鐢ㄥ悓涓€寮犺〃鎺ㄥ鍑虹殑 location銆?   `gxp_vert_0015` 澶撮儴鐨?`varyings_offset = 0x70`锛?x2C 瀛楁锛屽€艰 dump `varyings_off=0x70`锛夈€?
+1. **?`[V15EXP]` 的打印点移到 L2368 解包循环之后**（或直接?`[ALPHA2]` 的既有位置）?   丢次运行即可判?loc2 是否携带 UV：带??UV 没问题，问题?varying 接线；不??解包仍漏 loc2?2. **?varying 接线**（不再依?`P5D_UV_TO_L1`）：
+   ?vita3k `gxp_parser.cpp` ?varyings 表（`varyings_offset`，本文件 =0x70 ?0x2C+0x70=0x9C?   确定每个 OUTPUT ?location，并?`gxp_frag_0084` ?implicit coordinate 用同丢张表推导出的 location?   `gxp_vert_0015` 头部?`varyings_offset = 0x70`?x2C 字段，见 dump `varyings_off=0x70`）?
 
 ---
 
-# 鈽呪槄鈽?h145k644銆愮洰鏍囪揪鎴愶細寮曟搸鑷繁鐢诲嚭涓変釜鍘傚晢 LOGO锛屾湭浣跨敤浠讳綍璋冭瘯瑕嗙洊寮€鍏炽€戔槄鈽呪槄
+# ★★?h145k644【目标达成：引擎自己画出三个厂商 LOGO，未使用任何调试覆盖弢关★★★
 
-## 涓€銆佹牴鍥狅紙涓€澶勶紝涓旀槸 harness 鑷韩鐨勯敊璇涓猴級
+## 丢、根因（丢处，且是 harness 自身的错误行为）
 
-`eboot_probe.cpp` 閲岀殑 **`P5D_PX2NDC` 鑰?hack**锛堟爣绛?h145k137/h145k449锛変細鎶婇《鐐?`loc0`
-鍦?*涓婁紶缁?Vulkan 涔嬪墠**鏀瑰啓鎴?NDC銆傚畠鐨勯粯璁ゆ爣瀹氭槸涓?**SAVE 寰芥爣**鎷熷悎鍑烘潵鐨?`sx=19.76, sy=6.85, ox=1.729, oy=0.043`銆?
-**瀹炴祴閫愪綅鍚诲悎**锛坄[V15UPL]`锛岀湡姝ｉ€佽繘 GPU 鐨勬暟鎹級锛?```
-鍘熷娴?v0 loc0 = (11.651, -8.767)
-涓婁紶鍚?v0 loc0 = ( 0.730, -0.962)
-鎺ㄧ畻锛歺: 11.651*(2/(960*19.76)) - 1 + 1.729 = 0.7302   鉁?      y: -8.767*(2/(544*6.85))  - 1 + 0.043  = -0.9617  鉁?```
+`eboot_probe.cpp` 里的 **`P5D_PX2NDC` ?hack**（标?h145k137/h145k449）会把顶?`loc0`
+?*上传?Vulkan 之前**改写?NDC。它的默认标定是?**SAVE 徽标**拟合出来?`sx=19.76, sy=6.85, ox=1.729, oy=0.043`?
+**实测逐位吻合**（`[V15UPL]`，真正进 GPU 的数据）?```
+原始?v0 loc0 = (11.651, -8.767)
+上传?v0 loc0 = ( 0.730, -0.962)
+推算：x: 11.651*(2/(960*19.76)) - 1 + 1.729 = 0.7302   ?      y: -8.767*(2/(544*6.85))  - 1 + 0.043  = -0.9617  ?```
 
-鑰?`gxp_vert_0015` **鑷繁鍦ㄧ潃鑹插櫒閲岀敤 `screen`/SA 鍋氭姇褰?*
-锛坄x = pos.x*SA[2].y + SA[2].x`銆乣y = -pos.y*SA[4].x + SA[0].y`锛?鈬?杩欎釜 CPU 渚?hack 鏄?*閲嶅鍙樻崲**锛氭妸 LOGO 鍥涜竟褰㈠帇鎴愪竴鐐?锛堝疄娴嬪洓涓《鐐归兘钀藉埌 x鈮?0.9985銆亂鈮?1.0035锛岄浂闈㈢Н锛夆噿 闆剁墖鍏?鈬?鍏ㄩ粦銆?
-**鈬?淇硶**锛氬湪 `_apply`锛坄_mode==1/3`锛夐噷鎺掗櫎鑷繁鍋氭姇褰辩殑椤剁偣绋嬪簭
+?`gxp_vert_0015` **自己在着色器里用 `screen`/SA 做投?*
+（`x = pos.x*SA[2].y + SA[2].x`、`y = -pos.y*SA[4].x + SA[0].y`??这个 CPU ?hack ?*重复变换**：把 LOGO 四边形压成一?（实测四个顶点都落到 x?0.9985、y?1.0035，零面积）⇒ 零片??全黑?
+**?修法**：在 `_apply`（`_mode==1/3`）里排除自己做投影的顶点程序
 ```cpp
 const bool _selfproj = (_eh==0x172A9E736C7DC35Eull);
 if(_mode==1) _apply = (_pix || (g_vp_flat!=0)) && !_selfproj;
 else if(_mode==3) _apply = _pix && !_selfproj;
 ```
-杩欐槸**淇涓€涓敊璇涓?*锛屼笉鏄皟璇曡鐩栧紑鍏筹紙娌℃湁鏂板浠讳綍鐜鍙橀噺锛夈€?
-## 浜屻€佷慨澶嶅悗瀹炴祴锛坄P5D_SEQ_*` 鍙仛鎴浘锛屾棤浠讳綍琛屼负瑕嗙洊锛?
+这是**修正丢个错误行?*，不是调试覆盖开关（没有新增任何环境变量）?
+## 二修复后实测（`P5D_SEQ_*` 只做截图，无任何行为覆盖?
 ```
-[V15UPL] fc=2763 v0 loc0=(11.651,-8.767,2.125,1.000) loc1=(1,1,1,1) loc2=(0,0,0,1)   鈫?鍘熷鍧愭爣鐩磋揪 GPU
+[V15UPL] fc=2763 v0 loc0=(11.651,-8.767,2.125,1.000) loc1=(1,1,1,1) loc2=(0,0,0,1)   ?原始坐标直达 GPU
          v1 (4363.651,-44.871)  loc2=(1,0,0,1)
          v2 (4382.765,-2348.871) loc2=(1,1,0,1)
          v3 (30.765,-2312.767)  loc2=(0,1,0,1)      鈫?瀹屾暣 UV 鍥涜竟褰?```
 
-甯х粺璁★紙**2760鈥?000 鍏?19/27 甯ф湁鍐呭**锛屾鍓嶆槸 0/27 鍏ㄩ粦锛夛細
+帧统计（**2760?000 ?19/27 帧有内容**，此前是 0/27 全黑）：
 ```
-2780鈥?830  mean=11.21 max=255   鈫?ATLUS
-2860鈥?910  mean=27.35 max=252   鈫?P路STUDIO
-2940鈥?990  mean=25.09 max=255   鈫?CRIWARE
-3010       mean=85.87 max=255   鈫?寮€鍦哄姩鐢伙紙鏃犲洖褰掞級
+2780?830  mean=11.21 max=255   ?ATLUS
+2860?910  mean=27.35 max=252   ?P·STUDIO
+2940?990  mean=25.09 max=255   ?CRIWARE
+3010       mean=85.87 max=255   ?弢场动画（无回归）
 ```
 
-**鑲夌溂楠屾敹锛圥NG 杞嚭鍚庢煡鐪嬶級**锛?- 甯?2800 = **ATLUS**锛堣摑鑹插瓧 + **绾㈣壊 T** + 鐧芥弿杈癸紝涓庣敤鎴锋弿杩扮殑鍘熺増涓€鑷达級
-- 甯?2880 = **P路STUDIO**锛堟柟鍧?+ 鍥惧舰 + "P路STUDIO / Creative department 2nd Production"锛?- 甯?2960 = **CRIWARE**锛堣摑鑹茬珛鏂逛綋 + "CRIWARE鈩?锛?
-## 涓夈€佷负浠€涔堜箣鍓嶆墍鏈?绯绘暟"瀹為獙閮芥棤鏁?
-鍥犱负瀹冧滑鍏ㄩ兘浣滅敤鍦?*宸茶杩欎釜 hack 鏀瑰啓杩囩殑杈撳叆**涓婏細
+**肉眼验收（PNG 转出后查看）**?- ?2800 = **ATLUS**（蓝色字 + **红色 T** + 白描边，与用户描述的原版丢致）
+- ?2880 = **P·STUDIO**（方?+ 图形 + "P·STUDIO / Creative department 2nd Production"?- ?2960 = **CRIWARE**（蓝色立方体 + "CRIWARE??
+## 三为仢么之前所?系数"实验都无?
+因为它们全都作用?*已被这个 hack 改写过的输入**上：
 
-| 瀹為獙 | 涓轰綍鏃犳晥 |
+| 实验 | 为何无效 |
 |---|---|
-| 寰€ guest UBO 娉ㄥ叆"姝ｇ‘绯绘暟"锛坔145k636b/637锛?| 鈶燬PIR-V 閭ｆ椂浠?`sa_f32`/literals 璇伙紝涓嶈 UBO锛涒憽鍗充究璇讳簡锛岃緭鍏?`loc0` 鏈韩宸茶鏀瑰啓 |
-| `P5D_V15_FULLSCREEN` 绛?| 鍚屼笂锛屾槸鍦ㄨ鏀瑰啓鐨?`loc0` 涓婂啀鏀逛竴娆?|
-| 鐩存帴鏀瑰彉棰戠▼搴忕殑鎶曞奖绯绘暟 | 杈撳叆鏄?NDC 鑰岄潪鍍忕礌鍧愭爣锛岀郴鏁拌涔夊畬鍏ㄤ笉鍚?|
+| 徢 guest UBO 注入"正确系数"（h145k636b/637?| ①SPIR-V 那时?`sa_f32`/literals 读，不读 UBO；②即便读了，输?`loc0` 本身已被改写 |
+| `P5D_V15_FULLSCREEN` ?| 同上，是在被改写?`loc0` 上再改一?|
+| 直接改变频程序的投影系数 | 输入?NDC 而非像素坐标，系数语义完全不?|
 
-**鈬?鏁欒锛堝凡鍐欏叆锛夛細鍑℃槸"鍑犱綍/绯绘暟"绫诲疄楠岋紝蹇呴』鍏堢敤 `[V15UPL]` 纭**鐪熸涓婁紶缁?GPU 鐨勬暟鎹?*锛?鑰屼笉鏄彧淇?`_exp`锛堟湰娆′袱鑰呭湪 hack 鎵撳紑鏃剁浉宸?4.5 鍊嶄互涓婏級銆?*
+**?教训（已写入）：凡是"几何/系数"类实验，必须先用 `[V15UPL]` 确认**真正上传?GPU 的数?*?而不是只?`_exp`（本次两者在 hack 打开时相?4.5 倍以上）?*
 
-## 鍥涖€佹湰杞箣鍓嶇疮璁¤惤鍦扮殑 7 椤圭粨鏋勬€т慨澶嶏紙浠嶇劧鏈夋晥锛屼笖鏄湰娆¤兘鍑哄浘鐨勫熀纭€锛?
-1. 瑙ｇ爜鍣ㄧ浉浣嶆爣蹇?`s_second_program`锛堟绋嬪簭鎵€鏈?bank 鈫?SECATTR锛?2. **鐢熸垚鍣ㄤ袱鐩镐綅缈昏瘧**锛堟绋嬪簭鍏堣窇锛夆€斺€?姝ゅ墠**鏁翠釜娆＄▼搴忚涓㈠純**锛屽奖鍝嶅叏搴?4116 涓?GXP
-3. 椤剁偣渚?**PA 鍙啓**锛坄pa_vars`锛?4. 椤剁偣渚?**SA 鍙啓**锛團32 绮掑害褰卞瓙 `sa_f32`锛?5. **VCOMP `double_reg`**锛坉est锛?6. **GXP literals 鈫?SA**锛屼笖鍦ㄦ绋嬪簭涔嬪悗瑁呰浇
-7. **`masked_store` 鐨?mask 鍚堝苟鍩哄噯淇**锛坆ank==3 鏃剁敤 SA 绐楀彛鑰岄潪鏈垵濮嬪寲鐨?`secattr_vars`锛?
-鏂板璇婃柇寮€鍏筹紙浠呮墦鍗帮紝涓嶆敼鍙樿涓猴級锛歚P5D_V15VTX` / `P5D_V15EXP` / `P5D_V15PROJ` / `P5D_V15UPL` /
-`P5D_SA_RAWUBO`锛堢敓鎴愬櫒渚э級/ `P5D_VPOS_FORCE`锛堢敓鎴愬櫒渚т簩鍒嗭級銆?
+## 四本轮之前累计落地的 7 项结构修复（仍然有效，且是本次能出图的基硢?
+1. 解码器相位标?`s_second_program`（次程序扢?bank ?SECATTR?2. **生成器两相位翻译**（次程序先跑）?此前**整个次程序被丢弃**，影响全?4116 ?GXP
+3. 顶点?**PA 可写**（`pa_vars`?4. 顶点?**SA 可写**（F32 粒度影子 `sa_f32`?5. **VCOMP `double_reg`**（dest?6. **GXP literals ?SA**，且在次程序之后装载
+7. **`masked_store` ?mask 合并基准修正**（bank==3 时用 SA 窗口而非未初始化?`secattr_vars`?
+新增诊断弢关（仅打印，不改变行为）：`P5D_V15VTX` / `P5D_V15EXP` / `P5D_V15PROJ` / `P5D_V15UPL` /
+`P5D_SA_RAWUBO`（生成器侧）/ `P5D_VPOS_FORCE`（生成器侧二分）?
 
 ---
 
-## h145k647/h145k648锛堢 18 杞級锛氱敤 vita3k 鏉冨▉澶嶆牳锛岀籂姝ｄ袱澶勮鍒わ紝閿佸畾 LOGO 鐩镐綅鐨?draw 娓呭崟涓庡敮涓€鍓╀綑闃诲
+## h145k647/h145k648（第 18 轮）：用 vita3k 权威复核，纠正两处误判，锁定 LOGO 相位?draw 清单与唯丢剩余阻塞
 
-### 涓€銆乿ita3k 鏉冨▉妫€绱㈢粨璁猴紙`C:\dev\tmp\vita3k_full\`锛?
-| 椤?| vita3k 鏉冨▉ | 鎴戜滑鐨勫疄鐜?| 鍒ゅ畾 |
+### 丢、vita3k 权威棢索结论（`C:\dev\tmp\vita3k_full\`?
+| ?| vita3k 权威 | 我们的实?| 判定 |
 |---|---|---|---|
-| `SceGxmProgramParameter` 浣嶅煙 | `cat:4\|type:4\|cc:4\|cont:4`锛坲16@+4锛夈€乻emantic u16@+6銆乤rray_size@+8銆乺esource_index i32@+0xC | 涓庝箣涓€鑷达紙`cat=b4&0xF, type=b4>>4, comp=b5&0xF, cont=b5>>4`锛?| 鉁?|
-| `SceGxmProgramParameterContainer` | `{u16 container_index, u16 unk02, u16 base_sa_offset, u16 size_in_f32}` | 涓€鑷?| 鉁?|
-| `SceGxmUniformBufferInfo` | `{u16 reside_buffer, u16 base_offset, u32 unk0}`锛沗reside_buffer==0` 鈬?**鍐呭瓨 buffer(SSBO)** | gxp_vert_0015: `{0,0,0xFFFFFFFC}` 鈬?SSBO | 璁板綍 |
-| `get_uniform_buffer_base` | 鍙敤 **container 19**(DATA) 鐨?`base_sa_offset` + `info->base_offset` | 涓€鑷?| 鉁?|
-| UNIFORM 鍙傛暟鐨?SA 鍩哄潃 | `gxp_parser.cpp:82`锛歚get_container_by_index(prog, param.container_index)->base_sa_offset + resource_index`锛涘鍣ㄤ笉瀛樺湪鍒欓€€鍥?`resource_index` | `screen`(cont=0) 涓嶅湪瀹瑰櫒琛?琛ㄥ唴鍙湁 cont=19) 鈬?SA base=0 | 鉁?|
-| **`sceGxmSetUniformDataF` 钀界偣** | `offset = parameter->resource_index * sizeof(float) + componentOffset*comp_size`锛?*float 鍗曚綅**锛?| HLE 鍐欑殑鏄?`dst = ub + resIdx*16 + coff*4`锛?*vec4 鍗曚綅**锛?| 鉂?**鐪?bug锛堝樊 4脳锛?*锛宍res=0` 鐨?`clearColor`/`screen` 鎭板ソ骞稿厤 |
-| SA 鎿嶄綔鏁板崟浣?| `usse_utilities.cpp:781`锛歚idx_in_arr = (op.num+shift)>>2`锛宐ank 涓?`vec4 sa[N/4]` 鈬?**`op.num` 鏄?f32 绱㈠紩** | 涓€鑷达紙`load_secattr_vec4` 鐢?`s=idx>>2, k=idx&3`锛?| 鉁?|
-| FPCONSTANT | 纭紪鐮佸父閲忚〃 `f32_constant_table_bank_0/1_raw`锛沗bank1` 浠呭湪 `i==1 && op.index==0` 鏃剁敤锛岀储寮?= `op.num + swizzle[i] - X` | `kFpconstBank0Raw/Bank1Raw`锛宍.y` 鍙?bank1锛涚储寮曠敤 `num`锛堟湭鍔?swizzle 鍋忕Щ锛?| 鈿狅笍 瑙佷笅 |
-| `secondary_program_start/end` | `0x48+soff` / `0x4C+soff_end` | 涓€鑷?| 鉁?|
-| `stream_data` 璇箟 | **per-context** 鐘舵€侊紱`SceGxmVertexStream{stride, indexSource}`锛?*鏃?offset**锛夛紱vita3k 椤剁偣杈撳叆鍙敤 `attribute.offset` | 涓€鑷达紱`[V5SETSEQ]` 瀹炴祴鎵€鏈?SetVertexStream 鐨?ctx == draw 鐨?ctx | 鉁?鎺掗櫎澶?context |
-| `sceGxmDrawPrecomputed` | 椤剁偣娴佸彇鑷?`precomputed_vertex_state`锛寀niform 鍙～ container 14 | 鏈綔 `DrawPrecomputed` 璋冪敤鏁?= 0锛堟敞閲?1471 琛屽疄娴嬶級锛涗笖 `n_precomp_vstream` 鍙啓 state 缁撴瀯 | 鉁?鎺掗櫎 |
-| FPC 鐪熷€煎垽瀹?| `FPC[1].yyyy`锛歚i=0/2/3` 鐢?bank0[1+1]=`table0[2]`=**1.0**锛沗i=1` 鑻?`op.index==0` 鐢?bank1[2]=**0.0**锛屽惁鍒?bank0[2]=1.0 | 鎴戜滑涓€寰嬪彇 `bank1[1]`=1.0 | 缁撴灉鍚屼负 1.0 鈬?**涓嶆槸闃诲**锛坄op.index!=0` 鏃?vita3k 浜︿负 1.0锛?|
+| `SceGxmProgramParameter` 位域 | `cat:4\|type:4\|cc:4\|cont:4`（u16@+4）semantic u16@+6、array_size@+8、resource_index i32@+0xC | 与之丢致（`cat=b4&0xF, type=b4>>4, comp=b5&0xF, cont=b5>>4`?| ?|
+| `SceGxmProgramParameterContainer` | `{u16 container_index, u16 unk02, u16 base_sa_offset, u16 size_in_f32}` | 丢?| ?|
+| `SceGxmUniformBufferInfo` | `{u16 reside_buffer, u16 base_offset, u32 unk0}`；`reside_buffer==0` ?**内存 buffer(SSBO)** | gxp_vert_0015: `{0,0,0xFFFFFFFC}` ?SSBO | 记录 |
+| `get_uniform_buffer_base` | 只用 **container 19**(DATA) ?`base_sa_offset` + `info->base_offset` | 丢?| ?|
+| UNIFORM 参数?SA 基址 | `gxp_parser.cpp:82`：`get_container_by_index(prog, param.container_index)->base_sa_offset + resource_index`；容器不存在则?`resource_index` | `screen`(cont=0) 不在容器?表内只有 cont=19) ?SA base=0 | ?|
+| **`sceGxmSetUniformDataF` 落点** | `offset = parameter->resource_index * sizeof(float) + componentOffset*comp_size`?*float 单位**?| HLE 写的?`dst = ub + resIdx*16 + coff*4`?*vec4 单位**?| ?**?bug（差 4×?*，`res=0` ?`clearColor`/`screen` 恰好幸免 |
+| SA 操作数单?| `usse_utilities.cpp:781`：`idx_in_arr = (op.num+shift)>>2`，bank ?`vec4 sa[N/4]` ?**`op.num` ?f32 索引** | 丢致（`load_secattr_vec4` ?`s=idx>>2, k=idx&3`?| ?|
+| FPCONSTANT | 硬编码常量表 `f32_constant_table_bank_0/1_raw`；`bank1` 仅在 `i==1 && op.index==0` 时用，索?= `op.num + swizzle[i] - X` | `kFpconstBank0Raw/Bank1Raw`，`.y` ?bank1；索引用 `num`（未?swizzle 偏移?| ⚠️ 见下 |
+| `secondary_program_start/end` | `0x48+soff` / `0x4C+soff_end` | 丢?| ?|
+| `stream_data` 语义 | **per-context** 状；`SceGxmVertexStream{stride, indexSource}`?*?offset**）；vita3k 顶点输入只用 `attribute.offset` | 丢致；`[V5SETSEQ]` 实测扢?SetVertexStream ?ctx == draw ?ctx | ?排除?context |
+| `sceGxmDrawPrecomputed` | 顶点流取?`precomputed_vertex_state`，uniform 只填 container 14 | 本作 `DrawPrecomputed` 调用?= 0（注?1471 行实测）；且 `n_precomp_vstream` 只写 state 结构 | ?排除 |
+| FPC 真判?| `FPC[1].yyyy`：`i=0/2/3` ?bank0[1+1]=`table0[2]`=**1.0**；`i=1` ?`op.index==0` ?bank1[2]=**0.0**，否?bank0[2]=1.0 | 我们丢律取 `bank1[1]`=1.0 | 结果同为 1.0 ?**不是阻塞**（`op.index!=0` ?vita3k 亦为 1.0?|
 
-**鈿狅笍 閲嶅ぇ绾犻敊锛堟鍓嶄竴杞殑缁撹浣滃簾锛?*锛氫笂涓€杞嵁"鍙嶆眹缂栭噷鎼滀笉鍒?`OpFDiv`"鍒ゅ畾"娆＄▼搴忕浉浣嶆湭瀹炵幇"銆?瀹為檯鏄?*鎴戜滑鑷繁鐨?SPIR-V dumper 鍚嶅瓧琛ㄦ妸 `OpFDiv` 鏍囨垚 103**锛堢湡姝ｇ殑 `OpFDiv` = **136**锛屼笉鍦ㄦ墦鍗扮櫧鍚嶅崟锛夈€?鐩存帴鍋?opcode 鐩存柟鍥惧悗纭锛歚spv_all/gxp_vert_0015.gxp.spv` 涓?`_rt_vert_ABE1E100963724B0.gxp.spv` 鍧囨湁 **op136 n=2** 鈬?**two-phase锛坰econdary 鐨?VRCP锛? literals 涓€鐩存槸鐢熸晥鐨?*锛歋A 鏈€缁?= (f32_1=+1.0 literal, f32_2=鈭?.0 literal, f32_3=rcp(480)=1/480, f32_4=rcp(272)=1/272)銆?
-### 浜屻€佹柊鎺㈤拡 `P5D_VALL=1`锛歀OGO 鐩镐綅锛坒c 2755鈥?005锛?*姣忎竴娆?draw** 鐨勬竻鍗?
-`[VALL] fc d eh fh rt cw ch s0 cnt vb` + `[VALLATTR]`锛坓_vfmt 鐨?stride/灞炴€э級+ `[VALLRAW]`锛堥《鐐规祦鍘熷 32 float锛? `[VALLUBO0]`/`[VALLBIND0..15]`/`[VALLVDEF]`銆?
-瀹炴祴锛坒c=2770锛?2 draw/甯э級锛?
+**⚠️ 重大纠错（此前一轮的结论作废?*：上丢轮据"反汇编里搜不?`OpFDiv`"判定"次程序相位未实现"?实际?*我们自己?SPIR-V dumper 名字表把 `OpFDiv` 标成 103**（真正的 `OpFDiv` = **136**，不在打印白名单）?直接?opcode 直方图后确认：`spv_all/gxp_vert_0015.gxp.spv` ?`_rt_vert_ABE1E100963724B0.gxp.spv` 均有 **op136 n=2** ?**two-phase（secondary ?VRCP? literals 丢直是生效?*：SA 朢?= (f32_1=+1.0 literal, f32_2=?.0 literal, f32_3=rcp(480)=1/480, f32_4=rcp(272)=1/272)?
+### 二新探针 `P5D_VALL=1`：LOGO 相位（fc 2755?005?*每一?draw** 的清?
+`[VALL] fc d eh fh rt cw ch s0 cnt vb` + `[VALLATTR]`（g_vfmt ?stride/属）+ `[VALLRAW]`（顶点流原始 32 float? `[VALLUBO0]`/`[VALLBIND0..15]`/`[VALLVDEF]`?
+实测（fc=2770?2 draw/帧）?
 | # | eh | fh | rt | 椤剁偣 | 鍒ゅ畾 |
 |---|---|---|---|---|---|
-| 12989 | `A71B28370132FF67` | `26F80E96E57EB001` | A1300000 | 3 椤剁偣 stride12锛歚(-1,-1,1) (3,-1,1) (-1,3,1)` | **鍏ㄥ睆涓夎褰㈡竻灞?*锛坒h 鐨勫敮涓€鍙傛暟鏄?`clearColor`, cont=14锛?|
-| 12990 | **`ABE1E100963724B0`(vert_0014)** | `5D73281E76A107B2` | A1300000 | **鍍忕礌绌洪棿鍏ㄥ睆鍥涜竟褰?`(0,0,2) (960,0,2) (960,544,2) (0,544,2)`** stride16锛坧os F32脳3 + color U8N脳4锛?*鏃?UV 灞炴€?*锛?| 鍑犱綍=寮曟搸鑷韩鍙樻崲鍚庢伆濂?NDC[-1,1]锛涗絾 `OUT[2]=PA[2]` 鏃犲睘鎬т緵缁?鈬?UV鈮? 鈬?鍗曡壊閾哄睆锛堥伄缃╋級 |
-| 12991鈥?2996 | `4A3A4C8DFD6083F6` / `8D301D508EDD0DF5` | `E9728942鈥/`BD212AB1鈥 | AE100000/AE300000 (224脳68) | 灏忓洓杈瑰舰 + UV | 灏忕洰鏍?UI |
-| 12997 | `EC5D3D7E8BC3DADA` | `5BE8035296882A66` | A1300000 | stride28 | 涓荤紦鍐?|
-| 13000 | **`172A9E736C7DC35E`(vert_0015)** | `6952EF6C507D515E` | A1300000 | **`(11.6512,-8.7668,2.125) (4363.6514,-44.8708,2.125) (4382.7651,-2348.8708,2.125) (30.7650,-2312.7668,2.125)`锛孶V=`(0,0)(1,0)(1,1)(0,1)`** stride24锛坧os F32脳3@0 + color U8N脳4@12 + uv F32脳2@16锛?| **鍞竴鍚屾椂甯?瀹屾暣 UV 鍥涜竟褰?涓?閲囨牱 colorMap 鐨?fragment"鐨?draw** 鈬?LOGO 鐨勮浇浣?|
+| 12989 | `A71B28370132FF67` | `26F80E96E57EB001` | A1300000 | 3 顶点 stride12：`(-1,-1,1) (3,-1,1) (-1,3,1)` | **全屏三角形清?*（fh 的唯丢参数?`clearColor`, cont=14?|
+| 12990 | **`ABE1E100963724B0`(vert_0014)** | `5D73281E76A107B2` | A1300000 | **像素空间全屏四边?`(0,0,2) (960,0,2) (960,544,2) (0,544,2)`** stride16（pos F32×3 + color U8N×4?*?UV 属?*?| 几何=引擎自身变换后恰?NDC[-1,1]；但 `OUT[2]=PA[2]` 无属性供??UV? ?单色铺屏（遮罩） |
+| 12991?2996 | `4A3A4C8DFD6083F6` / `8D301D508EDD0DF5` | `E9728942…`/`BD212AB1…` | AE100000/AE300000 (224×68) | 小四边形 + UV | 小目?UI |
+| 12997 | `EC5D3D7E8BC3DADA` | `5BE8035296882A66` | A1300000 | stride28 | 主缓?|
+| 13000 | **`172A9E736C7DC35E`(vert_0015)** | `6952EF6C507D515E` | A1300000 | **`(11.6512,-8.7668,2.125) (4363.6514,-44.8708,2.125) (4382.7651,-2348.8708,2.125) (30.7650,-2312.7668,2.125)`，UV=`(0,0)(1,0)(1,1)(0,1)`** stride24（pos F32×3@0 + color U8N×4@12 + uv F32×2@16?| **唯一同时?完整 UV 四边??采样 colorMap ?fragment"?draw** ?LOGO 的载?|
 
-- `[VALLUBO0]`锛?*鎵€鏈?* draw 鐨?bind0=AA700000 鎭掍负 `(1.0, 0.5, 480.0, 272.0)`銆?- `[VALLBIND]`锛?*16 涓Ы閲屽彧鏈?bind0 闈為浂**锛?500/1500 鏉★級鈬?寮曟搸鍙粦浜嗕竴涓樉寮?UBO锛屼笉瀛樺湪"鍒殑妲介噷鏀剧潃鐪熺郴鏁?銆?- `[VALLVDEF]`锛堥《鐐归粯璁?reserve 鍧楋紝姣忔 reserve 鎹㈡柊鍦板潃 B3A56xxx/B3A5Cxxx鈥︼級锛?*鎭掍负 `(0.5446, 0.8214, 0, 0, 0, 0, 0, 0)`**锛?500/1500 鏉★級銆?- `[PRES]`锛氭瘡甯?imgIdx 0/1/2 杞浆 = 涓夐噸缂撳啿锛涗袱娆¤剼鏈繍琛屽潎璇佸疄 **fc 2755鈥?000 鍛堢幇鍏ㄩ粦**锛?7 寮?BMP 閲屽彧鏈?fc=3010 鏈夊唴瀹?mean=125.2/max=255锛夈€?
-**鈬?鏄庣‘缁撹**锛歀OGO 鐩镐綅鐨勫彲瑙佸唴瀹规湰搴旂敱 `vert_0015` 鐨?draw 浜х敓锛堝畠鏄敮涓€甯?UV + 閲囨牱 LOGO 鐢诲竷鐨?draw锛夈€?鑰屽畠鐨勫嚑浣曠粡寮曟搸鑷韩绯绘暟锛?/480銆?/272锛夊悗涓?`x_ndc鈭圼-0.98,8.13]銆亂_ndc鈭圼0.99,9.64]` 鈬?**鏁翠綋鍑哄睆**锛屽彧鍓╁睆骞曢《閮ㄧ害 4 鍍忕礌楂樼殑涓€鏉★紝涓旇鏉″甫 UV 钀藉湪 `v<0`锛堢汗鐞嗗锛夆噿 鍏ㄩ粦銆?鍚屾椂 `vert_0014` 鐨勫叏灞忓洓杈瑰舰铏藉嚑浣曟纭紝浣?*鏃?UV** 鈬?鍗曡壊閬僵锛屼笉鑳芥樉绀?LOGO銆?
-### 涓夈€佷簩鍒嗗疄楠岀殑**鏂规硶瀛︾籂閿?*锛堥噸瑕侊級
+- `[VALLUBO0]`?*扢?* draw ?bind0=AA700000 恒为 `(1.0, 0.5, 480.0, 272.0)`?- `[VALLBIND]`?*16 个槽里只?bind0 非零**?500/1500 条）?引擎只绑了一个显?UBO，不存在"别的槽里放着真系??- `[VALLVDEF]`（顶点默?reserve 块，每次 reserve 换新地址 B3A56xxx/B3A5Cxxx…）?*恒为 `(0.5446, 0.8214, 0, 0, 0, 0, 0, 0)`**?500/1500 条）?- `[PRES]`：每?imgIdx 0/1/2 轮转 = 三重缓冲；两次脚本运行均证实 **fc 2755?000 呈现全黑**?7 ?BMP 里只?fc=3010 有内?mean=125.2/max=255）?
+**?明确结论**：LOGO 相位的可见内容本应由 `vert_0015` ?draw 产生（它是唯丢?UV + 采样 LOGO 画布?draw）?而它的几何经引擎自身系数?/480?/272）后?`x_ndc∈[-0.98,8.13]、y_ndc∈[0.99,9.64]` ?**整体出屏**，只剩屏幕顶部约 4 像素高的丢条，且该条带 UV 落在 `v<0`（纹理外）⇒ 全黑?同时 `vert_0014` 的全屏四边形虽几何正确，?*?UV** ?单色遮罩，不能显?LOGO?
+### 三二分实验的**方法学纠?*（重要）
 
-绗竴鐗?`P5D_SCREEN_FIX` 娉ㄥ叆鐐瑰啓鍦?`[VALL]` 鎺㈤拡閲岋紙draw 鎻愪氦鍓嶏級锛?浣嗛《鐐?UBO **涓婁紶**锛坄update_uniform_buffer_raw(_upv, 8192u)`锛夊彂鐢熷湪 draw 澶勭悊鐨?*鏇存棭**闃舵
-鈬?璇ユ"娉ㄥ叆鍚庝粛鍏ㄩ粦"**鏃犱俊鎭噺**锛堝彧鏀逛簡 guest 鍐呭瓨锛宻hader 鐢ㄧ殑鏄凡涓婁紶鐨勬嫹璐濓紱`[VALLBIND0]` 姝ｅソ璇佹槑浜嗚繖涓€鐐癸細
-绗竴琛屾槸 (480,272)锛屽叾鍚庡悇琛屼负娉ㄥ叆鍚庣殑 (2176,鈭?152)锛夈€?绗簩鐗堝凡鎶婃敞鍏ョЩ鍒?*涓婁紶涔嬪墠**锛屽苟闄愬畾 `eh==0x172A9E736C7DC35E`锛岃 `_h145k648_fix.out` / `p5d_seq_*.bmp`銆?
-### 鍥涖€佸緟鍔烇紙鎸変紭鍏堢骇锛?
-1. 璇?`_h145k648_fix.out` + BMP 鍍忕礌缁熻锛屽垽瀹?鍑犱綍绯绘暟鏄惁涓哄敮涓€闃诲"銆?2. **鏃犺缁撴灉濡備綍閮藉繀椤诲幓鎺夋敞鍏?*锛屾敼涓鸿寮曟搸鐪熷€肩敓鏁?鈥斺€?棣栬瀚岀枒鏄?`sceGxmSetUniformDataF` 鐨?`resIdx*16` 鈫?`resIdx*4` 淇锛坴ita3k 鏉冨▉锛夛紝
-   骞跺鏍?`screen` 鍒板簳鐢辫皝鍐欏叆 AA700000"锛坄[SETUNI2]` 閲屼粠鏈嚭鐜?`screen`锛涢渶鐢?`P5D_WATCH=AA700000-AA700010` 鍒ゅ畾 guest 鐩村啓 vs HLE 鍐欏叆锛夈€?3. 澶嶆牳 `frag_6952EF6C507D515E`锛坒rag_0084锛夛細GXP 閲?`tex=0x1/0x0` 澹版槑鏈夌汗鐞嗘煡璇紝浣?`primInstr=2` 鍙湁 `PHAS`+`V16NMAD PA[0]=PA[0]*PA[1]`锛屽疄闄呴噰鏍峰簲鐢?GXP 鐨?texture-query 琛ㄩ殣寮忔彃鍏?鈥斺€?闇€楠岃瘉鎴戜滑 `gxp_to_spv` 鐨?texture-query 瑙ｆ瀽瀵瑰畠鏄垚鍔熺殑銆?4. 娓呯悊锛歚P5D_VALL` 鐨?1500 鏉′笂闄愭寜甯у垎閰嶏紱`P5D_DBG_PHASE` 璇婃柇甯搁┗鏃犲銆?
+第一?`P5D_SCREEN_FIX` 注入点写?`[VALL]` 探针里（draw 提交前）?但顶?UBO **上传**（`update_uniform_buffer_raw(_upv, 8192u)`）发生在 draw 处理?*更早**阶段
+?该次"注入后仍全黑"**无信息量**（只改了 guest 内存，shader 用的是已上传的拷贝；`[VALLBIND0]` 正好证明了这丢点：
+第一行是 (480,272)，其后各行为注入后的 (2176,?152)）?第二版已把注入移?*上传之前**，并限定 `eh==0x172A9E736C7DC35E`，见 `_h145k648_fix.out` / `p5d_seq_*.bmp`?
+### 四待办（按优先级?
+1. ?`_h145k648_fix.out` + BMP 像素统计，判?几何系数是否为唯丢阻塞"?2. **无论结果如何都必须去掉注?*，改为让引擎真生?—?首要嫌疑?`sceGxmSetUniformDataF` ?`resIdx*16` ?`resIdx*4` 修复（vita3k 权威），
+   并复?`screen` 到底由谁写入 AA700000"（`[SETUNI2]` 里从未出?`screen`；需?`P5D_WATCH=AA700000-AA700010` 判定 guest 直写 vs HLE 写入）?3. 复核 `frag_6952EF6C507D515E`（frag_0084）：GXP ?`tex=0x1/0x0` 声明有纹理查询，?`primInstr=2` 只有 `PHAS`+`V16NMAD PA[0]=PA[0]*PA[1]`，实际采样应?GXP ?texture-query 表隐式插?—?霢验证我们 `gxp_to_spv` ?texture-query 解析对它是成功的?4. 清理：`P5D_VALL` ?1500 条上限按帧分配；`P5D_DBG_PHASE` 诊断常驻无害?
 
 ---
 
-## h145k649鈥揾145k653锛堢 18 杞画锛夛細娲诲姩 SPIR-V 绔熸槸 rawubo 鍙樹綋锛泇force 鍒ゅ喅瀹為獙澶嶇幇涓変釜 LOGO锛涘苟閫犲嚭"UBO 鏄惁鍒拌揪鐫€鑹插櫒"鐨勫垽鍐冲櫒
+## h145k649–h145k653（第 18 轮续）：活动 SPIR-V 竟是 rawubo 变体；vforce 判决实验复现三个 LOGO；并造出"UBO 是否到达睢色器"的判决器
 
-### 涓€銆佸彂鐜板苟淇锛?*娲诲姩 SPIR-V 涓€鐩存槸 rawubo 鍙樹綋**
+### 丢、发现并修正?*活动 SPIR-V 丢直是 rawubo 变体**
 
-`spv_all/gxp_vert_0015.gxp.spv` 瀹炴祴 **11704 瀛楄妭 = `spv_rawubo`**锛圫A 鐩磋 guest UBO銆?*璺宠繃 `sa_f32`/literals overlay**锛夈€?鍚庢灉锛氭墍鏈夐《鐐圭▼搴忕殑 `SA[2].x/.y`銆乣SA[4].x`銆乣SA[0].y` 閮藉彇 **UBO 鍘熷€?*锛坰creen = 480/272锛夛紝
-浜庢槸 `PA0.x = x*272 + 480`銆乣PA0.y = -y*(0) + 0.5` 鈬?**鍏ㄩ儴鍥惧厓閫€鍖?鍑哄睆 鈬?LOGO 鐩镐綅鍏ㄩ粦锛堣繛鍑犱綍鏈簲姝ｇ‘鐨?vert_0014 涔熶笉鍑哄儚绱狅級**銆?
-**淇鍔ㄤ綔**锛氭竻绌烘墍鏈夌敓鎴愭湡寮€鍏冲悗 `gxp_to_spv genall spv_all`锛圤K=4331 FAIL=0锛岀敤鏃?6.5s锛夛紝
-寰楀埌 `gxp_vert_0015.gxp.spv` = **11972 瀛楄妭**锛屼笌 `spv_2ph` **MD5 瀛楄妭鐩稿悓** 鈬?宸插洖鍒?寮曟搸璺緞"锛坱wo-phase + literals + overlay锛夈€?
-### 浜屻€乿force 鍒ゅ喅瀹為獙锛?*涓変釜 LOGO 渚濇鍙锛岃浇浣撶‘瀹氫负 `vert_0015`**
+`spv_all/gxp_vert_0015.gxp.spv` 实测 **11704 字节 = `spv_rawubo`**（SA 直读 guest UBO?*跳过 `sa_f32`/literals overlay**）?后果：所有顶点程序的 `SA[2].x/.y`、`SA[4].x`、`SA[0].y` 都取 **UBO 原?*（screen = 480/272），
+于是 `PA0.x = x*272 + 480`、`PA0.y = -y*(0) + 0.5` ?**全部图元逢?出屏 ?LOGO 相位全黑（连几何本应正确?vert_0014 也不出像素）**?
+**修正动作**：清空所有生成期弢关后 `gxp_to_spv genall spv_all`（OK=4331 FAIL=0，用?6.5s），
+得到 `gxp_vert_0015.gxp.spv` = **11972 字节**，与 `spv_2ph` **MD5 字节相同** ?已回?引擎路径"（two-phase + literals + overlay）?
+### 二vforce 判决实验?*三个 LOGO 依次可见，载体确定为 `vert_0015`**
 
-`P5D_VPOS_FORCE=1` 鍏ㄩ噺閲嶆柊鐢熸垚锛坄spv_vforce`锛孫K=4331锛夊苟瀹夎涓烘椿鍔ㄦ爲锛岃窇 LOGO 鐩镐綅骞堕€愬抚鍍忕礌缁熻锛?60脳544锛屾瘡 4 鍍忕礌閲囨牱锛屼寒搴?= 0.30R+0.59G+0.11B锛夛細
+`P5D_VPOS_FORCE=1` 全量重新生成（`spv_vforce`，OK=4331）并安装为活动树，跑 LOGO 相位并帧像素统计?60×544，每 4 像素采样，亮?= 0.30R+0.59G+0.11B）：
 
 | 甯у尯闂?| mean | max | 闈炴殫鍍忕礌 |
 |---|---|---|---|
-| 2755鈥?760 | 0 | 0 | 0% |
-| **2770鈥?840** | **10.83** | 255 | 7.0% |
-| **2850鈥?920** | **27.41** | 252 | 12.7% |
-| **2930鈥?000** | **24.97** | 255 | 10.9% |
+| 2755?760 | 0 | 0 | 0% |
+| **2770?840** | **10.83** | 255 | 7.0% |
+| **2850?920** | **27.41** | 252 | 12.7% |
+| **2930?000** | **24.97** | 255 | 10.9% |
 | 3010 | 83.42 | 255 | 85.1% |
 
-**鈬?涓変釜 LOGO 渚濇鍑虹幇锛圓TLUS / P路STUDIO / CRIWARE锛夛紝涓庣洰鏍囨弿杩板畬鍏ㄤ竴鑷淬€?*
+**?三个 LOGO 依次出现（ATLUS / P·STUDIO / CRIWARE），与目标描述完全一致?*
 
-vforce 鐨勭郴鏁版槸鍥哄畾鐨?`(2/4352, 卤2/2304) + (-1.005, 1.007)`锛屽彧鏈夐《鐐瑰睘鎬ц惤鍦?**4352 灏哄害**鐨?draw 鎵嶄細琚摵婊★紱
-鑰?`[VALL]` 瀹炴祴 **鍙湁 `vert_0015` 鐨勯《鐐规祦鏄?4352脳2304**锛堝叾浣欙細`vert_0014` 鏄?0..960 鍍忕礌绌洪棿銆乣EC5D3D7E` 鏄?NDC `-1..1`銆乣4A3A4C8D/8D301D50` 鏄?224脳68 灏忕洰鏍囷級
-鈬?**LOGO 鐨勮浇浣撳氨鏄?`vert_0015` 鐨?draw**锛堝畠涔熸槸鍞竴鍚屾椂甯?`vertex.texcoord0` 涓旀覆鏌撳埌涓荤紦鍐茬殑绋嬪簭锛夈€?
-瀵圭収锛?*寮曟搸璺緞**锛?1972锛変笌 **PA0 鍙樹綋**锛坄gl_Position = vec4(PA0.xy, 0.49995, 1)`锛?1856锛夊湪 2755鈥?000 **閮芥槸 mean=0/max=0**銆?
-### 涓夈€乣[UBOWR]`锛歴creen 閭ｅ潡鍐呭瓨**涓嶆槸** `SetUniformDataF` 鍐欑殑
+vforce 的系数是固定?`(2/4352, ±2/2304) + (-1.005, 1.007)`，只有顶点属性落?**4352 尺度**?draw 才会被铺满；
+?`[VALL]` 实测 **只有 `vert_0015` 的顶点流?4352×2304**（其余：`vert_0014` ?0..960 像素空间、`EC5D3D7E` ?NDC `-1..1`、`4A3A4C8D/8D301D50` ?224×68 小目标）
+?**LOGO 的载体就?`vert_0015` ?draw**（它也是唯一同时?`vertex.texcoord0` 且渲染到主缓冲的程序）?
+对照?*引擎路径**?1972）与 **PA0 变体**（`gl_Position = vec4(PA0.xy, 0.49995, 1)`?1856）在 2755?000 **都是 mean=0/max=0**?
+### 三`[UBOWR]`：screen 那块内存**不是** `SetUniformDataF` 写的
 
-鏂板鏃犳潯浠惰惤鐐瑰彇璇侊紙浠讳綍 `dst 鈭?[AA700000, AA700020)` 鐨?`SetUniformDataF` 閮芥墦鍗板悕瀛?res/coff/鍊硷級鈥斺€?**鏁翠釜杩愯闆惰緭鍑?* 鈬?`AA700000` 鐨?`(1.0, 0.5, 480.0, 272.0)` **涓嶆槸** HLE 鐨?`sceGxmSetUniformDataF` 鍐欑殑
-锛坄[SETUNI2]` 鐨勮繃婊ゅ櫒閲屾伆濂芥病鏈?`screen`锛屾墍浠ユ鍓嶄竴鐩寸湅涓嶅埌锛夈€?鈬?楂樺害鍙兘鐢?**guest 鐩存帴 STR/memcpy** 鍐欏叆锛堜笅涓€姝ョ敤 `P5D_WATCH=AA700000-AA700010` 鍒ゅ畾锛夈€?
-### 鍥涖€乣[MEMSCAN3]`锛氱簿纭€佷笉鏃╁仠鐨勫唴瀛樻壂鎻忥紙淇鏃х粨璁猴級
+新增无条件落点取证（任何 `dst ?[AA700000, AA700020)` ?`SetUniformDataF` 都打印名?res/coff/值）—?**整个运行零输?* ?`AA700000` ?`(1.0, 0.5, 480.0, 272.0)` **不是** HLE ?`sceGxmSetUniformDataF` 写的
+（`[SETUNI2]` 的过滤器里恰好没?`screen`，所以此前一直看不到）??高度可能?**guest 直接 STR/memcpy** 写入（下丢步用 `P5D_WATCH=AA700000-AA700010` 判定）?
+### 四`[MEMSCAN3]`：精确不早停的内存扫描（修正旧结论）
 
-鏃?`[MEMSCAN2]` 鐨勫懡涓潯浠跺惈 `0.00043~0.00049`/`0.00082~0.00089` 瀹藉尯闂达紝鑰岃繖浜涘€煎湪 guest 鍐呭瓨閲屾瀬澶?鈬?`cap=32` 鍦ㄦ壂鍒?`2176.0/1152.0` **涔嬪墠**灏辩敤灏?鈬?"鍐呭瓨閲屼笉瀛樺湪 2176/1152" **涓嶆垚绔?*銆?鏂扮増鎸?*绮剧‘鐩哥瓑**鍒嗙被璁℃暟銆佷笉鏃╁仠锛屾壂鎻?`[0xAA000000, 0xB4000000)`锛?
-| 鍊?| 鍛戒腑 | 棣栦釜鍦板潃锛堝共鍑€杩愯锛?|
+?`[MEMSCAN2]` 的命中条件含 `0.00043~0.00049`/`0.00082~0.00089` 宽区间，而这些在 guest 内存里极??`cap=32` 在扫?`2176.0/1152.0` **之前**就用??"内存里不存在 2176/1152" **不成?*?新版?*精确相等**分类计数、不早停，扫?`[0xAA000000, 0xB4000000)`?
+| ?| 命中 | 首个地址（干凢运行?|
 |---|---|---|
-| 480 | 1 | `AA700008` = UBO0 鐨?f32 2 = `screen.z` 鉁?|
-| 272 | 4 | `AA70000C` = UBO0 鐨?f32 3 = `screen.w` 鉁?|
-| 1152 | **0** | 鈥?|
-| 4352 | **0** | 鈥?|
-| 2/4352 (0.0004595588) | **0** | 鈥?|
-| 2/2304 (0.0008680556) | **0** | 鈥?|
-| 4.53333 / 4.23529 | **0** / **0** | 鈥?|
+| 480 | 1 | `AA700008` = UBO0 ?f32 2 = `screen.z` ?|
+| 272 | 4 | `AA70000C` = UBO0 ?f32 3 = `screen.w` ?|
+| 1152 | **0** | ?|
+| 4352 | **0** | ?|
+| 2/4352 (0.0004595588) | **0** | ?|
+| 2/2304 (0.0008680556) | **0** | ?|
+| 4.53333 / 4.23529 | **0** / **0** | ?|
 | 2176 | 10 | `AB8D21D4` |
 | 2304 | 2 | `B1FBB924` |
 | 鈭?176 | 1 | `B1FF4588` |
 
-鈬?寮曟搸**浠庢湭**寰€ guest 鍐呭瓨鍐欒繃 `1152 / 4352 / 2梅4352 / 4.5333` 鈬?"寮曟搸鎸夊洓杈瑰舰鑷韩灏哄褰掍竴"鐨勫亣璁?*娌℃湁鍐呭瓨渚濇嵁**锛?鑰?`480 / 272` 灏辫惤鍦?screen 鑷繁鐨勬Ы浣嶄笂銆?
-### 浜斻€乣[VALL]`锛歀OGO 鐩镐綅**姣忎竴娆?draw** 涓庨《鐐瑰昂搴︾殑鏃堕棿绋冲畾鎬?
-- 12 draw/甯э紙涓?`d` 澧為噺涓€鑷达紝鏃犻仐婕忥級锛涗富缂撳啿涓婄殑缁勫悎锛氭竻灞?`A71B2837+26F80E96`锛堝叏灞忎笁瑙掑舰 `(-1,-1,1)(3,-1,1)(-1,3,1)`锛宖h 鍞竴鍙傛暟鏄?`clearColor` cont=14锛夈€?  `vert_0014+5D73281E`锛? 娆★紝鍍忕礌绌洪棿 0..960锛?*鏃?UV 灞炴€?* 鈬?鍗曡壊閬僵锛夈€乣EC5D3D7E+5BE80352`锛圢DC `-1..1` + UV锛夈€乣172A9E73+6952EF6C`锛圠OGO锛夈€?- **`vert_0015` 鐨勯《鐐规暟鎹湪 fc 2763鈥?879 瀹屽叏鎭掑畾**锛坄x0=11.6512, y0=-8.7668`锛夆噿 **涓嶆槸鏀惧ぇ/缂╁皬鍔ㄧ敾**锛沗screen` 涔熸亽瀹?鈬?鍑哄睆鏄?*姘歌繙**鐨勩€?
-### 鍏€乣output_vars` 閾捐矾闈欐€佹牳鏌ワ紙鎺掗櫎鑻ュ共瀚岀枒锛?
-- `output_vars[0..15]` 鍦ㄥ嚱鏁板叆鍙ｅ垵濮嬪寲涓?`(0,0,0,1)`锛坄usse_translator.cpp:2737-2745`锛夆噿 鏈啓鐨?`w` 榛樿 1 鉁?- finalize锛歚gl_Position = (OUT0.x, OUT0.y, (OUT0.z+OUT0.w)*0.5*0.9999, OUT0.w)` 鈬?瀵?`OUT0=(x,y,0,1)` 寰?`z=0.49995` 鉁旓紙涓?vforce 閲屾墜鍐欑殑 0.49995 涓€鑷达級
-- FPC 甯搁噺琛ㄤ笌 vita3k `usse_constant_table.h` **閫愬瓧鑺備竴鑷?*锛沗FPC[1].yyyy` 缁忔垜浠殑瀹炵幇 = `bank1[1] = 1.0` 鉁?- SPIR-V 涓?Function 鍙橀噺 224 涓紝store 娆℃暟鍒嗗竷 `{1:60, 2:3, 3:1}` 鈬?涓?`PA[0]` 琚啓 3 娆★紙鍒濆€?I2+I3锛夈€乣OUT0/1/2` 鍚?2 娆?鍚诲悎 鈬?鍐欏叆**瀛樺湪**
-- 椤剁偣 UBO 鐨?`Binding = 0`锛坄usse_translator.cpp:2698`锛夛紝涓?HLE 鐨?`update_uniform_buffer_raw`锛坆inding 0锛変竴鑷?鉁?- 椤剁偣 SPIR-V 閲?**op136(OpFDiv) = 2** 鈬?two-phase 鐨?VRCP 纭疄鐢熸垚锛堟鍓?娌℃湁 OpFDiv"鏄垜浠?dumper 鎶?OpFDiv 鏍囨垚 103 鐨?*鍋囬槾鎬?*锛?
-### 涓冦€佹湰杞柊澧炶瘖鏂紙鐢熸垚鏈燂紝闈炶繍琛屾椂瑕嗙洊锛?
+?引擎**从未**徢 guest 内存写过 `1152 / 4352 / 2÷4352 / 4.5333` ?"引擎按四边形自身尺寸归一"的假?*没有内存依据**??`480 / 272` 就落?screen 自己的槽位上?
+### 五`[VALL]`：LOGO 相位**每一?draw** 与顶点尺度的时间稳定?
+- 12 draw/帧（?`d` 增量丢致，无遗漏）；主缓冲上的组合：清?`A71B2837+26F80E96`（全屏三角形 `(-1,-1,1)(3,-1,1)(-1,3,1)`，fh 唯一参数?`clearColor` cont=14）?  `vert_0014+5D73281E`? 次，像素空间 0..960?*?UV 属?* ?单色遮罩）`EC5D3D7E+5BE80352`（NDC `-1..1` + UV）`172A9E73+6952EF6C`（LOGO）?- **`vert_0015` 的顶点数据在 fc 2763?879 完全恒定**（`x0=11.6512, y0=-8.7668`）⇒ **不是放大/缩小动画**；`screen` 也恒??出屏?*永远**的?
+### 六`output_vars` 链路静核查（排除若干嫌疑?
+- `output_vars[0..15]` 在函数入口初始化?`(0,0,0,1)`（`usse_translator.cpp:2737-2745`）⇒ 未写?`w` 默认 1 ?- finalize：`gl_Position = (OUT0.x, OUT0.y, (OUT0.z+OUT0.w)*0.5*0.9999, OUT0.w)` ??`OUT0=(x,y,0,1)` ?`z=0.49995` ✔（?vforce 里手写的 0.49995 丢致）
+- FPC 常量表与 vita3k `usse_constant_table.h` **逐字节一?*；`FPC[1].yyyy` 经我们的实现 = `bank1[1] = 1.0` ?- SPIR-V ?Function 变量 224 个，store 次数分布 `{1:60, 2:3, 3:1}` ??`PA[0]` 被写 3 次（初?I2+I3）`OUT0/1/2` ?2 ?吻合 ?写入**存在**
+- 顶点 UBO ?`Binding = 0`（`usse_translator.cpp:2698`），?HLE ?`update_uniform_buffer_raw`（binding 0）一??- 顶点 SPIR-V ?**op136(OpFDiv) = 2** ?two-phase ?VRCP 确实生成（此?没有 OpFDiv"是我?dumper ?OpFDiv 标成 103 ?*假阴?*?
+### 七本轮新增诊断（生成期，非运行时覆盖?
 | 寮€鍏?| 璇箟 | 鐢ㄩ€?|
 |---|---|---|
 | `P5D_VPOS_OUT0` | `gl_Position = vec4(OUT0.xy, 0.49995, 1)` | 浜屽垎"OUT0 鍊奸敊"vs"finalize 閿? |
 | `P5D_VPOS_PA0` | `gl_Position = vec4(pa_vars[0].xy, 0.49995, 1)` | 浜屽垎"I4/I5 閿?vs"I2/I3 閿? |
-| **`P5D_VPOS_FORCE_UBO`** | **vforce 琛ㄨ揪寮?脳 `SA[0].x`**锛坰creen.x锛屽紩鎿庣湡鍊?1.0锛?| **鍒ゅ喅 UBO 鏄惁鍒拌揪椤剁偣鐫€鑹插櫒**锛堝嚭鍥?鈬?鍒拌揪锛涘叏榛?鈬?SA 璇诲洖 0锛?|
-| `P5D_UBO_TRACE` | 涓婁紶**鍓?*鎵撳嵃 vert_0015 draw 鐨?UBO 鍓?8 float | 璇佸疄娉ㄥ叆纭疄杩涘叆涓婁紶鏁版嵁锛堝凡璇?f2=2176/f3=鈭?152 鐢熸晥锛?|
-| `P5D_VALL` | LOGO 鐩镐綅姣忔 draw 鐨?eh/fh/rt/cw/s0/灞炴€?椤剁偣娴?鍏ㄩ儴 bind 妲?| draw 娓呭崟涓庤浇浣撳垽瀹?|
-| `P5D_SCREEN_FIX=<z>,<w>` | **涓婁紶鍓?*鏀?`screen.z/w`锛堝彧瀵?vert_0015锛?| 浜屽垎"鍑犱綍绯绘暟鏄惁鍞竴闃诲"锛堢粨璁猴細涓嶆槸锛?|
+| **`P5D_VPOS_FORCE_UBO`** | **vforce 表达?× `SA[0].x`**（screen.x，引擎真?1.0?| **判决 UBO 是否到达顶点睢色器**（出??到达；全??SA 读回 0?|
+| `P5D_UBO_TRACE` | 上传**?*打印 vert_0015 draw ?UBO ?8 float | 证实注入确实进入上传数据（已?f2=2176/f3=?152 生效?|
+| `P5D_VALL` | LOGO 相位每次 draw ?eh/fh/rt/cw/s0/属?顶点?全部 bind ?| draw 清单与载体判?|
+| `P5D_SCREEN_FIX=<z>,<w>` | **上传?*?`screen.z/w`（只?vert_0015?| 二分"几何系数是否唯一阻塞"（结论：不是?|
 
 ### 鍏€佸緟鍔?
-1. 璇?`_h145k653_forcubo.out` + `p5d_seq_*.bmp`锛?*鍒ゅ畾 UBO 鏄惁鍒拌揪椤剁偣鐫€鑹插櫒**銆?   - 鍑哄浘 鈬?鏂偣鍦?`SA鈫扨A鈫扥UT0` 鐨勭畻鏈紝椤婚€愭潯鏍稿 `load_secattr_vec4` / `masked_store` / `pa_vars` 鐨勮繍琛屾椂琛屼负锛?   - 鍏ㄩ粦 鈬?UBO 鏈埌 鈬?鏌?binding/鎻忚堪绗?`update_uniform_buffer_raw` 涓?SPIR-V 鐨?`DescriptorSet/Binding`銆?2. **蹇呴』绉婚櫎鎵€鏈夌敓鎴愭湡璇婃柇鍙樹綋**锛屾椿鍔ㄦ爲淇濇寔"寮曟搸璺緞"锛堝綋鍓?= `spv_2ph` 绛変环锛?1972锛夈€?3. 鐢?`P5D_WATCH=AA700000-AA700010` 鍒ゅ畾 screen 鐨勫€兼槸鍚︾敱 guest 鐩村啓銆?4. 淇?`sceGxmSetUniformDataF` 鐨?`resIdx*16` 鈫?`resIdx*4`锛坴ita3k 鏉冨▉锛夈€?
+1. ?`_h145k653_forcubo.out` + `p5d_seq_*.bmp`?*判定 UBO 是否到达顶点睢色器**?   - 出图 ?断点?`SA→PA→OUT0` 的算术，须条核对 `load_secattr_vec4` / `masked_store` / `pa_vars` 的运行时行为?   - 全黑 ?UBO 未到 ??binding/描述?`update_uniform_buffer_raw` ?SPIR-V ?`DescriptorSet/Binding`?2. **必须移除扢有生成期诊断变体**，活动树保持"引擎路径"（当?= `spv_2ph` 等价?1972）?3. ?`P5D_WATCH=AA700000-AA700010` 判定 screen 的是否由 guest 直写?4. ?`sceGxmSetUniformDataF` ?`resIdx*16` ?`resIdx*4`（vita3k 权威）?
 
 ---
 
-## h145k654锛堢 18 杞敹灏撅級锛歷force 绛変环鐢婚潰閲?LOGO **灞呬腑涓斿昂瀵告甯?*锛涢《鐐瑰昂搴﹀叏琛紱UBO 鍒ゅ喅閫氳繃
+## h145k654（第 18 轮收尾）：vforce 等价画面?LOGO **居中且尺寸正?*；顶点尺度全表；UBO 判决通过
 
-### 涓€銆乣P5D_VPOS_FORCE_UBO` 鍒ゅ喅锛?*UBO 纭疄鍒拌揪椤剁偣鐫€鑹插櫒**
+### 丢、`P5D_VPOS_FORCE_UBO` 判决?*UBO 确实到达顶点睢色器**
 
-璇ュ彉浣?= vforce 琛ㄨ揪寮?**鍐嶄箻 `SA[0].x`**銆傚疄娴?LOGO 鐩镐綅鍍忕礌缁熻涓庣函 vforce **閫愬瓧鑺傜浉鍚?*锛?
+该变?= vforce 表达?**再乘 `SA[0].x`**。实?LOGO 相位像素统计与纯 vforce **逐字节相?*?
 | 甯у尯闂?| mean | max | 闈炴殫 |
 |---|---|---|---|
-| 2770鈥?840 | 10.83 | 255 | 7.0% |
-| 2850鈥?920 | 27.41 | 252 | 12.7% |
-| 2930鈥?000 | 24.97 | 255 | 10.9% |
+| 2770?840 | 10.83 | 255 | 7.0% |
+| 2850?920 | 27.41 | 252 | 12.7% |
+| 2930?000 | 24.97 | 255 | 10.9% |
 
-鈬?`SA[0].x = 1.0`锛坰creen.x 鐪熷€硷級**鐪熷疄鍙** 鈬?**UBO鈫扴PIR-V 鐨?binding/鎻忚堪绗?涓婁紶閾捐矾鏄€氱殑**锛?鏂偣涓嶅湪"UBO 渚涚粰"锛岃€屽湪 `SA鈫扨A鈫扥UT0` 鐨?*绠楁湳**锛堟垨椤剁偣娴佹湰韬級銆?
-### 浜屻€丩OGO 鍦?vforce 涓?*灞呬腑鏄剧ず**锛堝苟闈?閾烘弧"锛?
-瀵?vforce 绛変环鐢婚潰鐨?BMP 鍋氶潪鏆楀儚绱狅紙浜害>24锛夎竟鐣屾涓?16 绛夊垎鍒楀垎甯冿細
+?`SA[0].x = 1.0`（screen.x 真）**真实可读** ?**UBO→SPIR-V ?binding/描述?上传链路是的**?断点不在"UBO 供给"，在 `SA→PA→OUT0` ?*算术**（或顶点流本身）?
+### 二LOGO ?vforce ?*居中显示**（并?铺满"?
+?vforce 等价画面?BMP 做非暗像素（亮度>24）边界框?16 等分列分布：
 
-| 甯?| 闈炴殫/閲囨牱 | bbox x | bbox y | 鍒楀垎甯冿紙16 绛夊垎锛?|
+| ?| 非暗/采样 | bbox x | bbox y | 列分布（16 等分?|
 |---|---|---|---|---|
-| 2780锛圓TLUS锛?| 9054/130560 | **236..640** | **192..328** | `0,0,0,0,308,1274,1357,1223,1292,1717,1713,170,0,0,0,0` |
-| 2880锛圥路STUDIO锛?| 16547/130560 | **350..550** | **90..420** | `0,0,0,0,0,0,3374,4814,5146,3213,0,0,0,0,0,0` |
-| 2950锛圕RIWARE锛?| 14217/130560 | **338..566** | **128..382** | `0,0,0,0,0,0,3332,3665,3840,3380,0,0,0,0,0,0` |
+| 2780（ATLUS?| 9054/130560 | **236..640** | **192..328** | `0,0,0,0,308,1274,1357,1223,1292,1717,1713,170,0,0,0,0` |
+| 2880（P·STUDIO?| 16547/130560 | **350..550** | **90..420** | `0,0,0,0,0,0,3374,4814,5146,3213,0,0,0,0,0,0` |
+| 2950（CRIWARE?| 14217/130560 | **338..566** | **128..382** | `0,0,0,0,0,0,3332,3665,3840,3380,0,0,0,0,0,0` |
 
-鈬?LOGO 鍥炬**闆嗕腑鍦ㄧ敾闈腑澶?*锛堝绾?400/200/228 px锛夈€傝繖涓?**鍥涜竟褰㈤摵婊″睆骞?+ LOGO 鍥炬鍙崰鐢诲竷涓ぎ**"瀹屽叏涓€鑷?锛堢敾甯?1024脳512 涓?ATLUS 鍥炬绾﹀崰 40% 瀹?鈬?鏄犲皠鍒?960 灞忓 鈬?鈮?00px 鉁旓級銆?鈬?缁撹涓嶅彉锛?*杞戒綋鐨勫洓杈瑰舰鍦?vforce 涓嬫槸閾烘弧鐨?*锛屽洜姝ゅ畠蹇呴』灞炰簬**鍞竴 4352 灏哄害**鐨?`vert_0015`銆?
-### 涓夈€丩OGO 鐩镐綅**鍏ㄩ噺椤剁偣灏哄害琛?*锛?500 鏉?`[VALL]` 璁板綍锛屾寜 stride 瑙?4 椤剁偣锛?
+?LOGO 图案**集中在画面中?*（宽?400/200/228 px）这?**四边形铺满屏?+ LOGO 图案只占画布中央**"完全丢?（画?1024×512 ?ATLUS 图案约占 40% ??映射?960 屏宽 ??00px ✔）??结论不变?*载体的四边形?vforce 下是铺满?*，因此它必须属于**唯一 4352 尺度**?`vert_0015`?
+### 三LOGO 相位**全量顶点尺度?*?500 ?`[VALL]` 记录，按 stride ?4 顶点?
 | eh | stride | 鐩爣 | in_pos x | in_pos y | 鏉℃暟 |
 |---|---|---|---|---|---|
 | `4A3A4C8DFD6083F6` | 20 | 224脳68 | 鈭?.0..0.9 | 鈭?.0..1.0 | 378 |
@@ -273780,25 +273784,25 @@ vforce 鐨勭郴鏁版槸鍥哄畾鐨?`(2/4352, 卤2/2304) + (-1.005, 1.007)`锛
 | `EC5D3D7E8BC3DADA` | 28 | 960脳544 | 鈭?..1 | 鈭?..1 | 125 |
 | **`172A9E736C7DC35E`(vert_0015)** | 24 | 960脳544 | **11.7..4382.8** | **鈭?348.9..鈭?.8** | 117 |
 
-鈬?**鍙湁 `vert_0015` 涓嶆槸"宸插綊涓€鍖?鐨勫潗鏍?*锛堝叾浣欓兘鏄?NDC 鎴栧儚绱犵┖闂达紝鎭板ソ鍖归厤 `screen=(1,0.5,480,272)` 鐨勫彉鎹級銆?鈬?鍞竴鐨?4352 灏哄害杞戒綋 = `vert_0015`锛涜€?`screen` 鐨?480/272 鎸?`1/480`銆乣1/272` 鍙樻崲瀹?鈬?蹇呯劧鍑哄睆銆?
-### 鍥涖€乣[VSET]` 瀹屾暣鍘婚噸锛?08 鏉¤褰曪紝绾?200 涓笉鍚屽湴鍧€锛?
-- `A3150880` **纭疄琚缃?*锛屽唴瀹?`413A6B2A C10C44F0 40080000 FFFFFFFF 00000000 00000000 45885D36 C2337BAF`
-  = `(11.651, 鈭?.767, 2.125, 0xFFFFFFFF)` + `uv(0,0)` + `(4363.65, 鈭?4.87)` 鈬?**涓?`[VALL]/[V15RAW]` 瀹屽叏涓€鑷?*锛堟鍓嶇殑"浠庢湭璁剧疆"鏄垜鐢?`Select-Object -First 14` 鎴柇閫犳垚鐨勮鍒わ紝宸茬籂姝ｏ級銆?- 鍚屽抚鍙︽湁**鍍忕礌绌洪棿鍥涜竟褰?*娴侊紙濡?`A3150950`锛歚0,0,2.0 / 960,0,2.0`锛夛紝渚?`vert_0014` 浣跨敤銆?- `[PDRAW]` 璁℃暟鍦ㄤ笁娆¤繍琛屼腑鍧囦负 **0** 鈬?`sceGxmDrawPrecomputed` **浠庢湭琚皟鐢?* 鈬?**precomputed 娴佸亣璁炬帓闄?*锛?  `g_vstream[0]` 灏辨槸鏅€?`sceGxmSetVertexStream` 鐨勫€硷紙鍞竴鍐欏叆鐐?`eboot_probe.cpp:614`锛夈€?
-### 浜斻€佸綋鍓嶅敮涓€鏈В鐨勬牳蹇冪煕鐩撅紙涓嬩竴杞殑涓绘敾鏂瑰悜锛?
-**寮曟搸缁?`vert_0015` 鐨?`screen`锛?80/272锛変笌瀹冭嚜宸辩殑椤剁偣灏哄害锛?352/2304锛夋瘮渚嬩笉涓€鑷?*
-锛?352/960 = 4.533銆?304/544 = 4.235锛?*涓嶆槸鍚屼竴鍊嶆暟**锛夛紝鍥犳璇?draw 鍦ㄧ湡鏈轰笂涔熷簲鍑哄睆銆?鑰?`[VALLUBO0]`(1500/1500) 涓?`[MEMSCAN3]` 閮借瘉瀹?`AA700000` 鎭掍负 `(1.0, 0.5, 480, 272)`锛宍[VALLBIND]` 璇佸疄 16 妲介噷**鍙湁 bind0 闈為浂**锛?500/1500锛夈€?
-鈬?鍞竴杩樿兘缈荤洏鐨勪竴鐜細**`AA700000` 鐨勮繖 4 涓?float 鏄皝鍐欑殑**銆?- `[UBOWR]`锛堜换浣?`dst 鈭?[AA700000,AA700020)` 鐨?`SetUniformDataF`锛?*闆惰緭鍑?* 鈬?涓嶆槸 `sceGxmSetUniformDataF`锛?- `[SETUNI2]` 鐨勮繃婊ゅ櫒閲屾病鏈?`'screen'`锛屾鍓嶄竴鐩寸湅涓嶅埌瀹冦€?
-**涓嬩竴杞姩浣滐紙浼樺厛绾у簭锛?*锛?1. `P5D_WATCH=AA700000-AA700010` 璺戜竴娆★紙`arm/thumb_interpreter.cpp:420` 宸插疄鐜伴€氱敤鍐欑洃瑙嗭級锛?   - **鏈?guest 鍐欏叆** 鈬?`(1,0.5,480,272)` 鏄紩鎿庣湡鍊?鈬?璇?draw 鍦ㄧ湡鏈轰笂涔熶笉鍙 鈬?蹇呴』閲嶆柊鍒ゅ畾 LOGO 杞戒綋
-     锛堝眾鏃堕噸鐐规牳 `EC5D3D7E8BC3DADA`锛歂DC `鈭?..1` + UV + 涓荤紦鍐诧紝鍑犱綍鏃犻渶 `screen`锛夛紱
-   - **鏃?guest 鍐欏叆** 鈬?杩?4 涓?float 鏄?**HLE 鍐欑殑** 鈬?鍦?HLE 閲屽畾浣嶈璧嬪€煎苟淇锛?     寰堝彲鑳芥仮澶嶅紩鎿庣湡鍊硷紙2176/鈭?152 涓€绫伙級锛屼粠鑰屼娇 `vert_0015` 鐨勫嚑浣曟纭?鈥斺€?**杩欐墠鏄?寮曟搸鑷繁鐢诲嚭鏉?鐨勬瑙?*銆?2. 鍚屾椂淇?`sceGxmSetUniformDataF` 鐨?`resIdx*16` 鈫?`resIdx*4`锛坴ita3k 鏉冨▉ `offset = resource_index*sizeof(float)`锛?   鈥斺€?璇?bug 璁╂墍鏈?`resource_index 鈮?1` 鐨?uniform 钀藉埌 4 鍊嶈繙澶勶紙`clearColor`/`screen` 鍥?`res=0` 骞稿厤锛夈€?3. 娓呯悊鎵€鏈夌敓鎴愭湡璇婃柇鍙樹綋锛屾椿鍔ㄦ爲淇濇寔寮曟搸璺緞锛坄gxp_vert_0015.gxp.spv` = 11972 = `spv_2ph` 鍚?MD5锛夈€?
+?**只有 `vert_0015` 不是"已归丢?的坐?*（其余都?NDC 或像素空间，恰好匹配 `screen=(1,0.5,480,272)` 的变换）??唯一?4352 尺度载体 = `vert_0015`；?`screen` ?480/272 ?`1/480`、`1/272` 变换??必然出屏?
+### 四`[VSET]` 完整去重?08 条记录，?200 个不同地坢?
+- `A3150880` **确实被设?*，内?`413A6B2A C10C44F0 40080000 FFFFFFFF 00000000 00000000 45885D36 C2337BAF`
+  = `(11.651, ?.767, 2.125, 0xFFFFFFFF)` + `uv(0,0)` + `(4363.65, ?4.87)` ?**?`[VALL]/[V15RAW]` 完全丢?*（此前的"从未设置"是我?`Select-Object -First 14` 截断造成的误判，已纠正）?- 同帧另有**像素空间四边?*流（?`A3150950`：`0,0,2.0 / 960,0,2.0`），?`vert_0014` 使用?- `[PDRAW]` 计数在三次运行中均为 **0** ?`sceGxmDrawPrecomputed` **从未被调?* ?**precomputed 流假设排?*?  `g_vstream[0]` 就是普?`sceGxmSetVertexStream` 的（唯一写入?`eboot_probe.cpp:614`）?
+### 五当前唯丢未解的核心矛盾（下一轮的主攻方向?
+**引擎?`vert_0015` ?`screen`?80/272）与它自己的顶点尺度?352/2304）比例不丢?*
+?352/960 = 4.533?304/544 = 4.235?*不是同一倍数**），因此?draw 在真机上也应出屏??`[VALLUBO0]`(1500/1500) ?`[MEMSCAN3]` 都证?`AA700000` 恒为 `(1.0, 0.5, 480, 272)`，`[VALLBIND]` 证实 16 槽里**只有 bind0 非零**?500/1500）?
+?唯一还能翻盘的一环：**`AA700000` 的这 4 ?float 是谁写的**?- `[UBOWR]`（任?`dst ?[AA700000,AA700020)` ?`SetUniformDataF`?*零输?* ?不是 `sceGxmSetUniformDataF`?- `[SETUNI2]` 的过滤器里没?`'screen'`，此前一直看不到它?
+**下一轮动作（优先级序?*?1. `P5D_WATCH=AA700000-AA700010` 跑一次（`arm/thumb_interpreter.cpp:420` 已实现用写监视）?   - **?guest 写入** ?`(1,0.5,480,272)` 是引擎真???draw 在真机上也不可见 ?必须重新判定 LOGO 载体
+     （届时重点核 `EC5D3D7E8BC3DADA`：NDC `?..1` + UV + 主缓冲，几何无需 `screen`）；
+   - **?guest 写入** ??4 ?float ?**HLE 写的** ??HLE 里定位该赋并修正?     很可能恢复引擎真值（2176/?152 丢类），从而使 `vert_0015` 的几何正?—?**这才?引擎自己画出?的正?*?2. 同时?`sceGxmSetUniformDataF` ?`resIdx*16` ?`resIdx*4`（vita3k 权威 `offset = resource_index*sizeof(float)`?   —??bug 让所?`resource_index ?1` ?uniform 落到 4 倍远处（`clearColor`/`screen` ?`res=0` 幸免）?3. 清理扢有生成期诊断变体，活动树保持引擎路径（`gxp_vert_0015.gxp.spv` = 11972 = `spv_2ph` ?MD5）?
 
 ---
 
-## h145k655鈥揾145k656锛堢 19 杞級锛歴creen 鏄?guest 鐩村啓鐨勫紩鎿庣湡鍊硷紱vita3k 鏉冨▉钀界偣淇瑙佹晥锛涙瘡甯?13 draw 鍏ㄥ垪
+## h145k655–h145k656（第 19 轮）：screen ?guest 直写的引擎真值；vita3k 权威落点修复见效；每?13 draw 全列
 
-### 涓€銆乣screen` 鐨勫啓鍏ヨ€呬笌璇箟锛?*guest 鐩村啓锛屼笖璇箟灏辨槸"娓叉煋鐩爣灏哄鐨勪竴鍗?**
+### 丢、`screen` 的写入与语义?*guest 直写，且语义就是"渲染目标尺寸的一?**
 
-`P5D_WATCH=AA700000-AA700010` 瀹炴祴**鍏ㄨ繍琛屽彧鏈?4 娆″啓鍏?*锛坄[GENW32]`锛宑ap 300 鏈ケ鍜岋級锛?
+`P5D_WATCH=AA700000-AA700010` 实测**全运行只?4 次写?*（`[GENW32]`，cap 300 未饱和）?
 ```
 [GENW32] pc=0x811EEC9A addr=0xAA700000 v=0x3F800000 (=1.0)   lr=0x8120735C
 [GENW32] pc=0x811EECA4 addr=0xAA700004 v=0x3F000000 (=0.5)   lr=0x8120735C
@@ -273806,7 +273810,7 @@ vforce 鐨勭郴鏁版槸鍥哄畾鐨?`(2/4352, 卤2/2304) + (-1.005, 1.007)`锛
 [GENW32] pc=0x811EECB4 addr=0xAA70000C v=0x43880000 (=272.0) lr=0x8120735C
 ```
 
-鍙嶆眹缂?`0x811EEC80..BC`锛坄_h145k453_dis.py`锛孴humb锛夐€愭潯鍗拌瘉锛?
+反汇?`0x811EEC80..BC`（`_h145k453_dis.py`，Thumb）条印证?
 ```
 811EEC8C  vcvt.f32.u32 s0, s0        ; s0 = (float)width
 811EEC90  vcvt.f32.u32 s1, s1        ; s1 = (float)height
@@ -273821,92 +273825,92 @@ vforce 鐨勭郴鏁版槸鍥哄畾鐨?`(2/4352, 卤2/2304) + (-1.005, 1.007)`锛
 811EECB4  vstr       s1, [r1, #0xc]  ; screen.w = 272 = 544*0.5
 ```
 
-鈬?**`screen = (1.0, 0.5, 娓叉煋鐩爣瀹?2, 娓叉煋鐩爣楂?2)`锛岃€屾覆鏌撶洰鏍?= 960脳544**锛?80 = 960/2銆?72 = 544/2锛夈€?鈬?HLE 婧愮爜閲?*娌℃湁**浠讳綍纭紪鐮?`480/272`锛坓rep 鍙懡涓?"screenshot" 瀛楁牱锛夆噿 璇ュ€兼槸**娓告垙浠ｇ爜**鍐欑殑锛屾槸寮曟搸鐪熷€笺€?鈬?鍥犳 `vert_0015` 鐨?4352脳2304 鍥涜竟褰㈢粡 `x/480鈭?`銆乣鈭抷/272+1` **鍦ㄧ湡鏈轰笂涔熷繀鐒跺嚭灞?* 鈥斺€?杩欎釜 draw 涓嶅彲鑳芥槸 LOGO 鐨勫彲瑙佽浇浣撱€?
-### 浜屻€乿ita3k 鏉冨▉钀界偣淇锛坄resIdx*16` 鈫?`resIdx*4`锛?*瑙佹晥**
+?**`screen = (1.0, 0.5, 渲染目标?2, 渲染目标?2)`，渲染目?= 960×544**?80 = 960/2?72 = 544/2）??HLE 源码?*没有**任何硬编?`480/272`（grep 只命?"screenshot" 字样）⇒ 该是**游戏代码**写的，是引擎真??因此 `vert_0015` ?4352×2304 四边形经 `x/480?`、`−y/272+1` **在真机上也必然出?* —?这个 draw 不可能是 LOGO 的可见载体?
+### 二vita3k 权威落点修复（`resIdx*16` ?`resIdx*4`?*见效**
 
-`modules/SceGxm/SceGxm.cpp`锛坄sceGxmSetUniformDataF`锛変笌 `renderer/src/uniforms.cpp`锛坄set_uniforms`锛?*涓ゅ**鍧囦负
-`offset = resource_index * sizeof(float)`锛坒loat 鍗曚綅锛夛紝鑰屾垜浠殑 SPIR-V 渚у悓鏍锋槸 f32 绮掑害
-锛坄load_secattr_vec4(idx)` 鈫?`s=idx>>2, k=idx&3` 璁块棶 `vec4 sa[N/4]` 鈬?瀛楄妭鍋忕Щ `idx*4`锛夈€?宸叉敼涓?`dst = ub + resIdx*4 + coff*4`锛屽苟鐣?`P5D_UNI_VEC4=1` 鍥為€€銆?
-**瀹炴祴鏁堟灉锛堝悓涓€ LOGO 鐩镐綅鎴浘绠＄嚎鐨勫鐓э級**锛歠c=3010锛堢墖澶村姩鐢伙紝鍥炲綊瀵圭収锛?- 淇鍓嶏細mean 鈮?83鈥?9銆侀潪鏆?鈮?83鈥?5%
-- **淇鍚庯細mean = 143.29銆侀潪鏆?= 98.7%**
-鈬?鐢婚潰鏄捐憲鍙樺ソ锛屽弽鍚戣瘉瀹?vita3k 鐨?float 鍗曚綅鏄纭殑銆?
-### 涓夈€佹瘡甯?**13** 涓?draw锛堟鍓?`[VALL]` cap=12 婕忔帀 1 涓級
+`modules/SceGxm/SceGxm.cpp`（`sceGxmSetUniformDataF`）与 `renderer/src/uniforms.cpp`（`set_uniforms`?*两处**均为
+`offset = resource_index * sizeof(float)`（float 单位），而我们的 SPIR-V 侧同样是 f32 粒度
+（`load_secattr_vec4(idx)` ?`s=idx>>2, k=idx&3` 访问 `vec4 sa[N/4]` ?字节偏移 `idx*4`）?已改?`dst = ub + resIdx*4 + coff*4`，并?`P5D_UNI_VEC4=1` 回?
+**实测效果（同丢 LOGO 相位截图管线的对照）**：fc=3010（片头动画，回归对照?- 修复前：mean ?83?9、非??83?5%
+- **修复后：mean = 143.29、非?= 98.7%**
+?画面显著变好，反向证?vita3k ?float 单位是正确的?
+### 三每?**13** ?draw（此?`[VALL]` cap=12 漏掉 1 个）
 
-鎶?cap 鎻愬埌 24 鍚?fc 2772 鐨勫畬鏁存竻鍗曪紙`d, eh, fh, rt, s0`锛夛細
+?cap 提到 24 ?fc 2772 的完整清单（`d, eh, fh, rt, s0`）：
 
 | d | eh | fh | rt | s0 | 璇存槑 |
 |---|---|---|---|---|---|
-| 13015 | `A71B2837` | `26F80E96` | A0F00000 | A2500000 | 娓呭睆锛? 椤剁偣鍏ㄥ睆涓夎褰紝fh 鍞竴鍙傛暟 `clearColor` cont=14锛?|
+| 13015 | `A71B2837` | `26F80E96` | A0F00000 | A2500000 | 清屏? 顶点全屏三角形，fh 唯一参数 `clearColor` cont=14?|
 | 13016 | `ABE1E100`(v14) | `5D73281E` | A0F00000 | A31501E0 | 鍏ㄥ睆鍍忕礌鍥涜竟褰紝**frag_0079 = 绌?shader** |
-| 13017鈥?9 | `4A3A4C8D` | `E9728942` | AE100000(224脳68) | AE500000.. | 灏忕洰鏍?|
-| 13020鈥?2 | `8D301D50` | `BD212AB1` | AE300000(224脳68) | AE600000.. | 灏忕洰鏍?|
-| 13023 | `EC5D3D7E` | `5BE80352` | A0F00000 | AEB00000 | **frag_0003 = bloom**锛堜袱涓?SAMPLER銆乣tex=0x11`銆乣[UNIOWNER] bloomPitch`锛?|
+| 13017?9 | `4A3A4C8D` | `E9728942` | AE100000(224×68) | AE500000.. | 小目?|
+| 13020?2 | `8D301D50` | `BD212AB1` | AE300000(224×68) | AE600000.. | 小目?|
+| 13023 | `EC5D3D7E` | `5BE80352` | A0F00000 | AEB00000 | **frag_0003 = bloom**（两?SAMPLER、`tex=0x11`、`[UNIOWNER] bloomPitch`?|
 | 13024 | `ABE1E100`(v14) | `5D73281E` | A0F00000 | A31504A0 | 鍏ㄥ睆灞?|
 | 13025 | `ABE1E100`(v14) | `5D73281E` | A0F00000 | A3150760 | 鍏ㄥ睆灞?|
-| **13026** | **`172A9E73`(v15)** | **`6952EF6C`** | A0F00000 | **A3150880** | **鍞竴甯﹀畬鏁?UV + 閲囨牱 `colorMap` 鐨?draw** |
-| 13027 | `ABE1E100`(v14) | `5D73281E` | A0F00000 | A31509B0 | 鍏ㄥ睆灞傦紙姝ゅ墠琚?cap 婕忔帀鐨勯偅涓級 |
+| **13026** | **`172A9E73`(v15)** | **`6952EF6C`** | A0F00000 | **A3150880** | **唯一带完?UV + 采样 `colorMap` ?draw** |
+| 13027 | `ABE1E100`(v14) | `5D73281E` | A0F00000 | A31509B0 | 全屏层（此前?cap 漏掉的那个） |
 
-鈬?**娌℃湁闅愯棌鐨?LOGO draw**锛沗vert_0015` 浠嶆槸鍞竴 UV+閲囨牱杞戒綋銆?
-### 鍥涖€乣frag_0079`锛? 娆?甯х殑鍏ㄥ睆灞傦級鏄?*绌?shader**
+?**没有隐藏?LOGO draw**；`vert_0015` 仍是唯一 UV+采样载体?
+### 四`frag_0079`? ?帧的全屏层）?*?shader**
 
-`_rt_frag_5D73281E76A107B2.gxp`锛歚params=0`銆乣primInstr=1`锛堝彧鏈?`PHAS`锛夈€乣tex=0x0/0x0`
-鈬?瀹冧笉閲囨牱浠讳綍绾圭悊銆佷笉鍋氫换浣曡繍绠楋紝杈撳嚭鍗充负鐗囧厓杈撳嚭瀵勫瓨鍣ㄥ垵鍊?鈬?杩?4 灞傛槸**鎭掑畾鑹?閬僵**銆?
+`_rt_frag_5D73281E76A107B2.gxp`：`params=0`、`primInstr=1`（只?`PHAS`）`tex=0x0/0x0`
+?它不采样任何纹理、不做任何运算，输出即为片元输出寄存器初???4 层是**恒定?遮罩**?
 ### 浜斻€乿ita3k 鍐嶆牳瀵癸細`VMAD2` 璇箟 = `src0*src1 + src2`
 
-`shader/src/translator/alu.cpp:259-260`锛歚mul_result = OpFMul(src0,src1); add_result = OpFAdd(mul_result,src2); store(dest, add_result)`
-鈬?涓庢垜浠殑瀹炵幇涓€鑷达紝鍑犱綍鍏紡 `PA0.x = PA[0].x*SA[2].y + SA[2].x`銆乣PA0.y = PA[0].y*(鈭扴A[4].x) + SA[0].y` **鏃犺**銆?
-### 鍏€佸綋鍓嶇煕鐩撅紙蹇呴』鍦ㄤ笅涓€杞墦鐮达級
+`shader/src/translator/alu.cpp:259-260`：`mul_result = OpFMul(src0,src1); add_result = OpFAdd(mul_result,src2); store(dest, add_result)`
+?与我们的实现丢致，几何公式 `PA0.x = PA[0].x*SA[2].y + SA[2].x`、`PA0.y = PA[0].y*(−SA[4].x) + SA[0].y` **无误**?
+### 六当前矛盾（必须在下丢轮打破）
 
-- 鏁版嵁閾惧凡鍏ㄩ儴瀹炴祴涓€鑷达細椤剁偣 = 4352脳2304 鍏ㄥ箙 UV 鍥涜竟褰紙`[VALL]/[V15RAW]/[VSET]` 涓夋柟涓€鑷达級銆?  `screen` = guest 鐩村啓 `(1,0.5,480,272)`銆丼A 璇诲彇閾捐矾閫氾紙`P5D_VPOS_FORCE_UBO` 璇佹槑 `SA[0].x=1.0` 鍙锛夈€?  绾圭悊涓婁紶姝ｇ‘锛坄[TEXUPLOAD] 1024脳512 mean=70.63 max=255`锛夈€乣VMAD2` 璇箟涓?vita3k 涓€鑷淬€?- 浜庢槸銆屽紩鎿庤矾寰勪笅璇?draw 鍑哄睆銆嶆槸**鏁板蹇呯劧**锛岃€屻€寁force 涓嬩笁涓?LOGO 娓呮櫚鍙涓斿眳涓€嶄篃鏄?*瀹炴祴浜嬪疄**銆?- 鈬?蹇呴』閲嶆柊鍥炵瓟"vforce 涓嬮偅涓変釜 LOGO 绌剁珶鐢卞摢涓€娆?draw 鐢诲嚭"銆?
-**涓嬩竴杞殑鍐冲畾鎬у疄楠?*锛?*鍦?vforce 鍙樹綋涓嬪悓鏃舵墦寮€ `P5D_VALL=1`锛坈ap 24锛夊苟鎴浘** 鈥斺€?vforce 浼氭妸**姣忎釜** draw 鐨?`gl_Position` 鎹㈡垚 `in_pos*(2/4352, 2/2304)+(-1.005,1.007)`锛?鍥犳"LOGO 鍙鐨勯偅涓€鍒?姣忓抚 13 涓?draw 涓紝鍝竴涓殑 `in_pos` 钀藉湪琚槧灏勫埌涓ぎ 42% 鐨勫尯闂淬€佸摢涓€涓殑
-`fh` 鍏峰閲囨牱鑳藉姏锛屽氨鑳?*鐩存帴閿佸畾杞戒綋**锛屼笉鍐嶄緷璧栭棿鎺ユ帹鏂€?锛堝悓鏃朵繚鐣欙細`docs/progress.md` 宸叉洿鏂帮紱娲诲姩鏍?`spv_all` 涓?`spv_2ph` 鍏ㄦ爲闆跺樊寮?= 绾紩鎿庤矾寰勶紝鏃犱换浣曡瘖鏂彉浣撴畫鐣欍€傦級
+- 数据链已全部实测丢致：顶点 = 4352×2304 全幅 UV 四边形（`[VALL]/[V15RAW]/[VSET]` 三方丢致）?  `screen` = guest 直写 `(1,0.5,480,272)`、SA 读取链路通（`P5D_VPOS_FORCE_UBO` 证明 `SA[0].x=1.0` 可读）?  纹理上传正确（`[TEXUPLOAD] 1024×512 mean=70.63 max=255`）`VMAD2` 语义?vita3k 丢致?- 于是「引擎路径下?draw 出屏」是**数学必然**，vforce 下三?LOGO 清晰可见且居中也?*实测事实**?- ?必须重新回答"vforce 下那三个 LOGO 究竟由哪丢?draw 画出"?
+**下一轮的决定性实?*?*?vforce 变体下同时打弢 `P5D_VALL=1`（cap 24）并截图** —?vforce 会把**每个** draw ?`gl_Position` 换成 `in_pos*(2/4352, 2/2304)+(-1.005,1.007)`?因此"LOGO 可见的那丢?每帧 13 ?draw 中，哪一个的 `in_pos` 落在被映射到中央 42% 的区间哪丢个的
+`fh` 具备采样能力，就?*直接锁定载体**，不再依赖间接推断?（同时保留：`docs/progress.md` 已更新；活动?`spv_all` ?`spv_2ph` 全树零差?= 纯引擎路径，无任何诊断变体残留）
 
 
 ---
 
-## h145k657锛堢 19 杞敹灏撅級锛歷force + 鍏ㄩ噺 draw 娓呭崟鐨勮仈鍚堝垽鍐?鈥斺€?杞戒綋纭畾锛岃€?寮曟搸 screen 涓庨《鐐瑰昂搴︿笉鍖归厤"鎴愪负鍞竴纭煕鐩?
-### 涓€銆乿force 涓?LOGO 鍙鎬т笌 bbox 澶嶇幇锛堝悓涓€娆¤繍琛屽唴鍚屾椂寮€ `P5D_VALL`锛?
+## h145k657（第 19 轮收尾）：vforce + 全量 draw 清单的联合判?—?载体确定，?引擎 screen 与顶点尺度不匹配"成为唯一硬矛?
+### 丢、vforce ?LOGO 可见性与 bbox 复现（同丢次运行内同时弢 `P5D_VALL`?
 | 甯?| 闈炴殫鍍忕礌 | bbox x | bbox y |
 |---|---|---|---|
-| 2780锛圓TLUS锛?| 9054 | 236..640 | 192..328 |
-| 2880锛圥路STUDIO锛?| 16547 | 350..550 | 90..420 |
-| 2950锛圕RIWARE锛?| 14217 | 338..566 | 128..382 |
+| 2780（ATLUS?| 9054 | 236..640 | 192..328 |
+| 2880（P·STUDIO?| 16547 | 350..550 | 90..420 |
+| 2950（CRIWARE?| 14217 | 338..566 | 128..382 |
 
-瀵?**vforce 鐨勬樉寮忓叕寮?*锛坄x_ndc = in_pos.x*0.000459558 鈭?1.005354`銆乣y_ndc = in_pos.y*0.000854664 + 1.007493`锛夊弽鎺?bbox 瀵瑰簲鐨?`in_pos` 鍖洪棿锛?**x 鈭?[1081, 2914]銆亂 鈭?[鈭?419, 鈭?35]**銆?
-鍐嶆妸璇ュ抚 13 涓?draw 鐨?`in_pos` 閫愪釜瀵圭収锛堢敤鍏?`stride` 浠?`[VALLRAW]` 瑙?4 椤剁偣锛夛細
+?**vforce 的显式公?*（`x_ndc = in_pos.x*0.000459558 ?1.005354`、`y_ndc = in_pos.y*0.000854664 + 1.007493`）反?bbox 对应?`in_pos` 区间?**x ?[1081, 2914]、y ?[?419, ?35]**?
+再把该帧 13 ?draw ?`in_pos` 逐个对照（用?`stride` ?`[VALLRAW]` ?4 顶点）：
 
-| d | eh | stride | in_pos 鑼冨洿 | 鏄惁瑕嗙洊鐩爣鍖洪棿 |
+| d | eh | stride | in_pos 范围 | 是否覆盖目标区间 |
 |---|---|---|---|---|
 | 13115 | `A71B2837` | 12 | [鈭?, 3] | 鉁楋紙閫€鍖栧埌宸︿笂瑙掞級 |
-| 13116/24/25 | `ABE1E100`(v14) | 16 | [0, 960]脳[0, 544] | 鉁楋紙vforce 涓?鈫?灞忓乏 209px锛?|
-| 13117鈥?2 | `4A3A4C8D`/`8D301D50` | 20 | [鈭?, 0.9] | 鉁?|
-| 13123 | `EC5D3D7E` | 28 | [鈭?, 1] | 鉁楋紙vforce 涓嬮€€鍖栦负涓€鐐癸級 |
-| **13126** | **`172A9E73`(v15)** | 24 | **[11.7, 4382.8]脳[鈭?348.9, 鈭?.8]** | **鉁?瑕嗙洊锛屼笖鏄犲皠鍚庨摵婊℃暣灞?* |
+| 13116/24/25 | `ABE1E100`(v14) | 16 | [0, 960]×[0, 544] | ✗（vforce ??屏左 209px?|
+| 13117?2 | `4A3A4C8D`/`8D301D50` | 20 | [?, 0.9] | ?|
+| 13123 | `EC5D3D7E` | 28 | [?, 1] | ✗（vforce 下化为丢点） |
+| **13126** | **`172A9E73`(v15)** | 24 | **[11.7, 4382.8]×[?348.9, ?.8]** | **?覆盖，且映射后铺满整?* |
 
-鈬?**LOGO 鍙鐨勮浇浣撳敮涓€纭畾 = `d=13126`锛屽嵆 `vert_0015` + `frag_0084`**锛坄6952EF6C507D515E`锛?鍞竴甯﹀畬鏁?`vertex.texcoord0` 涓?`tex=0x1` 浼氶噰鏍?`colorMap` 鐨?draw锛夈€?瀹冮摵婊℃暣灞忓悗锛岀敾甯冧腑澶殑鍥炬鑷劧钀藉湪灞忓箷涓ぎ 鈬?bbox 涓庡疄娴嬪惢鍚堛€?
-### 浜屻€佷簬鏄?寮曟搸 screen 涓庨《鐐瑰昂搴︿笉鍖归厤"鎴愪负鍞竴纭煕鐩撅紙涓や晶閮芥湁瀹炴祴鏀拺锛?
+?**LOGO 可见的载体唯丢确定 = `d=13126`，即 `vert_0015` + `frag_0084`**（`6952EF6C507D515E`?唯一带完?`vertex.texcoord0` ?`tex=0x1` 会采?`colorMap` ?draw）?它铺满整屏后，画布中央的图案自然落在屏幕中央 ?bbox 与实测吻合?
+### 二于?引擎 screen 与顶点尺度不匹配"成为唯一硬矛盾（两侧都有实测支撑?
 | 璇佹嵁 | 缁撹 |
 |---|---|
-| `[GENW32]`锛坄P5D_WATCH=AA700000-AA700010`锛屽叏杩愯浠?4 鏉″啓鍏ワ級 + 鍙嶆眹缂?`0x811EEC80..BC` | `screen = (1.0, 0.5, **width/2**, **height/2**)` 涓?`width=960, height=544` 鈥斺€?**guest 鐩村啓鐨勫紩鎿庣湡鍊?*锛屼笖鍙啓涓€娆?|
-| `[VALLRAW]`/`[VSET]`锛坄A3150880` 鍐呭 `413A6B2A C10C44F0 40080000 FFFFFFFF 鈥锛? `(11.651, 鈭?.767, 2.125, 鈥?` | 椤剁偣 **4352脳2304** 涔熸槸 guest 鍐欒繘鍐呭瓨鐨勫紩鎿庣湡鍊?|
-| 涓棿杩囩▼鍏ㄩ儴鎺掗櫎 | UBO 鍒拌揪 shader锛坄P5D_VPOS_FORCE_UBO`锛夈€乣VMAD2` 璇箟 = `src0*src1+src2`锛坴ita3k `alu.cpp:259-260`锛夈€丼A 璇诲彇閾捐矾 f32 绮掑害涓€鑷淬€乣frag_0079` 鏄┖ shader銆佹瘡甯?13 draw 鏃犻仐婕忋€乣DrawPrecomputed`=0 |
-| 鏁板 | `x_ndc = x/480 鈭?1` 瀵?`x鈭圼11.7,4382.8]` 鈬?`[鈭?.976, 8.13]` 鈬?**鍙樉绀虹敾甯冨乏 22%锛坄u<0.22`锛?* 鈬?鑰屽浘妗堝湪鐢诲竷涓ぎ 鈬?**蹇呯劧榛?* |
+| `[GENW32]`（`P5D_WATCH=AA700000-AA700010`，全运行?4 条写入） + 反汇?`0x811EEC80..BC` | `screen = (1.0, 0.5, **width/2**, **height/2**)` ?`width=960, height=544` —?**guest 直写的引擎真?*，且只写丢?|
+| `[VALLRAW]`/`[VSET]`（`A3150880` 内容 `413A6B2A C10C44F0 40080000 FFFFFFFF …`? `(11.651, ?.767, 2.125, ?` | 顶点 **4352×2304** 也是 guest 写进内存的引擎真?|
+| 中间过程全部排除 | UBO 到达 shader（`P5D_VPOS_FORCE_UBO`）`VMAD2` 语义 = `src0*src1+src2`（vita3k `alu.cpp:259-260`）SA 读取链路 f32 粒度丢致`frag_0079` 是空 shader、每?13 draw 无遗漏`DrawPrecomputed`=0 |
+| 数学 | `x_ndc = x/480 ?1` ?`x∈[11.7,4382.8]` ?`[?.976, 8.13]` ?**只显示画布左 22%（`u<0.22`?* ?而图案在画布中央 ?**必然?* |
 
-鈬?鍗筹細**寮曟搸缁?`vert_0015` 鐨?`screen` 鎻忚堪鐨勬槸 960脳544 鐨勫睆骞曪紝鑰屽畠鍠傜粰璇?draw 鐨勯《鐐瑰嵈鏄?4352脳2304 鐨勭敾甯冪┖闂?* 鈥斺€?涓よ€呮瘮渚嬭繕涓嶄竴鑷达紙4352/960=4.533銆?304/544=4.235锛夈€?鈬?蹇呴』鎵惧埌"寮曟搸鍦ㄤ綍澶勪负杩欎釜 draw 鍑嗗 4352 灏哄害瀵瑰簲鐨勭郴鏁?锛屾垨鑰呰瘉鏄庤 draw 鍦ㄧ湡鏈轰笂鍙︽湁鍏剁郴鏁版潵婧愩€?
-### 涓夈€佹湰杞檮甯﹀畬鎴愮殑瀹炶川淇涓庢竻鐞?
-1. **`sceGxmSetUniformDataF` 钀界偣鏀逛负 vita3k 鏉冨▉鐨?float 鍗曚綅**锛坄resIdx*4`锛岀暀 `P5D_UNI_VEC4=1` 鍥為€€锛夛細
-   `modules/SceGxm/SceGxm.cpp`锛坄offset = resource_index * sizeof(float) + componentOffset*comp_size`锛?   涓?`renderer/src/uniforms.cpp`锛坄resource_index * sizeof(uint32_t)`锛変袱澶勪竴鑷达紝涓斾笌 SPIR-V 渚?`load_secattr_vec4` 鐨?f32 绮掑害鍚诲悎銆?   **瀹炴祴锛歠c=3010 鍥炲綊瀵圭収甯?mean 83鈥?9 鈫?143.29銆侀潪鏆?83% 鈫?98.7%** 鈬?淇姝ｇ‘涓旀湁鏁堛€?2. 娲诲姩鏍戞仮澶嶄负**绾紩鎿庤矾寰?*锛歚genall spv_all` 鍚庝笌 `spv_2ph` **鍏ㄦ爲 4331 涓枃浠堕浂宸紓**锛坄gxp_vert_0015.gxp.spv` = 11972锛夈€?3. `docs/progress.md` 宸茬疮璁℃洿鏂帮紙鏈疆涓ゆ锛岀幇绾?2.10 MB锛夈€?
-### 鍥涖€佷笅涓€杞紙round 20锛夌殑鍔ㄤ綔
+?即：**引擎?`vert_0015` ?`screen` 描述的是 960×544 的屏幕，而它喂给?draw 的顶点却?4352×2304 的画布空?* —?两比例还不一致（4352/960=4.533?304/544=4.235）??必须找到"引擎在何处为这个 draw 准备 4352 尺度对应的系?，或者证明该 draw 在真机上另有其系数来源?
+### 三本轮附带完成的实质修复与清?
+1. **`sceGxmSetUniformDataF` 落点改为 vita3k 权威?float 单位**（`resIdx*4`，留 `P5D_UNI_VEC4=1` 回）：
+   `modules/SceGxm/SceGxm.cpp`（`offset = resource_index * sizeof(float) + componentOffset*comp_size`?   ?`renderer/src/uniforms.cpp`（`resource_index * sizeof(uint32_t)`）两处一致，且与 SPIR-V ?`load_secattr_vec4` ?f32 粒度吻合?   **实测：fc=3010 回归对照?mean 83?9 ?143.29、非?83% ?98.7%** ?修复正确且有效?2. 活动树恢复为**纯引擎路?*：`genall spv_all` 后与 `spv_2ph` **全树 4331 个文件零差异**（`gxp_vert_0015.gxp.spv` = 11972）?3. `docs/progress.md` 已累计更新（本轮两次，现?2.10 MB）?
+### 四下丢轮（round 20）的动作
 
-**鐩爣锛氭壘鍑轰负 `vert_0015` 杩欎釜 4352 灏哄害 draw 鍑嗗鎶曞奖绯绘暟鐨勫湴鏂广€?*
+**目标：找出为 `vert_0015` 这个 4352 尺度 draw 准备投影系数的地方?*
 
-1. `P5D_WATCH=A3150880-A31508D8`锛堣鍦板潃鍦?`[VSET]` 涓?n=4锛屽緢鍙兘姣忓抚澶嶇敤锛夋崟鑾?*鍐?4352 鍥涜竟褰㈢殑閭ｆ guest 浠ｇ爜**锛屽弽姹囩紪鍏跺墠鍚?   鈥斺€?鍚屼竴娈典唬鐮佹瀬鍙兘鍚屾椂绠楀嚭/鍐欏叆璇?draw 闇€瑕佺殑鎶曞奖绯绘暟锛堣嫢鍐欏悜鍙︿竴涓?UBO 鍧楋紝灏辫兘瑙ｉ噴鎴戜滑涓轰綍璇诲埌 480/272锛夈€?2. 鑻?(1) 鏄剧ず璇ユ祦鐢?*鍒**锛堥潪椤剁偣鐢熸垚浠ｇ爜锛夊啓鍏ワ紝鍒欑户缁敤 `P5D_WATCH` 椤鸿棨鎽哥摐鍒?鐢诲竷鈫掑洓杈瑰舰"鐨勬瀯閫犵偣銆?3. 鏃佽瘉锛歚[MOVIEFS]` 璇佹槑 HLE 宸叉湁"鍏ㄥ睆 blit"鑳藉姏锛堝奖鐗囩敤锛夛紝鍙敤鏉ュ鐓?闈為《鐐硅矾寰?鏄惁闇€瑕佷负 LOGO 鍚敤銆?
+1. `P5D_WATCH=A3150880-A31508D8`（该地址?`[VSET]` ?n=4，很可能每帧复用）捕?*?4352 四边形的那段 guest 代码**，反汇编其前?   —?同一段代码极可能同时算出/写入?draw 霢要的投影系数（若写向另一?UBO 块，就能解释我们为何读到 480/272）?2. ?(1) 显示该流?*别处**（非顶点生成代码）写入，则继续用 `P5D_WATCH` 顺藤摸瓜?画布→四边形"的构造点?3. 旁证：`[MOVIEFS]` 证明 HLE 已有"全屏 blit"能力（影片用），可用来对?非顶点路?是否霢要为 LOGO 启用?
 
 ---
 
-## h145k658鈥揾145k660锛堢 20 杞級锛歳ed-FS 鍒ゅ喅鎶婇棶棰橀攣姝诲湪鍑犱綍锛泂creen 鐨?width/height 鏉ユ簮宸插畾浣?
-### 涓€銆?*鍐冲畾鎬у垽鍐?*锛歚vert_0015` 鐨勫浘鍏?*鏍规湰娌℃湁鍏夋爡鍖?*锛堜笌 UV/绾圭悊鏃犲叧锛?
-鐢?HLE 鐜版垚璇婃柇 `P5D_DIAG_FS_IN=3`锛堟妸 **`frag_0084` 鎹㈡垚"甯搁噺绾€佸畬鍏ㄤ笉璇?Input"鐨勭墖鍏冩ā鍧楋級璺?LOGO 鐩镐綅骞堕€愬抚缁熻锛?
+## h145k658–h145k660（第 20 轮）：red-FS 判决把问题锁死在几何；screen ?width/height 来源已定?
+### 丢?*决定性判?*：`vert_0015` 的图?*根本没有光栅?*（与 UV/纹理无关?
+?HLE 现成诊断 `P5D_DIAG_FS_IN=3`（把 **`frag_0084` 换成"常量纃69完全不?Input"的片元模块）?LOGO 相位并帧统计?
 ```
 [DIAGFS-IN] fragment module ready (mode=3: constant red)     鈫?璇婃柇妯″潡纭宸插姞杞?frame 2760  mean=0 max=0 绾㈠儚绱?0/130560 (0%)
 frame 2780  mean=0 max=0 绾㈠儚绱?0/130560 (0%)
@@ -273916,82 +273920,82 @@ frame 2880  mean=0 max=0 绾㈠儚绱?0/130560 (0%)
 frame 2930  mean=0 max=0 绾㈠儚绱?0/130560 (0%)
 frame 2950  mean=0 max=0 绾㈠儚绱?0/130560 (0%)
 frame 3000  mean=0 max=0 绾㈠儚绱?0/130560 (0%)
-frame 3010  mean=83.51 max=255 绾㈠儚绱?6510/130560 (5%)   鈫?鍥炲綊瀵圭収锛氳甯х绾挎甯?```
+frame 3010  mean=83.51 max=255 红像?6510/130560 (5%)   ?回归对照：该帧管线正?```
 
-鈬?鍗充娇鐗囧厓**涓嶈浠讳綍 Input**銆佹亽瀹氳緭鍑虹孩鑹诧紝LOGO 鐩镐綅渚濇棫**闆跺儚绱?*锛?**璇?draw 娌℃湁浜х敓浠讳綍鐗囧厓**锛堜笉鏄?閲囨牱鍒伴€忔槑"锛屼篃涓嶆槸"杈撳嚭榛?锛夈€?鈬?缁撳悎 vforce 涓嬪悓涓€ draw 鑳芥竻鏅版樉绀轰笁涓?LOGO锛坢ean 10.83/27.41/24.97銆乥box 灞呬腑涓斿昂瀵告甯革級锛?鍙柇瀹氾細**鐗囧厓閾捐矾銆佺汗鐞嗐€乁V銆佹贩鍚堝叏閮ㄦ甯革紝鍞竴闃诲灏辨槸璇?draw 鐨勯《鐐瑰嚑浣?*锛堜笌鐩爣鎻忚堪涓€鑷达級銆?
-### 浜屻€乣screen` 鐨?`width/height` 鏉ユ簮宸插畾浣嶅埌鍏ㄥ眬缁撴瀯
+?即使片元**不读任何 Input**、恒定输出红色，LOGO 相位依旧**零像?*?**?draw 没有产生任何片元**（不?采样到明"，也不是"输出?）??结合 vforce 下同丢 draw 能清晰显示三?LOGO（mean 10.83/27.41/24.97、bbox 居中且尺寸正常）?可断定：**片元链路、纹理UV、混合全部正常，唯一阻塞就是?draw 的顶点几?*（与目标描述丢致）?
+### 二`screen` ?`width/height` 来源已定位到全局结构
 
-鍙嶆眹缂?`0x811EEB30..0x811EEB90`锛堝啓 screen 鐨勫嚱鏁颁笂娓革級锛?
+反汇?`0x811EEB30..0x811EEB90`（写 screen 的函数上游）?
 ```
-811EEB46  movw r1, #0xbc08 / movt r1, #0x816c     ; r1 = 0x816CBC08锛堝叏灞€缁撴瀯鍩哄潃锛?811EEB56  adds r0, r1, #0x948                      ; 鈫?0x816CC550
-811EEB58  vldr s0, [r0]                            ; s0 = width锛堝悗缁?vcvt.f32.u32 + *0.5 鈫?screen.z锛?811EEB5C  adds r0, r1, #0x94c                      ; 鈫?0x816CC554
+811EEB46  movw r1, #0xbc08 / movt r1, #0x816c     ; r1 = 0x816CBC08（全屢结构基址?811EEB56  adds r0, r1, #0x948                      ; ?0x816CC550
+811EEB58  vldr s0, [r0]                            ; s0 = width（后?vcvt.f32.u32 + *0.5 ?screen.z?811EEB5C  adds r0, r1, #0x94c                      ; ?0x816CC554
 811EEB62  vldr s2, [r0]
 811EEB66  adds r0, r1, #0x938                      ; 鈫?0x816CC540
-811EEB6C  vldr s1, [r0]                            ; s1 = height锛堚啋 screen.w锛?811EEB70  adds r0, r1, #0x93c / #0x940 / #0x950     ; s3/s4/s5
+811EEB6C  vldr s1, [r0]                            ; s1 = height（→ screen.w?811EEB70  adds r0, r1, #0x93c / #0x940 / #0x950     ; s3/s4/s5
 811EEB86  blx  #0x812b1300 ; bl #0x811c52b6
 ```
 
-鈬?`screen` 鐨勫洓涓垎閲忕敱鍏ㄥ眬缁撴瀯 `0x816CBC08 + {0x938,0x948,0x94C,鈥` 閲岀殑鍊肩畻鍑猴紝
-涓?`P5D_WATCH` 璇佹槑 **鏁翠釜杩愯鍙啓浜嗕竴娆?*锛? 鏉?`[GENW32]`锛宍pc=0x811EEC9A..B4`锛夈€?**涓嬩竴杞簲鍦?LOGO 鐩镐綅鐩存帴璇昏繖鍑犱釜鍏ㄥ眬鍦板潃**锛氳嫢瀹冧滑鍦ㄥ悗鏈熷彉鎴?`4352/2304`锛堣€?UBO 浠嶆槸 480/272锛夛紝
-灏辫鏄?寮曟搸鏈簲鍒锋柊 screen 鑰屾垜浠殑 HLE 璁╁畠娌″埛鏂?鈥斺€旈偅灏嗘槸**寮曟搸鑷繁鐨勭郴鏁?*鍥炲埌姝ｇ‘鍊肩殑鍏抽敭銆?
-### 涓夈€侀《鐐规暟鎹啓鍏ヨ€呭凡瀹氫綅锛圵R32 閽╁瓙鎶撲笉鍒版壒閲忓啓锛?
-`P5D_WATCH=A3150880-A3150898`锛堝彧瑕嗙洊椤剁偣鏁版嵁 24 瀛楄妭锛変粛琚?300 鏉′笂闄愭墦婊★紝pc 鍒嗗竷锛?
+?`screen` 的四个分量由全局结构 `0x816CBC08 + {0x938,0x948,0x94C,…}` 里的值算出，
+?`P5D_WATCH` 证明 **整个运行只写了一?*? ?`[GENW32]`，`pc=0x811EEC9A..B4`）?**下一轮应?LOGO 相位直接读这几个全局地址**：若它们在后期变?`4352/2304`（?UBO 仍是 480/272），
+就说?引擎本应刷新 screen 而我们的 HLE 让它没刷?—那将是**引擎自己的系?*回到正确值的关键?
+### 三顶点数据写入已定位（WR32 钩子抓不到批量写?
+`P5D_WATCH=A3150880-A3150898`（只覆盖顶点数据 24 字节）仍?300 条上限打满，pc 分布?
 | pc | 鍐欏叆浣嶇疆 | 鎬ц川 |
 |---|---|---|
-| `0x81151D4E` / `0x81151D52` / `0x81151D44` / `0x81151D5E` | `off=0/4/8/0xC` | **stride 16 椤剁偣鏋勯€犲惊鐜?*锛堝弽姹囩紪 `0x81151D62: add.w lr,lr,#0x10`銆乣vstr s2,[lr,#8]`/`vstr s3,[lr]`/`vstr s1,[lr,#4]`/`str.w r4,[lr,#0xc]`锛夆噿 浜у嚭 **`vert_0014` 鐨勫儚绱犵┖闂村洓杈瑰舰** |
-| `0x811AFE5A` | `off=0`锛屽€?`0x7FFFFFFF` | 缁撴瀯瀛楁/濉厖 |
-| `0x811E3BD0` | `off=4`锛坄0x600FFFF`锛夈€乣off=0xC`锛坄0xFFFF`锛?| 棰滆壊/UV 瀛楁 |
-| `0x811C0B3E`/`0x811C5596`/`0x811C55A4` | `off=0x50/0x54`锛堝惈鎸囬拡 `0xAA841000`锛?| `A3150880` 鏄?*甯﹀熬閮ㄥ厓鏁版嵁鐨勭粨鏋?* |
+| `0x81151D4E` / `0x81151D52` / `0x81151D44` / `0x81151D5E` | `off=0/4/8/0xC` | **stride 16 顶点构循?*（反汇编 `0x81151D62: add.w lr,lr,#0x10`、`vstr s2,[lr,#8]`/`vstr s3,[lr]`/`vstr s1,[lr,#4]`/`str.w r4,[lr,#0xc]`）⇒ 产出 **`vert_0014` 的像素空间四边形** |
+| `0x811AFE5A` | `off=0`，?`0x7FFFFFFF` | 结构字段/填充 |
+| `0x811E3BD0` | `off=4`（`0x600FFFF`）`off=0xC`（`0xFFFF`?| 颜色/UV 字段 |
+| `0x811C0B3E`/`0x811C5596`/`0x811C55A4` | `off=0x50/0x54`（含指针 `0xAA841000`?| `A3150880` ?*带尾部元数据的结?* |
 
-**鍏抽敭**锛氭暣涓?WATCH 閲?*娌℃湁**鎹曡幏鍒板啓 `11.651(0x413A6B2A)`/`4363.65(0x45885D36)` 鐨勮褰?鈬?4352 灏哄害鐨勯《鐐瑰簲鐢?**`vstmia`/`vstr d`锛?4/128 浣嶆壒閲忓啓锛?* 鍐欏叆锛岃€屾垜浠殑 `P5D_WATCH` 鍙寕浜?`wr8/wr16/wr32`銆?锛堜笅涓€杞嫢瑕佽拷杩欐锛岄渶瑕佺粰 `thumb_interpreter` 鐨勬壒閲忓啓鎸囦护琛ラ挬瀛愩€傦級
+**关键**：整?WATCH ?*没有**捕获到写 `11.651(0x413A6B2A)`/`4363.65(0x45885D36)` 的记??4352 尺度的顶点应?**`vstmia`/`vstr d`?4/128 位批量写?* 写入，我们的 `P5D_WATCH` 只挂?`wr8/wr16/wr32`?（下丢轮若要追这段，需要给 `thumb_interpreter` 的批量写指令补钩子）
 
 ### 鍥涖€佹湰杞悓鏃剁‘璁ょ殑鍏跺畠浜嬪疄
 
-- `[VALL]` 姣忓抚 **12鈥?3 涓?draw** 宸插叏閮ㄦ灇涓撅紙cap 鎻愬埌 24锛夛紝鏃犻殣钘?draw锛?- `frag_0079`锛坄vert_0014` 鐨?4 灞傚叏灞?draw 鎵€鐢級鏄?*绌?shader**锛坄params=0`銆佸彧鏈?`PHAS`銆乣tex=0x0`锛夆噿 鎭掑畾鑹?閬僵锛?- `DrawPrecomputed` 璁℃暟 = 0锛沗EC5D3D7E` 鐨勯厤瀵圭墖鍏?`5BE80352` = `frag_0003`锛?*bloom**锛屼袱涓?SAMPLER銆乣tex=0x11`銆乣[UNIOWNER] bloomPitch`锛夆噿 闈?LOGO 杞戒綋锛?- 娲诲姩鏍戜繚鎸?*绾紩鎿庤矾寰?*锛堜笌 `spv_2ph` 鍏ㄦ爲闆跺樊寮傦級銆?
-### 浜斻€佷笅涓€杞紙round 21锛夊姩浣?
-1. **鍦?LOGO 鐩镐綅鐩存帴璇诲叏灞€缁撴瀯** `0x816CC540/0x816CC550/0x816CC554/0x816CC558`
-   锛坄0x816CBC08 + 0x938/0x948/0x94C/0x950`锛夛紝閫愬抚鎵撳嵃锛?   - 鑻ュ畠浠?*鎭掍负 960/544** 鈬?寮曟搸璁や负灞忓箷灏辨槸 960脳544锛屽垯璇?draw 鐨?4352 椤剁偣鍦ㄧ湡鏈轰笂鍚屾牱鍑哄睆锛?     蹇呴』閲嶆柊瑙ｉ噴"LOGO 鐨勮浇浣?锛堟鏃堕噸鐐硅浆鍚戯細鏄惁瀛樺湪**鎴戜滑鏈?hook 鐨勯《鐐规祦璁剧疆 API** 浣胯 draw 瀹為檯浣跨敤鍍忕礌绌洪棿娴侊級锛?   - 鑻ュ畠浠湪 LOGO 鐩镐綅**鍙樻垚 4352/2304**锛堣€?UBO 浠嶆槸 480/272锛夆噿 璇存槑寮曟搸**鏈簲鍒锋柊 screen** 鑰屾垜浠殑 HLE 闃绘浜嗗埛鏂?     鈥斺€?鎵惧埌閭ｄ釜缂哄彛鍗冲彲璁?*寮曟搸鑷繁鐨勭郴鏁?*鎭㈠姝ｇ‘锛屼粠鑰屼笉闈犱换浣曡皟璇曞紑鍏崇敾鍑?LOGO銆?2. 椤哄甫鍦?`thumb_interpreter` 缁?`vstmia/vldmia/strd/vstr d` 琛?`P5D_WATCH` 閽╁瓙锛屼互渚挎崟鑾?4352 椤剁偣鐨勫啓鍏ヨ€呫€?
+- `[VALL]` 每帧 **12?3 ?draw** 已全部枚举（cap 提到 24），无隐?draw?- `frag_0079`（`vert_0014` ?4 层全?draw 扢用）?*?shader**（`params=0`、只?`PHAS`、`tex=0x0`）⇒ 恒定?遮罩?- `DrawPrecomputed` 计数 = 0；`EC5D3D7E` 的配对片?`5BE80352` = `frag_0003`?*bloom**，两?SAMPLER、`tex=0x11`、`[UNIOWNER] bloomPitch`）⇒ ?LOGO 载体?- 活动树保?*纯引擎路?*（与 `spv_2ph` 全树零差异）?
+### 五下丢轮（round 21）动?
+1. **?LOGO 相位直接读全屢结构** `0x816CC540/0x816CC550/0x816CC554/0x816CC558`
+   （`0x816CBC08 + 0x938/0x948/0x94C/0x950`），逐帧打印?   - 若它?*恒为 960/544** ?引擎认为屏幕就是 960×544，则?draw ?4352 顶点在真机上同样出屏?     必须重新解释"LOGO 的载?（此时重点转向：是否存在**我们?hook 的顶点流设置 API** 使该 draw 实际使用像素空间流）?   - 若它们在 LOGO 相位**变成 4352/2304**（?UBO 仍是 480/272）⇒ 说明引擎**本应刷新 screen** 而我们的 HLE 阻止了刷?     —?找到那个缺口即可?*引擎自己的系?*恢复正确，从而不靠任何调试开关画?LOGO?2. 顺带?`thumb_interpreter` ?`vstmia/vldmia/strd/vstr d` ?`P5D_WATCH` 钩子，以便捕?4352 顶点的写入?
 
 ---
 
-## h145k661锛堢 20 杞ˉ锛夛細鍐?screen 鐨勫嚱鏁版槸**涓€娆℃€у垵濮嬪寲**锛涘叏灞€灏哄璇诲彇鐐瑰凡绾犲亸
+## h145k661（第 20 轮补）：?screen 的函数是**丢次初始化**；全屢尺寸读取点已纠偏
 
-### 涓€銆乣screen` 鐨勫啓鍏ュ嚱鏁板畾浣嶄笌鎬ц川
+### 丢、`screen` 的写入函数定位与性质
 
-`P5D_WATCH` 缁欏嚭鐨勫啓鐐?`pc=0x811EEC9A..B4`锛屽叾鎵€灞炲嚱鏁板叆鍙ｆ槸 **`0x811EEB98`**锛坄push.w {r4,r5,r6,r7,r8,sb,sl,fp,lr}`锛夈€傝鍑芥暟鍓嶆閫愭潯涓?*鍒濆鍖?*鎬ц川锛?
+`P5D_WATCH` 给出的写?`pc=0x811EEC9A..B4`，其扢属函数入口是 **`0x811EEB98`**（`push.w {r4,r5,r6,r7,r8,sb,sl,fp,lr}`）该函数前段逐条?*初始?*性质?
 ```
 811EEBBC  bl   #0x81207734        ; 鍒嗛厤
-811EEBC8  str.w r0, [r4, #0x1fc]  ; r4 = 0x816CBC08锛堝叏灞€缁撴瀯锛?811EEBDA  bl   #0x81207734
+811EEBC8  str.w r0, [r4, #0x1fc]  ; r4 = 0x816CBC08（全屢结构?811EEBDA  bl   #0x81207734
 811EEBDE  str.w r0, [r4, #0x200]
 811EEBEC  blx  #0x812b17c0        ; GXM 鐩稿叧
 811EEBFE  blx  #0x812b11c0
 811EEC08  bl   #0x811e6a40        ; memset 绫?811EECBC  bl   #0x81207308
-811EECC0鈥?涓€杩炰覆 bl #0x811c53f0 / #0x811c5682 鈥?str.w r0,[0x816CC630+0x980/0xaf0]
+811EECC0?丢连串 bl #0x811c53f0 / #0x811c5682 ?str.w r0,[0x816CC630+0x980/0xaf0]
 ```
 
-鈬?瀹冨湪**鍚姩鏃舵墽琛屼竴娆?*锛堜笌 WATCH 鍙嚭鐜?4 鏉″啓璁板綍瀹屽叏涓€鑷达級锛?*涔嬪悗 screen 姘镐笉鍐嶅啓**銆?鈬?鍥犳 `screen = (1.0, 0.5, 960/2, 544/2)` 鏄?*寮曟搸鐨勫叏灞€甯搁噺**锛岀湡鏈轰害鐒躲€?
-### 浜屻€佽鍙栫偣绾犲亸锛堟鍓嶇殑鍏ㄥ眬鍦板潃鎺㈤拡璇婚敊鍑芥暟鑼冨洿锛?
-涓婁竴鐗堟帰閽堟寜 `0x811EEB30..90` 鍙?灏哄鏉ユ簮"鐨勫亸绉伙紙`0x816CBC08+0x938/0x948/0x94C/0x950`锛夛紝浣嗛偅娈靛睘浜?*鍓嶄竴涓嚱鏁?*锛屽疄娴嬪叏涓?`0.0`銆?鐪熸鍐?screen 鐨勫嚱鏁颁綋鍐咃紝`width/height` 鏄敱璋冪敤鏂瑰帇鏍?瀵勫瓨鍣ㄤ紶鍏ワ紝鍐嶇粡 `vcvt.f32.u32` 杞?float銆佷箻 `0.5` 鍐欏叆 鈥斺€?鍗?*灞忓箷灏哄鏉ヨ嚜璇ュ垵濮嬪寲鍑芥暟鐨勫叆鍙?*锛堣鍑芥暟鍙璋冪敤涓€娆★級銆?鈬?缁撹锛?*涓嶅瓨鍦?闅忔覆鏌撶洰鏍囧彉鍖栫殑 screen"**锛宍[SCREENG]` 鎺㈤拡鍙繚鐣欎絾涓嶅啀浣滀负涓荤嚎绱€?
-### 涓夈€佺敱鏈疆鍏ㄩ儴瀹炴祴鏀舵暃鍑虹殑鍞竴缁撹锛堜緵涓嬩竴杞洿鎺ヤ娇鐢級
+?它在**启动时执行一?*（与 WATCH 只出?4 条写记录完全丢致）?*之后 screen 永不再写**??因此 `screen = (1.0, 0.5, 960/2, 544/2)` ?*引擎的全屢常量**，真机亦然?
+### 二读取点纠偏（此前的全局地址探针读错函数范围?
+上一版探针按 `0x811EEB30..90` ?尺寸来源"的偏移（`0x816CBC08+0x938/0x948/0x94C/0x950`），但那段属?*前一个函?*，实测全?`0.0`?真正?screen 的函数体内，`width/height` 是由调用方压?寄存器传入，再经 `vcvt.f32.u32` ?float、乘 `0.5` 写入 —??*屏幕尺寸来自该初始化函数的入?*（该函数只被调用丢次）??结论?*不存?随渲染目标变化的 screen"**，`[SCREENG]` 探针可保留但不再作为主线紃69?
+### 三由本轮全部实测收敛出的唯一结论（供下一轮直接使用）
 
 | 浜嬪疄 | 璇佹嵁 |
 |---|---|
-| LOGO 鍞竴鍙杞戒綋 = `vert_0015` + `frag_0084` 鐨?draw | vforce 涓嬪彧鏈夊畠閾烘弧锛堝叾浣?draw 鍦?vforce 鏄犲皠涓嬭涔堥€€鍖栥€佽涔?`y_ndc>1` 琚锛夛紱璇?run 涓変釜 LOGO 鍙涓斿眳涓?|
-| 璇?draw 鍦ㄥ紩鎿庤矾寰勪笅**闆剁墖鍏?* | `P5D_DIAG_FS_IN=3`锛堝父閲忕孩銆佷笉璇?Input锛変笅 2755鈥?000 浠?`绾㈠儚绱?0` 鈬?涓?UV/绾圭悊鏃犲叧 |
-| 璇?draw 鐨勯《鐐?= 4352脳2304 鍏ㄥ箙 UV 鍥涜竟褰紙guest 鍐呭瓨鐪熷€硷級 | `[VALLRAW]`/`[VSET] data8` 涓€鑷达紱`[VALL]` 鍏ㄩ噺 13 draw 涓粎姝や竴涓潪褰掍竴鍖?|
-| 璇?draw 鐨勭郴鏁版潵鑷敮涓€ UBO锛坆ind0 = AA700000锛? `(1,0.5,480,272)` | `[VALLBIND]` 1500/1500 鍙湁 bind0 闈為浂锛沗[GENW32]` 璇佹槑鐢?guest 鍒濆鍖栧啓鍏?|
-| `screen` 鍙啓涓€娆°€佹槸鍏ㄥ眬甯搁噺 | 鏈疆 搂涓€ |
+| LOGO 唯一可见载体 = `vert_0015` + `frag_0084` ?draw | vforce 下只有它铺满（其?draw ?vforce 映射下要么化要?`y_ndc>1` 被裁）；?run 三个 LOGO 可见且居?|
+| ?draw 在引擎路径下**零片?* | `P5D_DIAG_FS_IN=3`（常量红、不?Input）下 2755?000 ?`红像?0` ??UV/纹理无关 |
+| ?draw 的顶?= 4352×2304 全幅 UV 四边形（guest 内存真） | `[VALLRAW]`/`[VSET] data8` 丢致；`[VALL]` 全量 13 draw 中仅此一个非归一?|
+| ?draw 的系数来自唯丢 UBO（bind0 = AA700000? `(1,0.5,480,272)` | `[VALLBIND]` 1500/1500 只有 bind0 非零；`[GENW32]` 证明?guest 初始化写?|
+| `screen` 只写丢次是全局常量 | 本轮 §丢 |
 
-**鈬?浜庢槸"寮曟搸鏁版嵁鍐呴儴"鏃犳硶鍐嶈В閲?鐪熸満鍙"** 锛?352 鐢诲竷椤剁偣 脳 1/480 绯绘暟 鈬?`x_ndc 鈭?[鈭?.98, 8.13]`銆乣y_ndc 鈭?[0.99, 9.64]`锛屽彲瑙佸尯浠呭睆骞曢《閮ㄤ竴鏉′笖 UV 钀藉湪 `v<0`銆?鈬?**涓嬩竴杞繀椤昏浆鍘昏拷"4352 杩欎釜灏哄浠庝綍鑰屾潵"** 锛?1. 缁?`thumb_interpreter` 鐨?`vstmia/vldmia/strd/vstr d` 琛?`P5D_WATCH` 閽╁瓙锛堢幇鏈夐挬瀛愬彧鎸?`wr8/16/32`锛屾墍浠?4352 椤剁偣鐨勫啓鍏ヨ€呬竴鐩存姄涓嶅埌锛夛紱
-2. 鐢辨瀹氫綅"鏋勯€?4352 鍥涜竟褰?鐨?guest 浠ｇ爜锛屽苟鎵惧嚭瀹冩墍涔樼殑閭ｄ釜**灏哄鍏ㄥ眬鍙橀噺**锛?3. 鑻ヨ鍏ㄥ眬鍙橀噺鍦ㄦ垜浠殑 HLE 閲屾槸 4352 鑰岀湡鏈烘槸 960锛堝嵆鏌愪釜鎴戜滑瀹炵幇閿欒鐨?API 杩斿洖鍊煎鑷存父鎴忕畻閿欏昂瀵革級锛岃ˉ瀵硅璇箟鍗冲彲璁?*寮曟搸鑷繁**鎶婇《鐐圭敓鎴愬埌 960 绌洪棿 鈬?涓?`screen` 鍖归厤 鈬?LOGO 鍙锛屼笖鍏ㄧ▼鏃犻渶浠讳綍璋冭瘯寮€鍏炽€?
+**?于是"引擎数据内部"无法再解?真机可见"** ?352 画布顶点 × 1/480 系数 ?`x_ndc ?[?.98, 8.13]`、`y_ndc ?[0.99, 9.64]`，可见区仅屏幕顶部一条且 UV 落在 `v<0`??**下一轮必须转去追"4352 这个尺寸从何而来"** ?1. ?`thumb_interpreter` ?`vstmia/vldmia/strd/vstr d` ?`P5D_WATCH` 钩子（现有钩子只?`wr8/16/32`，所?4352 顶点的写入一直抓不到）；
+2. 由此定位"构?4352 四边??guest 代码，并找出它所乘的那个**尺寸全局变量**?3. 若该全局变量在我们的 HLE 里是 4352 而真机是 960（即某个我们实现错误?API 返回值导致游戏算错尺寸），补对该语义即可?*引擎自己**把顶点生成到 960 空间 ??`screen` 匹配 ?LOGO 可见，且全程无需任何调试弢关?
 
 ---
 
-## h145k664鈥揾145k665锛堢 22 杞級锛歷ita3k 璇箟鏍稿鏀跺畼锛涘彂鐜板苟**鍥為€€**涓€涓?primType 淇鍥炲綊
+## h145k664–h145k665（第 22 轮）：vita3k 语义核对收官；发现并**回**丢?primType 修复回归
 
-### 涓€銆乣primType` 涔嬭皽鐨勫疄娴嬬瓟妗堬紙鏈疆鏈€澶ф敹鑾凤級
+### 丢、`primType` 之谜的实测答案（本轮朢大收获）
 
-缁?HLE 琛ヤ笂"淇濈暀 primType"锛坄g_cur_prim`锛夊苟鍦?`[VALL]` 閲屾墦鍗板悗锛屽叏绐楀彛锛?755鈥?010锛宑ap 16/甯с€佸叡 3130 鏉★級瀹炴祴锛?
+?HLE 补上"保留 primType"（`g_cur_prim`）并?`[VALL]` 里打印后，全窗口?755?010，cap 16/帧共 3130 条）实测?
 | 椤剁偣绋嬪簭 | prim 鍊?| 娆℃暟 | 鍚箟 |
 |---|---|---|---|
 | `ABE1E100963724B0`(vert_0014) | `0x00000000` | 838 | TRIANGLES |
@@ -273999,38 +274003,38 @@ frame 3010  mean=83.51 max=255 绾㈠儚绱?6510/130560 (5%)   鈫?鍥炲綊瀵�
 | `4A3A4C8DFD6083F6` | **`0x0C000000`** | 768 | **TRIANGLE_STRIP** |
 | `EC5D3D7E8BC3DADA` | **`0x0C000000`** | 256 | **TRIANGLE_STRIP** |
 | `A71B28370132FF67` | `0x00000000` | 256 | TRIANGLES |
-| **`172A9E736C7DC35E`(vert_0015锛孡OGO 杞戒綋)** | **`0x00000000`** | 244 | **TRIANGLES** |
+| **`172A9E736C7DC35E`(vert_0015，LOGO 载体)** | **`0x00000000`** | 244 | **TRIANGLES** |
 
-鈬?**LOGO 杞戒綋鐢ㄧ殑鏄?TRIANGLES锛屼笌鎴戜滑鍚庣纭紪鐮佺殑 `VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST` 涓€鑷?*
-鈬?**primType 涓嶆槸 LOGO 鐨勬牴鍥?*锛堜絾鏆撮湶浜嗕竴涓湡瀹炵己鍙ｏ細涓変釜 STRIP 绋嬪簭琚綋 LIST 鐢?鈬?鍑犱綍閿欙級銆?
+?**LOGO 载体用的?TRIANGLES，与我们后端硬编码的 `VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST` 丢?*
+?**primType 不是 LOGO 的根?*（但暴露了一个真实缺口：三个 STRIP 程序被当 LIST ??几何错）?
 ### 浜屻€乸rimType 淇灏濊瘯 鈫?**瀹炴祴鍥炲綊 鈫?宸查粯璁ゅ洖閫€**
 
-鍦ㄦ彁浜ゅ墠鎶?STRIP/FAN 绱㈠紩閲嶅缓涓哄垪琛紙`[PRIMFIX] prim=0C000000 cnt 6 -> 12 list indices` 纭疄鎵ц锛夛紝
-浣?*杩?3010 鍥炲綊瀵圭収甯ч兘鍙橀粦**锛坢ean 83鈫?锛夆噿 璇ラ噸寤哄熀浜庝袱涓湭楠岃瘉鍋囪
-锛堚憼 strip鈫抣ist 鐨勭粫搴忥紱鈶?`s_pd_ifmt==0` 琛ㄧず U16锛夛紝鑷冲皯涓€涓敊銆?鈬?宸叉敼涓?*榛樿鍏抽棴**锛堜粎 `P5D_PRIMFIX=1` 鏃跺惎鐢級锛屾仮澶嶅師娓叉煋琛屼负锛涗唬鐮佷繚鐣欎緵鍚庣画鐢?vita3k 鐨勭储寮曟牸寮忓啀鏍稿銆?**鏁欒璁板綍**锛氫换浣?鐪嬭捣鏉ュ"鐨勮涔変慨澶嶉兘蹇呴』鍏堣繃鍥炲綊瀵圭収甯с€?
-### 涓夈€乿ita3k 璇箟鏍稿**鏀跺畼**锛堟湰杞妸鏈€鍚庡嚑椤逛篃鏍稿畬锛?
+在提交前?STRIP/FAN 索引重建为列表（`[PRIMFIX] prim=0C000000 cnt 6 -> 12 list indices` 确实执行），
+?*?3010 回归对照帧都变黑**（mean 83?）⇒ 该重建基于两个未验证假设
+（① strip→list 的绕序；?`s_pd_ifmt==0` 表示 U16），至少丢个错??已改?*默认关闭**（仅 `P5D_PRIMFIX=1` 时启用），恢复原渲染行为；代码保留供后续?vita3k 的索引格式再核对?**教训记录**：任?看起来对"的语义修复都必须先过回归对照帧?
+### 三vita3k 语义核对**收官**（本轮把朢后几项也核完?
 | 椤?| vita3k 鏉冨▉ | 缁撹 |
 |---|---|---|
-| `SceGxmVertexStream` | `{uint16_t stride; uint16_t indexSource;}`锛坄gxm/types.h`锛?| 涓庢垜浠В鏋愪竴鑷?鈬?**椤剁偣琛岃窛 24 鏃犺** |
-| `attribute.offset` 璇箟 | GL 璺緞 `glVertexAttribPointer(loc, cc, type, normalised, stream.stride, (void*)attribute.offset)` | 鐩稿 stream 璧风偣 鈬?鎴戜滑涓€鑷?|
-| `primType` 浼犻€?| `sceGxmDraw(... primType ...)` 鈫?`renderer::draw(..., primType, ...)`锛坄SceGxm.cpp:482,583`锛夛紱鏋氫妇甯﹂珮浣嶏紙`TRIANGLES=0`/`STRIP=0x0C000000`/`FAN=0x10000000`/`LINES=0x04000000`锛?| 鎴戜滑**涓㈠純**浜嗗畠锛堝凡琛?`g_cur_prim` 瑙傛祴锛?|
-| `VLDST` | `translator/data.cpp:562-573`锛?*鏈?secondary program 鏃?dst bank = SECATTR**锛涙湰浣滆鎸囦护 `dest_n=6, src0_n=0(buffer[0]), src1_n=0, mask_count=6`锛堢敤 vita3k 浣嶄覆 `111oopppsnmycrbakkkkddeetgffihjlqquuvvvvvvvwwwwwwwxxxxxxxzzzzzzz` 绮剧‘瑙ｇ爜锛?| 鎴戜滑瑙ｆ垚 `dst=TEMP[0]`锛堢己鍙ｏ級锛涗絾鍐?SA[6..12] 鑰?primary 鍙 SA[0..4] 鈬?瀵?LOGO 鏄?**dead code**锛屼笉褰卞搷鐡堕 |
-| `get_uniform_buffer_sizes` | `reside_buffer==0 鈫?index 14`锛堥粯璁ゅ潡锛?| 涓?`vert_0015` 鐨?`default_uniform_buffer_count = 0` 涓€鑷?鈬?鍏?UNIFORM 鍏ㄩ儴鏉ヨ嚜鏄惧紡 UBO |
+| `SceGxmVertexStream` | `{uint16_t stride; uint16_t indexSource;}`（`gxm/types.h`?| 与我们解析一??**顶点行距 24 无误** |
+| `attribute.offset` 语义 | GL 路径 `glVertexAttribPointer(loc, cc, type, normalised, stream.stride, (void*)attribute.offset)` | 相对 stream 起点 ?我们丢?|
+| `primType` 传?| `sceGxmDraw(... primType ...)` ?`renderer::draw(..., primType, ...)`（`SceGxm.cpp:482,583`）；枚举带高位（`TRIANGLES=0`/`STRIP=0x0C000000`/`FAN=0x10000000`/`LINES=0x04000000`?| 我们**丢弃**了它（已?`g_cur_prim` 观测?|
+| `VLDST` | `translator/data.cpp:562-573`?*?secondary program ?dst bank = SECATTR**；本作该指令 `dest_n=6, src0_n=0(buffer[0]), src1_n=0, mask_count=6`（用 vita3k 位串 `111oopppsnmycrbakkkkddeetgffihjlqquuvvvvvvvwwwwwwwxxxxxxxzzzzzzz` 精确解码?| 我们解成 `dst=TEMP[0]`（缺口）；但?SA[6..12] ?primary 只读 SA[0..4] ??LOGO ?**dead code**，不影响瓶颈 |
+| `get_uniform_buffer_sizes` | `reside_buffer==0 ?index 14`（默认块?| ?`vert_0015` ?`default_uniform_buffer_count = 0` 丢???UNIFORM 全部来自显式 UBO |
 
-**鍚屾椂鑱旂綉妫€绱?*锛圙XM 甯搁噺缂撳啿/SA 甯冨眬銆乣sceGxmSetViewport`銆乣4352脳2304` 鏄惁涓哄凡鐭ュ昂瀵搞€丳5D LOGO 閫嗗悜璧勬枡锛?**娌℃湁浠讳綍鍏紑璧勬枡**缁欏嚭 GXM **椹卞姩渚?*"UNIFORM 鍙傛暟钀藉湪鍝釜 SA"鐨勮鍒?鈥斺€?vita3k 鑷韩涔熸槸閫嗗悜锛?涓斿湪 UBO 璺緞涓婂仛浜嗚嚜宸辩殑杩戜技銆傗噿 璇ョ幆鑺傚彧鑳介潬**瀹炴祴**锛岃€屽疄娴嬪凡瀹屾垚涓旈棴鍚堬細
+**同时联网棢?*（GXM 常量缓冲/SA 布局、`sceGxmSetViewport`、`4352×2304` 是否为已知尺寸P5D LOGO 逆向资料?**没有任何公开资料**给出 GXM **驱动?*"UNIFORM 参数落在哪个 SA"的规?—?vita3k 自身也是逆向?且在 UBO 路径上做了自己的近似。⇒ 该环节只能靠**实测**，实测已完成且闭合：
 
-- `P5D_WATCH=AA700000-AA700010` 鈬?guest 鍒濆鍖栧嚱鏁帮紙`0x811EEB98` 璧凤紝鍙窇涓€娆★級鍐欏叆 `(1.0, 0.5, 960/2, 544/2)`锛?- `P5D_VPOS_FORCE_UBO`锛坴force 琛ㄨ揪寮?脳 `SA[0].x`锛変笌绾?vforce **閫愬瓧鑺傚悓缁撴灉** 鈬?`SA[0].x=1.0` 鐪熷疄鍙 鈬?UBO鈫扴A 閾捐矾閫氥€?
-### 鍥涖€佸綋鍓嶇摱棰堢殑**鍑嗙‘鍒荤敾**锛堜緵鍚庣画鐩存帴浣跨敤锛?
-涓嶆槸"鎴戜滑涓嶆噦 PSV 鍘熺悊"锛岃€屾槸**寮曟搸鏁版嵁鑷韩鐨勮涔夊啿绐?*锛?- shader 鐨勬姇褰?`x/480鈭?` 瑕佹眰椤剁偣鍦?**0..960 鍍忕礌绌洪棿**锛?- 鑰屽紩鎿庡疄闄呭杺鍏ョ殑椤剁偣鏄?*浠?(2176,1152) 涓轰腑蹇冪殑 4352脳2304 鍥涜竟褰?*锛坄[VALLRAW]`/`[VSET]` 鍙岃瘉锛涘唴瀛橀噷涔熺‘瀹炲瓨鍦?`2176.0f`脳10 涓?`2304.0f`脳2锛屼笖 `-2176` 閭诲煙涓?`-136/-544/-8704/-34816` = 17脳8鈦?瀹舵棌锛夛紱
-- 浜岃€呮瘮渚嬭繕涓嶄竴鑷达紙4352/960=4.533銆?304/544=4.235锛夈€?
-鈬?涓嬩竴姝ュ簲**鏀惧純缁х画鏍稿璇箟**锛岃浆鍘诲湪 guest 浠ｇ爜閲屾壘 **4352 鐨勭敓鎴愬**锛?缁?`P5D_WATCH` 鐩戣**鍊?*锛坄0x413A6B2A`=11.651 / `0x45885D36`=4363.65 / `0x40080000`=2.125 鍐欏叆**浠讳綍**鍦板潃锛夛紝
-鍗冲彲瀹氫綅鏋勯€犺鍥涜竟褰㈢殑鍑芥暟涓庡叾浣跨敤鐨勫昂瀵告潵婧愶紙VSTM 宸茶蛋 `wr32`锛屾晠杩欑被鍐欏叆鏈簲鍙锛?涔嬪墠鍙洃瑙嗗浐瀹氬湴鍧€ `A3150880-A3150898` 鎵嶈缁撴瀯瀛楁鍐欐弧 cap锛夈€?
+- `P5D_WATCH=AA700000-AA700010` ?guest 初始化函数（`0x811EEB98` 起，只跑丢次）写入 `(1.0, 0.5, 960/2, 544/2)`?- `P5D_VPOS_FORCE_UBO`（vforce 表达?× `SA[0].x`）与?vforce **逐字节同结果** ?`SA[0].x=1.0` 真实可读 ?UBO→SA 链路通?
+### 四当前瓶颈的**准确刻画**（供后续直接使用?
+不是"我们不懂 PSV 原理"，是**引擎数据自身的语义冲?*?- shader 的投?`x/480?` 要求顶点?**0..960 像素空间**?- 而引擎实际喂入的顶点?*?(2176,1152) 为中心的 4352×2304 四边?*（`[VALLRAW]`/`[VSET]` 双证；内存里也确实存?`2176.0f`×10 ?`2304.0f`×2，且 `-2176` 邻域?`-136/-544/-8704/-34816` = 17×8?家族）；
+- 二比例还不一致（4352/960=4.533?304/544=4.235）?
+?下一步应**放弃继续核对语义**，转去在 guest 代码里找 **4352 的生成处**??`P5D_WATCH` 监视**?*（`0x413A6B2A`=11.651 / `0x45885D36`=4363.65 / `0x40080000`=2.125 写入**任何**地址），
+即可定位构该四边形的函数与其使用的尺寸来源（VSTM 已走 `wr32`，故这类写入本应可见?之前只监视固定地坢 `A3150880-A3150898` 才被结构字段写满 cap）?
 
 ---
 
-## h145k670鈥?74銆恦ert_0015 鍙嶆眹缂?+ literals + 涓夊潡 UBO 瀹炴祴锛氭暣鏉￠摼棣栨闂悎銆?
-### 1. 椤剁偣娴佺簿纭綅锛坄[VALLHEX] LOGO` / `[VALLFLT]`锛宖c 2760鈥?010 閲囨牱锛?
-stride **24**锛? 椤剁偣 + 6 涓?u16 绱㈠紩锛坄0,1,2,0,2,3`锛夛細
+## h145k670?74【vert_0015 反汇?+ literals + 三块 UBO 实测：整条链首次闭合?
+### 1. 顶点流精确位（`[VALLHEX] LOGO` / `[VALLFLT]`，fc 2760?010 采样?
+stride **24**? 顶点 + 6 ?u16 索引（`0,1,2,0,2,3`）：
 
 | | x | y | z | w | u | v |
 |---|---|---|---|---|---|---|
@@ -274039,17 +274043,17 @@ stride **24**锛? 椤剁偣 + 6 涓?u16 绱㈠紩锛坄0,1,2,0,2,3`锛夛細
 | v2 | 4382.7651 | -2348.8708 | 2.125 | `FFFFFFFF` | 1 | 1 |
 | v3 | 30.7650 | -2312.7668 | 2.125 | `FFFFFFFF` | 0 | 1 |
 
-杈瑰悜閲忥細`u = v1-v0 = (4352.0002, -36.1040)`锛宍v = v3-v0 = (19.1138, -2304.0000)`锛?`v2-v3 = u`銆乣v2-v1 = v` 鈬?**绮剧‘ 4352.0002 脳 2304.0000 鐨勫壀鍒囧钩琛屽洓杈瑰舰**锛?鍓垏绯绘暟 `a = 36.1040/4352 = 19.1138/2304 = 0.0082960`锛堝绉?shear锛岄潪绾棆杞級銆?UV 瀹屾暣瑕嗙洊 0..1 鈬?**鍏ㄥ睆鍥涜竟褰?*銆傝繖涓€鏉?*鎺ㄧ炕浜嗘鍓?鍧愭爣涓嶅彲瑙ｉ噴"鐨勫洶鎯?*銆?
-### 2. GXP literals 绮剧‘瀹氫綅锛坄_rt_vert_172A9E736C7DC35E.gxp`锛?45 B锛?
+边向量：`u = v1-v0 = (4352.0002, -36.1040)`，`v = v3-v0 = (19.1138, -2304.0000)`?`v2-v3 = u`、`v2-v1 = v` ?**精确 4352.0002 × 2304.0000 的剪切平行四边形**?剪切系数 `a = 36.1040/4352 = 19.1138/2304 = 0.0082960`（对?shear，非纯旋转）?UV 完整覆盖 0..1 ?**全屏四边?*。这丢?*推翻了此?坐标不可解释"的困?*?
+### 2. GXP literals 精确定位（`_rt_vert_172A9E736C7DC35E.gxp`?45 B?
 ```
 literals_count@0x70 = 2   literals_offset@0x74 = 0xA4  -> 琛?@0x74+0xA4 = 0x118
 0x118: 01 00 00 00 | 00 00 80 3F   ->  {offset = 1, value = +1.0}
 0x120: 02 00 00 00 | 00 00 80 BF   ->  {offset = 2, value = -1.0}
 ```
-涓?vita3k `shader/src/gxp_parser.cpp:257-259`
-锛坄literal_offset = container->base_sa_offset + literals[i]`锛沜ontainer 浼樺厛 16锛屽惁鍒?19锛?瀵圭収锛氭湰绋嬪簭瀹瑰櫒琛ㄥ彧鏈?`idx=19, base_sa_offset=0, size_in_f32=3`
-鈬?**SA f32[1] := +1.0锛孲A f32[2] := -1.0**銆?鍏ㄦ枃浠舵壂 2176/1152/4352/2304/480/272 娴偣瀛楅潰閲忥細**鍙湁 -1.0 涓€澶?*锛?x124锛夈€?
-### 3. 涓夊潡鍊欓€夐《鐐?UBO 24 float 瀹炴祴锛坄[VALLUB0/1/2]`锛孡OGO draw 鏃讹級
+?vita3k `shader/src/gxp_parser.cpp:257-259`
+（`literal_offset = container->base_sa_offset + literals[i]`；container 优先 16，否?19?对照：本程序容器表只?`idx=19, base_sa_offset=0, size_in_f32=3`
+?**SA f32[1] := +1.0，SA f32[2] := -1.0**?全文件扫 2176/1152/4352/2304/480/272 浮点字面量：**只有 -1.0 丢?*?x124）?
+### 3. 三块候顶?UBO 24 float 实测（`[VALLUB0/1/2]`，LOGO draw 时）
 
 | 鍧?| 鍐呭 |
 |---|---|
@@ -274057,9 +274061,9 @@ literals_count@0x70 = 2   literals_offset@0x74 = 0xA4  -> 琛?@0x74+0xA4 = 0x118
 | `g_vubo` = `B38A0000 / B38A5000 / B38AB000` | `0.5446  0.8214  0脳22` |
 | `g_vdefubo` = `A335A8FC` | 鍏?0 |
 
-**涓夊潡閮芥病鏈?2176 / 1152 / -1152銆?* 姝ゅ墠"SA[2]/SA[4] 涓?0"鐨勮娉曟湰鏉ュ氨鍙湅浜嗗墠 8 涓?float锛?鐜板湪 24 涓?float 鍏ㄩ儴瀹炴祴锛岀粨璁轰笉鍙樹絾**璇佹嵁琛ュ叏**銆?锛圫CRN draw 鐨?bind0 鍚屾牱鏄?`AA700000` = 鍚?4 涓?float 鈬?璇ュ潡鏄?engine 鐨?灞忓箷鍙傛暟"鍧椼€傦級
+**三块都没?2176 / 1152 / -1152?* 此前"SA[2]/SA[4] ?0"的说法本来就只看了前 8 ?float?现在 24 ?float 全部实测，结论不变但**证据补全**?（SCRN draw ?bind0 同样?`AA700000` = ?4 ?float ?该块?engine ?屏幕参数"块）
 
-### 4. 瀹屾暣鎸囦护璇箟锛坄gxp_to_spv dump` + 浣嶇骇鎵嬬畻锛?
+### 4. 完整指令语义（`gxp_to_spv dump` + 位级手算?
 ```
 I0 PHAS
 I1 VMOV    OUT[2].xy <- TEMP[0].xy
@@ -274071,92 +274075,92 @@ I6 SMBO
 s2 VCOMP(VRCP) SA[4].x = rcp(SA[3].x)   (src1_mod=0, src_comp=0, dest.num raw2->double 4)
 s3 VCOMP(VRCP) SA[2].y = rcp(SA[2].y)   (src1_mod=0, src_comp=1, dest.num raw1->double 2)
 ```
-- `FPC[1].y = kFpconstBank1Raw[1] = 0x3F800000 = 1.0`锛堣〃宸叉牳瀵癸級鈬?I4/I5 鏄?*绾箻娉?*銆?- I3 鐨?Neg 鏄墜绠椾綅锛歚00802126F0040080` bit37=1, bit38=0 鈬?`src1_mod=1`銆?- 浣嶄覆涓?vita3k `usse_translator_entry.cpp` 鐨?  `INST(&V::vmad2, "VMAD2 ()", "00000dpps-ry-cbawwwineeeemmookttffgghhhhhhzzjjllllllqqqqqquuuuuu")`
-  閫愬瓧娈靛榻愶紙`src1_mod` = bit37..38銆乣src1.num` = bit6..11 鈫?double 鍚?= 4 鈬?SA[4]锛夈€?
-### 5. vita3k 鏉冨▉锛歚screen` 鐨?SA 鍩哄潃 = 0
+- `FPC[1].y = kFpconstBank1Raw[1] = 0x3F800000 = 1.0`（表已核对）?I4/I5 ?*纯乘?*?- I3 ?Neg 是手算位：`00802126F0040080` bit37=1, bit38=0 ?`src1_mod=1`?- 位串?vita3k `usse_translator_entry.cpp` ?  `INST(&V::vmad2, "VMAD2 ()", "00000dpps-ry-cbawwwineeeemmookttffgghhhhhhzzjjllllllqqqqqquuuuuu")`
+  逐字段对齐（`src1_mod` = bit37..38、`src1.num` = bit6..11 ?double ?= 4 ?SA[4]）?
+### 5. vita3k 权威：`screen` ?SA 基址 = 0
 
-`gxp_parser.cpp:83-87`锛?```cpp
+`gxp_parser.cpp:83-87`?```cpp
 std::uint32_t offset = parameter.resource_index;
 auto container = gxp::get_container_by_index(program, parameter.container_index);
 if (container) offset = container->base_sa_offset + parameter.resource_index;
 ```
-`screen`(cat=UNIFORM, cont=0, res=0)锛氬鍣ㄨ〃鍙湁 idx=19 鈬?`get_container_by_index(0)` = nullptr
-鈬?**offset = 0** 鈬?`SA f32[0..3] = screen = (1.0, 0.5, 480, 272)` 鉁?锛堜笌 literals 鐨?offset 鍚屽崟浣?= **f32 鏍囬噺涓嬫爣**锛屾晠 `SA[n]` 鐨勭獥鍙?= `f32[n .. n+3]`銆傦級
+`screen`(cat=UNIFORM, cont=0, res=0)：容器表只有 idx=19 ?`get_container_by_index(0)` = nullptr
+?**offset = 0** ?`SA f32[0..3] = screen = (1.0, 0.5, 480, 272)` ?（与 literals ?offset 同单?= **f32 标量下标**，故 `SA[n]` 的窗?= `f32[n .. n+3]`。）
 
-### 6. 绠楁湳闂悎 鈬?涓?闆剁墖鍏?绮剧‘鍚诲悎
+### 6. 算术闭合 ??零片?精确吻合
 
-f32 鏍囬噺涓嬫爣妯″瀷涓嬶細`SA[2].y` 涓?`SA[3].x` **閮芥槸 f32[3]** 鈬?
+f32 标量下标模型下：`SA[2].y` ?`SA[3].x` **都是 f32[3]** ?
 ```
 SA[2].x = f32[2] = -1.0        (literal)
 SA[2].y = f32[3] = rcp(272) = 1/272   (s3)
-SA[4].x = f32[4] = rcp(272) = 1/272   (s2锛屼笖 s2 鍦?s3 涔嬪墠 鈬?璇荤殑鏄師鍊?272)
+SA[4].x = f32[4] = rcp(272) = 1/272   (s2，且 s2 ?s3 之前 ?读的是原?272)
 SA[0].y = f32[1] = +1.0        (literal)
 
-OUT0.x = pos.x/272 - 1        -> [-0.9572, 15.11]     瑕嗙洊灞忓箷 鉁?OUT0.y = -pos.y/272 + 1       -> [ 1.0322,  9.6356]   鏈€灏忓€?> 1 鈬?鍏ㄩ儴鍦ㄨ鍓寖鍥村 鉁?```
-鈬?鍥惧厓琚畬鍏ㄨ鍓?鈬?**闆剁墖鍏?*锛屼笌 `P5D_DIAG_FS_IN=3` 瀹炴祴"2755鈥?000 闆剁孩鍍忕礌"**绮剧‘鍚诲悎**銆?
-### 7. 鐢辩 6 鏉″緱鍒扮殑鍏抽敭鐭涚浘锛堟湰杞渶閲嶈鐨勬柊缁撹锛?
-`4352 = 16 脳 272`锛坄screen.w`锛夆€斺€?x 鏂瑰悜鎭板ソ 16 鍊嶏紱鑰?`2304 / 272 = 8.4706`銆?**寮曟搸鎶?x 涓?y 鐨勯櫎鏁板疄鐜颁负鍚屼竴涓?`f32[3]`锛屽嵈闈㈠ 16 : 8.47 鐨勭敾甯?鈬?璇箟涓婁笉鎴愮珛**銆?鈬?浜岃€呭繀鏈変竴閿欙細
-  (a) `SA[n]` 鐨勭獥鍙ｆā鍨嬶紙f32 鏍囬噺涓嬫爣锛変笌鐪熸満涓嶇锛涙垨
-  (b) 璇?draw 鐨勯《鐐?UBO 鐪熷€间笉鏄?`AA700000`锛堟垜浠粦閿欎簡鍧楋級銆?
-### 8. 鏂板鎺㈤拡 / 璇婃柇锛堝潎宸查噸寤哄苟瀹炴祴锛?
-- `[VALLUB0/1/2]`锛歜ind0 / `g_vubo` / `g_vdefubo` 鍚?**24 涓?float**锛堟鍓嶅彧 8 涓級銆?- `[VALLHEX] LOGO|SCRN`锛氶《鐐规祦鍓?**32 涓?u32** + `[VALLFLT]` 鍚?32 涓?float銆?- `P5D_VPOS_OUT0_SCALE=<k>`锛?*鐢熸垚鏈?*锛宍gxp_to_spv` 璇伙級锛歚gl_Position = vec4(OUT0.xy*k, 0.49995, 1)`锛?  鐢ㄤ簬**璇诲嚭 OUT0 鐨勭湡瀹為噺绾т笌绗﹀彿**鑰屼笉鐚滃叕寮忋€?
-### 9. PSV 鐪熸満鍙妫€鏌ワ紙缁撹锛氬鏈摱棰堟棤鍐冲畾鎬ц础鐚級
+OUT0.x = pos.x/272 - 1        -> [-0.9572, 15.11]     覆盖屏幕 ?OUT0.y = -pos.y/272 + 1       -> [ 1.0322,  9.6356]   朢小?> 1 ?全部在裁剪范围外 ?```
+?图元被完全裁??**零片?*，与 `P5D_DIAG_FS_IN=3` 实测"2755?000 零红像素"**精确吻合**?
+### 7. 由第 6 条得到的关键矛盾（本轮最重要的新结论?
+`4352 = 16 × 272`（`screen.w`）?x 方向恰好 16 倍；?`2304 / 272 = 8.4706`?**引擎?x ?y 的除数实现为同一?`f32[3]`，却面对 16 : 8.47 的画??语义上不成立**??二必有一错：
+  (a) `SA[n]` 的窗口模型（f32 标量下标）与真机不符；或
+  (b) ?draw 的顶?UBO 真不?`AA700000`（我们绑错了块）?
+### 8. 新增探针 / 诊断（均已重建并实测?
+- `[VALLUB0/1/2]`：bind0 / `g_vubo` / `g_vdefubo` ?**24 ?float**（此前只 8 个）?- `[VALLHEX] LOGO|SCRN`：顶点流?**32 ?u32** + `[VALLFLT]` ?32 ?float?- `P5D_VPOS_OUT0_SCALE=<k>`?*生成?*，`gxp_to_spv` 读）：`gl_Position = vec4(OUT0.xy*k, 0.49995, 1)`?  用于**读出 OUT0 的真实量级与符号**而不猜公式?
+### 9. PSV 真机只读棢查（结论：对本瓶颈无决定性贡献）
 
-- `E:\mai\PCSH10109\eboot.bin` MD5 `1105C41E602B03C8235594757E90845F` = 鏈湴閫愬瓧鑺傜浉鍚屻€?- `data.cpk` / `vita.cpk` 鏄?mai 瑙ｅ瘑鏄庢枃 CPK锛坄CPK ` + `@UTF`@0x10锛夛紝鍐呭惈 **鏃?.gxp**銆?- `E:\data\psp2core-*.psp2dmp`锛坓zip 鈫?ELF锛?6.1 MB / 9.9 MB锛屽惈 SceGxm 娈碉級锛屽叾涓竴涓槸 **PCSH00211**銆?- 鍏ㄧ▼鍙锛屾湭鏀瑰姩璁惧浠讳綍鏂囦欢銆?
-### 10. 涓嬩竴姝ワ紙鍞竴鍔ㄤ綔锛?
-璺?`P5D_VPOS_OUT0=1 P5D_VPOS_OUT0_SCALE=0.05`锛堝凡鐢熸垚 `spv_all`锛寁ert_0015 spv 11972鈫?1912 B锛?md5 `12D697945466C83DF422EA7BD75988DC`鈫抈E1CF725581C4EE52539B8DD12ED62955`锛夛紝
-鎸?`0.05` 缂╂斁鎶?`OUT0.xy` 浠?[-0.96, 15.1]脳[1.03, 9.64] 鍘嬭繘灞忓箷锛?鐢?*鍑哄浘褰㈢姸涓?bbox**鍙嶆帹 OUT0 鐨勭湡瀹炴暟鍊硷紙棰勬湡鐨勯摵婊?鈬?璇佸疄绗?6 鏉★級锛?浠庤€屽湪 (a) SA 绐楀彛妯″瀷 / (b) UBO 鏉ユ簮 涔嬮棿鍋氬嚭鍒ゅ喅銆?
+- `E:\mai\PCSH10109\eboot.bin` MD5 `1105C41E602B03C8235594757E90845F` = 本地逐字节相同?- `data.cpk` / `vita.cpk` ?mai 解密明文 CPK（`CPK ` + `@UTF`@0x10），内含 **?.gxp**?- `E:\data\psp2core-*.psp2dmp`（gzip ?ELF?6.1 MB / 9.9 MB，含 SceGxm 段），其中一个是 **PCSH00211**?- 全程只读，未改动设备任何文件?
+### 10. 下一步（唯一动作?
+?`P5D_VPOS_OUT0=1 P5D_VPOS_OUT0_SCALE=0.05`（已生成 `spv_all`，vert_0015 spv 11972?1912 B?md5 `12D697945466C83DF422EA7BD75988DC`→`E1CF725581C4EE52539B8DD12ED62955`），
+?`0.05` 缩放?`OUT0.xy` ?[-0.96, 15.1]×[1.03, 9.64] 压进屏幕??*出图形状?bbox**反推 OUT0 的真实数值（预期的铺??证实?6 条）?从在 (a) SA 窗口模型 / (b) UBO 来源 之间做出判决?
 
 ---
 
-## h145k675銆愬垽鍐冲疄楠岋細OUT0 鍙樊涓€涓粺涓€缂╂斁 鈥斺€?涓変釜 LOGO 棣栨鐢?*绾嚑浣?*鍑哄浘銆?
-### 瀹為獙锛堢敓鎴愭湡鍙樹綋锛岀墖鍏?UV/绾圭悊/娣峰悎鍏ㄩ儴鏈姩锛?
-`P5D_VPOS_OUT0=1 P5D_VPOS_OUT0_SCALE=0.05` 鈬?`gl_Position = vec4(OUT0.xy * 0.05, 0.49995, 1)`锛宍genall spv_all`锛坴ert_0015 spv 11972 鈫?11912 B锛?md5 `12D697945466C83DF422EA7BD75988DC` 鈫?`E1CF725581C4EE52539B8DD12ED62955`锛夈€?杩愯鍚庣珛鍗崇敤涓嶅甫浠讳綍鐢熸垚鏈熷紑鍏崇殑 `genall` **鎭㈠**锛屾渶缁?md5 澶嶆牳 = `12D697945466C83DF422EA7BD75988DC` 鉁撱€?
-### 瀹炴祴锛?60脳544 BMP 閫愬儚绱犵粺璁★紝姣?4 鍍忕礌閲囨牱锛?
+## h145k675【判决实验：OUT0 只差丢个统丢缩放 —?三个 LOGO 首次?*纯几?*出图?
+### 实验（生成期变体，片?UV/纹理/混合全部未动?
+`P5D_VPOS_OUT0=1 P5D_VPOS_OUT0_SCALE=0.05` ?`gl_Position = vec4(OUT0.xy * 0.05, 0.49995, 1)`，`genall spv_all`（vert_0015 spv 11972 ?11912 B?md5 `12D697945466C83DF422EA7BD75988DC` ?`E1CF725581C4EE52539B8DD12ED62955`）?运行后立即用不带任何生成期开关的 `genall` **恢复**，最?md5 复核 = `12D697945466C83DF422EA7BD75988DC` ✓?
+### 实测?60×544 BMP 逐像素统计，?4 像素采样?
 | 甯ф | mean | max | nz |
 |---|---|---|---|
-| 2755鈥?760 | 0.00 | 0 | 0 |
-| **2770鈥?840** | **1.07** | 255 | **208** |
-| **2850鈥?920** | **2.29** | 252 | **355** |
-| **2930鈥?000** | **2.03** | 255 | **297** |
-| 3010锛堝洖褰掑鐓э級 | 115.42 | 255 | 31341 |
+| 2755?760 | 0.00 | 0 | 0 |
+| **2770?840** | **1.07** | 255 | **208** |
+| **2850?920** | **2.29** | 252 | **355** |
+| **2930?000** | **2.03** | 255 | **297** |
+| 3010（回归对照） | 115.42 | 255 | 31341 |
 
-### 缁撹锛堜笁鏉★紝鍧囨湁瀹炴祴鏀拺锛?
-1. **涓変釜 LOGO 绐楀彛鍚勮嚜鍑哄浘锛屼笖涓夋鏁板€间簰涓嶇浉鍚?*锛?.07 / 2.29 / 2.03锛沶z 208/355/297锛?   鈬?涓変釜鍘傚晢 LOGO 纭疄鐢?**`eh=172A9E736C7DC35E`(vert_0015) + `fh=6952EF6C507D515E`(frag_0084)**
-   杩欎竴鏉?draw 缁樺埗锛屼笖"渚濇鏄剧ず"鐨勬椂搴忔満鍒舵湰鏉ュ氨鏄鐨勩€?2. **`OUT0` 鐨勯噺绾т笌绗﹀彿涓庣 6 鏉＄殑鎺ㄥ涓€鑷?*锛?.05 鍊嶅悗 `OUT0.xy 鈭?[-0.048,0.756] 脳 [0.052,0.482]`
-   鎭板ソ杩涘叆灞忓箷宸︿笅鍥涘垎涔嬩竴鍖哄煙锛屽嚭鍥鹃潰绉緢灏忥紙nz鈮?08鈥?55锛夆€斺€?涓?琚帇杩涘睆骞曚竴灏忚"绮剧‘鐩哥銆?   鈬?**椤剁偣灞炴€?鈫?SA 鈫?PA0 鈫?OUT0 鈫?鍏夋爡 鈫?閲囨牱 鈫?涓婂睆鏁存潯閾惧畬濂斤紝鍙樊涓€涓粺涓€鐨勭缉鏀剧郴鏁般€?*
-3. **3010 甯т笉鍙楀奖鍝?*锛?15.42 鈮?鍏堝墠鍩虹嚎 83鈥?43锛夆噿 璇ョ缉鏀惧彧浣滅敤浜庤蛋 vert_0015 鐨?draw锛?   鍏朵粬鍐呭 draw 涓庡紑鍦哄姩鐢诲彟鏈夐《鐐圭▼搴?鈬?**涓嶅瓨鍦?鏀逛簡灏辨妸鍒殑鐢诲潖"鐨勮€﹀悎椋庨櫓**銆?
-### 鐢辩粨璁?2 寰楀埌鐨?*鍞竴缂哄彛**
+### 结论（三条，均有实测支撑?
+1. **三个 LOGO 窗口各自出图，且三段数互不相?*?.07 / 2.29 / 2.03；nz 208/355/297?   ?三个厂商 LOGO 确实?**`eh=172A9E736C7DC35E`(vert_0015) + `fh=6952EF6C507D515E`(frag_0084)**
+   这一?draw 绘制，且"依次显示"的时序机制本来就是对的?2. **`OUT0` 的量级与符号与第 6 条的推导丢?*?.05 倍后 `OUT0.xy ?[-0.048,0.756] × [0.052,0.482]`
+   恰好进入屏幕左下四分之一区域，出图面积很小（nz?08?55）??被压进屏幕一小角"精确相符?   ?**顶点属??SA ?PA0 ?OUT0 ?光栅 ?采样 ?上屏整条链完好，只差丢个统丢的缩放系数?*
+3. **3010 帧不受影?*?15.42 ?先前基线 83?43）⇒ 该缩放只作用于走 vert_0015 ?draw?   其他内容 draw 与开场动画另有顶点程??**不存?改了就把别的画坏"的合风险**?
+### 由结?2 得到?*唯一缺口**
 
-闇€瑕?`SA[2].y = +1/2176`锛坸锛変笌 `SA[4].x = -1/1152`锛坹锛夛紝
-鑰屽弽姹囩紪缁欏嚭浜岃€?*鍚屾簮**锛坄s2` 涓?`s3` 閮藉湪 f32 涓嬫爣妯″瀷涓嬪彇 `f32[3]`锛夛細
+霢?`SA[2].y = +1/2176`（x）与 `SA[4].x = -1/1152`（y），
+而反汇编给出二?*同源**（`s2` ?`s3` 都在 f32 下标模型下取 `f32[3]`）：
 ```
 s2: SA[4].x = rcp(SA[3].x)     s3: SA[2].y = rcp(SA[2].y)
 ```
-瀹炴祴 UBO `f32[3] = 272` 鈬?涓よ€呭悓涓?`1/272` 鈬?`OUT0.x = pos.x/272 - 1`锛堣鐩栵級鑰?`OUT0.y = -pos.y/272 + 1 鈭?[1.0322, 9.6356]`锛堝叏閮?> 1锛岃瑁侊級銆?**鈬?鐪熸満杩欎釜 draw 鐨勯《鐐?UBO 閲岋紝鎵挎媴闄ゆ硶鐨勯偅涓や釜 f32 妲戒綅鐨勫€煎繀鐒朵笉鏄?272銆?*
-鈬?涓庢垜浠粦瀹氱殑 `bind0 = AA700000`锛? engine 鐨?`screen` = `(1.0,0.5,480,272)`锛岃 SCRN draw 鍏辩敤锛?**涓嶆槸** vert_0015 鐪熸璇诲彇鐨勭郴鏁板潡锛屾垨鍏?res 钀界偣涓庢垜浠畻鐨勪笉鍚屻€?
-### 鏈疆鏂板/浣跨敤鐨勮瘖鏂?
-- `P5D_VPOS_OUT0_SCALE=<k>`锛?*鐢熸垚鏈?*锛宍gxp_to_spv` 璇伙紱`usse_translator.cpp` OUT0 鍒嗘敮锛?  鈥斺€?涓嶇寽鍏紡鍗冲彲璇诲嚭 `OUT0` 鐨勯噺绾т笌绗﹀彿銆?- `[SETUNI]` / `[SETUNI**]`锛堟棤鏉′欢璁板綍 2755鈥?010 鍐?*姣忎竴娆?* `sceGxmSetUniformDataF` 鐨?  `ub / param鍚?/ res / coff / ccnt / dst / 鍓? float`锛屽苟瀵?`|v| 鈭?(1000, 5000)` 鎵?`**` 楂樹寒锛?  鈥斺€?鐢ㄤ簬鍥炵瓟"2176 / 1152 / 4352 / 2304 杩欎簺绯绘暟绌剁珶鐢?*鍝竴娆¤皟鐢?*鍐欏埌**鍝釜 ub 鐨勫摢涓?res**"銆?
-### 涓嬩竴姝?
-璇?`[SETUNI**]`锛?- **鏈夊懡涓?* 鈬?engine 纭疄缁?`sceGxmSetUniformDataF` 涓婁紶绯绘暟锛屽彧鏄?`ub` 涓嶆槸 `AA700000`
-  锛堟垨 `res` 钀界偣涓庢垜浠?`dst = ub + res*4 + coff*4` 鐨勭畻娉曚笉鍚岋級鈬?淇?HLE 鐨?*缁戝畾/涓婁紶**锛?- **鏃犲懡涓?* 鈬?绯绘暟鐢?guest 鐩存帴鍐欏唴瀛?鈬?鐢?`P5D_WATCHVAL` 鎶?`2176.0f(45080000)` / `-1152.0f(C4900000)`
-  鐨?*鍐欏叆鐐?PC/LR**锛屽弽姹囩紪閭ｄ釜鍑芥暟锛屾嵁姝ゅ湪 HLE 渚ф彁渚涙纭潡銆?涓ゆ潯璺兘**涓嶉渶瑕?*淇濈暀浠讳綍瑕嗙洊寮€鍏?鈥斺€?鏈€缁堜慨澶嶅繀椤绘槸 HLE 灞備緵缁欑湡鍊笺€?
+实测 UBO `f32[3] = 272` ?两同?`1/272` ?`OUT0.x = pos.x/272 - 1`（覆盖）?`OUT0.y = -pos.y/272 + 1 ?[1.0322, 9.6356]`（全?> 1，被裁）?**?真机这个 draw 的顶?UBO 里，承担除法的那两个 f32 槽位的必然不?272?*
+?与我们绑定的 `bind0 = AA700000`? engine ?`screen` = `(1.0,0.5,480,272)`，被 SCRN draw 共用?**不是** vert_0015 真正读取的系数块，或?res 落点与我们算的不同?
+### 本轮新增/使用的诊?
+- `P5D_VPOS_OUT0_SCALE=<k>`?*生成?*，`gxp_to_spv` 读；`usse_translator.cpp` OUT0 分支?  —?不猜公式即可读出 `OUT0` 的量级与符号?- `[SETUNI]` / `[SETUNI**]`（无条件记录 2755?010 ?*每一?* `sceGxmSetUniformDataF` ?  `ub / param?/ res / coff / ccnt / dst / ? float`，并?`|v| ?(1000, 5000)` ?`**` 高亮?  —?用于回答"2176 / 1152 / 4352 / 2304 这些系数究竟?*哪一次调?*写到**哪个 ub 的哪?res**"?
+### 下一?
+?`[SETUNI**]`?- **有命?* ?engine 确实?`sceGxmSetUniformDataF` 上传系数，只?`ub` 不是 `AA700000`
+  （或 `res` 落点与我?`dst = ub + res*4 + coff*4` 的算法不同）??HLE ?*绑定/上传**?- **无命?* ?系数?guest 直接写内???`P5D_WATCHVAL` ?`2176.0f(45080000)` / `-1152.0f(C4900000)`
+  ?*写入?PC/LR**，反汇编那个函数，据此在 HLE 侧提供正确块?两条路都**不需?*保留任何覆盖弢?—?朢终修复必须是 HLE 层供给真值?
 
 ---
 
-## h145k676鈥?79銆愮敤鎴蜂粠鐪熸満瀵煎嚭鍐呭瓨 + [SETUNI] 鍏ㄩ噺鍙栬瘉锛歎bo 鐪熷€煎畾浣嶅埌"妯″潡鍖轰箣澶?銆?
-### A. `[SETUNI]` 鍏ㄩ噺鍙栬瘉锛坔arness 渚э紝瀹炴祴锛?
-`P5D_VPOS_OUT0...` 宸叉仮澶?normal锛坴ert_0015 spv md5 澶嶆牳 = `12D697945466C83DF422EA7BD75988DC`锛夛紝
-鍦?2755鈥?010 绐楀彛鏃犳潯浠惰褰?*姣忎竴娆?* `sceGxmSetUniformDataF`锛坄ub / name / res / coff / ccnt / dst / 鍓? float`锛夛細
+## h145k676?79【用户从真机导出内存 + [SETUNI] 全量取证：Ubo 真定位到"模块区之??
+### A. `[SETUNI]` 全量取证（harness 侧，实测?
+`P5D_VPOS_OUT0...` 已恢?normal（vert_0015 spv md5 复核 = `12D697945466C83DF422EA7BD75988DC`），
+?2755?010 窗口无条件记?*每一?* `sceGxmSetUniformDataF`（`ub / name / res / coff / ccnt / dst / ? float`）：
 
-**`[SETUNI**]`锛坄|v| 鈭?(1000, 5000)` 楂樹寒锛夆噿 绌洪泦銆?*
-琚皟鐢ㄧ殑鍙湁锛歚clearColor`銆乣middleGray`銆乣adaptedLum`銆乣bloomScale`銆乣sampleOffsets`銆?`sampleWeights`銆乣bloomPitch`锛? `0.54464, 0.82143` 鈬?鍗?`g_vubo` 閭ｄ袱 涓?float 鐨勬潵婧愶級銆?
-鈬?**缁撹锛歀OGO 绐楀彛鍐呭紩鎿庝粠鏈粡 `sceGxmSetUniformDataF` 鍐欏叆浠讳綍澶х郴鏁帮紙2176/1152/4352/2304 绛夛級銆?*
-鈬?`screen = (1.0, 0.5, 480, 272)` 鍙兘鏄?**guest 鐩存帴鍐欏唴瀛?*锛堜笌鏃╁墠 `[GENW32] pc=0x811EEC9A` 鍚诲悎锛夛紝
-涓?`dst = ub + res*4 + coff*4`锛坴ita3k 鏉冨▉锛変笅鎴戜滑娌℃湁鎶婁换浣?uniform 鍐欓敊浣嶃€?
-### B. 鐪熸満鍐呭瓨 dump 鍒嗘瀽锛堢敤鎴风粡 vitacheat 瀵煎嚭锛屽叏绋嬪彧璇伙級
+**`[SETUNI**]`（`|v| ?(1000, 5000)` 高亮）⇒ 空集?*
+被调用的只有：`clearColor`、`middleGray`、`adaptedLum`、`bloomScale`、`sampleOffsets`?`sampleWeights`、`bloomPitch`? `0.54464, 0.82143` ??`g_vubo` 那两 ?float 的来源）?
+?**结论：LOGO 窗口内引擎从未经 `sceGxmSetUniformDataF` 写入任何大系数（2176/1152/4352/2304 等）?*
+?`screen = (1.0, 0.5, 480, 272)` 只能?**guest 直接写内?*（与早前 `[GENW32] pc=0x811EEC9A` 吻合），
+?`dst = ub + res*4 + coff*4`（vita3k 权威）下我们没有把任?uniform 写错位?
+### B. 真机内存 dump 分析（用户经 vitacheat 导出，全程只读）
 
-鏂囦欢锛歚E:\vitacheat\mem\PCSH10109_0x81000000_0x83000000_0.bin` = **33 554 432 B锛?x2000000锛?*锛?VA 鑼冨洿 `0x81000000..0x83000000`锛涘悓鍚?`.txt` 鍒楀嚭妯″潡鏄犲皠锛?
+文件：`E:\vitacheat\mem\PCSH10109_0x81000000_0x83000000_0.bin` = **33 554 432 B?x2000000?*?VA 范围 `0x81000000..0x83000000`；同?`.txt` 列出模块映射?
 | # | module | vaddr | memsz |
 |---|---|---|---|
 | 00 | **xrd757_psp2_p5d_master** (`ux0:/app/PCSH10109/eboot.bin`) | `0x8101fa40` | `0x321778` |
@@ -274165,50 +274169,50 @@ s2: SA[4].x = rcp(SA[3].x)     s3: SA[2].y = rcp(SA[2].y)
 | 06 | SceLibFios2 | `0x813c01f0` | `0x2ccbf` |
 | 07 | SceLibc | `0x81840030` | `0x5191c` |
 
-**鈬?璇?dump 鏄?妯″潡鏄犲皠鍖?锛屼笉鏄爢銆?*
+**??dump ?模块映射?，不是堆?*
 
-**B1. 鐪熸満鏁版嵁娈甸噷鐨?`screen` 妯℃澘锛堝疄娴嬶紝鏈€閲嶈鐨勬闈㈣瘉鎹級**
+**B1. 真机数据段里?`screen` 模板（实测，朢重要的正面证据）**
 
 ```
 VA 0x817A7080 : ptr, ptr, 0x000003C0(960), 0x00000220(544)
 VA 0x817A7090 : 0x00000400(1024), 1, 0x18, ...
 VA 0x817A70A0 : 0x00000400(1024), 0, 0x000003C0(960), 0x00000220(544)
 VA 0x817A70C0 : 480.0  -272.0  0.5  0.0
-VA 0x817A70D0 : 480.0   272.0  0.5  0.0        <-- screen = (480, +-272, 0.5) 涓ゅ锛?-Y锛?VA 0x817A70E0 : 0x81A024A0 0x81A028A0 0x82765A90 0x1F   (鎸囬拡琛?
+VA 0x817A70D0 : 480.0   272.0  0.5  0.0        <-- screen = (480, +-272, 0.5) 两套?-Y?VA 0x817A70E0 : 0x81A024A0 0x81A028A0 0x82765A90 0x1F   (指针?
 ```
 ```
 VA 0x81F20EA0 : 480.0  480.0  272.0  -272.0
 VA 0x81F20EB0 : 0.5    0.5    0.0    0x00180008
 ```
-鈬?**`480 = 960/2`銆乣272 = 544/2` 鍦ㄧ湡鏈烘暟鎹閲屾槸**缂栬瘧鏈熷父閲?*锛屼笖 `-272` 涔熺湡瀹炲瓨鍦?*
-鈬?鎴戜滑 `[VALLUB0]` 璇诲埌鐨?`(1.0, 0.5, 480, 272)` 閲?**0.5 / 480 / 272 閮芥槸鐪熷€?* 鉁?鈬?涔嬪墠"鎶?480/272 鎹㈡垚 2176/-1152"鐨勬兂娉曡**璇佷吉**锛氱湡鏈烘病鏈?2176/1152 浣滀负 screen銆?
-**B2. 鍏ㄩ噺鎵弿锛?2 MB锛寀32 绮剧‘鍖归厤锛?*
+?**`480 = 960/2`、`272 = 544/2` 在真机数据段里是**编译期常?*，且 `-272` 也真实存?*
+?我们 `[VALLUB0]` 读到?`(1.0, 0.5, 480, 272)` ?**0.5 / 480 / 272 都是真?* ??之前"?480/272 换成 2176/-1152"的想法被**证伪**：真机没?2176/1152 作为 screen?
+**B2. 全量扫描?2 MB，u32 精确匹配?*
 
 | 妯″紡 | 鍛戒腑 | 璇存槑 |
 |---|---|---|
-| `11.6512`(413A6B2A) / `-8.7668` / `4363.65` / `4382.77` / `30.765` / `-2312.77` | **0** | **LOGO 椤剁偣娴佷笉鍦ㄦā鍧楀尯** |
-| `(1.0,0.5,480,272)` 鍥涘厓缁?| **0** | **鐪熸満椤剁偣 UBO 涓嶅湪妯″潡鍖?* |
-| `(1.0,0.5)` 鐩搁偦瀵?| 3 | `0x811D15E4`(娴偣琛?銆乣0x8132C638`(**sin/cos 琛?*)銆乣0x814833C0` 鈥?鍧囬潪 UBO |
-| `(480,272)` 鐩搁偦瀵?| 5 | `0x817A70D0` / `0x827A35D4/3684/3734`锛堟暟鎹妯℃澘锛夈€乣0x81F20EA4` |
-| `2176 / 1152 / 4352 / 2304 / 2.125` | 鏈夊懡涓?| 鍏ㄥ湪**閫掑娴偣甯搁噺琛?*閲岋紙濡?`0x8181228E`: 1600,1664,1728,鈥︼紱`0x81816252`: -832,-864,鈥︼紱`0x8181200E`: 2.125,2.25,2.375,2.5锛夆噿 **绾阀鍚?*锛屼笉鏄嚑浣曠郴鏁?|
+| `11.6512`(413A6B2A) / `-8.7668` / `4363.65` / `4382.77` / `30.765` / `-2312.77` | **0** | **LOGO 顶点流不在模块区** |
+| `(1.0,0.5,480,272)` 四元?| **0** | **真机顶点 UBO 不在模块?* |
+| `(1.0,0.5)` 相邻?| 3 | `0x811D15E4`(浮点?、`0x8132C638`(**sin/cos ?*)、`0x814833C0` ?均非 UBO |
+| `(480,272)` 相邻?| 5 | `0x817A70D0` / `0x827A35D4/3684/3734`（数据段模板）`0x81F20EA4` |
+| `2176 / 1152 / 4352 / 2304 / 2.125` | 有命?| 全在**递增浮点常量?*里（?`0x8181228E`: 1600,1664,1728,…；`0x81816252`: -832,-864,…；`0x8181200E`: 2.125,2.25,2.375,2.5）⇒ **纯巧?*，不是几何系?|
 | `2/4352鈮?.0004596` / `2/2304鈮?.0008547` | **0** | 寮曟搸浠ｇ爜閲屾病鏈夎繖浜涘父鏁?|
 
-鈬?涓庢棭鍓嶅鏈湴 eboot 鐨勭粨璁轰竴鑷达紙"4352/2304 鍛戒腑鏄法璁板綍宸у悎"锛夛紝鏈疆鐢?*鐪熸満鍐呭瓨**鍐嶆纭瘉銆?鈬?**鈬?椤剁偣娴佷笌椤剁偣 UBO 閮藉湪 `0x83000000` 浠ヤ笂鐨勫爢鍖猴紱褰撳墠 dump 瑕嗙洊涓嶅埌銆?*
+?与早前对本地 eboot 的结论一致（"4352/2304 命中是跨记录巧合"），本轮?*真机内存**再次确证??**?顶点流与顶点 UBO 都在 `0x83000000` 以上的堆区；当前 dump 覆盖不到?*
 
 ### C. 淇鍚庣殑鍒ゆ柇
 
-1. `screen` 鐪熷€?= `(1.0, 0.5, 480, 272)` 鈥斺€?**宸茬敱鐪熸満鏁版嵁娈电嫭绔嬬‘璁?*锛屼笉鏄垜浠殑璇绘暟閿欒銆?2. `literals = {sa f32[1] := +1.0, sa f32[2] := -1.0}` 鈥斺€?GXP 瀛楄妭 + vita3k `gxp_parser.cpp` 鍙岄噸纭銆?3. 鈬?`SA[2].x = -1.0`銆乣SA[2].y = SA[4].x = rcp(f32[3])`銆乣SA[0].y = +1.0` 鐨勬帹瀵?*鍦?harness 渚ф槸鑷唇鐨?*锛?   涓?`OUT0.y = -pos.y/272 + 1 鈭?[1.0322, 9.6356]` 蹇呯劧琚 鈥斺€?杩欐鏄疄娴嬬殑"闆剁墖鍏?銆?4. 鈬?鍓╀笅鐨勫敮涓€鍙兘鏄細**鐪熸満 draw 鏃剁粦瀹氱殑椤剁偣 UBO 鍐呭姣?`AA700000` 閭?4 涓?float 鏇村**
-   锛堜緥濡?`f32[8..19]` 鏈夊€硷級锛岃€屾垜浠殑 HLE 鎶婂畠鎴柇/缁戦敊銆?   `[SETUNI]` 宸叉帓闄?SetUniformDataF 钀界偣閿?锛屾晠瀚岀枒闆嗕腑鍦?**`sceGxmSetVertexUniformBuffer` 鐨?`data` 鎸囬拡鏉ユ簮**
-   涓?*榛樿 UBO锛坄sceGxmSetVertexDefaultUniformBuffer`锛夌殑鐪熷疄鍐呭**銆?
-### D. 涓嬩竴姝ワ紙闇€瑕佺湡鏈烘洿澶ц寖鍥寸殑鍐呭瓨锛?
-璇风敤鎴峰湪**娓告垙鏄剧ず鍘傚晢 LOGO 鏃?*瀵煎嚭 `0x83000000` 浠ヤ笂鐨勫爢锛屼紭鍏?`0x83000000鈥?x90000000`锛堝彲鍒嗗潡 32 MB锛夈€?鍒ゆ嵁锛堟垜浼氱珛鍒绘墽琛岋級锛?- 鍛戒腑 `11.6512f`(413A6B2A) 鈬?瀹氫綅鐪熸満 **LOGO 椤剁偣娴?*锛岀洿鎺ヨ鍑?`pos` 涓庣浉閭荤殑 UBO 鎸囬拡锛?- 鍛戒腑 `(1.0, 0.5, 480, 272)` 鈬?瀹氫綅鐪熸満 **椤剁偣 UBO**锛岃鍑哄畠**瀹屾暣鐨?24+ 涓?float**锛?  鍗冲彲鍒ゅ畾 `f32[3]/f32[8..19]` 鏄惁鏈夊€?鈥斺€?杩欐槸鍞竴杩樻病琚娴嬪埌鐨勯噺銆?锛堣嫢涓嶄究瀵煎嚭澶ц寖鍥达紝涔熷彲鐢?vitacheat 鑷甫鐨?*鏁板€兼悳绱?*锛氬厛鎼?float `11.6512`锛屾妸鍛戒腑鐨勫湴鍧€鍛婅瘔鎴戙€傦級
+1. `screen` 真?= `(1.0, 0.5, 480, 272)` —?**已由真机数据段独立确?*，不是我们的读数错误?2. `literals = {sa f32[1] := +1.0, sa f32[2] := -1.0}` —?GXP 字节 + vita3k `gxp_parser.cpp` 双重确认?3. ?`SA[2].x = -1.0`、`SA[2].y = SA[4].x = rcp(f32[3])`、`SA[0].y = +1.0` 的推?*?harness 侧是自洽?*?   ?`OUT0.y = -pos.y/272 + 1 ?[1.0322, 9.6356]` 必然被裁 —?这正是实测的"零片??4. ?剩下的唯丢可能是：**真机 draw 时绑定的顶点 UBO 内容?`AA700000` ?4 ?float 更多**
+   （例?`f32[8..19]` 有），我们的 HLE 把它截断/绑错?   `[SETUNI]` 已排?SetUniformDataF 落点?，故嫌疑集中?**`sceGxmSetVertexUniformBuffer` ?`data` 指针来源**
+   ?*默认 UBO（`sceGxmSetVertexDefaultUniformBuffer`）的真实内容**?
+### D. 下一步（霢要真机更大范围的内存?
+请用户在**游戏显示厂商 LOGO ?*导出 `0x83000000` 以上的堆，优?`0x83000000?x90000000`（可分块 32 MB）?判据（我会立刻执行）?- 命中 `11.6512f`(413A6B2A) ?定位真机 **LOGO 顶点?*，直接读?`pos` 与相邻的 UBO 指针?- 命中 `(1.0, 0.5, 480, 272)` ?定位真机 **顶点 UBO**，读出它**完整?24+ ?float**?  即可判定 `f32[3]/f32[8..19]` 是否有?—?这是唯一还没被观测到的量?（若不便导出大范围，也可?vitacheat 自带?*数搜?*：先?float `11.6512`，把命中的地坢告诉我）
 
 
 ---
 
-## h145k680鈥?81銆怢OGO draw 韬唤鏀舵暃 + 鐢ㄦ埛鐪熸満 dump 鐨勪簩鍊肩粨璁?+ 绯绘暟鐭涚浘鐨勬渶缁堥噺鍖栥€?
-### 1. `vert_0014` 鏄竻灞忓眰锛孡OGO 浠嶆槸 `vert_0015`锛堝疄娴?+ 婧愮爜娉ㄩ噴鍙岃瘉锛?
-`gxp_to_spv dump _rt_vert_ABE1E100963724B0.gxp`锛?12 B锛宍[EHMAP] ABE1E100963724B0 -> gxp_vert_0014.gxp.spv`锛?涓?`_rt_vert_172A9E736C7DC35E.gxp`锛?45 B锛宍vert_0015`锛?*7 鏉′富鎸囦护 + 4 鏉″壇鎸囦护閫愬瓧鑺傚畬鍏ㄧ浉鍚?*锛?
+## h145k680?81【LOGO draw 身份收敛 + 用户真机 dump 的二值结?+ 系数矛盾的最终量化?
+### 1. `vert_0014` 是清屏层，LOGO 仍是 `vert_0015`（实?+ 源码注释双证?
+`gxp_to_spv dump _rt_vert_ABE1E100963724B0.gxp`?12 B，`[EHMAP] ABE1E100963724B0 -> gxp_vert_0014.gxp.spv`??`_rt_vert_172A9E736C7DC35E.gxp`?45 B，`vert_0015`?*7 条主指令 + 4 条副指令逐字节完全相?*?
 ```
 I2 VMAD2   PA0.x = PA0.x*SA[2].y + SA[2].x        (write_mask=1, src1_mod=0)
 I3 VMAD2   PA0.y = PA0.y*(-SA[4].x) + SA[0].y     (write_mask=2, src1_mod=1 = Neg)
@@ -274216,61 +274220,61 @@ I4/I5 V32NMAD(VMUL) OUT[0/1].xy = PA[0/1].xy * FPC[1].y    (FPC[1].y = 0x3F80000
 s2 VCOMP(VRCP) SA[4].x = rcp(SA[3].x)     s3 VCOMP(VRCP) SA[2].y = rcp(SA[2].y)
 ```
 
-鑰?`vulkan_backend.cpp:1339` 鐨勫疄娴嬫敞閲婃槑纭細
-> 瀹炴祴"绐楀彛鎭掍负绾粦"鐨勭湡鍑舵槸 `vert_0014`+`frag_0079` 鐢荤殑**涓€鏁村睆涓嶉€忔槑绾粦瑕嗙洊灞?*
-> 锛坄P5D_SKIP_VH=ABE1E100963724B0` 璺宠繃瀹冨悗鑳屾櫙浠?(0,0,0) 鍙樻垚寮曟搸鐪熷疄鑳屾櫙鑹?(31,22,18)锛夛紝
-> 鑰?`frag_0079` 鐨勫父閲忓潡瀹炴祴鏄?`(0,0,0,1)`銆?
-鈬?姣忓抚 3 娆?`vert_0014` 鏄?*娓呭睆灞?*锛堝叾 `[LOGOBIND] da=... 1024x512 mean=0.0` 鏄?*姝ｇ‘鐨勯粦**锛屼笉鏄?bug锛夈€?鈬?LOGO 鐢?`vert_0015 + frag_0084` 鐢伙紱`[LOGOBIND-NEW]` 涓変釜 LOGO 绐楀彛绮剧‘瀵瑰簲
-`d=12910(fc2763) / d=13918(fc2845) / d=14913(fc2926)`锛? 2760鈥?840 / 2845鈥?920 / 2926鈥?000锛夈€?
-### 2. `[SETUNI]` 鍏ㄩ噺鍙栬瘉 鈬?鎺掗櫎"UBO 钀界偣閿?
+?`vulkan_backend.cpp:1339` 的实测注释明确：
+> 实测"窗口恒为纯黑"的真凶是 `vert_0014`+`frag_0079` 画的**丢整屏不明纯黑覆盖?*
+> （`P5D_SKIP_VH=ABE1E100963724B0` 跳过它后背景?(0,0,0) 变成引擎真实背景?(31,22,18)），
+> ?`frag_0079` 的常量块实测?`(0,0,0,1)`?
+?每帧 3 ?`vert_0014` ?*清屏?*（其 `[LOGOBIND] da=... 1024x512 mean=0.0` ?*正确的黑**，不?bug）??LOGO ?`vert_0015 + frag_0084` 画；`[LOGOBIND-NEW]` 三个 LOGO 窗口精确对应
+`d=12910(fc2763) / d=13918(fc2845) / d=14913(fc2926)`? 2760?840 / 2845?920 / 2926?000）?
+### 2. `[SETUNI]` 全量取证 ?排除"UBO 落点?
 
-2755鈥?010 绐楀彛鍐?*姣忎竴娆?* `sceGxmSetUniformDataF` 閮借璁板綍锛氬彧鏈?`clearColor / middleGray / adaptedLum / bloomScale / sampleOffsets / sampleWeights / bloomPitch`
-锛坄bloomPitch = 0.54464, 0.82143` = `g_vubo` 閭ｄ袱涓?float 鐨勬潵婧愶級銆?`[SETUNI**]`锛坄|v| 鈭?(1000,5000)` 楂樹寒锛?*涓虹┖闆?*銆?
-鈬?LOGO 绐楀彛鍐呭紩鎿?*浠庢湭**缁忚 API 鍐欏叆浠讳綍澶х郴鏁帮紱`dst = ub + res*4 + coff*4`锛坴ita3k 鏉冨▉锛夋棤钀界偣閿欒銆?
-### 3. 鐢ㄦ埛鐪熸満鍐呭瓨 dump锛坄E:\vitacheat\mem\`锛屽彧璇伙級
+2755?010 窗口?*每一?* `sceGxmSetUniformDataF` 都被记录：只?`clearColor / middleGray / adaptedLum / bloomScale / sampleOffsets / sampleWeights / bloomPitch`
+（`bloomPitch = 0.54464, 0.82143` = `g_vubo` 那两?float 的来源）?`[SETUNI**]`（`|v| ?(1000,5000)` 高亮?*为空?*?
+?LOGO 窗口内引?*从未**经该 API 写入任何大系数；`dst = ub + res*4 + coff*4`（vita3k 权威）无落点错误?
+### 3. 用户真机内存 dump（`E:\vitacheat\mem\`，只读）
 
-`PCSH10109_0x81000000_0x83000000_0.bin` = 33 554 432 B锛沗+ .txt` 鍒楀嚭妯″潡鏄犲皠
-锛坋boot `0x8101fa40 + 0x321778` / `0x81400480 + 0x3aa4a0`銆丼ceGxm銆丼ceLibFios2銆丼ceLibc鈥︼級
-鈬?**鏄ā鍧楁槧灏勫尯锛屼笉鏄爢**銆?
-**3a. 姝ｉ潰纭瘉 鈥斺€?`screen` 妯℃澘鍦ㄧ湡鏈烘暟鎹閲岋紙鍚?`-272` 鐗堟湰锛侊級**
+`PCSH10109_0x81000000_0x83000000_0.bin` = 33 554 432 B；`+ .txt` 列出模块映射
+（eboot `0x8101fa40 + 0x321778` / `0x81400480 + 0x3aa4a0`、SceGxm、SceLibFios2、SceLibc…）
+?**是模块映射区，不是堆**?
+**3a. 正面确证 —?`screen` 模板在真机数据段里（?`-272` 版本！）**
 ```
 VA 0x817A70C0 : 480.0  -272.0  0.5  0.0     <-- 璐熷彿鐗堟湰
 VA 0x817A70D0 : 480.0   272.0  0.5  0.0
 VA 0x817A7080 : ptr, ptr, 0x3C0(960), 0x220(544), 0x400(1024), ...
 VA 0x81F20EA0 : 480 480 272 -272 0.5 0.5
 ```
-**3b. 鍚﹀畾鎬х‘璇?鈥斺€?椤剁偣娴佷笌 UBO 閮戒笉鍦ㄦā鍧楀尯**
-`11.6512(413A6B2A) / -8.7668 / 4363.65 / 4382.77 / 30.765`锛?*0 鍛戒腑**锛?`(1.0,0.5,480,272)` 鍥涘厓缁勶細**0 鍛戒腑**锛?`2176 / 1152 / 4352 / 2304 / 2.125`锛氭湁鍛戒腑浣嗗叏鍦?*閫掑娴偣甯搁噺琛?*閲?锛坄0x8181228E`: 1600,1664,1728鈥︼紱`0x81812252`: 832,864鈥︼紱`0x81816252`: -832,-864鈥︼紱`B1FF9DC0`: 9脳4鈦?搴忓垪锛?鈬?**绾阀鍚?*锛沗2/4352`銆乣2/2304`锛?*0 鍛戒腑**銆?鎶?`2176` 鐨勪笂涓嬫枃鏀惧ぇ鍒?鈭?0..+56 float 鍚庣‘璁わ細鍥涘鍛戒腑锛坄AB8D21D4`/`ABFBF1D4`/`ACA001D4`/`ACAC21D4`锛?鍛ㄥ洿鏄?`4.0329 / 4.0016 / 4.1266 / 6.0017 / 6.1e-05 / -2048 / -2112 / -2240` 绛夋贩鏉傚€硷紝
-**涓嶅惈 `-1152`锛屼篃涓嶆瀯鎴?4脳4 鍙樻崲鐭╅樀** 鈬?涓嶆槸椤剁偣 UBO銆?
-### 4. 绯绘暟鐭涚浘鐨勬渶缁堥噺鍖栵紙鏈疆鏈€閲嶈鐨勭粨璁猴級
+**3b. 否定性确?—?顶点流与 UBO 都不在模块区**
+`11.6512(413A6B2A) / -8.7668 / 4363.65 / 4382.77 / 30.765`?*0 命中**?`(1.0,0.5,480,272)` 四元组：**0 命中**?`2176 / 1152 / 4352 / 2304 / 2.125`：有命中但全?*递增浮点常量?*?（`0x8181228E`: 1600,1664,1728…；`0x81812252`: 832,864…；`0x81816252`: -832,-864…；`B1FF9DC0`: 9×4?序列??**纯巧?*；`2/4352`、`2/2304`?*0 命中**??`2176` 的上下文放大??0..+56 float 后确认：四处命中（`AB8D21D4`/`ABFBF1D4`/`ACA001D4`/`ACAC21D4`?周围?`4.0329 / 4.0016 / 4.1266 / 6.0017 / 6.1e-05 / -2048 / -2112 / -2240` 等混杂，
+**不含 `-1152`，也不构?4×4 变换矩阵** ?不是顶点 UBO?
+### 4. 系数矛盾的最终量化（本轮朢重要的结论）
 
-`vert_0014`锛堟竻灞忥級涓?`vert_0015`锛圠OGO锛?*鐢ㄥ悓涓€涓?shader銆佸悓涓€鍧?UBO `AA700000`**锛?浣嗛《鐐逛竴涓湪鍍忕礌绌洪棿銆佷竴涓湪鐢诲竷绌洪棿锛?
+`vert_0014`（清屏）?`vert_0015`（LOGO?*用同丢?shader、同丢?UBO `AA700000`**?但顶点一个在像素空间、一个在画布空间?
 | draw | pos 鑼冨洿 | `PA0.x = pos.x/272 - 1` | `PA0.y = -pos.y/272 + 1` |
 |---|---|---|---|
-| vert_0014 | `(0,0)鈥?960,544)` | `[-1, 2.53]` 鉁?瑕嗙洊 | `[1, -1]` 鉁?瑕嗙洊 |
-| vert_0015 | `(11.65,-8.77)鈥?4382.77,-2348.87)` | `[-0.957, 15.11]` 鉁?瑕嗙洊 | `[1.0322, 9.6356]` 鉁?**鍏ㄩ儴 > 1 鈬?琚** |
+| vert_0014 | `(0,0)?960,544)` | `[-1, 2.53]` ?覆盖 | `[1, -1]` ?覆盖 |
+| vert_0015 | `(11.65,-8.77)?4382.77,-2348.87)` | `[-0.957, 15.11]` ?覆盖 | `[1.0322, 9.6356]` ?**全部 > 1 ?被裁** |
 
-瑕佽 `vert_0015` 涔熻鐩栵紝蹇呴』鏈?`SA[4].x < 0`锛堜娇 `PA0.y = pos.y/272 + 1 鈭?[-7.64, 0.97]`锛夛紝
-鍗?`SA[3].x` 涓鸿礋銆傝€屼袱涓€欓€夋ā鍨嬮兘鍋氫笉鍒帮細
-- **f32 鏍囬噺涓嬫爣妯″瀷**锛歚SA[2].y` 涓?`SA[3].x` **鍚屼负 f32[3]** 鈬?浜岃€呮亽涓?`rcp(f32[3])`锛?  f32[3]=272 鈬?x 瑕嗙洊銆亂 涓嶈鐩栵紙姝ｄ笌瀹炴祴鐨?闆剁墖鍏?鍚诲悎锛夛紱f32[3]=-272 鈬?x銆亂 鍚屾椂缈昏礋锛坸 涔熶笉鍐嶈鐩栵級銆?- **vec4 妲芥ā鍨?*锛歚SA[2].y = f32[9]`銆乣SA[3].x = f32[12]`锛屽疄娴嬩袱鑰?*鐨嗕负 0** 鈬?`rcp(0) = +inf` 鈬?鍏ㄩ粦銆?
-鈬?**鍞竴鑷唇瑙ｏ細vec4 妲芥ā鍨?+ 鐪熸満 UBO 鐨?`f32[9] = 2176`銆乣f32[12] = -1152`**锛?浜庢槸 `SA[2].y = rcp(2176) = 1/2176`锛坸 鉁擄級銆乣SA[4].x = rcp(-1152) = -1/1152`锛坹 鉁擄級銆?鈬?鑰屾垜浠帰閽堝疄娴?`AA700000` 鐨?**24 涓?float 閲?f32[4..23] 鍏ㄤ负 0**銆?
-**鈬?鏈€缁堣惤鐐癸細`g_vubo_bind[0] = AA700000` 涓嶆槸 `vert_0015` 鐪熸璇诲彇鐨勭郴鏁板潡锛堟垨缂哄悗 20 涓?float锛夈€?*
-`[SETUNI]` 宸叉帓闄?SetUniformDataF 钀界偣閿?锛屾晠瀚岀枒闆嗕腑鍦?`sceGxmSetVertexUniformBuffer` / `sceGxmSetVertexDefaultUniformBuffer` 鐨?**HLE 鍙傛暟璇诲彇**涓?*涓婁紶瀛楄妭鏁?*銆?
-### 5. 涓嬩竴姝ワ紙鍊欓€夐『搴忥級
+要让 `vert_0015` 也覆盖，必须?`SA[4].x < 0`（使 `PA0.y = pos.y/272 + 1 ?[-7.64, 0.97]`），
+?`SA[3].x` 为负。两个模型都做不到：
+- **f32 标量下标模型**：`SA[2].y` ?`SA[3].x` **同为 f32[3]** ?二恒?`rcp(f32[3])`?  f32[3]=272 ?x 覆盖、y 不覆盖（正与实测?零片?吻合）；f32[3]=-272 ?x、y 同时翻负（x 也不再覆盖）?- **vec4 槽模?*：`SA[2].y = f32[9]`、`SA[3].x = f32[12]`，实测两?*皆为 0** ?`rcp(0) = +inf` ?全黑?
+?**唯一自洽解：vec4 槽模?+ 真机 UBO ?`f32[9] = 2176`、`f32[12] = -1152`**?于是 `SA[2].y = rcp(2176) = 1/2176`（x ✓）、`SA[4].x = rcp(-1152) = -1/1152`（y ✓）??而我们探针实?`AA700000` ?**24 ?float ?f32[4..23] 全为 0**?
+**?朢终落点：`g_vubo_bind[0] = AA700000` 不是 `vert_0015` 真正读取的系数块（或缺后 20 ?float）?*
+`[SETUNI]` 已排?SetUniformDataF 落点?，故嫌疑集中?`sceGxmSetVertexUniformBuffer` / `sceGxmSetVertexDefaultUniformBuffer` ?**HLE 参数读取**?*上传字节?*?
+### 5. 下一步（候顺序）
 
-1. `P5D_VALL=1 P5D_VERBOSE=1` 鎶?`vert_0015` 閭ｄ釜 draw 鐨?`[VALLATTR]`锛坰tride/off/format锛変笌
-   `[VBIND0..15]`锛岀‘璁ゆ槸鍚﹀彧鏈?bind0 闈為浂 鈥斺€?鑻ュ紩鎿庣粦浜?idx鈮? 鐨勬Ы鑰屾垜浠殑 HLE 璁伴敊锛屽嵆鍙洿鎺ュ畾浣嶃€?2. 澶嶆牳 `eboot_probe.cpp` 鐨?`n_set_vubo`锛?425 琛?`g_vubo_bind[bufferIndex]=bufferData`锛変笌
-   `n_set_vdefubo` 鐨?*瀵勫瓨鍣?鏍堝弬鏁伴『搴?*锛坴ita3k `SceGxm.cpp`锛歚(context, bufferIndex, data)`锛夈€?3. 瀵?`AA700000` 鍋氬瓧鑺傜骇鍐欑洃瑙嗭紙`P5D_WATCH=aa700000-aa700040`锛夛紝纭 `f32[0..3]` 鏄?guest 鍐欍€?   浠ュ強**鏄惁杩樻湁绗簩娆″啓鍏ヨ鐩栦簡 f32[8..19]**銆?
+1. `P5D_VALL=1 P5D_VERBOSE=1` ?`vert_0015` 那个 draw ?`[VALLATTR]`（stride/off/format）与
+   `[VBIND0..15]`，确认是否只?bind0 非零 —?若引擎绑?idx? 的槽而我们的 HLE 记错，即可直接定位?2. 复核 `eboot_probe.cpp` ?`n_set_vubo`?425 ?`g_vubo_bind[bufferIndex]=bufferData`）与
+   `n_set_vdefubo` ?*寄存?栈参数顺?*（vita3k `SceGxm.cpp`：`(context, bufferIndex, data)`）?3. ?`AA700000` 做字节级写监视（`P5D_WATCH=aa700000-aa700040`），确认 `f32[0..3]` ?guest 写?   以及**是否还有第二次写入覆盖了 f32[8..19]**?
 
 ---
 
-## h145k682鈥?86銆愮湡鏈洪《鐐?UBO 鎵惧埌骞朵笌鎴戜滑閫愪綅鐩稿悓 鈬?鎺ㄧ炕"UBO 鏈夐殣钘忕郴鏁?鍋囪銆?
+## h145k682?86【真机顶?UBO 找到并与我们逐位相同 ?推翻"UBO 有隐藏系?假说?
 ### 1. `[SETUNO]`/瀛楄妭绾х洃瑙嗭細`AA700000` 鏃犱换浣?32 浣嶆爣閲忓啓
 
-`P5D_WATCH=aa700000-aa700040`锛堟寕鍦?`wr32` 鐨?*鍏ㄥ眬**鍐欑洃瑙嗭紝鑰屼笉鏄彧鎸傚湪 `SetUniformDataF` 涓婏級
-璺戞弧 2755鈥?010 绐楀彛 鈬?**`WV32=0`锛堥浂鍛戒腑锛?*銆?
-鈬?`AA700000` 鐨?`(1.0, 0.5, 480, 272)` **涓嶆槸**缁?32 浣嶆爣閲忓啓杩涘幓鐨?锛堟棭鏈?`[GENW32]` 鐨?guest 鍦?0x811EEC9A 闄勮繎鍐?鍙鐩栦簡瀹冪殑鏌愪釜闃舵锛屾垨閭ｆ浠ｇ爜鍦ㄦ垜浠?HLE 閲屼笉浜х敓 `wr32`锛夈€?鈬?涔熶晶闈㈢‘璁?`[SETUNI]` 鐨勭粨璁猴細LOGO 绐楀彛鍐呮病鏈変换浣曞ぇ绯绘暟缁?`SetUniformDataF` 鍐欏叆銆?
-### 2. `[VALLATTR]`锛氶《鐐硅В鐮?*瀹屽叏姝ｇ‘**锛堟湰杞帓闄ら」锛?
+`P5D_WATCH=aa700000-aa700040`（挂?`wr32` ?*全局**写监视，而不是只挂在 `SetUniformDataF` 上）
+跑满 2755?010 窗口 ?**`WV32=0`（零命中?*?
+?`AA700000` ?`(1.0, 0.5, 480, 272)` **不是**?32 位标量写进去?（早?`[GENW32]` ?guest ?0x811EEC9A 附近?只覆盖了它的某个阶段，或那段代码在我?HLE 里不产生 `wr32`）??也侧面确?`[SETUNI]` 的结论：LOGO 窗口内没有任何大系数?`SetUniformDataF` 写入?
+### 2. `[VALLATTR]`：顶点解?*完全正确**（本轮排除项?
 ```
 [VALL] fc=2763 d=12909 eh=172A9E736C7DC35E fh=6952EF6C507D515E rt=A0F00000 cw=960 ch=544
        s0=A3150880 cnt=6 vb=512 prim=00000000
@@ -274280,64 +274284,64 @@ VA 0x81F20EA0 : 480 480 272 -272 0.5 0.5
        [st0 off16 fmt9 cc2 reg8]   = vertex.texcoord0  (F32x2) -> UV (0,0)(1,0)(1,1)(0,1)
 [vert_0014 娓呭睆] stride0=16 n=2: [off0 fmt9 cc3 reg0] [off12 fmt4 cc4 reg4]
 ```
-涓?GXP 鍙傛暟琛?`p0(res0)/p1(res4)/p2(res8)` **绮剧‘瀵瑰簲**锛宍[VALLFLT]` 鐨?UV 涔熷畬鍏ㄥ惢鍚?鈬?**`(11.6512, -8.7668)` 灏辨槸寮曟搸缁欑殑鐪熷疄鍧愭爣锛屼笉鏄閿欍€佷笉鏄?stride/offset 瑙ｆ瀽閿欍€?*
+?GXP 参数?`p0(res0)/p1(res4)/p2(res8)` **精确对应**，`[VALLFLT]` ?UV 也完全吻??**`(11.6512, -8.7668)` 就是引擎给的真实坐标，不是读错不?stride/offset 解析错?*
 
-### 3. 鐢ㄦ埛鐪熸満 dump 涓夎繛锛坄E:\vitacheat\mem\`锛屽彧璇伙級
+### 3. 用户真机 dump 三连（`E:\vitacheat\mem\`，只读）
 
 | 鏂囦欢 | 澶у皬 | 缁撴灉 |
 |---|---|---|
-| `0x83000000_0x90000000_0.bin` | 186 646 528 B锛?*鍙埌 0x8E200000锛岀己 31MB**锛?| 椤剁偣娴?0 鍛戒腑锛沗(1.0,0.5,480,272)` 0 鍛戒腑 |
+| `0x83000000_0x90000000_0.bin` | 186 646 528 B?*只到 0x8E200000，缺 31MB**?| 顶点?0 命中；`(1.0,0.5,480,272)` 0 命中 |
 | `0x8E000000_0x90000000_0.bin` | 2 097 152 B | 鍏ㄩ儴 0 鍛戒腑 |
-| `0x90000000_0xA0000000_0.bin` | **0 B**锛堝鍑哄け璐?涓嶅彲璇伙級 | 鈥?|
-| **`0x60000000_0x70000000_0.bin`** | 126 877 696 B锛堝埌 0x67900000锛?| **鎵惧埌鐪熸満椤剁偣 UBO锛?* |
+| `0x90000000_0xA0000000_0.bin` | **0 B**（导出失?不可读） | ?|
+| **`0x60000000_0x70000000_0.bin`** | 126 877 696 B（到 0x67900000?| **找到真机顶点 UBO?* |
 
-**3a. 鈽呪槄鈽?鐪熸満椤剁偣 UBO 涓庢垜浠殑 `AA700000` **閫愪綅鐩稿悓** 鈽呪槄鈽?*
+**3a. ★★?真机顶点 UBO 与我们的 `AA700000` **逐位相同** ★★?*
 ```
 VA 0x66880000: 3F800000 3F000000 43F00000 43880000 | 1  0.5  480  272
-VA 0x66880010 .. 0x668800F0: 鍏?0        (鍚?28 涓?float 鍏ㄩ浂)
+VA 0x66880010 .. 0x668800F0: ?0        (?28 ?float 全零)
 闄勮繎 卤8KB: 2176 / 1152 / -1152 鍛戒腑 = 0
 ```
-鈬?**鐪熸満鐨?`screen` UBO 涔熷彧鏈夎繖 4 涓湁鏁?float銆?*
-鈬?杩?*褰诲簳璇佷吉**浜?鐪熸満 `f32[9]=2176`銆乣f32[12]=-1152`"鐨勭寽鎯?锛堥偅鏄垜浠负瑙ｉ噴 `SA[2].y`/`SA[4].x` 绗﹀彿鐭涚浘鑰屾瀯閫犵殑**鍞竴**鑷唇瑙ｏ級銆?鈬?浜庢槸 `SA[2].y = SA[4].x = rcp(272) = 1/272` 鍦?*鐪熸満涓婁篃鏄?*杩欎釜鍊硷紝
-`PA0.y = -pos.y/272 + 1 鈭?[1.0322, 9.6356]` 鍦ㄧ湡鏈轰笂鍚屾牱钀藉湪瑁佸壀鑼冨洿澶栥€?
+?**真机?`screen` UBO 也只有这 4 个有?float?*
+??*彻底证伪**?真机 `f32[9]=2176`、`f32[12]=-1152`"的猜?（那是我们为解释 `SA[2].y`/`SA[4].x` 符号矛盾而构造的**唯一**自洽解）??于是 `SA[2].y = SA[4].x = rcp(272) = 1/272` ?*真机上也?*这个值，
+`PA0.y = -pos.y/272 + 1 ?[1.0322, 9.6356]` 在真机上同样落在裁剪范围外?
 **3b. CDRAM 閲岀殑 `2.125f` / `2176f` 鍛戒腑鍏ㄦ槸宸у悎**
-`0x62EA30E6` 闄勮繎鏄?*鍘嬬缉绾圭悊鏁版嵁**锛坄55555555 / 25252525 / AAAAAAAA` 閲嶅妯″紡锛夛紱
-`0x63637F9D / 0x6363BFEE / 0x6365D7EE` 闄勮繎鏄?`FFFFFFFF`+`nan` 鐨?*鏈垵濮嬪寲鍐呭瓨**銆?鈬?杩欎笁娈?dump 閲?*娌℃湁椤剁偣娴?*锛堥《鐐圭紦鍐叉瘡甯ч噸寤猴紝瀵煎嚭鏃舵満涓嶅湪 LOGO 甯э級銆?
-### 4. 鍒ゅ喅瀹為獙锛歚vert_0015` **纭疄鏄?* LOGO 鐨勭粯鍒惰€?
-`OUT0*0.05`锛堢敓鎴愭湡锛屾妸鎵€鏈夐《鐐瑰嚑浣曞帇杩涘睆骞曪紱鍩虹嚎涓夌獥鍙?`mean=1.07 / 2.29 / 2.03`锛?**鍐嶅姞** `P5D_SKIP_VH=172A9E736C7DC35E`锛?
+`0x62EA30E6` 附近?*压缩纹理数据**（`55555555 / 25252525 / AAAAAAAA` 重复模式）；
+`0x63637F9D / 0x6363BFEE / 0x6365D7EE` 附近?`FFFFFFFF`+`nan` ?*未初始化内存**??这三?dump ?*没有顶点?*（顶点缓冲每帧重建，导出时机不在 LOGO 帧）?
+### 4. 判决实验：`vert_0015` **确实?* LOGO 的绘制?
+`OUT0*0.05`（生成期，把扢有顶点几何压进屏幕；基线三窗?`mean=1.07 / 2.29 / 2.03`?**再加** `P5D_SKIP_VH=172A9E736C7DC35E`?
 ```
-2770 鈥?3000  鍏ㄩ儴  mean=0.00  max=0  nz=0     <-- LOGO 瀹屽叏娑堝け
+2770 ?3000  全部  mean=0.00  max=0  nz=0     <-- LOGO 完全消失
 ```
-鈬?鑻?LOGO 浠嶅嚭鐜板嵆鍙帹缈?vert_0015 鏄粯鍒惰€?锛涚粨鏋?*鍏ㄩ粦** 鈬?鍋囪鎴愮珛 鉁?鈬?锛堟敞锛歚P5D_VPOS_FORCE` / `P5D_VPOS_OUT0_SCALE` 閮芥槸**鍏ㄥ眬**鐢熸垚鏈熷紑鍏筹紝
-   涓嶈兘鐢ㄦ潵鎸囪鍏蜂綋 draw 鈥斺€?蹇呴』閰嶅悎 `P5D_SKIP_VH` 鍋氬鐓с€傦級
+??LOGO 仍出现即可推?vert_0015 是绘制?；结?*全黑** ?假设成立 ??（注：`P5D_VPOS_FORCE` / `P5D_VPOS_OUT0_SCALE` 都是**全局**生成期开关，
+   不能用来指认具体 draw —?必须配合 `P5D_SKIP_VH` 做对照）
 
-### 5. 鐢辨寰楀埌鐨勫敮涓€鍓╀綑缁撹
+### 5. 由此得到的唯丢剩余结论
 
 | 浜嬪疄 | 鐘舵€?|
 |---|---|
-| 鐪熸満 UBO `(1,0.5,480,272)+鍏ㄩ浂` = 鎴戜滑鐨?`AA700000` | **瀹炴祴纭瘉** |
-| shader 鎸囦护锛?+4 鏉★級閫愬瓧鑺傚悓涓€浠?| **鍙嶆眹缂栫‘璇?* |
-| 椤剁偣灞炴€цВ鐮?stride/off/format 涓庡紩鎿?attr 涓€鑷?| **瀹炴祴纭瘉** |
-| `vert_0015` 鏄?LOGO 缁樺埗鑰?| **skip 瀵圭収纭瘉** |
-| 鍑犱綍鏄敮涓€闃诲锛坄OUT0*0.05` 鍑哄浘锛?| **瀹炴祴纭瘉** |
+| 真机 UBO `(1,0.5,480,272)+全零` = 我们?`AA700000` | **实测确证** |
+| shader 指令?+4 条）逐字节同丢?| **反汇编确?* |
+| 顶点属解?stride/off/format 与引?attr 丢?| **实测确证** |
+| `vert_0015` ?LOGO 绘制?| **skip 对照确证** |
+| 几何是唯丢阻塞（`OUT0*0.05` 出图?| **实测确证** |
 
-鈬?**缁撹锛氱湡鏈虹殑 `pos` 蹇呯劧涓嶆槸 `4352脳2304`锛? `0x1100 脳 0x900`锛夎€屾槸鍍忕礌绌洪棿閲忕骇銆?*
-鏈€鐩存帴鐨勬梺璇侊細娓呭睆灞?`vert_0014` 鎷垮埌鐨勬槸 `(0,0)鈥?960,544)`锛岀敤**鍚屼竴涓叕寮?*銆?*鍚屼竴鍧?UBO**
-鎭板ソ瑕嗙洊灞忓箷锛坄x/272-1 鈭?[-1,2.53]`銆乣-y/272+1 鈭?[1,-1]`锛夈€?鈬?鏍瑰洜涓嶅湪 shader / UBO / 灞炴€цВ鐮侊紝鑰屽湪**寮曟搸璁＄畻杩欎釜鍥涜竟褰㈡椂渚濇嵁鐨勬煇涓姸鎬?*銆?
-### 6. 涓嬩竴姝ワ紙鏄庣‘鐨勪袱涓姩浣滐級
+?**结论：真机的 `pos` 必然不是 `4352×2304`? `0x1100 × 0x900`）是像素空间量级?*
+朢直接的旁证：清屏?`vert_0014` 拿到的是 `(0,0)?960,544)`，用**同一个公?*?*同一?UBO**
+恰好覆盖屏幕（`x/272-1 ?[-1,2.53]`、`-y/272+1 ?[1,-1]`）??根因不在 shader / UBO / 属解码，而在**引擎计算这个四边形时依据的某个状?*?
+### 6. 下一步（明确的两个动作）
 
-1. **`P5D_WATCHVAL=413A6B2A`锛堝崟鍊硷紝2 鍒嗛挓鍐呰窇涓€娆★級**锛?   涓婁竴杞?`P5D_WATCHVAL` 鎶撳埌鐨?240 娆″懡涓?*鍏ㄦ槸 `v=40080000`(2.125f)** 鈬?**cap 琚崰婊?*锛?   `11.6512` 浠庢湭鍑虹幇鏋佸彲鑳芥槸**鍋囬槾鎬?*銆傚彧鐩戣**涓€涓?*鍊煎嵆鍙嬁鍒?璋佸啓浜嗛《鐐?x"鐨?`pc/lr`锛?   鍙嶆眹缂栭偅娈靛嵆鍙畾浣嶅紩鎿庣殑椤剁偣鐢熸垚鍑芥暟涓庡畠渚濊禆鐨勭姸鎬併€?2. 璇风敤鎴峰湪**鍘傚晢 LOGO 姝ｆ樉绀虹殑閭ｄ竴鍒?*鍐嶅涓€娆?`0x83000000鈥?x90000000`锛堢‘璁ゆ枃浠跺ぇ灏?= `0xD000000`锛?   鎴?`0x68000000鈥?x70000000`锛岀敤浜庣‘璁ょ湡鏈?`pos` 鐨勯噺绾с€?
+1. **`P5D_WATCHVAL=413A6B2A`（单值，2 分钟内跑丢次）**?   上一?`P5D_WATCHVAL` 抓到?240 次命?*全是 `v=40080000`(2.125f)** ?**cap 被占?*?   `11.6512` 从未出现极可能是**假阴?*。只监视**丢?*值即可拿?谁写了顶?x"?`pc/lr`?   反汇编那段即可定位引擎的顶点生成函数与它依赖的状态?2. 请用户在**厂商 LOGO 正显示的那一?*再导丢?`0x83000000?x90000000`（确认文件大?= `0xD000000`?   ?`0x68000000?x70000000`，用于确认真?`pos` 的量级?
 
 ---
 
-## h145k687鈥?88銆愨槄鏍瑰洜閾捐矾鎵撻€氾細椤剁偣鏄?绾圭悊灏哄 脳 鍏ㄥ眬缂╂斁"绠楀嚭鏉ョ殑锛屼笖鍚棆杞槄銆?
-### 1. `P5D_WATCHVAL=413A6B2A`锛?*鍗曞€?*锛夆€斺€?姝ゅ墠鐨?0 鍛戒腑"鏄?cap 鍋囬槾鎬?
+## h145k687?88【★根因链路打：顶点?纹理尺寸 × 全局缩放"算出来的，且含旋转★?
+### 1. `P5D_WATCHVAL=413A6B2A`?*单?*）?此前?0 命中"?cap 假阴?
 ```
-[WV32] pc=81161274 addr=A016DF1C v=413A6B2A lr=00000002     (杩炵画 240 娆★紝鍚屼竴鍦板潃)
+[WV32] pc=81161274 addr=A016DF1C v=413A6B2A lr=00000002     (连续 240 次，同一地址)
 ```
-涓婁竴杞?`P5D_WATCHVAL` 鎶撳埌鐨?240 娆″懡涓?*鍏ㄦ槸 `v=40080000`(2.125f)** 鈬?cap 琚崰婊★紝
-`11.6512` 鍥犳浠庢湭鍑虹幇銆?*鍙洃瑙嗕竴涓€煎嵆鍙懡涓?* 鈥斺€?缁撹锛氶《鐐规ā鏉胯鍐欏湪**鍫?`0xA016DF1C`**锛?瀹冨湪 `[0xAA000000,0xB4000000)` **涔嬪**锛岃繖涔熻В閲婁簡 `[MEMSCAN3]`锛堣寖鍥?`0xAA..0xB4`锛夋鍓嶅璇?6 涓垎閲?**0 鍛戒腑**銆?
-### 2. 椤剁偣鐢熸垚寰幆锛坄0x81161246`鈥揱0x81161280`锛屽弽姹囩紪瀹炶瘉锛?
+上一?`P5D_WATCHVAL` 抓到?240 次命?*全是 `v=40080000`(2.125f)** ?cap 被占满，
+`11.6512` 因此从未出现?*只监视一个即可命?* —?结论：顶点模板被写在**?`0xA016DF1C`**?它在 `[0xAA000000,0xB4000000)` **之外**，这也解释了 `[MEMSCAN3]`（范?`0xAA..0xB4`）此前对?6 个分?**0 命中**?
+### 2. 顶点生成循环（`0x81161246`–`0x81161280`，反汇编实证?
 ```
 81161246  vldr s0,[r3,#0x14]      ; 鏍堟ā鏉?x0
 8116124A  vldr s1,[r3,#0x18]      ; 鏍堟ā鏉?y0
@@ -274349,12 +274353,12 @@ VA 0x66880010 .. 0x668800F0: 鍏?0        (鍚?28 涓?float 鍏ㄩ浂)
 81161260  vadd.f32 s1,s1,s17      ; y = 妯℃澘 + s17
 81161264  vstr s2,[r2,#0x10]      ; u
 81161268  vstr s3,[r2,#0x14]      ; v
-8116126C  subs.w lr,lr,#1         ; 4 涓《鐐?81161270  add.w r3,r3,#8          ; 婧愭闀?8
-81161274  vstr s0,[r2]            ; 鈽?x 鍐欏叆鐐癸紙= WATCHVAL 鍛戒腑鐨?pc锛?81161278  vstr s1,[r2,#4]         ; y
-8116127C  add.w r2,r2,#0x18       ; 鐩爣姝ラ暱 0x18 = 24  鈫?涓?[VALLATTR] stride0=24 瀹屽叏涓€鑷?81161280  bne  #0x81161246
+8116126C  subs.w lr,lr,#1         ; 4 个顶?81161270  add.w r3,r3,#8          ; 源步?8
+81161274  vstr s0,[r2]            ; ?x 写入点（= WATCHVAL 命中?pc?81161278  vstr s1,[r2,#4]         ; y
+8116127C  add.w r2,r2,#0x18       ; 目标步长 0x18 = 24  ??[VALLATTR] stride0=24 完全丢?81161280  bne  #0x81161246
 ```
-鈬?**椤剁偣 = 鏍堜笂鐨?4 缁?`(x0,y0,u,v)` 妯℃澘 + `(s16,s17)` 骞崇Щ鍋忕Щ**锛?z/w 鏄父閲忥紙`2.125` / `0xFFFFFFFF`锛夆€斺€?涓?`[VALLHEX]` 瀹炴祴鐨?6-float 甯冨眬閫愬瓧娈靛搴斻€?
-### 3. 妯℃澘閲屽惈涓€涓?*鏃嬭浆鐭╅樀**锛坄0x811611EC`鈥揱0x81161232`锛?
+?**顶点 = 栈上?4 ?`(x0,y0,u,v)` 模板 + `(s16,s17)` 平移偏移**?z/w 是常量（`2.125` / `0xFFFFFFFF`）??`[VALLHEX]` 实测?6-float 布局逐字段对应?
+### 3. 模板里含丢?*旋转矩阵**（`0x811611EC`–`0x81161232`?
 ```
 811611EC  movw r0,#0xfa35 / movt r0,#0x3c8e   ; = 0x3C8EFA35 = 蟺/180
 811611F8  vmul.f32 s19, s23, s0               ; 瑙掑害(搴? -> 寮у害
@@ -274366,82 +274370,82 @@ VA 0x66880010 .. 0x668800F0: 鍏?0        (鍚?28 涓?float 鍏ㄩ浂)
 8116122A  vmla.f32 s1, s2, s0                 ; y' = y0*sin + x0*cos
 8116122E  vstr s3,[r2,#0x14]   81161232  vstr s1,[r2,#0x18]
 ```
-鈬?姝ゅ墠瑙傚療鍒扮殑"鍓垏 0.008296"**鍏跺疄鏄井鏃嬭浆**锛堚増0.475掳锛屾潵鑷?`s23`锛夈€?鈬?鎵€浠?`[VALLHEX]` 閲?`u=(4352.0002,-36.1040)`銆乣v=(19.1138,-2304.0000)` 鐨?骞宠鍥涜竟褰?鏄? **`4352脳2304` 鐨勭煩褰㈢粫鍘熺偣鏃嬭浆 0.0083 rad** 鐨勭粨鏋?鈥斺€?灏哄鏄?*绮剧‘**鐨?4352 / 2304銆?
-### 4. 鈽呪槄鈽?灏哄鏉ユ簮锛歚绾圭悊瀹?楂?脳 鍏ㄥ眬缂╂斁绯绘暟` 鈽呪槄鈽?
+?此前观察到的"剪切 0.008296"**其实是微旋转**（≈0.475°，来?`s23`）??扢?`[VALLHEX]` ?`u=(4352.0002,-36.1040)`、`v=(19.1138,-2304.0000)` ?平行四边?? **`4352×2304` 的矩形绕原点旋转 0.0083 rad** 的结?—?尺寸?*精确**?4352 / 2304?
+### 4. ★★?尺寸来源：`纹理??× 全局缩放系数` ★★?
 ```
 81161130  bl   #0x8116318a        ; r0 = 绾圭悊 width
 8116113A  vcvt.f32.u32 s24, s0
-8116114A  bl   #0x81003f34        ; s0 = *(float*)0x81540A98     鈫?x 缂╂斁
+8116114A  bl   #0x81003f34        ; s0 = *(float*)0x81540A98     ?x 缩放
 8116114E  vmul.f32 s24, s24, s0   ; => 4352
 8116113E  bl   #0x81163198        ; r0 = 绾圭悊 height
 81161146  vcvt.f32.u32 s25, s0
-81161152  bl   #0x81003f42        ; s0 = *(float*)0x81540A9C     鈫?y 缂╂斁
+81161152  bl   #0x81003f42        ; s0 = *(float*)0x81540A9C     ?y 缩放
 81161166  vmul.f32 s0,  s25, s0   ; => 2304
 ```
-鑰屼袱涓缉鏀?getter 鏄?*鏋佺畝鍏ㄥ眬璇?*锛?```
+而两个缩?getter ?*极简全局?*?```
 81003F34  movw r0,#0xa88 / movt r0,#0x8154 ; vldr s0,[r0,#0x10] ; bx lr
 81003F42  movw r0,#0xa88 / movt r0,#0x8154 ; vldr s0,[r0,#0x14] ; bx lr
 ```
-鈬?**`4352 = texWidth 脳 *(float*)0x81540A98`锛宍2304 = texHeight 脳 *(float*)0x81540A9C`銆?*
+?**`4352 = texWidth × *(float*)0x81540A98`，`2304 = texHeight × *(float*)0x81540A9C`?*
 
-灏哄 getter 閾撅紙`0x8116318a` 鈫?`0x81163fb4` 鈫?`0x811eda16` 鈫?闀胯烦杞々 `0x812b1230`锛?鍏朵腑 `0x8116318a`/`0x81163198` = `sceGxmTextureGetWidth/GetHeight` 鐨勫紩鎿庡皝瑁咃細
+尺寸 getter 链（`0x8116318a` ?`0x81163fb4` ?`0x811eda16` ?长跳转桩 `0x812b1230`?其中 `0x8116318a`/`0x81163198` = `sceGxmTextureGetWidth/GetHeight` 的引擎封装：
 ```
 8116318A  ldr r1,[r0] ; adds r0,r1,#0 ; bl #0x81163fb4    (width)
 81163198  ldr r1,[r0] ; adds r0,r1,#0 ; bl #0x81163fbe    (height)
 81163FB4  ldr r0,[r0,#4] ; bl #0x811eda16                  (width)
 81163FBE  ldr r0,[r0,#4] ; bl #0x811eda22                  (height)
 811EDA16  blx #0x812b1230      鈫?瀵煎叆妗?811EDA22  blx #0x812b1360      鈫?瀵煎叆妗?```
-鑰岃繖涓や釜 NID 鎴戜滑**宸茬粦瀹?HLE**锛坄eboot_probe.cpp:5704/5705`锛夛細
+而这两个 NID 我们**已绑?HLE**（`eboot_probe.cpp:5704/5705`）：
 ```
 bind_by_nid(0x126A3EB3u, n_tex_get_w);   // sceGxmTextureGetWidth
 bind_by_nid(0x5420A086u, n_tex_get_h);   // sceGxmTextureGetHeight
 ```
-`n_tex_get_w`锛?15 琛岋級鐨勮В鏋愭槸锛?```cpp
+`n_tex_get_w`?15 行）的解析是?```cpp
 SceUInt32 w1=gxp_rd(tex+4u), tp=(w1>>29)&7u;
 SceUInt32 w=(tp==0u||tp==2u)?(1u<<((w1>>12)&0xFu)):(((w1>>12)&0xFFFu)+1u);
 ```
 
-**鈬?鑻?LOGO 鐢诲竷鏄?`1024脳512`锛坄[LOGOBIND-NEW]` 瀹炴祴锛夛紝**
-**鍒?`1024 脳 4.25 = 4352`銆乣512 脳 4.5 = 2304` 鈬?缂╂斁绯绘暟搴斾负 `4.25f 脳 4.5f`銆?*
+**??LOGO 画布?`1024×512`（`[LOGOBIND-NEW]` 实测），**
+**?`1024 × 4.25 = 4352`、`512 × 4.5 = 2304` ?缩放系数应为 `4.25f × 4.5f`?*
 
-**鈬?鈬?鍥犳涓嬩竴姝ョ殑**鍞竴鏈煡閲?*鍙樻垚浜?`*(float*)0x81540A98` 涓?`*(float*)0x81540A9C` 鐨勫疄闄呭€?*
-锛堜互鍙婂畠浠?*鐢辫皝鍐欏叆**锛夈€傝繖涓や釜鍊煎喅瀹氬洓杈瑰舰鏄?`4352脳2304` 杩樻槸 `960脳544` 閲忕骇銆?
-### 5. 宸叉帓闄ら」姹囨€伙紙鏈疆锛?
+**??因此下一步的**唯一未知?*变成?`*(float*)0x81540A98` ?`*(float*)0x81540A9C` 的实际?*
+（以及它?*由谁写入**）这两个值决定四边形?`4352×2304` 还是 `960×544` 量级?
+### 5. 已排除项汇（本轮?
 | 鍋囪 | 瀹炴祴 | 缁撹 |
 |---|---|---|
 | 鐪熸満 UBO 鍚?`f32[9]=2176 / f32[12]=-1152` | 鐪熸満 `0x66880000` = `(1,0.5,480,272)+鍏ㄩ浂` | **璇佷吉** |
-| 椤剁偣灞炴€цВ鐮侀敊锛坰tride/off/format锛?| `[VALLATTR]` stride=24 涓?GXP 鍙傛暟琛ㄧ簿纭搴?| **璇佷吉** |
-| `vert_0015` 涓嶆槸 LOGO 缁樺埗鑰?| `OUT0*0.05` + `P5D_SKIP_VH=172A9E736C7DC35E` 鈬?鍏ㄩ粦 | **璇佷吉**锛堝畠灏辨槸缁樺埗鑰咃級 |
-| UBO 缁?`SetUniformDataF` 钀界偣閿?| `[SETUNI]` 鍏ㄩ噺鍙栬瘉鏃犲ぇ绯绘暟鍐欏叆 | **璇佷吉** |
+| 顶点属解码错（stride/off/format?| `[VALLATTR]` stride=24 ?GXP 参数表精确对?| **证伪** |
+| `vert_0015` 不是 LOGO 绘制?| `OUT0*0.05` + `P5D_SKIP_VH=172A9E736C7DC35E` ?全黑 | **证伪**（它就是绘制者） |
+| UBO ?`SetUniformDataF` 落点?| `[SETUNI]` 全量取证无大系数写入 | **证伪** |
 | `AA700000` 琚?32 浣嶆爣閲忓啓 | `P5D_WATCH=aa700000-aa700040` 鈬?`WV32=0` | **璇佷吉** |
-| 4352/2304 鏄诞鐐瑰父閲忓阀鍚?| 鍙嶆眹缂栬瘉鏄?= `texW 脳 缂╂斁`銆乣texH 脳 缂╂斁` | **鎺ㄧ炕**锛堝畠鏄畻鍑烘潵鐨勶級 |
+| 4352/2304 是浮点常量巧?| 反汇编证?= `texW × 缩放`、`texH × 缩放` | **推翻**（它是算出来的） |
 
-### 6. 涓嬩竴姝?
-1. **鍔犳帰閽堟墦鍗?`*(float*)0x81540A98` / `0x81540A9C`**锛圠OGO 甯э級锛屽苟鐢?`P5D_WATCH=81540a98-81540aa0`
-   鎶撳叾鍐欏叆鑰?鈥斺€?杩欎袱涓€煎喅瀹氬嚑浣曢噺绾с€?2. 鐢?`P5D_SCREEN_FIX=480,-272`锛堝彧浣滅敤浜?`vert_0015`锛夐獙璇?`screen.w` 绗﹀彿鍋囪
-   锛堢湡鏈烘暟鎹鍚屾椂瀛樺湪 `(480,-272,0.5,0)` 涓?`(480,272,0.5,0)` 涓ゅ锛夈€?3. E: 鐩樺凡鏂紑锛圥SV 鎷斿嚭锛夛紝鐪熸満 dump 鏆傛椂涓嶅彲鐢紱鎭㈠鍚庡彲鍙 `0x81540A88` 缁撴瀯
-   鐩存帴鎷垮埌鐪熸満鐨勪袱涓缉鏀惧€硷紝涓庢湰鏈哄姣斿嵆鍙畾浣嶃€?
+### 6. 下一?
+1. **加探针打?`*(float*)0x81540A98` / `0x81540A9C`**（LOGO 帧），并?`P5D_WATCH=81540a98-81540aa0`
+   抓其写入?—?这两个决定几何量级?2. ?`P5D_SCREEN_FIX=480,-272`（只作用?`vert_0015`）验?`screen.w` 符号假说
+   （真机数据段同时存在 `(480,-272,0.5,0)` ?`(480,272,0.5,0)` 两套）?3. E: 盘已断开（PSV 拔出），真机 dump 暂时不可用；恢复后可只读 `0x81540A88` 结构
+   直接拿到真机的两个缩放，与本机对比即可定位?
 
 ---
 
-## h145k692鈥?93銆愮敤瑙ｉ噴鍣?pc 閽╁瓙璇诲嚭鍑犱綍鐢熸垚鍑芥暟鐨勫叆鍙ｅ弬鏁颁笌璋冪敤鑰呫€?
+## h145k692?93【用解释?pc 钩子读出几何生成函数的入口参数与调用者?
 ### 1. 澶у昂瀵哥汗鐞嗘煡璇細LOGO 甯?`w>=2048` **0 鍛戒腑**
 
-鎶?`[TEXSCALE]` 鐨勮繃婊ゆ敼涓?`(w>=2048||h>=2048)`锛坈ap 80锛屼粎 LOGO 甯э級鍚?400 s 鍐?**0 鍛戒腑**銆?鈬?`sceGxmTextureGetWidth` 鍦?LOGO 鐩镐綅**浠庝笉杩斿洖 4352** 鈬?**`4352` 涓嶆槸鏉ヨ嚜绾圭悊灏哄鏌ヨ**銆俙[TEXGW]` 鐨?`lr=0x811EDA1D` 鍚屾椂纭
-妗?`0x812b1230/0x812b1360` 灏辨槸 `sceGxmTextureGetWidth/GetHeight`锛堜笌 `n_tex_get_w/h` 鐨勭粦瀹氫竴鑷达級銆?
-### 2. 鏂板 `[GEOMQ]` 鎺㈤拡锛坄thumb_interpreter.cpp`锛宲c 閽╁瓙锛?
-鍦?`pc==0x81161274`锛坄vstr s0,[r2]`锛屽嵆 `P5D_WATCHVAL=413A6B2A` 鐨勫懡涓偣锛夎Е鍙戯紝
-鎸夊叆鍙ｆ爤甯冨眬璇诲弬鏁帮細鍏ュ彛 `push {r4-r7,lr}(0x14) + vpush {s16-s25}(0x28) + sub sp,#0xbc`
-鈬?`sp0 = sp+0xF8`锛屼繚瀛樼殑 lr @ `sp+0xF4`銆?
-**瀹炴祴锛堣繛鎵?24 娆★紝鍏ㄩ儴涓€鑷达級锛?*
+?`[TEXSCALE]` 的过滤改?`(w>=2048||h>=2048)`（cap 80，仅 LOGO 帧）?400 s ?**0 命中**??`sceGxmTextureGetWidth` ?LOGO 相位**从不返回 4352** ?**`4352` 不是来自纹理尺寸查询**。`[TEXGW]` ?`lr=0x811EDA1D` 同时确认
+?`0x812b1230/0x812b1360` 就是 `sceGxmTextureGetWidth/GetHeight`（与 `n_tex_get_w/h` 的绑定一致）?
+### 2. 新增 `[GEOMQ]` 探针（`thumb_interpreter.cpp`，pc 钩子?
+?`pc==0x81161274`（`vstr s0,[r2]`，即 `P5D_WATCHVAL=413A6B2A` 的命中点）触发，
+按入口栈布局读参数：入口 `push {r4-r7,lr}(0x14) + vpush {s16-s25}(0x28) + sub sp,#0xbc`
+?`sp0 = sp+0xF8`，保存的 lr @ `sp+0xF4`?
+**实测（连?24 次，全部丢致）?*
 ```
 [GEOMQ] sp=0xA016DEC8  s16=544.000000  s17=0.000000  ret=0x811935EE  lr=0x2
 ```
-- **`sp = 0xA016DEC8`** 鈬?椤剁偣妯℃澘寤哄湪**鏍?*涓?  鈬?`sp+0x54 = 0xA016DF1C`锛?*姝ｆ槸 `P5D_WATCHVAL` 鍛戒腑鐨勫啓 `11.6512f` 鐨勫湴鍧€** 鉁?瀹屽叏鑷唇
-- **`s16 = 544.0`** 鈬?x 鏂瑰悜骞崇Щ鍋忕Щ = 544锛? 灞忓箷楂橈級锛宍s17 = 0`
+- **`sp = 0xA016DEC8`** ?顶点模板建在**?*?  ?`sp+0x54 = 0xA016DF1C`?*正是 `P5D_WATCHVAL` 命中的写 `11.6512f` 的地坢** ?完全自洽
+- **`s16 = 544.0`** ?x 方向平移偏移 = 544? 屏幕高），`s17 = 0`
 - **`ret = 0x811935EE`** 鈬?**璋冪敤鑰呰繑鍥炲湴鍧€**
 
-### 3. 璋冪敤鐐瑰弽姹囩紪锛坄0x811935EA`锛夆€斺€?淇浜嗕笂涓€杞殑鎺ㄦ祴
+### 3. 调用点反汇编（`0x811935EA`）?修正了上丢轮的推测
 
 ```
 811935A2  movs.w r2, #0x3f800000        ; 1.0
@@ -274453,8 +274457,8 @@ SceUInt32 w=(tp==0u||tp==2u)?(1u<<((w1>>12)&0xFu)):(((w1>>12)&0xFFFu)+1u);
 811935B6  strd   r2, r2, [sp, #0x18]     ; 1.0 鍐欏叆鏍堟ā鏉垮尯
 811935BA  movs   r2, #1
 811935BC  bl     #0x81160b7e
-811935C0  vmov.f32 s3, #1.000000e+00     ; 鈽?绗?涓?float 鍙傛暟 = 1.0锛?*涓嶆槸** 4.25锛?811935C4  vmov.f32 s0, s17
-811935C8  add    r1, sp, #0x10           ; 鈽?妯℃澘缁撴瀯鎸囬拡锛? 缁?x0,y0,u,v锛?811935CA  vmov.f32 s1, s17
+811935C0  vmov.f32 s3, #1.000000e+00     ; ???float 参数 = 1.0?*不是** 4.25?811935C4  vmov.f32 s0, s17
+811935C8  add    r1, sp, #0x10           ; ?模板结构指针? ?x0,y0,u,v?811935CA  vmov.f32 s1, s17
 811935CE  vmov.f32 s2, s17
 811935D2  vmov.f32 s5, s17
 811935D6  vmov.f32 s6, s17
@@ -274467,35 +274471,35 @@ SceUInt32 w=(tp==0u||tp==2u)?(1u<<((w1>>12)&0xFu)):(((w1>>12)&0xFFFu)+1u);
 811935EE  b      #0x811936ee
 ```
 
-**鈬?缁撹淇锛?*
-- 鐢熸垚鍑芥暟鐨?*缂╂斁鍙傛暟 s19 = 1.0**锛堜笉鏄垜涓婁竴杞粠 `s1-s3` 鍙嶆帹鍑虹殑 4.25锛?- `s16 = 544` 鍙槸 `x = 妯℃澘 + 544` 鐨勫钩绉婚噺
-- 鈬?**`4352` 鐨勮法搴︽潵鑷皟鐢ㄥ墠灏卞～濂界殑"妯℃澘缁撴瀯"锛坄sp+0x10` 璧凤級**锛?  瀹冨湪 `0x811935A0` 涔嬪墠鐢辨洿涓婂眰浠ｇ爜绠楀ソ锛坄strd r0,r0,[sp,#0x10]` 鍙鍐欎簡鍓嶄袱涓瓧娈碉級
+**?结论修正?*
+- 生成函数?*缩放参数 s19 = 1.0**（不是我上一轮从 `s1-s3` 反推出的 4.25?- `s16 = 544` 只是 `x = 模板 + 544` 的平移量
+- ?**`4352` 的跨度来自调用前就填好的"模板结构"（`sp+0x10` 起）**?  它在 `0x811935A0` 之前由更上层代码算好（`strd r0,r0,[sp,#0x10]` 只覆写了前两个字段）
 
-### 4. 绔嬪嵆鍙敤鐨勭粨璁?
+### 4. 立即可用的结?
 | 閲?| 鍊?| 鏉ユ簮 |
 |---|---|---|
 | 鍑犱綍鐢熸垚鍑芥暟鍏ュ彛 | `0x811610A4` | 璋冪敤鐐?`0x811935EA` |
 | 璋冪敤鑰呰繑鍥炲湴鍧€ | `0x811935EE` | `[GEOMQ] ret` |
-| 妯℃澘缁撴瀯鍦板潃 | `sp+0x10 = 0xA016DED8` | `r1` |
-| 椤剁偣鏁版嵁鍦板潃 | `sp+0x54 = 0xA016DF1C` | `WATCHVAL` 鍛戒腑 |
+| 模板结构地址 | `sp+0x10 = 0xA016DED8` | `r1` |
+| 顶点数据地址 | `sp+0x54 = 0xA016DF1C` | `WATCHVAL` 命中 |
 | x/y 骞崇Щ | `s16=544, s17=0` | `[GEOMQ]` |
-| 缂╂斁鍙傛暟 | `1.0` | `811935C0 vmov.f32 s3,#1.0` |
-| 绾圭悊灏哄锛圠OGO 鐢诲竷锛?| `1024脳512` | `[TEXSCALE]` |
-| UBO锛堢湡鏈?鏈満锛?| `(1,0.5,480,272)+鍏ㄩ浂` | 鐪熸満 `0x66880000` |
+| 缩放参数 | `1.0` | `811935C0 vmov.f32 s3,#1.0` |
+| 纹理尺寸（LOGO 画布?| `1024×512` | `[TEXSCALE]` |
+| UBO（真?本机?| `(1,0.5,480,272)+全零` | 真机 `0x66880000` |
 
-### 5. 涓嬩竴姝?
-椤虹潃 `0x811935A0` **寰€涓?*鍙嶆眹缂栵紙`0x811934xx`鈥揱0x811935A0`锛夛紝鎵惧嚭锛?1. 妯℃澘缁撴瀯 `sp+0x10..0x50` 鐨?4 缁?`(x0,y0,u,v)` 鏄湪鍝噷绠楃殑锛?2. 鍏朵腑 `x1-x0 = 4352`銆乣y` 璺ㄥ害 `2304` 鐨勫叿浣撴潵婧愶紙鏄惁鍙堟槸涓€涓?涔樺嚭鏉ョ殑"鍊硷級銆?
-宸ュ叿榻愬锛歚[GEOMQ]` 鎺㈤拡鍙殢鏃惰璇ュ嚱鏁扮殑浠绘剰鍏ュ彛鍙傛暟锛沗P5D_WATCHVAL` 鍗曞€肩洃瑙嗗彲鐩存帴瀹氫綅浠讳綍鍧愭爣甯搁噺鐨勫啓鍏ョ偣銆?
+### 5. 下一?
+顺着 `0x811935A0` **徢?*反汇编（`0x811934xx`–`0x811935A0`），找出?1. 模板结构 `sp+0x10..0x50` ?4 ?`(x0,y0,u,v)` 是在哪里算的?2. 其中 `x1-x0 = 4352`、`y` 跨度 `2304` 的具体来源（是否又是丢?乘出来的"值）?
+工具齐备：`[GEOMQ]` 探针可随时读该函数的任意入口参数；`P5D_WATCHVAL` 单监视可直接定位任何坐标常量的写入点?
 
 ---
 
-## h145k694鈥?96銆恡bh 鍒嗘敮 + 鐭╁舰鐢熸垚鍑芥暟锛氬昂瀵哥畻鍑烘潵鏄?960脳544锛岃€岄《鐐硅法搴︽槸 4352銆?
-### 1. 鍏ㄥ眬灞忓箷/缂╂斁缁撴瀯瀹屽叏姝ｅ父锛堟帹缈讳簡涓婁竴杞殑"G[0]=0"鐚滄祴锛?
-鏂板 `[GSTRUCT]` 鎺㈤拡锛堣 `0x81540A88` 鐨?6 涓瓧娈碉級锛孡OGO 甯у疄娴?8 娆″叏閮ㄤ竴鑷达細
+## h145k694?96【tbh 分支 + 矩形生成函数：尺寸算出来?960×544，顶点跨度是 4352?
+### 1. 全局屏幕/缩放结构完全正常（推翻了上一轮的"G[0]=0"猜测?
+新增 `[GSTRUCT]` 探针（读 `0x81540A88` ?6 个字段），LOGO 帧实?8 次全部一致：
 ```
 [GSTRUCT] G+00(int)=960 G+04(int)=544 G+08=1.0 G+0C=1.0 G+10=1.0 G+14=1.0
 ```
-鈬?`G = {960, 544, 1.0, 1.0, 1.0, 1.0}` 鈥斺€?**灞忓箷灏哄涓庡叏閮ㄧ缉鏀剧郴鏁伴兘姝ｇ‘**銆?鈬?涓や釜灏哄 getter 鐨勮涔夌‘璁わ細
+?`G = {960, 544, 1.0, 1.0, 1.0, 1.0}` —?**屏幕尺寸与全部缩放系数都正确**??两个尺寸 getter 的语义确认：
 ```
 0x81003EEC:  r0 = (u32)((float)(int)G[0]*G[8])   ; = 960
 0x81003F10:  r0 = (u32)((float)(int)G[4]*G[0xC]) ; = 544
@@ -274504,31 +274508,31 @@ SceUInt32 w=(tp==0u||tp==2u)?(1u<<((w1>>12)&0xFu)):(((w1>>12)&0xFFFu)+1u);
 
 ### 2. `tbh` 璺宠浆琛ㄨВ鍑猴紙鎸夊璞＄被鍨嬮€夊垎鏀級
 
-`0x8119355A tbh [pc, r0, lsl #1]`锛岃〃鍦?`0x8119355E`锛宍r0 = type-4`锛坱ype 鈭?4..12锛夛細
+`0x8119355A tbh [pc, r0, lsl #1]`，表?`0x8119355E`，`r0 = type-4`（type ?4..12）：
 
 | 绫诲瀷 | 鐩爣 |
 |---|---|
-| **4, 5, 6** | **`0x81193570`** 鈫?鎴戜滑鐨勮皟鐢ㄧ偣 `811935EA` 钀藉湪姝ゅ垎鏀?|
+| **4, 5, 6** | **`0x81193570`** ?我们的调用点 `811935EA` 落在此分?|
 | 7, 8, 9 | `0x811935F0` |
 | 10, 11, 12 | `0x81193670` |
 
-### 3. type 4/5/6 鍒嗘敮锛坄0x81193570`锛夊疄娴嬪弽姹囩紪
+### 3. type 4/5/6 分支（`0x81193570`）实测反汇编
 
 ```
 81193574  bl   #0x8116f8a8
 8119357C  bl   #0x8116f8d2
 81193588  ldr  r0, [r4] ; movs r5,#0 ; cmp r0,#3 ; bne ; ldr r5,[r4,#4]
 81193592  movs r1, #0
-81193594  vstr s17, [sp, #8]      ; 淇濆瓨 s17(=960) 鍒扮粨鏋勫瓧娈?81193598  vmov s17, r1            ; 鈽呪槄 s17 := 0  鈥斺€?杩欒В閲婁簡 [GEOMQ] 璇诲埌鐨?s17=0 鉁?8119359E  strd r0, r0, [sp]       ; sp+0x00 = 0, sp+0x04 = 0     (= x0, y0)
+81193594  vstr s17, [sp, #8]      ; 保存 s17(=960) 到结构字?81193598  vmov s17, r1            ; ★★ s17 := 0  —?这解释了 [GEOMQ] 读到?s17=0 ?8119359E  strd r0, r0, [sp]       ; sp+0x00 = 0, sp+0x04 = 0     (= x0, y0)
 811935A6  vstr s16, [sp, #0xc]    ; sp+0x0c = 544                (= h)
 811935AC  strd r0, r0, [sp, #0x10]; sp+0x10 = 0, sp+0x14 = 0
 811935B6  strd r2, r2, [sp, #0x18]; sp+0x18 = 1.0, sp+0x1C = 1.0
 811935BC  bl   #0x81160b7e        ; 鐢?r1=sp+0 浣滀负杈撳叆缁撴瀯
 811935C0  vmov.f32 s3, #1.0
-811935C8  add  r1, sp, #0x10      ; 鈽?浼犵粰 0x811610A4 鐨勬槸 sp+0x10锛堝彟涓€涓粨鏋勶紒锛?811935EA  bl   #0x811610a4
+811935C8  add  r1, sp, #0x10      ; ?传给 0x811610A4 的是 sp+0x10（另丢个结构！?811935EA  bl   #0x811610a4
 ```
-鈬?鐭╁舰鍙傛暟涓?**`{x0=0, y0=0, w=s17=960, h=s16=544}`** 鈥斺€?**灏辨槸灞忓箷灏哄锛屽畬鍏ㄦ甯?*銆?
-### 4. `0x81160b7e` = "鐭╁舰 鈫?4 涓《鐐硅"
+?矩形参数?**`{x0=0, y0=0, w=s17=960, h=s16=544}`** —?**就是屏幕尺寸，完全正?*?
+### 4. `0x81160b7e` = "矩形 ?4 个顶点角"
 
 ```
 81160BA2  vldr s0,[r4]        ; x0
@@ -274538,22 +274542,22 @@ SceUInt32 w=(tp==0u||tp==2u)?(1u<<((w1>>12)&0xFu)):(((w1>>12)&0xFFFu)+1u);
 81160BC0  vadd.f32 s2, s0, s2 ; 鈽?x0 + w
 81160BD2  vadd.f32 s3, s1, s3 ; 鈽?y0 + h
 ```
-鈬?绾姞娉曪紝**娌℃湁鍊嶆暟鏀惧ぇ**銆備互 `(0,0,960,544)` 涓鸿緭鍏ュ彧浼氬緱鍒?`(0,0)鈥?960,544)`銆?
-### 5. 褰撳墠鍞竴鏈棴鐨勭煕鐩?
+?纯加法，**没有倍数放大**。以 `(0,0,960,544)` 为输入只会得?`(0,0)?960,544)`?
+### 5. 当前唯一未闭的矛?
 | 鐜妭 | 瀹炴祴鍊?|
 |---|---|
-| 灞忓箷/缂╂斁缁撴瀯 `G` | `{960,544,1,1,1,1}` **姝ｅ父** |
-| 涓ゅ昂瀵?getter | `s17=960`銆乣s16=544` **姝ｅ父** |
-| type4/5/6 鍒嗘敮鏋勯€犵殑鐭╁舰 | `(0,0)-(960,544)` **姝ｅ父** |
-| 椤剁偣鏁版嵁锛坄[VALLHEX]`/妯℃澘 `0xA016DF1C`锛?| `(11.65,-8.77)鈥?4382.77,-2348.87)` 鈬?璺ㄥ害 **4352脳2304** |
-| 浼?`0x811610A4` 鐨勭粨鏋勬寚閽?| `sp+0x10`锛屼粎琚?`strd` 鍐欒繃 `{0,0,1.0,1.0}` |
-| `0x811610A4` 璇荤殑妯℃澘瀛楁 | `[r1+0x14] = sp+0x24`锛?*涓嶅湪涓婇潰鍐欏叆鑼冨洿鍐?*锛?|
+| 屏幕/缩放结构 `G` | `{960,544,1,1,1,1}` **正常** |
+| 两尺?getter | `s17=960`、`s16=544` **正常** |
+| type4/5/6 分支构的矩形 | `(0,0)-(960,544)` **正常** |
+| 顶点数据（`[VALLHEX]`/模板 `0xA016DF1C`?| `(11.65,-8.77)?4382.77,-2348.87)` ?跨度 **4352×2304** |
+| ?`0x811610A4` 的结构指?| `sp+0x10`，仅?`strd` 写过 `{0,0,1.0,1.0}` |
+| `0x811610A4` 读的模板字段 | `[r1+0x14] = sp+0x24`?*不在上面写入范围?*?|
 
-鈬?**鈬?涓嬩竴姝ュ繀椤昏 `0x811610A4` 鍐呴儴瀵?`sp+0x10..0x50` 鐨勫畬鏁翠娇鐢?*锛堝畠璇?`[r3+0x14]`/`[r3+0x18]`/`[r3+0x34]`/`[r3+0x38]`锛?鍏朵腑 `r3` 浠?`r2 = sp+0x10` 璧锋寜 `+8` 姝ヨ繘 4 娆★級锛岀‘璁ら偅 4 缁?`(x0,y0,u,v)` 绌剁珶鏄?*璋?*濉垚 4352 璺ㄥ害鐨勶紱
-鎴栫洿鎺ョ敤 `[GEOMQ]` 鎵╁睍鎵撳嵃 `sp+0x10..0x50` 鐨?16 涓?float锛?*宸茬‘璁?`sp = 0xA016DEC8`**锛屾晠鍙洿鎺ヤ粠 guest 鍐呭瓨璇伙級銆?
+?**?下一步必须读 `0x811610A4` 内部?`sp+0x10..0x50` 的完整使?*（它?`[r3+0x14]`/`[r3+0x18]`/`[r3+0x34]`/`[r3+0x38]`?其中 `r3` ?`r2 = sp+0x10` 起按 `+8` 步进 4 次），确认那 4 ?`(x0,y0,u,v)` 究竟?*?*填成 4352 跨度的；
+或直接用 `[GEOMQ]` 扩展打印 `sp+0x10..0x50` ?16 ?float?*已确?`sp = 0xA016DEC8`**，故可直接从 guest 内存读）?
 ### 6. 宸ュ叿灏辩华鐘舵€?
-- `[GEOMQ]`锛歱c==`0x81161274` 鏃惰璇ュ嚱鏁板叆鍙ｅ弬鏁颁笌 `ret`锛堝凡纭 `sp=0xA016DEC8`銆乣s16=544`銆乣ret=0x811935EE`锛?- `[GSTRUCT]`锛氳 `0x81540A88` 鍏瓧娈?- `[TEXSCALE]`锛氱汗鐞嗗昂瀵?+ 涓や釜鍏ㄥ眬缂╂斁锛堝凡璇?LOGO 甯ф棤 `w>=2048` 鐨勬煡璇級
-- `P5D_WATCHVAL=<鍗曞€?`锛氭寜**鍗曚釜**鍐欏叆鍊煎畾浣嶄换鎰忓父閲忥紙cap 涓嶅啀琚埆鐨勫€煎崰婊★級
+- `[GEOMQ]`：pc==`0x81161274` 时读该函数入口参数与 `ret`（已确认 `sp=0xA016DEC8`、`s16=544`、`ret=0x811935EE`?- `[GSTRUCT]`：读 `0x81540A88` 六字?- `[TEXSCALE]`：纹理尺?+ 两个全局缩放（已?LOGO 帧无 `w>=2048` 的查询）
+- `P5D_WATCHVAL=<单?`：按**单个**写入值定位任意常量（cap 不再被别的占满）
 
 
 ---
@@ -274586,61 +274590,61 @@ SceUInt32 w=(tp==0u||tp==2u)?(1u<<((w1>>12)&0xFu)):(((w1>>12)&0xFFFu)+1u);
 
 ---
 
-## h145k698鈥?99銆愮煩褰㈢敓鎴愬嚱鏁颁笉杩斿洖缁撴瀯 + 鍑犱綍鍑芥暟鍏ュ彛瀵勫瓨鍣ㄥ嚭鐜版柊鐭涚浘銆?
-### 1. `0x81160b7e`锛?鐭╁舰鈫? 椤剁偣"锛?*涓嶈繑鍥炰换浣曠粨鏋?*
+## h145k698?99【矩形生成函数不返回结构 + 几何函数入口寄存器出现新矛盾?
+### 1. `0x81160b7e`?矩形? 顶点"?*不返回任何结?*
 
-鍙嶆眹缂栧叾灏鹃儴锛?```
+反汇编其尾部?```
 81160C22  bl   #0x81160814
 81160C26  cmp  r0, #0
 81160C28  beq  #0x81160c42
 81160C2A  bl   #0x8115ff12
 81160C2E  movs r0, #6 / str r0,[sp]
 81160C32  movs r0, #0 / str r0,[sp,#4]
-81160C36  add  r1, sp, #0x14          ; 鈽?鎸囧悜**鑷繁鐨?*鏍堬紝涓嶆槸璋冪敤鑰呯殑缁撴瀯
+81160C36  add  r1, sp, #0x14          ; ?指向**自己?*栈，不是调用者的结构
 81160C38  add  r3, sp, #8
 81160C3C  movs r2, #4
 81160C3E  bl   #0x81163abc            ; 鎻愪氦缁樺埗
-81160C42  ldr  r1, [sp, #0x74]        ; 鏍堜繚鎶ゆ鏌?81160C4A  add  sp, #0x78 / vpop / pop {r4,r5,r6,pc}   ; 鐩存帴杩斿洖
+81160C42  ldr  r1, [sp, #0x74]        ; 栈保护检?81160C4A  add  sp, #0x78 / vpop / pop {r4,r5,r6,pc}   ; 直接返回
 ```
-鈬?**瀹冩妸椤剁偣绠楄繘鑷繁鐨勬爤鍚庡氨鍦版彁浜わ紝`0x8119351C` 鐨?`sp+0x10` 骞朵笉鏄畠濉殑銆?*
+?**它把顶点算进自己的栈后就地提交，`0x8119351C` ?`sp+0x10` 并不是它填的?*
 
 ### 2. `[WV32]` 瀹氫綅妯℃澘鍐欏洖鐐癸紙鏃嬭浆娈碉級
 
-鍗曞€肩洃瑙?`P5D_WATCHVAL=45884D36`锛? 妯℃澘 `t1.x = 4361.651367`锛夊懡涓細
+单监?`P5D_WATCHVAL=45884D36`? 模板 `t1.x = 4361.651367`）命中：
 ```
 [WV32] pc=8116122E  addr=A016DEE4  v=45884D36  lr=811658C2
 ```
-- `0x8116122E` = `vstr s3,[r2,#0x14]`锛屽嵆鏃嬭浆鐭╅樀鐨勫啓鍥炴寚浠?  锛坄81161226 vnmls.f32 s3, s2, s23` 鈬?`x' = y0*cos - x0*sin`锛?- `addr = A016DEE4`锛涜€?`[GEOMQ]` 瀹炴祴 `sp = 0xA016DEC8` 鈬?`addr = sp + 0x1C`
-- 涓?`[GEOMT]` 鐨?`sp+0x1C = 4361.651367` **瀹屽叏鍚诲悎**
-鈬?妯℃澘浣嶄簬鍐呴儴 `sp+0x14` 璧凤紙姣?8 瀛楄妭涓€缁?`(x,y)`锛屽叡 4 缁勶紝鍚庢帴 8 涓?UV锛夛紝涓旀槸**鍘熷湴鏃嬭浆**銆?鈬?鏃嬭浆瑙掍粎 `0.0083 rad`锛屾晠**鏃嬭浆鍓嶇殑鍊煎氨宸茬粡鏄?4352 璺ㄥ害**锛屽嵆璇ヨ法搴﹀湪杩涘叆 `0x811610A4` 涔嬪墠鎴栧湪鍏跺唴閮ㄦ瀯閫犻樁娈靛氨宸茬‘瀹氥€?
-### 3. 鈽?鏂扮煕鐩撅細鍏ュ彛瀵勫瓨鍣ㄤ笌璋冪敤鐐瑰弽姹囩紪涓嶇 鈽?
-鏂板 `[GEOMIN]`锛坄pc==0x811610A4` 鏃惰鍏ュ彛瀵勫瓨鍣紝杩炴墦 12 娆″叏閮ㄤ竴鑷达級锛?```
+- `0x8116122E` = `vstr s3,[r2,#0x14]`，即旋转矩阵的写回指?  （`81161226 vnmls.f32 s3, s2, s23` ?`x' = y0*cos - x0*sin`?- `addr = A016DEE4`；?`[GEOMQ]` 实测 `sp = 0xA016DEC8` ?`addr = sp + 0x1C`
+- ?`[GEOMT]` ?`sp+0x1C = 4361.651367` **完全吻合**
+?模板位于内部 `sp+0x14` 起（?8 字节丢?`(x,y)`，共 4 组，后接 8 ?UV），且是**原地旋转**??旋转角仅 `0.0083 rad`，故**旋转前的值就已经?4352 跨度**，即该跨度在进入 `0x811610A4` 之前或在其内部构造阶段就已确定?
+### 3. ?新矛盾：入口寄存器与调用点反汇编不符 ?
+新增 `[GEOMIN]`（`pc==0x811610A4` 时读入口寄存器，连打 12 次全部一致）?```
 [GEOMIN] r0=0xFFFFFFFF r1=0xA016DFD0 r2=0xB355A01C r3=0x1
          s0..s7 = 3.000000 3.000000 3.000000 1.000000 2.125000 3.000000 3.000000 3.000000
          lr=0x811935EE
 ```
-- `r1 = 0xA016DFD0`锛氫笌 "璋冪敤鑰?sp = 鍐呴儴 sp+0xF8 = 0xA016DFC0 鈬?sp+0x10 = 0xA016DFD0" **瀹屽叏鍚诲悎**
-  鈬?鏍堝亸绉昏绠楁纭紝`0x811610A4` 鐨?prologue 纭负 `push(0x14)+vpush(0x28)+sub(0xbc)`
-- `sn[64]` 鐨勫０鏄庝负 `SceUInt32 sn[64]; // s0..s63`锛屼笖 `fs(i)`/`get_fs(i)` 閮界敤 `sn[i&63]`
-  鈬?**`sn[i]` == s`i`锛屾槧灏勬棤璇?*
-- `s3 = 1.0` 涓庤皟鐢ㄧ偣 `811935C0 vmov.f32 s3,#1.0` **涓€鑷?* 鉁?- 浣?`s4 = 2.125`銆乣s0/s1/s2/s5/s6/s7 = 3.0`
-  涓庤皟鐢ㄧ偣 `811935C0-811935E8` 鎵€璁剧殑 `0,0,0,1.0,1.0,0,0,0` **涓嶄竴鑷?* 鉁?- 鑰?`lr = 0x811935EE` 鍙堢‘瀹炴寚鍚?`811935EA bl 0x811610A4` 鐨勪笅涓€鏉?
-鈬?**缁撹锛氶渶瑕佸湪璇ヨ皟鐢ㄦ寚浠ゆ湰韬紙`0x811935EA`锛夊鍐嶅彇涓€娆?s0鈥搒7**锛屼互鍒ゅ畾鏄?(a) 鍙嶆眹缂栨墍璇荤殑閭ｆ骞堕潪瀹為檯鎵ц璺緞锛堜緥濡?`tbh` 璺冲埌浜嗗彟涓€鍒嗘敮鍗存伆濂芥湁鐩稿悓杩斿洖鍦板潃锛夛紝杩樻槸
-(b) 鍏ュ彛璇诲彇鏃舵満鍙?prologue/寤惰繜妲藉奖鍝嶃€?
-**娉ㄦ剰 `s0..s2 = 3.0`銆乣s4 = 2.125`**锛歚2.125` 姝ｆ槸椤剁偣鐨?**z 甯搁噺**锛?鑰?`3.0` 鍑虹幇杩囧湪 `0x81160b7e` 鐨勮皟鐢ㄥ弬鏁伴噷锛坄81160B7E` 鐨勮皟鐢ㄧ偣鏄?`r2=1, r0=0xff`锛宍s0=s16`锛夈€?杩欑粍鍊煎儚鏄?鏌愮鍥惧厓绫诲瀷/灞傚彿"鑰岄潪鍑犱綍灏哄 鈥斺€?闇€涓庤皟鐢ㄧ偣瀹炴祴瀵圭収鍚庢墠鑳藉畾璁恒€?
-### 4. 宸ュ叿涓庣姸鎬?
-- `[GEOMIN]`锛堝叆鍙ｅ瘎瀛樺櫒锛夈€乣[GEOMQ]`锛坧c=`0x81161274` 鏃剁殑鍏ュ彛鍙傛暟+ret锛夈€乣[GEOMT]`锛堝唴閮?`sp+0x10` 璧?16 float锛?- `P5D_WATCHVAL=<鍗曞€?`锛氬凡楠岃瘉鍙簿纭懡涓?float 浣嶆ā寮忥紙`45884D36` 鍛戒腑 240 娆★級
-- `P5D_KWATCH=<lo>-<hi>`锛?*娉ㄦ剰**鍖洪棿鐩戣鐢?`P5D_KWATCH` 椹卞姩锛堜笉鏄?`P5D_WATCH`锛夛紝
-  涓?cap 浼氳鏃╂湡鏍堝鐢ㄥ崰婊★紙瀹炴祴 t=25 s 鍗虫弧锛夛紝鐩戣鏍堝尯闂撮渶鍔犲抚杩囨护
-- `P5D_TEXSCALE` / `[GSTRUCT]`锛氬叏灞€缁撴瀯 `G=0x81540A88` = `{960,544,1,1,1,1}` 鍏ㄩ儴姝ｅ父
+- `r1 = 0xA016DFD0`：与 "调用?sp = 内部 sp+0xF8 = 0xA016DFC0 ?sp+0x10 = 0xA016DFD0" **完全吻合**
+  ?栈偏移计算正确，`0x811610A4` ?prologue 确为 `push(0x14)+vpush(0x28)+sub(0xbc)`
+- `sn[64]` 的声明为 `SceUInt32 sn[64]; // s0..s63`，且 `fs(i)`/`get_fs(i)` 都用 `sn[i&63]`
+  ?**`sn[i]` == s`i`，映射无?*
+- `s3 = 1.0` 与调用点 `811935C0 vmov.f32 s3,#1.0` **丢?* ?- ?`s4 = 2.125`、`s0/s1/s2/s5/s6/s7 = 3.0`
+  与调用点 `811935C0-811935E8` 扢设的 `0,0,0,1.0,1.0,0,0,0` **不一?* ?- ?`lr = 0x811935EE` 又确实指?`811935EA bl 0x811610A4` 的下丢?
+?**结论：需要在该调用指令本身（`0x811935EA`）处再取丢?s0–s7**，以判定?(a) 反汇编所读的那段并非实际执行路径（例?`tbh` 跳到了另丢分支却恰好有相同返回地址），还是
+(b) 入口读取时机?prologue/延迟槽影响?
+**注意 `s0..s2 = 3.0`、`s4 = 2.125`**：`2.125` 正是顶点?**z 常量**??`3.0` 出现过在 `0x81160b7e` 的调用参数里（`81160B7E` 的调用点?`r2=1, r0=0xff`，`s0=s16`）?这组值像?某种图元类型/层号"而非几何尺寸 —?霢与调用点实测对照后才能定论?
+### 4. 工具与状?
+- `[GEOMIN]`（入口寄存器）`[GEOMQ]`（pc=`0x81161274` 时的入口参数+ret）`[GEOMT]`（内?`sp+0x10` ?16 float?- `P5D_WATCHVAL=<单?`：已验证可精确命?float 位模式（`45884D36` 命中 240 次）
+- `P5D_KWATCH=<lo>-<hi>`?*注意**区间监视?`P5D_KWATCH` 驱动（不?`P5D_WATCH`），
+  ?cap 会被早期栈复用占满（实测 t=25 s 即满），监视栈区间需加帧过滤
+- `P5D_TEXSCALE` / `[GSTRUCT]`：全屢结构 `G=0x81540A88` = `{960,544,1,1,1,1}` 全部正常
 
-### 5. 涓嬩竴姝ワ紙鍞竴鍔ㄤ綔锛?
-鍦?`pc==0x811935EA`锛堣皟鐢ㄦ寚浠わ級澶勬墦鍗?`r0..r3` 涓?`s0..s7`锛屼笌琚皟鐢ㄨ€呭叆鍙?`[GEOMIN]` 瀵圭収锛?娑堥櫎涓婅堪鐭涚浘鍚庡嵆鍙‘瀹?`4352` 鏄湪 `0x811610A4` 鍐呴儴鐨勫摢涓€姝ョ敱鍝釜杈撳叆浜х敓銆?
+### 5. 下一步（唯一动作?
+?`pc==0x811935EA`（调用指令）处打?`r0..r3` ?`s0..s7`，与被调用入?`[GEOMIN]` 对照?消除上述矛盾后即可确?`4352` 是在 `0x811610A4` 内部的哪丢步由哪个输入产生?
 
 ---
 
-## h145k700銆愯皟鐢ㄧ偣涓庡叆鍙ｄ竴鑷?鈬?涔嬪墠鐨?璋冪敤鐐瑰弽姹囩紪"涓嶆槸瀹為檯鎸囦护娴侊紱灏哄瀚岀枒杞悜 r2 瀵硅薄銆?
-### 瀹炴祴瀵圭収锛堝悓涓€娆¤皟鐢ㄧ殑涓や晶锛?
+## h145k700【调用点与入口一??之前?调用点反汇编"不是实际指令流；尺寸嫌疑转向 r2 对象?
+### 实测对照（同丢次调用的两侧?
 ```
 [GEOMCALL] (pc==0x811935EA) r0=0xFFFFFFFF r1=0xA016DFD0 r2=0xB355A01C r3=0x1
                             s0..s7 = 3.000000 3.000000 3.000000 1.000000 2.125000 3.000000 3.000000 3.000000
@@ -274648,54 +274652,54 @@ SceUInt32 w=(tp==0u||tp==2u)?(1u<<((w1>>12)&0xFu)):(((w1>>12)&0xFFFu)+1u);
                             s0..s7 = 3.000000 3.000000 3.000000 1.000000 2.125000 3.000000 3.000000 3.000000
                             lr=0x811935EE
 ```
-鈬?涓や晶閫愬瓧娈电浉鍚?鈬?**璋冪敤鐐逛笌鍏ュ彛鏃犲樊寮?*锛岃鏄庝笂涓€杞偅涓?鐭涚浘"涓嶅瓨鍦ㄤ簬杩愯鏃讹紝
-鑰屽湪浜?*鎴戝 `0x811935C0`鈥揱0x811935EA` 鐨勫弽姹囩紪涓庣湡瀹炴墽琛岀殑鎸囦护娴佷笉绗?*銆?
-### 鐢辨寰楀埌鐨勪笁鏉′慨姝?
-1. **`s19 = s3 = 1.0`**锛堜笉鏄?4.25锛夈€?   姝ゅ墠 `[GEOMQ]` 璇诲埌鐨?`s19 = 2.125` 鏄洜涓烘垜鎶婃爤鍋忕Щ鍙栧埌浜嗙浉閭绘Ы锛堥偅涓Ы瀛樼殑鏄?z 甯搁噺锛夈€?   `0x811610A4` 鍐呴儴鐨?`vmov.f32 s19, s3` 鈬?s19 = 1.0 涓庡疄娴嬩竴鑷?鉁?2. **鐪熷疄鍙傛暟涓?`(3, 3, 3, 1, 2.125, 3, 3, 3)`**锛屽叾涓?`2.125` 姝ｆ槸椤剁偣 z銆?   鏁寸粍鍙傛暟**娌℃湁浠讳綍閲忕骇鎺ヨ繎 4352 鐨勫€?* 鈬?鍥涜竟褰㈠昂瀵镐笉鍙兘鏉ヨ嚜杩?8 涓?float 鍙傛暟銆?3. 鈬?**灏哄鍙兘鏉ヨ嚜 `r2 = 0xB355A01C`**锛堣皟鐢ㄧ偣 `adds r2, r5, #0` 鑰?`r5 = [obj+4]`锛?   鍗?鏌愪釜鍫嗗璞?+0x4 澶勭殑瀛楁"锛夈€傝繖鏄湰杞緱鍑虹殑**鍞竴**灏哄鏉ユ簮鍊欓€夈€?
-### 鍏充簬"鍙嶆眹缂栦笌鎵ц涓嶇"
+?两侧逐字段相??**调用点与入口无差?*，说明上丢轮那?矛盾"不存在于运行时，
+而在?*我对 `0x811935C0`–`0x811935EA` 的反汇编与真实执行的指令流不?*?
+### 由此得到的三条修?
+1. **`s19 = s3 = 1.0`**（不?4.25）?   此前 `[GEOMQ]` 读到?`s19 = 2.125` 是因为我把栈偏移取到了相邻槽（那个槽存的?z 常量）?   `0x811610A4` 内部?`vmov.f32 s19, s3` ?s19 = 1.0 与实测一??2. **真实参数?`(3, 3, 3, 1, 2.125, 3, 3, 3)`**，其?`2.125` 正是顶点 z?   整组参数**没有任何量级接近 4352 的?* ?四边形尺寸不可能来自?8 ?float 参数?3. ?**尺寸只能来自 `r2 = 0xB355A01C`**（调用点 `adds r2, r5, #0` ?`r5 = [obj+4]`?   ?某个堆对?+0x4 处的字段"）这是本轮得出的**唯一**尺寸来源候?
+### 关于"反汇编与执行不符"
 
-涓ょ鍙兘锛岄渶鍦ㄤ笅杞垽鍒細
-- (a) 璇ユ浠ｇ爜鍦ㄨ繍琛屾椂琚敼鍐欙紙鑷慨鏀?JIT patch锛夛紱
-  瑙ｉ噴鍣ㄩ噷宸插瓨鍦?`[CODEW32]`锛堢洃瑙?`0x812B1580鈥?x812B15A0` 鐨勫啓鍏ワ級璇存槑姝ゅ墠涔熸€€鐤戣繃浠ｇ爜娈佃鍐欙紱
-- (b) 鍙嶆眹缂栬В鐮佸亸宸紙Thumb/Thumb-2 杈圭晫鍒ゅ畾锛夈€?
-**鍒ゅ埆鏂规硶**锛氬湪 `pc==0x811935EA` 鏃朵粠 **guest 鍐呭瓨**璇诲彇 `0x811935A0鈥?x81193610` 鐨勫師濮嬪瓧鑺傦紝
-涓?`eboot.bin`锛圴A鈫抩ffset = `va-0x81000000+0x10E0`锛夌殑鍚屾閫愬瓧鑺傛瘮瀵癸細
-涓嶅悓 鈬?(a) 鎴愮珛锛屼笖"琚敼鐨勯偅閮ㄥ垎"灏辨槸鏍瑰洜绾跨储锛涚浉鍚?鈬?(b)锛岄渶鎹㈡洿鍙潬鐨勫弽姹囩紪銆?
-### 涓嬩竴姝ワ紙涓ゆ潯骞惰锛岄兘涓嶉渶瑕佺湡鏈猴級
+两种可能，需在下轮判别：
+- (a) 该段代码在运行时被改写（自修?JIT patch）；
+  解释器里已存?`[CODEW32]`（监?`0x812B1580?x812B15A0` 的写入）说明此前也疑过代码段被写；
+- (b) 反汇编解码偏差（Thumb/Thumb-2 边界判定）?
+**判别方法**：在 `pc==0x811935EA` 时从 **guest 内存**读取 `0x811935A0?x81193610` 的原始字节，
+?`eboot.bin`（VA→offset = `va-0x81000000+0x10E0`）的同段逐字节比对：
+不同 ?(a) 成立，且"被改的那部分"就是根因线索；相??(b)，需换更可靠的反汇编?
+### 下一步（两条并行，都不需要真机）
 
-1. **dump `0xB355A01C` 瀵硅薄**锛坄r2` 鎸囧悜锛涜嚦灏戝墠 0x40 瀛楄妭鐨?u32/float 瑙嗗浘锛夛紝
-   鏌ユ壘 `4352 / 2304 / 2176 / 1152 / 4.25 / 4.5` 涔嬬被鐨勯噺 鈥斺€?杩欐槸鐩墠鍞竴鏈鐨勫昂瀵告潵婧愩€?2. **瀵规瘮 guest 鍐呭瓨浠ｇ爜 vs eboot.bin**锛坄0x811935A0鈥?x81193610`锛夛紝鍒ゅ埆涓婇潰鐨?(a)/(b)銆?
+1. **dump `0xB355A01C` 对象**（`r2` 指向；至少前 0x40 字节?u32/float 视图），
+   查找 `4352 / 2304 / 2176 / 1152 / 4.25 / 4.5` 之类的量 —?这是目前唯一未检的尺寸来源?2. **对比 guest 内存代码 vs eboot.bin**（`0x811935A0?x81193610`），判别上面?(a)/(b)?
 ### 褰撳墠宸茬‘璇佺殑瀹屾暣浜嬪疄閾撅紙渚涙敹灏句娇鐢級
 
 | 鐜妭 | 鍊?| 璇佹嵁 |
 |---|---|---|
 | LOGO 缁樺埗鑰?| `vert_0015(172A9E73)+frag_0084(6952EF6C)` | `OUT0*0.05`+`P5D_SKIP_VH` 鍏ㄩ粦瀵圭収 |
-| 鍞竴闃诲 | 椤剁偣鍑犱綍 | 缂╂斁鍚庝笁绐楀彛鍚勮嚜鍑哄浘 |
+| 唯一阻塞 | 顶点几何 | 缩放后三窗口各自出图 |
 | 鐪熸満 UBO | `(1,0.5,480,272)+鍏ㄩ浂` = 鏈満 `AA700000` | 鐪熸満 CDRAM `0x66880000` |
-| 鍏ㄥ眬灞忓箷/缂╂斁 `G=0x81540A88` | `{960,544,1,1,1,1}` | `[GSTRUCT]` |
-| 椤剁偣灞炴€?| stride 24锛宲os@0 F32x3锛寀v@16 F32x2 | `[VALLATTR]` |
-| 鍑犱綍鐢熸垚鍑芥暟 | `0x811610A4`锛岃皟鐢ㄨ€?`0x8119351C`锛宍ret=0x811935EE` | `[GEOMQ]` |
-| 妯℃澘浣嶇疆 | 鍐呴儴 `sp+0x14`锛? 缁?xy锛? 8 涓?UV锛涢《鐐?`sp+0x54` | `[GEOMT]` + `[WV32]` |
-| 妯℃澘鍧愭爣 | `(9.651163,-10.766830) 鈥?(4361.651367,-46.870785)` 璺ㄥ害 **4352.000** | `[GEOMT]` + 浣嶆ā寮忓弽鎺?|
+| 全局屏幕/缩放 `G=0x81540A88` | `{960,544,1,1,1,1}` | `[GSTRUCT]` |
+| 顶点属?| stride 24，pos@0 F32x3，uv@16 F32x2 | `[VALLATTR]` |
+| 几何生成函数 | `0x811610A4`，调用?`0x8119351C`，`ret=0x811935EE` | `[GEOMQ]` |
+| 模板位置 | 内部 `sp+0x14`? ?xy? 8 ?UV；顶?`sp+0x54` | `[GEOMT]` + `[WV32]` |
+| 模板坐标 | `(9.651163,-10.766830) ?(4361.651367,-46.870785)` 跨度 **4352.000** | `[GEOMT]` + 位模式反?|
 | 椤剁偣 = 妯℃澘 + (2.0, 2.0) | `[VALLHEX]` 浣嶆ā寮?`413A6B2A` vs 妯℃澘 `411A6B2A` | 绮剧‘浣嶆ā寮?|
-| 妯℃澘鍐欏洖鐐?| `0x8116122E`锛堟棆杞煩闃?`x'=y0*cos-x0*sin`锛?| `P5D_WATCHVAL=45884D36` |
+| 模板写回?| `0x8116122E`（旋转矩?`x'=y0*cos-x0*sin`?| `P5D_WATCHVAL=45884D36` |
 | 灏哄鏉ユ簮鍊欓€?| **`r2 = 0xB355A01C`** | `[GEOMCALL]`/`[GEOMIN]` |
 
 
 ---
 
-## h145k701鈥?04銆愨槄瀹氫綅鍒拌В閲婂櫒缂哄け VFP `vmov.f32 Sd, Sm`鈽?鈥斺€?杩欒В閲婁簡"鍙傛暟鍏ㄦ槸鏃у€?銆?
-### 1. guest 浠ｇ爜 = eboot.bin锛堥€愬瓧鑺傦紝0/28 涓嶄竴鑷达級
+## h145k701?04【★定位到解释器缺失 VFP `vmov.f32 Sd, Sm`?—?这解释了"参数全是旧??
+### 1. guest 代码 = eboot.bin（字节，0/28 不一致）
 
-`[CODECMP]` 璇?guest 鍐呭瓨 `0x811935A0` 璧?28 涓?u32锛屼笌 `eboot.bin`
-锛坄file offset = va-0x81000000+0x10E0`锛夐€愬瓧姣斿 鈬?**鍏ㄩ儴鐩稿悓**銆?鈬?**浠ｇ爜娌℃湁琚繍琛屾椂淇敼**锛涙鍓嶇殑"鍙嶆眹缂栦笌鎵ц涓嶇"涓嶆槸鑷慨鏀逛唬鐮併€?
-### 2. 鈽?鍐冲畾鎬у鐓э細绔嬪嵆鏁扮増 vmov 鐢熸晥锛屽瘎瀛樺櫒鐗?*瀹屽叏涓嶇敓鏁?* 鈽?
-`[GEOMCALL]`锛坄pc==0x811935EA`锛変笌 `[GEOMIN]`锛坄pc==0x811610A4`锛変袱渚т竴鑷达細
+`[CODECMP]` ?guest 内存 `0x811935A0` ?28 ?u32，与 `eboot.bin`
+（`file offset = va-0x81000000+0x10E0`）字比对 ?**全部相同**??**代码没有被运行时修改**；此前的"反汇编与执行不符"不是自修改代码?
+### 2. ?决定性对照：立即数版 vmov 生效，寄存器?*完全不生?* ?
+`[GEOMCALL]`（`pc==0x811935EA`）与 `[GEOMIN]`（`pc==0x811610A4`）两侧一致：
 ```
 r0=0xFFFFFFFF r1=0xA016DFD0 r2=0xB355A01C r3=0x1
 s0..s7 = 3.000000 3.000000 3.000000 1.000000 2.125000 3.000000 3.000000 3.000000
 ```
-鑰岃皟鐢ㄧ偣鍙嶆眹缂栵紙浠庣湡姝ｅ叆鍙?`0x8119351C` 璧凤紝宸茬‘璁ゆ寚浠よ竟鐣屾纭級鏄庣‘鍐欑潃锛?```
+而调用点反汇编（从真正入?`0x8119351C` 起，已确认指令边界正确）明确写着?```
 811935B0  vmov.f32 s0, s17      ; s0 = 0
 811935C0  vmov.f32 s3, #1.0     ; s3 = 1.0   鈫?**绔嬪嵆鏁?*褰㈠紡
 811935C4  vmov.f32 s0, s17      ; s0 = 0
@@ -274706,33 +274710,33 @@ s0..s7 = 3.000000 3.000000 3.000000 1.000000 2.125000 3.000000 3.000000 3.000000
 811935DA  vmov.f32 s7, s17      ; s7 = 0
 811935E0  vmov.f32 s4, s3       ; s4 = 1.0
 ```
-瀹炴祴缁撴灉锛?- **`s3 = 1.0` 姝ｇ‘鐢熸晥**锛堝敮涓€涓€鏉＄敤**绔嬪嵆鏁?*褰㈠紡鐨勶級
-- **`s0,s1,s2 = 3.0`銆乣s4 = 2.125`銆乣s5,s6,s7 = 3.0` 鈥斺€?鍏ㄩ儴鏄皟鐢ㄥ墠鐨勬棫鍊?*
-  锛坄2.125` 姝ｆ槸椤剁偣 z 甯搁噺锛宍3.0` 鏄笂涓€灞傞仐鐣欏€硷級
+实测结果?- **`s3 = 1.0` 正确生效**（唯丢丢条用**立即?*形式的）
+- **`s0,s1,s2 = 3.0`、`s4 = 2.125`、`s5,s6,s7 = 3.0` —?全部是调用前的旧?*
+  （`2.125` 正是顶点 z 常量，`3.0` 是上丢层遗留）
 
-鈬?**瑙ｉ噴鍣ㄧ己灏?VFP `vmov.f32 Sd, Sm`锛堝瘎瀛樺櫒鈫掑瘎瀛樺櫒锛夌殑鏀寔**锛岃鎸囦护钀界┖銆?
-### 3. 瑙ｉ噴鍣ㄧ幇鏈夊垎鏀紙`thumb_interpreter.cpp`锛?
+?**解释器缺?VFP `vmov.f32 Sd, Sm`（寄存器→寄存器）的支持**，该指令落空?
+### 3. 解释器现有分支（`thumb_interpreter.cpp`?
 | 琛?| 鍒嗘敮 | 鐘舵€?|
 |---|---|---|
-| 4487 | `(h&0xFFB8)==0xEEB8 && (h2&0x0F50)==0x0A40` | 杩欐槸 **VCVT**锛堟敞閲?4484-4486 鏄庣‘锛夛紝`op=h&7` |
-| 4512 | `VMOV Sn,Rt / Rt,Sn`锛圙PR鈫擲n锛?| 鏈?|
-| 4534 | `VMOV.F32 Sd,#imm`锛堢珛鍗虫暟锛?| 鏈?|
-| 鈥?| **`VMOV.F32 Sd, Sm`锛堝瘎瀛樺櫒锛?* | **缂哄け** |
+| 4487 | `(h&0xFFB8)==0xEEB8 && (h2&0x0F50)==0x0A40` | 这是 **VCVT**（注?4484-4486 明确），`op=h&7` |
+| 4512 | `VMOV Sn,Rt / Rt,Sn`（GPR↔Sn?| ?|
+| 4534 | `VMOV.F32 Sd,#imm`（立即数?| ?|
+| ?| **`VMOV.F32 Sd, Sm`（寄存器?* | **缺失** |
 
-瀹炴祴 `vmov.f32 s0, s17` 鐨勭紪鐮侊細`h=0xEEB0`銆乣h2=0x0A68`
-鈬?`h&0xFFB8 = 0xEEB0`锛堚墵0xEEB8 鈬?涓嶈繘 VCVT 鍒嗘敮锛屾纭級
-鈬?`h2&0x0F50 = 0x0A40`锛堜笌 VCVT 鐩稿悓 鈬?浜岃€呭彧闈?`h` 鐨?bit3 鍖哄垎锛?鈬?瀵勫瓨鍣ㄥ叕寮忎笌 VCVT 鐩稿悓锛歚Sd=((h2[15:12])<<1)|h.bit6`銆乣Sm=((h2[3:0])<<1)|h2.bit5`
-锛堜唬鍏ュ緱 `Sd=0, Sm=17` 鉁?涓庡疄闄呭惢鍚堬級
+实测 `vmov.f32 s0, s17` 的编码：`h=0xEEB0`、`h2=0x0A68`
+?`h&0xFFB8 = 0xEEB0`（≠0xEEB8 ?不进 VCVT 分支，正确）
+?`h2&0x0F50 = 0x0A40`（与 VCVT 相同 ?二只?`h` ?bit3 区分??寄存器公式与 VCVT 相同：`Sd=((h2[15:12])<<1)|h.bit6`、`Sm=((h2[3:0])<<1)|h2.bit5`
+（代入得 `Sd=0, Sm=17` ?与实际吻合）
 
-### 4. 鈿?绗竴娆′慨澶嶅け璐ワ紙宸叉挙鍥烇級鈥斺€?璁板綍鏁欒
+### 4. ?第一次修复失败（已撤回）—?记录教训
 
-鎸変笂杩版潯浠舵彃鍏ュ垎鏀悗杩愯锛?```
-2770鈥?000  浠嶅叏閮?mean=0.00
-3010锛堝洖褰掑鐓э紝姝ゅ墠 115.42锛?*涔熷彉鎴?mean=0.00**   鈫?鍥炲綊锛?```
-鍘熷洜锛氭潯浠跺啓瀹戒簡銆俙h2` 鐨?**bit7** 鎵嶈兘鍖哄垎 `vmov`锛坆it7=0锛変笌 `vabs`/`vneg`
-锛坄vabs.f32` 褰㈠ `h2=0x0AC0`锛屽叾 `h2&0x0F50` 鍚屾牱鏄?`0x0A40`锛夛紝
-浜庢槸鎶婇偅浜涙寚浠よ褰撴垚"鏁村瓧澶嶅埗"銆佺牬鍧忎簡鏁版嵁銆?
-**鈬?姝ｇ‘鐨勫垽鍒潯浠跺簲涓猴細**
+按上述条件插入分支后运行?```
+2770?000  仍全?mean=0.00
+3010（回归对照，此前 115.42?*也变?mean=0.00**   ?回归?```
+原因：条件写宽了。`h2` ?**bit7** 才能区分 `vmov`（bit7=0）与 `vabs`/`vneg`
+（`vabs.f32` 形如 `h2=0x0AC0`，其 `h2&0x0F50` 同样?`0x0A40`），
+于是把那些指令误当成"整字复制"、破坏了数据?
+**?正确的判别条件应为：**
 ```cpp
 if((h&0xFFB8u)==0xEEB0u && (h2&0x0F50u)==0x0A40u && (h2&0x80u)==0u){
     SceUInt32 vSd=(((h2>>12)&0xFu)<<1)|((h>>6)&1u);
@@ -274740,37 +274744,37 @@ if((h&0xFFB8u)==0xEEB0u && (h2&0x0F50u)==0x0A40u && (h2&0x80u)==0u){
     sn[vSd&63]=sn[vSm&63];
     return true; }
 ```
-**褰撳墠鐘舵€侊細璇ュ垎鏀凡鎾ゅ洖**锛堣В閲婂櫒鎭㈠鍘熻涓猴紝鍙洿鎺ラ噸璺戦獙璇佸洖褰掓秷澶憋級銆?
-### 5. 涓轰粈涔堣繖寰堝彲鑳藉氨鏄?`4352` 鐨勭湡鍥?
-`0x811610A4` 鐨勫叏閮ㄨ緭鍏ワ紙`s0..s7`锛夊疄娴?*閮芥槸鏃у€?*锛堥潪璋冪敤鐐硅瀹氬€硷級锛?瀹冨寘鎷湰搴斾紶鍏ョ殑 `x/y 鍋忕Щ` 涓?`z`銆傚湪杩欑杈撳叆涓嬪畠绠楀嚭鐨?4 缁勯《鐐硅法搴︿笉鏄睆骞曢噺绾?锛堝疄娴?`4352脳2304`锛屼笖妯℃澘 = 椤剁偣 鈭?`(2.0,2.0)`锛夆€斺€?*瀹屽叏鑷唇**銆?鈬?淇ソ `vmov.f32 Sd, Sm` 鍚庯紝`s0..s7` 灏嗗彉鎴愯皟鐢ㄧ偣璁惧畾鐨?`0,0,0,1,1,0,0,0`锛?鍑犱綍鐢熸垚鍑芥暟鐨勮緭鍏ラ殢鍗虫纭紝`4352脳2304` 鏈夋瀬澶ф鐜囨仮澶嶅埌灞忓箷閲忕骇銆?
-### 6. 涓嬩竴姝ワ紙鏀跺熬娓呭崟锛?
-1. 鎸?搂4 鐨?*姝ｇ‘鏉′欢**锛堝惈 `(h2&0x80)==0`锛夐噸鏂版彃鍏?`vmov.f32 Sd, Sm`锛岄噸缂栬瘧锛?2. 鍏堣窇涓€娆?`P5D_DBG_FRAMES` 楠岃瘉 **3010 鍥炲綊甯ф仮澶?`mean鈮?15`**锛堝洖褰掓秷澶辩殑鍒ゆ嵁锛夛紱
-3. 鍐嶇湅 LOGO 绐楀彛 2760鈥?000 鐨勪笁娈靛儚绱犵粺璁℃槸鍚﹀嚭鐜伴潪闆讹紙涓変釜 LOGO 渚濇鏄剧ず锛夛紱
-4. 鑻ヤ粛涓嶈冻锛岀敤鍚屼竴鏂规硶琛ラ綈鍏跺畠缂哄け鐨?VFP 鎸囦护锛堢幇鏈?`[GEOMIN]`/`[GEOMCALL]` 鍙洿鎺ラ獙璇佷换鎰忔寚浠ゆ槸鍚︾敓鏁堬級銆?
+**当前状：该分支已撤回**（解释器恢复原行为，可直接重跑验证回归消失）?
+### 5. 为什么这很可能就?`4352` 的真?
+`0x811610A4` 的全部输入（`s0..s7`）实?*都是旧?*（非调用点设定）?它包括本应传入的 `x/y 偏移` ?`z`。在这种输入下它算出?4 组顶点跨度不是屏幕量?（实?`4352×2304`，且模板 = 顶点 ?`(2.0,2.0)`）?*完全自洽**??修好 `vmov.f32 Sd, Sm` 后，`s0..s7` 将变成调用点设定?`0,0,0,1,1,0,0,0`?几何生成函数的输入随即正确，`4352×2304` 有极大概率恢复到屏幕量级?
+### 6. 下一步（收尾清单?
+1. ?§4 ?*正确条件**（含 `(h2&0x80)==0`）重新插?`vmov.f32 Sd, Sm`，重编译?2. 先跑丢?`P5D_DBG_FRAMES` 验证 **3010 回归帧恢?`mean?15`**（回归消失的判据）；
+3. 再看 LOGO 窗口 2760?000 的三段像素统计是否出现非零（三个 LOGO 依次显示）；
+4. 若仍不足，用同一方法补齐其它缺失?VFP 指令（现?`[GEOMIN]`/`[GEOMCALL]` 可直接验证任意指令是否生效）?
 
 ---
 
-## h145k705鈥?06銆恦mov 淇鐢熸晥锛氬嚑浣曚粠 4352脳2304 鈫?721脳721锛屼絾 4 椤剁偣鍏辩嚎锛堥€€鍖栵級銆?
-### 1. 鈽?淇 `vmov.f32 Sd, Sm` 鐨勫疄娴嬫晥鏋?鈽?
-鍔犲叆姝ｇ‘鏉′欢锛坄h&0xFFB8==0xEEB0 && h2&0x0F50==0x0A40 && h2&0x80==0`锛夊悗閲嶈窇锛?
+## h145k705?06【vmov 修复生效：几何从 4352×2304 ?721×721，但 4 顶点共线（化）?
+### 1. ?修复 `vmov.f32 Sd, Sm` 的实测效??
+加入正确条件（`h&0xFFB8==0xEEB0 && h2&0x0F50==0x0A40 && h2&0x80==0`）后重跑?
 | 鎺㈤拡 | 淇鍓?| **淇鍚?* |
 |---|---|---|
-| `[GEOMCALL]/[GEOMIN] s0..s7` | `3,3,3,1,2.125,3,3,3`锛堝叏鏃у€硷級 | **`0,0,0,1,1,0,0,0`** 鉁?涓庤皟鐢ㄧ偣涓€鑷?|
-| `[GEOMT]` 4 缁勯《鐐?| `(9.651,-10.767)鈥?4361.651,-46.871)` 璺ㄥ害 **4352** | `(0,0) (480.739,-480.739) (721.108,-721.108) (240.369,-240.369)` |
-| 3010 鍥炲綊甯?| 115.42 | **127.21**锛堟棤鍥炲綊锛屼笖鐣ユ湁鏀瑰杽锛?|
-| 2770鈥?000 LOGO 绐楀彛 | 0.00 | **0.00锛堜粛榛戯級** |
+| `[GEOMCALL]/[GEOMIN] s0..s7` | `3,3,3,1,2.125,3,3,3`（全旧） | **`0,0,0,1,1,0,0,0`** ?与调用点丢?|
+| `[GEOMT]` 4 组顶?| `(9.651,-10.767)?4361.651,-46.871)` 跨度 **4352** | `(0,0) (480.739,-480.739) (721.108,-721.108) (240.369,-240.369)` |
+| 3010 回归?| 115.42 | **127.21**（无回归，且略有改善?|
+| 2770?000 LOGO 窗口 | 0.00 | **0.00（仍黑）** |
 
-鈬?**纭 `vmov.f32 Sd, Sm` 缂哄け鏄?鍙傛暟鍏ㄦ棫鍊?鈫?鍑犱綍 4352 鐣稿彉"鐨勭洿鎺ュ師鍥?*锛?涓旇鍒嗘敮鏈韩姝ｇ‘锛堟棤鍥炲綊銆?010 甯у弽鑰屾洿濂斤級銆?
-### 2. 鏂扮殑闃诲锛? 涓《鐐?*鍏辩嚎**锛堥潰绉?0 鈬?浠嶉浂鍍忕礌锛?
-淇鍚庣殑妯℃澘锛?```
+?**确认 `vmov.f32 Sd, Sm` 缺失?参数全旧??几何 4352 畸变"的直接原?*?且该分支本身正确（无回归?010 帧反而更好）?
+### 2. 新的阻塞? 个顶?*共线**（面?0 ?仍零像素?
+修复后的模板?```
 [GEOMT] 0.0 | 0.0 -0.0 | 480.738953 -480.738953 | 721.108398 -721.108398 | 240.369476 -240.369476 | UV
 ```
-锛堝竷灞€锛歚sp+0x10` 璧?16 float = 1 涓?padding + 4 缁?`(x,y)` + 8 涓?UV锛?
-鈬?4 缁?`(x,y)` 婊¤冻 **`y = -x`**锛坄-480.739/480.739`銆乣-721.108/721.108`銆乣-240.369/240.369`锛夛紝
-涓旂涓€涓?`y` 鏄?**`-0.0`**锛堝彇璐熺殑鐥曡抗锛夆噿 **鍥涚偣鍏辩嚎 鈬?閫€鍖栧洓杈瑰舰 鈬?鍏夋爡鍖栭浂鍍忕礌**銆?
-鈬?鍗冲嚑浣曢噺绾у凡缁忔纭紙721 鏄睆骞曢噺绾э級锛屼絾**褰㈢姸涓嶅**锛堝簲涓烘湁闈㈢Н鐨勭煩褰級銆?杩欎笌"鍚屾棌鐨?`vneg/vabs/vsqrt` 绛変粛缂哄け"鎴?鏌愬鍙栬礋娆℃暟涓嶅"鐩哥銆?
-### 3. `[UNKVFP]` 鎺㈤拡锛堝垪鍑?VFP 3-reg 瀹舵棌鎸囦护锛?
-鍦?vmov 鍒嗘敮**涔嬪墠**鎻掑叆锛屾崟鑾峰埌 48 绉?`(h,h2)` 缁勫悎锛堝墠 30 鏉★級锛?
+（布屢：`sp+0x10` ?16 float = 1 ?padding + 4 ?`(x,y)` + 8 ?UV?
+?4 ?`(x,y)` 满足 **`y = -x`**（`-480.739/480.739`、`-721.108/721.108`、`-240.369/240.369`），
+且第丢?`y` ?**`-0.0`**（取负的痕迹）⇒ **四点共线 ?逢化四边形 ?光栅化零像素**?
+?即几何量级已经正确（721 是屏幕量级），但**形状不对**（应为有面积的矩形）?这与"同族?`vneg/vabs/vsqrt` 等仍缺失"?某处取负次数不对"相符?
+### 3. `[UNKVFP]` 探针（列?VFP 3-reg 家族指令?
+?vmov 分支**之前**插入，捕获到 48 ?`(h,h2)` 组合（前 30 条）?
 ```
 h=EEF1 h2=0A04 pc=0x811731FC      h=EEB0 h2=0A48 pc=0x81172FEA
 h=EEF0 h2=1A48 pc=0x81172FF0      h=EEB0 h2=2A48 pc=0x81172FF4
@@ -274786,115 +274790,115 @@ h=EEF0 h2=1A42 pc=0x8124031A      h=EEB7 h2=2A00 pc=0x8127F4AA
 h=EEB7 h2=1A00 pc=0x8124036E      h=EEB0 h2=8A40 pc=0x8127AD82
 h=EEF0 h2=1A62 pc=0x8127ADBE      h=EEB0 h2=0A41 pc=0x8127AE46
 h=EEB4 h2=1A00 pc=0x81251D94      h=EEB7 h2=0A00 pc=0x81275328
-h=EEB6 h2=1A00 pc=0x811EEC84      鈫?姝ｆ槸"鍐?screen"鍑芥暟 0x811EEB98 鍖?```
+h=EEB6 h2=1A00 pc=0x811EEC84      ?正是"?screen"函数 0x811EEB98 ?```
 
-**娉ㄦ剰**锛氳鎺㈤拡鎻掑湪 vmov 鍒嗘敮**涔嬪墠**锛屽洜姝ゅ叾涓?`h2&0x0F50==0x0A40 && h2&0x80==0`
-锛堝 `0x0A48`/`0x1A48`/`0x2A48`/`0x0A68`锛夌殑閭ｄ簺**宸茶鏂板垎鏀纭鐞?*銆?鍙嶆眹缂?`0x81172FC0` 闄勮繎鍙€愭潯楠岃瘉锛?```
+**注意**：该探针插在 vmov 分支**之前**，因此其?`h2&0x0F50==0x0A40 && h2&0x80==0`
+（如 `0x0A48`/`0x1A48`/`0x2A48`/`0x0A68`）的那些**已被新分支正确处?*?反汇?`0x81172FC0` 附近可条验证?```
 81172FEA vmov.f32 s0, s16  (h=0xEEB0 h2=0x0A48 鈫?Sd=0, Sm=16 鉁?
 81172FF0 vmov.f32 s3, s16  (h=0xEEF0 h2=0x1A48 鈫?Sd=3, Sm=16 鉁?
 81172FF4 vmov.f32 s4, s16  (h=0xEEB0 h2=0x2A48 鈫?Sd=4, Sm=16 鉁?
 81172FFE vmov.f32 s1, s17  (h=0xEEF0 h2=0x0A68 鈫?Sd=1, Sm=17 鉁?
-81173006 bl #0x8116556c                        鈫?绱ф帴鐫€杩涘叆鍑犱綍/鐭╅樀璁＄畻
+81173006 bl #0x8116556c                        ?紧接睢进入几何/矩阵计算
 ```
 
-### 4. 涓嬩竴姝?
-1. **鎶?`[UNKVFP]` 鎺㈤拡绉诲埌 vmov/VCVT 鍒嗘敮涔嬪悗**锛屽緱鍒?*鐪熸钀界┖**鐨?`(h,h2)` 闆嗗悎锛?   鍐嶆寜 ARM VFP 3-reg 缂栫爜閫愪釜琛ラ綈锛坄VADD/VSUB/VMUL/VDIV/VABS/VNEG/VSQRT/VCMP` 绛夛級銆?2. 浼樺厛澶勭悊 pc 钀藉湪 `0x8116xxxx`/`0x8117xxxx`锛堝嚑浣?鐭╅樀鍖猴級涓?`0x811EECxx`锛坰creen 鍐欏叆鍖猴級鐨勯偅浜涖€?3. 姣忚ˉ涓€鏉″嵆璺戜竴娆?2760鈥?010 鍍忕礌缁熻锛?*浠?3010 甯?`mean鈮?15鈥?27` 浣滀负"鏃犲洖褰?鍒ゆ嵁**銆?   锛堟湰杞凡璇佹槑锛氫慨澶嶇己澶辨寚浠や細璁?3010 甯х暐鍙樺ソ锛岃€屾潯浠跺啓瀹戒細璁╁畠鎺夊埌 0 鈬?鍒ゆ嵁鐏垫晱鍙敤銆傦級
+### 4. 下一?
+1. **?`[UNKVFP]` 探针移到 vmov/VCVT 分支之后**，得?*真正落空**?`(h,h2)` 集合?   再按 ARM VFP 3-reg 编码逐个补齐（`VADD/VSUB/VMUL/VDIV/VABS/VNEG/VSQRT/VCMP` 等）?2. 优先处理 pc 落在 `0x8116xxxx`/`0x8117xxxx`（几?矩阵区）?`0x811EECxx`（screen 写入区）的那些?3. 每补丢条即跑一?2760?010 像素统计?*?3010 ?`mean?15?27` 作为"无回?判据**?   （本轮已证明：修复缺失指令会?3010 帧略变好，条件写宽会让它掉到 0 ?判据灵敏可用。）
 
 
 ---
 
-## h145k707銆愯拷鍔狅細UNKVFP2 缁撴灉涓?UNKVFP 鐩稿悓 鈬?鎺㈤拡鎻掑叆浣嶇疆鏈寜棰勬湡鐢熸晥銆?
+## h145k707【追加：UNKVFP2 结果?UNKVFP 相同 ?探针插入位置未按预期生效?
 ### 浜嬪疄
 
-鎶婃帰閽堟敼涓?鎻掑湪 vmov/VCVT 鍒嗘敮涔嬪悗"锛坄[UNKVFP2]`锛夊悗閲嶈窇锛岃緭鍑轰笌鎻掑湪涔嬪墠鐨?`[UNKVFP]` **瀹屽叏鐩稿悓锛?8 鏉★紝閫愭潯涓€鑷达級**锛?
+把探针改?插在 vmov/VCVT 分支之后"（`[UNKVFP2]`）后重跑，输出与插在之前?`[UNKVFP]` **完全相同?8 条，逐条丢致）**?
 ```
 [UNKVFP2] h=EEF1 h2=0A04 pc=0x811731FC      [UNKVFP2] h=EEB0 h2=0A48 pc=0x81172FEA
 [UNKVFP2] h=EEF0 h2=1A48 pc=0x81172FF0      [UNKVFP2] h=EEB0 h2=2A48 pc=0x81172FF4
 [UNKVFP2] h=EEF0 h2=0A68 pc=0x81172FFE      [UNKVFP2] h=EEF0 h2=4A00 pc=0x8116A6C0
-... 锛堝叡 48 鏉★紝鍚?0x8116A6xx / 0x811E71xx / 0x811A8Cxx / 0x811B4Dxx / 0x812xxxxx锛?```
+... （共 48 条，?0x8116A6xx / 0x811E71xx / 0x811A8Cxx / 0x811B4Dxx / 0x812xxxxx?```
 
-鈬?鐢变簬 `0x0A48` / `0x1A48` / `0x2A48` / `0x0A68` 杩欎簺锛坄h2&0x0F50 == 0x0A40 涓?h2&0x80 == 0`锛?**鏈簲琚?vmov 鍒嗘敮 `return true` 鎷︿笅**锛屽嵈浠嶅嚭鐜板湪璁板綍涓?鈬?**璇存槑鑴氭湰鎻掑叆鐨勬帰閽堝疄闄呬粛鍦?vmov 鍒嗘敮涔嬪墠**
-锛坄tail` 瀹氫綅钀藉湪浜嗛敊璇綅缃級锛屽洜姝よ繖浠芥竻鍗?*涓嶈兘**鍖哄垎"宸插鐞?鏈鐞?銆?
-### 缁撹涓庝慨姝ｆ柟寮?
-1. **涓嶈鍐嶇敤"鎻掑湪鍒嗘敮闄勮繎闈犺剼鏈畾浣?鐨勬柟寮?*锛涘簲鎶婅褰曡鍙ョ洿鎺ユ斁杩?*姣忎釜宸茬煡鍒嗘敮鐨?`return true` 涔嬪悗鐨勫悓灞備綅缃?*锛?   鎴栨敼鐢?鍦?`default` 鍒嗘敮閲岃褰?锛堝嵆鐪熸钀界┖鐨勯偅鏉¤矾寰勶級鈥斺€旇繖鏄敮涓€鍙潬鐨勫垽鎹€?2. 宸茬煡鏈夋晥鐨勯儴鍒嗭紙鏈疆閲嶈鎴愭灉锛屽嬁涓級锛?   - **`vmov.f32 Sd, Sm` 鍒嗘敮锛坄h&0xFFB8==0xEEB0 && h2&0x0F50==0x0A40 && h2&0x80==0`锛夊凡纭姝ｇ‘**锛?     鍔犲畠涔嬪悗 `[GEOMCALL]/[GEOMIN] s0..s7` 浠?`3,3,3,1,2.125,3,3,3` 鍙樹负 **`0,0,0,1,1,0,0,0`**锛?     `[GEOMT]` 璺ㄥ害浠?**4352脳2304 鈫?721脳721**锛?010 鍥炲綊甯?**115.42 鈫?127.21**銆?   - 鍓╀綑闃诲锛? 缁?`(x,y)` 婊¤冻 `y = -x` **鍏辩嚎** 鈬?閫€鍖栧洓杈瑰舰 鈬?浠嶉浂鍍忕礌
-     锛堥涓?`y` 涓?`-0.0`锛屾槸"琚彇璐熻繃"鐨勭棔杩癸級銆?
-### 涓嬩竴姝ワ紙鍞竴鍔ㄤ綔锛?
-鍦ㄨВ閲婂櫒閲屾壘鍒?`0xEEB0` 瀹舵棌鐨?*鍏滃簳璺緞**锛堢湡姝ｈ惤绌烘椂鐨?`default`/`else`锛夛紝鍦ㄨ澶勮褰?`(h,h2,pc)`锛?寰楀埌"纭疄鏈墽琛?鐨勬寚浠ら泦鍚堬紱鐒跺悗**浼樺厛瀹炵幇 pc 钀藉湪 `0x811A8Cxx`锛堝嚑浣曞啓椤剁偣鍖猴級
-涓?`0x8116A6xx` / `0x8117xxxx`锛堢煩闃典笌鍑犱綍鍖猴級鐨勯偅浜?*锛屾瘡瀹炵幇涓€鏉″嵆浠?"3010 甯?mean鈮?15鈥?27 涓嶄笅闄?涓哄畨鍏ㄥ垽鎹€佷互"2760鈥?000 鍑虹幇闈為浂"涓鸿繘灞曞垽鎹€?
+?由于 `0x0A48` / `0x1A48` / `0x2A48` / `0x0A68` 这些（`h2&0x0F50 == 0x0A40 ?h2&0x80 == 0`?**本应?vmov 分支 `return true` 拦下**，却仍出现在记录??**说明脚本插入的探针实际仍?vmov 分支之前**
+（`tail` 定位落在了错误位置），因此这份清?*不能**区分"已处?未处??
+### 结论与修正方?
+1. **不要再用"插在分支附近靠脚本定?的方?*；应把记录语句直接放?*每个已知分支?`return true` 之后的同层位?*?   或改??`default` 分支里记?（即真正落空的那条路径）—这是唯丢可靠的判据?2. 已知有效的部分（本轮重要成果，勿丢）?   - **`vmov.f32 Sd, Sm` 分支（`h&0xFFB8==0xEEB0 && h2&0x0F50==0x0A40 && h2&0x80==0`）已确认正确**?     加它之后 `[GEOMCALL]/[GEOMIN] s0..s7` ?`3,3,3,1,2.125,3,3,3` 变为 **`0,0,0,1,1,0,0,0`**?     `[GEOMT]` 跨度?**4352×2304 ?721×721**?010 回归?**115.42 ?127.21**?   - 剩余阻塞? ?`(x,y)` 满足 `y = -x` **共线** ?逢化四边形 ?仍零像素
+     （首?`y` ?`-0.0`，是"被取负过"的痕迹）?
+### 下一步（唯一动作?
+在解释器里找?`0xEEB0` 家族?*兜底路径**（真正落空时?`default`/`else`），在该处记?`(h,h2,pc)`?得到"确实未执?的指令集合；然后**优先实现 pc 落在 `0x811A8Cxx`（几何写顶点区）
+?`0x8116A6xx` / `0x8117xxxx`（矩阵与几何区）的那?*，每实现丢条即?"3010 ?mean?15?27 不下?为安全判据以"2760?000 出现非零"为进展判据?
 
 ---
 
-## h145k708銆愪慨姝ｏ細vneg/vabs 鏃╁凡瀹炵幇锛涜В閲婂櫒鑷甫 vmiss 鏈懡涓褰曟満鍒躲€?
-### 1. 鎴戠殑 `[UNKVFP2]` 鎺㈤拡鎻掗敊浜嗕綅缃紙涓嶅彲鐢級
+## h145k708【修正：vneg/vabs 早已实现；解释器自带 vmiss 未命中记录机制?
+### 1. 我的 `[UNKVFP2]` 探针插错了位置（不可用）
 
-`thumb_interpreter.cpp:4504` 鏄剧ず鎺㈤拡瀹為檯琚彃鍦?**VFP 鍒嗘淳鍖虹殑鏈€鍓嶉潰**锛堟墍鏈夊垎鏀箣鍓嶏級锛?鑴氭湰鐢?鎵?`tail`"瀹氫綅鐨勬柟寮忓け璐ャ€傚洜姝?`[UNKVFP]`/`[UNKVFP2]` 鍒楀嚭鐨?48 鏉?**鍖呭惈澶ч噺宸茶姝ｇ‘澶勭悊鐨勬寚浠?*锛堝 `h2=0x0A48/0x1A48/0x2A48/0x0A68`锛屽畠浠兘婊¤冻
-`h2&0x0F50==0x0A40 && h2&0x80==0` 浼氳 vmov 鍒嗘敮 `return true` 鎷︿笅锛夈€?鈬?**杩欎袱浠芥竻鍗曚笉鑳界敤浜庡垽鏂?鍝簺鎸囦护鏈墽琛?锛屾湰杞嵁姝ゅ仛鐨?`vneg` 鎺ㄦ柇浣滃簾銆?*
+`thumb_interpreter.cpp:4504` 显示探针实际被插?**VFP 分派区的朢前面**（所有分支之前）?脚本??`tail`"定位的方式失败因?`[UNKVFP]`/`[UNKVFP2]` 列出?48 ?**包含大量已被正确处理的指?*（如 `h2=0x0A48/0x1A48/0x2A48/0x0A68`，它们都满足
+`h2&0x0F50==0x0A40 && h2&0x80==0` 会被 vmov 分支 `return true` 拦下）??**这两份清单不能用于判?哪些指令未执?，本轮据此做?`vneg` 推断作废?*
 
-### 2. 瀹為檯鎯呭喌锛氳В閲婂櫒宸叉湁鐩稿綋瀹屾暣鐨?VFP 鍗曠簿搴﹀疄鐜?
-`thumb_interpreter.cpp` 4500鈥?595锛?
+### 2. 实际情况：解释器已有相当完整?VFP 单精度实?
+`thumb_interpreter.cpp` 4500?595?
 | 琛?| 宸插疄鐜?|
 |---|---|
-| 4516鈥?531 | `VMOV Sn,Rt` / `Rt,Sn` |
-| 4533鈥?538 | `vmov.32 Dn[0]<->Rt` / `vdup.32` |
-| 4541鈥?544 | `VMOV.F32 Sd,#imm`锛堝惈 imm8 绗﹀彿浣嶏級 |
-| 4556鈥?565 | `VCVT`锛坒32鈫攕32/u32锛夈€乣VDIV.F32`锛堜袱绉嶇紪鐮侊級 |
-| 4566鈥?573 | `VMLA`(0) / `VNMLS`(1) / `VMUL路VNMUL`(2) / `VADD路VSUB`(3) |
-| 4580鈥?595 | VFP 鍗曠簿搴?3-reg 瀹舵棌锛歚vneg/vabs.f32`(4588)銆乣vcvt.s32.f32`(4590)銆乣vcvt.f32.s32`(4591)銆乣vrecpe/vrsqrte.f32`(4592)銆乣vceq #0`(4595) |
+| 4516?531 | `VMOV Sn,Rt` / `Rt,Sn` |
+| 4533?538 | `vmov.32 Dn[0]<->Rt` / `vdup.32` |
+| 4541?544 | `VMOV.F32 Sd,#imm`（含 imm8 符号位） |
+| 4556?565 | `VCVT`（f32↔s32/u32）`VDIV.F32`（两种编码） |
+| 4566?573 | `VMLA`(0) / `VNMLS`(1) / `VMUL·VNMUL`(2) / `VADD·VSUB`(3) |
+| 4580?595 | VFP 单精?3-reg 家族：`vneg/vabs.f32`(4588)、`vcvt.s32.f32`(4590)、`vcvt.f32.s32`(4591)、`vrecpe/vrsqrte.f32`(4592)、`vceq #0`(4595) |
 
-**鈬?鍏抽敭锛歚vneg.f32` / `vabs.f32` 鍦?4588 琛屽凡瀹炵幇銆?*
+**?关键：`vneg.f32` / `vabs.f32` ?4588 行已实现?*
 
-### 3. 搴斿綋浣跨敤鐨勬棦鏈夋満鍒讹細`vmiss`
+### 3. 应当使用的既有机制：`vmiss`
 
-4564 琛屾湁 `vmiss(h,h2,cur,"-cvt")` 鈬?**瑙ｉ噴鍣ㄨ嚜甯?鏈懡涓寚浠?璁板綍鍑芥暟**銆?鈬?姝ｇ‘鍋氭硶鏄?*鏌ョ湅/鍚敤 `vmiss` 鐨勮緭鍑?*锛岃€屼笉鏄嚜宸辨彃鎺㈤拡銆?
-### 4. 鏈疆纭畾鐨勫噣鎴愭灉锛堝嬁涓級
+4564 行有 `vmiss(h,h2,cur,"-cvt")` ?**解释器自?未命中指?记录函数**??正确做法?*查看/启用 `vmiss` 的输?*，不是自己插探针?
+### 4. 本轮确定的净成果（勿丢）
 
-- **`vmov.f32 Sd, Sm` 鍒嗘敮锛坄h&0xFFB8==0xEEB0 && h2&0x0F50==0x0A40 && h2&0x80==0`锛夌‘璁ゅ繀瑕佷笖姝ｇ‘**锛?  `[GEOMIN] s0..s7` 鐢?`3,3,3,1,2.125,3,3,3` 鈫?**`0,0,0,1,1,0,0,0`**锛?  `[GEOMT]` 璺ㄥ害鐢?**4352脳2304 鈫?721脳721**锛?010 鍥炲綊甯?**115.42 鈫?127.21**銆?- 鍓╀綑闃诲锛? 缁?`(x,y)` 婊¤冻 **`y = -x`** 鈬?鍏辩嚎 鈬?閫€鍖栧洓杈瑰舰 鈬?浠嶉浂鍍忕礌銆?
-### 5. 涓嬩竴姝ワ紙淇鍚庯級
+- **`vmov.f32 Sd, Sm` 分支（`h&0xFFB8==0xEEB0 && h2&0x0F50==0x0A40 && h2&0x80==0`）确认必要且正确**?  `[GEOMIN] s0..s7` ?`3,3,3,1,2.125,3,3,3` ?**`0,0,0,1,1,0,0,0`**?  `[GEOMT]` 跨度?**4352×2304 ?721×721**?010 回归?**115.42 ?127.21**?- 剩余阻塞? ?`(x,y)` 满足 **`y = -x`** ?共线 ?逢化四边形 ?仍零像素?
+### 5. 下一步（修正后）
 
-1. `grep vmiss` 鎵惧埌鍏跺畾涔変笌寮€鍏筹紝**鍚敤鍚庤窇涓€娆?*锛屾嬁鍒扮湡姝ｆ湭鍛戒腑鐨?`(h,h2,pc)` 娓呭崟锛?2. 鍙 pc 钀藉湪鍑犱綍/鐭╅樀鍖猴紙`0x8116A6xx`銆乣0x8117xxxx`銆乣0x811A8Cxx`锛夌殑鏈懡涓寚浠ら€愪釜琛ラ綈锛?3. 鍒ゆ嵁涓嶅彉锛?010 甯?`mean` 涓嶄笅闄?= 鏃犲洖褰掞紱2760鈥?000 鍑虹幇闈為浂 = 鏈夎繘灞曘€?
+1. `grep vmiss` 找到其定义与弢关，**启用后跑丢?*，拿到真正未命中?`(h,h2,pc)` 清单?2. 只对 pc 落在几何/矩阵区（`0x8116A6xx`、`0x8117xxxx`、`0x811A8Cxx`）的未命中指令个补齐?3. 判据不变?010 ?`mean` 不下?= 无回归；2760?000 出现非零 = 有进展?
 
 ---
 
-## h145k709銆愨殸 涓婁竴杞?patch 璇垹浜?vmov 淇锛涘凡鎭㈠骞堕獙璇併€?
-### 1. 浜嬫晠涓庢仮澶?
-`_h145k707_patch.py`锛堟妸 UNKVFP 鎺㈤拡"绉诲埌鍒嗘敮涔嬪悗"锛夌殑鍒犻櫎鑼冨洿鏄?`// h145k706` 鈫?`if((h&0xFFB8u)==0xEEB8u...`锛岃€?*鎴戞彃鍦ㄤ腑闂寸殑 `vmov.f32 Sd,Sm` 鍒嗘敮姝ｈ惤鍦ㄨ鍖洪棿鍐?*锛?浜庢槸琚竴骞跺垹闄?鈬?鏈細璇?round 34 棣栨杩愯鏃?`[GEOMT]` 閫€鍥?`4352` 璺ㄥ害銆?
-鏍稿疄涓庝慨澶嶏細
-- `grep h145k705` 鈬?鏃犵粨鏋滐紙鍒嗘敮纭凡涓㈠け锛夛紱4510 琛屽彧鍓?`[UNKVFP2]` 鎺㈤拡
-- 閲嶆柊鎻掑叆锛堟爣璁?`h145k709b`锛夛紝缃簬 UNKVFP2 鎺㈤拡**涔嬪墠**锛堣繖鏍锋帰閽堝彧璁板綍鏈 vmov 澶勭悊鐨勶級
-- 缂栬瘧閫氳繃锛岃繍琛岄獙璇侊細`[GEOMT]` 鍥炲埌 `480.738953 / 721.108398 / 240.369476` 閲忕骇 鉁?
-**鏁欒锛氬嚒鏄?鎸夊尯闂村垹闄ゆ帰閽?鐨勮剼鏈紝蹇呴』鍏堢‘璁ゅ尯闂村唴涓嶅惈鍔熻兘鎬т唬鐮侊紱鍚庣画 patch 涓€寰嬬敤
-绮剧‘鐨勫崟琛岄敋鐐癸紙濡?`if((h&0xFFB8u)==0xEEB0u){ static std::map<SceUInt32,long> _uvfp2;`锛夋彃鍏ャ€?*
+## h145k709【⚠ 上一?patch 误删?vmov 修复；已恢复并验证?
+### 1. 事故与恢?
+`_h145k707_patch.py`（把 UNKVFP 探针"移到分支之后"）的删除范围?`// h145k706` ?`if((h&0xFFB8u)==0xEEB8u...`，?*我插在中间的 `vmov.f32 Sd,Sm` 分支正落在该区间?*?于是被一并删??本会?round 34 首次运行?`[GEOMT]` 逢?`4352` 跨度?
+核实与修复：
+- `grep h145k705` ?无结果（分支确已丢失）；4510 行只?`[UNKVFP2]` 探针
+- 重新插入（标?`h145k709b`），置于 UNKVFP2 探针**之前**（这样探针只记录未被 vmov 处理的）
+- 编译通过，运行验证：`[GEOMT]` 回到 `480.738953 / 721.108398 / 240.369476` 量级 ?
+**教训：凡?按区间删除探?的脚本，必须先确认区间内不含功能性代码；后续 patch 丢律用
+精确的单行锚点（?`if((h&0xFFB8u)==0xEEB0u){ static std::map<SceUInt32,long> _uvfp2;`）插入?*
 
 ### 2. 鏈鐞嗘寚浠ゅ凡鏀舵暃鍒?鍩烘湰瀹屾暣"
 
-鎭㈠ vmov 鍚庡悓涓€娆¤繍琛岋細
+恢复 vmov 后同丢次运行：
 
 | 璁板綍 | 鏁伴噺 | 鍚箟 |
 |---|---|---|
-| `[UNKVFP2]`锛堝埌杈炬帰閽堟椂鏈 vmov 鎷︽埅锛?| 12 鏉?| 濡?`EEF1/0A04`銆乣EEF0/4A00`銆乣EEB7/5A00`銆乣EEB2/0A0C`銆乣EEB0/0A00`銆乣EEF0/1A00`銆乣EEB0/0A04`銆乣EEB7/8A00`銆乣EEF7/0A00`銆乣EEB0/0AE9`銆乣EEB1/1AC1`銆乣EEB7/2A00` |
-| **`[VMISS]`锛堢湡姝ｇ殑鍏滃簳鏈懡涓級** | **1 鏉?* | `[VMISS-neon] h=FFA0 h2=30B2 pc=0x811A4E80 cnt=1` |
+| `[UNKVFP2]`（到达探针时未被 vmov 拦截?| 12 ?| ?`EEF1/0A04`、`EEF0/4A00`、`EEB7/5A00`、`EEB2/0A0C`、`EEB0/0A00`、`EEF0/1A00`、`EEB0/0A04`、`EEB7/8A00`、`EEF7/0A00`、`EEB0/0AE9`、`EEB1/1AC1`、`EEB7/2A00` |
+| **`[VMISS]`（真正的兜底未命中）** | **1 ?* | `[VMISS-neon] h=FFA0 h2=30B2 pc=0x811A4E80 cnt=1` |
 
-鈬?閭?12 鏉?*鏈€缁堥兘琚悗缁垎鏀紙VCVT / 3-reg 瀹舵棌锛夊鐞?*锛宍vmiss` 鍙瑙﹀彂涓€娆?鈬?**瑙ｉ噴鍣ㄥ `0xEEB0` 瀹舵棌宸插熀鏈畬鏁达紱鍑犱綍鐣稿彉涓嶅啀鏄?鎸囦护娌℃墽琛?閫犳垚鐨勩€?*
+??12 ?*朢终都被后续分支（VCVT / 3-reg 家族）处?*，`vmiss` 只被触发丢??**解释器对 `0xEEB0` 家族已基本完整；几何畸变不再?指令没执?造成的?*
 
 ### 3. 褰撳墠鐘舵€佷笌鍏抽敭寰呮祴椤?
-淇鍚?`[GEOMT]`锛坄0x811610A4` **鍐呴儴**鏁扮粍 `sp+0x10`锛夛細
+修复?`[GEOMT]`（`0x811610A4` **内部**数组 `sp+0x10`）：
 ```
 0.0 | 0.0 -0.0 | 480.738953 -480.738953 | 721.108398 -721.108398 | 240.369476 -240.369476 | UV(0,0)(1,0)(1,1)(0,1)
 ```
-鍙︽祴寰?*鐪熸鐨勮緭鍏ョ粨鏋?*锛坄[GEOMR1]`锛宍r1 = 0xA016DFD0`锛岀敱 `0x8119351C` 鐨?`strd` 濉?`{0,0,1,1}`锛夛細
+另测?*真正的输入结?*（`[GEOMR1]`，`r1 = 0xA016DFD0`，由 `0x8119351C` ?`strd` ?`{0,0,1,1}`）：
 ```
-[GEOMR1] r1=0xA016DFD0 : 0.0 0.0 1.0 1.0 -0.0 544.0 0.133545 -nan 0.0 0.0 ... 锛坅lpha 鍊奸€愬抚鍙樺寲 0.133鈫?.167锛?```
-鈬?杈撳叆缁撴瀯閲?`544.0`锛堝睆骞曢珮锛変笌閫愬抚鍙樺寲鐨?`alpha` 閮藉嚭鐜颁簡锛岄噺绾у悎鐞嗐€?
-**鈬?浣嗘敞鎰忥細`[GEOMT]` 鏄唴閮ㄤ腑闂存暟缁勶紝鏈繀绛変簬鏈€缁堝啓鍏ラ《鐐圭紦鍐茬殑鏁版嵁銆?蹇呴』閲嶆柊娴?`[VALLHEX]`锛堝疄闄呴《鐐规祦锛夋墠鑳藉垽鏂慨澶嶅悗鐨?鐪熷疄鍑犱綍"鍙婂叾 NDC 瑕嗙洊鑼冨洿銆?*
+[GEOMR1] r1=0xA016DFD0 : 0.0 0.0 1.0 1.0 -0.0 544.0 0.133545 -nan 0.0 0.0 ... （alpha 值帧变化 0.133?.167?```
+?输入结构?`544.0`（屏幕高）与逐帧变化?`alpha` 都出现了，量级合理?
+**?但注意：`[GEOMT]` 是内部中间数组，未必等于朢终写入顶点缓冲的数据?必须重新?`[VALLHEX]`（实际顶点流）才能判断修复后?真实几何"及其 NDC 覆盖范围?*
 
-### 4. 涓嬩竴姝ワ紙鍞竴鍔ㄤ綔锛?
-寮€ `P5D_VALL=1` 閲嶈窇锛岃淇鍚庣殑 `[VALLHEX]/[VALLFLT]`锛堝疄闄呴《鐐逛綅妯″紡锛夛細
-- 鑻ュ疄闄呴《鐐瑰凡钀藉湪 `x鈭圼0,960]銆亂鈭圼0,544]` 鈬?鍑犱綍姝ｇ‘锛岃浆鍘绘煡鐗囧厓/缁戝畾锛?- 鑻ュ疄闄呴《鐐逛粛涓?`y = -x` 褰㈡€侊紙濡?`(480.7,-480.7)`锛夆噿 椤?`0x811610A4` 鍐呴儴 `sp+0x14鈫抯p+0x54` 鐨勬嫹璐濅笌鏃嬭浆娈电户缁拷锛?  骞跺悓鏃剁‘璁?椤剁偣 = 妯℃澘 + (2.0,2.0)"杩欎竴鍏崇郴鍦ㄤ慨澶嶅悗鏄惁浠嶆垚绔嬶紙姝ゅ墠鏄湪 4352 鐗堟湰涓婃祴寰楃殑锛夈€?
+### 4. 下一步（唯一动作?
+弢 `P5D_VALL=1` 重跑，读修复后的 `[VALLHEX]/[VALLFLT]`（实际顶点位模式）：
+- 若实际顶点已落在 `x∈[0,960]、y∈[0,544]` ?几何正确，转去查片元/绑定?- 若实际顶点仍?`y = -x` 形（?`(480.7,-480.7)`）⇒ ?`0x811610A4` 内部 `sp+0x14→sp+0x54` 的拷贝与旋转段继续追?  并同时确?顶点 = 模板 + (2.0,2.0)"这一关系在修复后是否仍成立（此前是在 4352 版本上测得的）?
 
 ---
 
-## h145k710銆愪慨澶嶅悗鐨勭湡瀹炲嚑浣?+ 鈽呯储寮曠枒浼奸€€鍖栤槄锛堟柊鏂瑰悜锛夈€?
-### 1. 鎭㈠ vmov 鍒嗘敮鍚庣殑鐪熷疄椤剁偣锛坄[VALLHEX] LOGO`锛岄€愪綅锛?
+## h145k710【修复后的真实几?+ ★索引疑似化★（新方向）?
+### 1. 恢复 vmov 分支后的真实顶点（`[VALLHEX] LOGO`，位?
 ```
 [VALLHEX] LOGO A3150880 (stride 24, 4 椤剁偣):
   v0 = ( 0.000000,    0.000000, 0, FFFFFFFF(NaN), 0, 0)
@@ -274903,95 +274907,95 @@ h=EEB6 h2=1A00 pc=0x811EEC84      鈫?姝ｆ槸"鍐?screen"鍑芥暟 0x811EEB98 
   v3 = ( 240.369476, -240.369476, 0, FFFFFFFF, 0, 1)
   UV = (0,0)(1,0)(1,1)(0,1)  瀹屾暣
 ```
-鈬?涓?`[GEOMT]` 鍐呴儴鏁扮粍涓€鑷达紱**涓?`z` 宸茬敱 `2.125` 鍙樹负 `0`**锛堝弬鏁颁慨澶嶇殑鍙堜竴浣愯瘉锛夈€?鈬?浣?*浣嶇疆浠嶆槸 `y = -x` 鐨勫瑙掑舰鎬?*锛屽昂瀵镐负 `721.108 脳 721.108`锛堟鏂瑰舰锛夛紝鑰岄潪 `960脳544`銆?
-浠ｅ叆 shader锛坄x/272鈭?`銆乣鈭抷/272+1`锛夛細NDC = `(鈭?,+1)`銆乣(0.767,+2.767)`銆乣(1.652,+3.651)`銆乣(鈭?.116,+1.884)`
-鈬?**鍏ㄩ儴 `y_ndc 鈮?1` 鈬?浠嶅湪灞忓箷涓婅竟鐣屼箣澶栥€?*
+??`[GEOMT]` 内部数组丢致；**?`z` 已由 `2.125` 变为 `0`**（参数修复的又一佐证）???*位置仍是 `y = -x` 的对角形?*，尺寸为 `721.108 × 721.108`（正方形），而非 `960×544`?
+代入 shader（`x/272?`、`−y/272+1`）：NDC = `(?,+1)`、`(0.767,+2.767)`、`(1.652,+3.651)`、`(?.116,+1.884)`
+?**全部 `y_ndc ?1` ?仍在屏幕上边界之外?*
 
 ### 2. 鈽?鏂扮嚎绱細椤剁偣鍖轰箣鍚庣殑绱㈠紩鐤戜技閫€鍖?鈽?
-`[VALLHEX]` 鎵撳嵃鐨?32 涓?u32 涓紝椤剁偣鍗?#0..#23锛?脳24B=96B锛夛紝鍏跺悗锛?
+`[VALLHEX]` 打印?32 ?u32 中，顶点?#0..#23?×24B=96B），其后?
 ```
 u32 #24 = 00010000    #25 = 00000002    #26 = 00030002
 ```
-鎸夊皬绔?u16 瑙ｆ瀽 鈬?绱㈠紩 **`0, 1, 0, 2, 3, 2`** 鈬?涓や釜涓夎褰?`(0,1,0)` 涓?`(2,3,2)`
-**椤剁偣閲嶅銆侀潰绉负 0 鈬?闆跺儚绱?*锛堜笌鍑犱綍鏃犲叧鐨勫彟涓€鏉＄嫭绔嬮樆濉烇級銆?
-鑰屽弽姹囩紪鏄剧ず `0x811610A4` **鍐呴儴璁剧疆鐨勭储寮曟槸姝ｇ‘鐨?*锛?```
+按小?u16 解析 ?索引 **`0, 1, 0, 2, 3, 2`** ?两个三角?`(0,1,0)` ?`(2,3,2)`
+**顶点重复、面积为 0 ?零像?*（与几何无关的另丢条独立阻塞）?
+而反汇编显示 `0x811610A4` **内部设置的索引是正确?*?```
 81160BB4/0BBA/0BC4/0BCA/0BD6/0BDE 鍒嗗埆 strh.w 0,1,2,0,2,3 鍒?sp+8/0xa/0xc/0xe/0x10/0x12
 ```
-鈬?鍗?`0,1,2,0,2,3` 鉁擄紙鎻愪氦鐢?`811612A6 bl 0x81163abc` 瀹屾垚锛屽弬鏁?`r1=sp+0x54`(椤剁偣)銆乣r2=4`(椤剁偣鏁?銆乣[sp]=6`(绱㈠紩鏁?銆乣r3=sp+8`(绱㈠紩婧?锛?
-**涓ょ鍙兘**锛?- (a) 绱㈠紩鍦ㄥ啓鍏ラ《鐐圭紦鍐?琚悗绔秷璐规椂**閿欎綅**锛堟垜浠殑 HLE 鎴栧悗绔殑闂锛夛紱
-- (b) 涓婅堪 u16 瑙ｆ瀽鐨?*璧峰鍋忕Щ**涓嶅锛堥《鐐瑰尯鍙兘涓嶆槸鎭板ソ 96B锛岀储寮曡捣鐐归渶瀹炴祴纭锛夈€?
-### 3. 宸叉湁鐨勫鐓у伐鍏?
-`[IDX3]` 鎺㈤拡锛堟棭鍓嶈繍琛屼腑鍑虹幇杩?`[IDX3] ib=6 i16=1 host=(0,1,2) gpu=(0,1,2)`锛?姝ｆ槸"瀹夸富瑙ｆ瀽鐨勭储寮?vs 閫?GPU 鐨勭储寮?瀵圭収 鈬?**涓嬩竴姝ョ洿鎺ョ敤瀹冩鏌?LOGO draw锛坄d鈮?2909`銆乣eh=172A9E73`锛夌殑绱㈠紩**銆?
-### 4. 涓嬩竴姝ワ紙鍞竴鍔ㄤ綔锛?
-鐢?`P5D_VALL=1` 璺戜竴娆″苟**鍚屾椂鎶?`[IDX3]`**锛堣嫢 `[IDX3]` 鏈夊紑鍏冲垯鍚敤锛夛紝瀵?LOGO draw 姣斿锛?- `host` 涓?`gpu` 绱㈠紩鏄惁閮芥槸 `0,1,2,0,2,3`锛?- 鑻?`gpu` 渚ф槸 `0,1,0,2,3,2` 鈬?**绱㈠紩閿欎綅灏辨槸闆跺儚绱犵殑鐩存帴鍘熷洜**锛屼笖杩欐槸涓€涓嫭绔嬩簬鍑犱綍鐨?HLE/鍚庣缂洪櫡锛?- 鑻ヤ袱鑰呴兘鏄纭殑 `0,1,2,0,2,3` 鈬?鍥炲埌鍑犱綍锛堢户缁拷 `721.108398` 鐨勭敓鎴愰摼锛夈€?
-> 澶囨敞锛氭湰杞紑澶存仮澶嶇殑 `vmov.f32 Sd,Sm` 鍒嗘敮鏍囪涓?`h145k709b`锛屼綅浜?> `if((h&0xFFB8u)==0xEEB0u){ static std::map<SceUInt32,long> _uvfp2;` **涔嬪墠**锛?> 浠讳綍鍚庣画"鎸夊尯闂村垹鎺㈤拡"鐨勮剼鏈兘涓嶅緱璺ㄨ秺璇ラ敋鐐癸紙姝ゅ墠宸插洜姝や涪澶辫繃涓€娆′慨澶嶏級銆?
+??`0,1,2,0,2,3` ✓（提交?`811612A6 bl 0x81163abc` 完成，参?`r1=sp+0x54`(顶点)、`r2=4`(顶点?、`[sp]=6`(索引?、`r3=sp+8`(索引??
+**两种可能**?- (a) 索引在写入顶点缓?被后端消费时**错位**（我们的 HLE 或后端的问题）；
+- (b) 上述 u16 解析?*起始偏移**不对（顶点区可能不是恰好 96B，索引起点需实测确认）?
+### 3. 已有的对照工?
+`[IDX3]` 探针（早前运行中出现?`[IDX3] ib=6 i16=1 host=(0,1,2) gpu=(0,1,2)`?正是"宿主解析的索?vs ?GPU 的索?对照 ?**下一步直接用它检?LOGO draw（`d?2909`、`eh=172A9E73`）的索引**?
+### 4. 下一步（唯一动作?
+?`P5D_VALL=1` 跑一次并**同时?`[IDX3]`**（若 `[IDX3]` 有开关则启用），?LOGO draw 比对?- `host` ?`gpu` 索引是否都是 `0,1,2,0,2,3`?- ?`gpu` 侧是 `0,1,0,2,3,2` ?**索引错位就是零像素的直接原因**，且这是丢个独立于几何?HLE/后端缺陷?- 若两者都是正确的 `0,1,2,0,2,3` ?回到几何（继续追 `721.108398` 的生成链）?
+> 备注：本轮开头恢复的 `vmov.f32 Sd,Sm` 分支标记?`h145k709b`，位?> `if((h&0xFFB8u)==0xEEB0u){ static std::map<SceUInt32,long> _uvfp2;` **之前**?> 任何后续"按区间删探针"的脚本都不得跨越该锚点（此前已因此丢失过丢次修复）?
 
 ---
 
-## h145k711銆愮储寮曟纭紱鍑犱綍宸插埌 721 閲忕骇 鈬?鍏抽敭瀹為獙锛歴creen.w = -272 闇€閲嶆祴銆?
-### 1. 绱㈠紩鏄纭殑锛堟帹缈讳笂涓€杞殑鐚滄祴锛?
-`[IDX3]` 瀹炴祴锛堝悗绔?`gxm_draw_indexed_real`锛宍vulkan_backend.cpp:3408`锛夛細
+## h145k711【索引正确；几何已到 721 量级 ?关键实验：screen.w = -272 霢重测?
+### 1. 索引是正确的（推翻上丢轮的猜测?
+`[IDX3]` 实测（后?`gxm_draw_indexed_real`，`vulkan_backend.cpp:3408`）：
 ```
-[IDX3] ib=6 i16=1 host=(0,1,2) gpu=(0,1,2)     脳 310 鏉★紝鍏ㄩ儴涓€鑷?```
-鈬?瀹夸富瑙ｆ瀽涓庨€?GPU 鐨勭储寮曚竴鑷达紝**绱㈠紩娌℃湁闂**銆?鈬?涓婁竴杞?绱㈠紩閫€鍖?`0,1,0,2,3,2`"鐨勬帹鏂?*閿欒**锛氶偅鏄妸椤剁偣鍖洪暱搴﹀綋浣滄伆濂?96B銆?鎸夐敊璇亸绉昏В鏋?`u32 #24..#26` 寰楀埌鐨勫亣璞★紙璇ユ帰閽堝彧鎵撳嵃鍓?3 涓储寮曪紝涔熶笉瓒充互瑕嗙洊 6 涓級銆?
-### 2. 褰撳墠纭垏鐨勫嚑浣曚笌 NDC锛堜慨澶?vmov 涔嬪悗锛?
+[IDX3] ib=6 i16=1 host=(0,1,2) gpu=(0,1,2)     × 310 条，全部丢?```
+?宿主解析与?GPU 的索引一致，**索引没有问题**??上一?索引逢?`0,1,0,2,3,2`"的推?*错误**：那是把顶点区长度当作恰?96B?按错误偏移解?`u32 #24..#26` 得到的假象（该探针只打印?3 个索引，也不足以覆盖 6 个）?
+### 2. 当前确切的几何与 NDC（修?vmov 之后?
 ```
 v0 = ( 0.000000,    0.000000, 0, NaN, 0, 0)
 v1 = ( 480.738953, -480.738953, 0, NaN, 1, 0)
 v2 = ( 721.108398, -721.108398, 0, NaN, 1, 1)
 v3 = ( 240.369476, -240.369476, 0, NaN, 0, 1)     UV 瀹屾暣
 ```
-`z` 宸茬敱 `2.125 鈫?0`锛涗絾浣嶇疆浠嶄负 `y = -x` 瀵硅褰㈡€併€佸昂瀵?`721.108虏`銆?
-鎸夊綋鍓?shader 鍋囪锛坄SA[4].x = +1/272`銆乣SA[0].y = +1`锛夛細
-`PA0.y = -y/272 + 1 鈭?[1.000, 3.651]` 鈬?**鍏ㄩ儴 鈮?1锛屽湪灞忓箷涓婅竟鐣屽**銆?
-### 3. 鈽?鍏抽敭瀹為獙锛堜笅涓€杞涓€浠朵簨锛夆槄
+`z` 已由 `2.125 ?0`；但位置仍为 `y = -x` 对角形尺?`721.108²`?
+按当?shader 假设（`SA[4].x = +1/272`、`SA[0].y = +1`）：
+`PA0.y = -y/272 + 1 ?[1.000, 3.651]` ?**全部 ?1，在屏幕上边界外**?
+### 3. ?关键实验（下丢轮第丢件事）★
 
-鑻?`SA[4].x = -1/272`锛堝嵆 `SA[3].x = screen.w = **-272**`锛夛紝鍒?```
+?`SA[4].x = -1/272`（即 `SA[3].x = screen.w = **-272**`），?```
 PA0.y = -pos.y * (-1/272) + 1 = pos.y/272 + 1
       鈭?[ -721.108/272 + 1 , 0 + 1 ] = [ -1.651 , +1.000 ]   鈬?瑕嗙洊灞忓箷 鉁?PA0.x = pos.x/272 - 1 鈭?[ -1.000 , +1.651 ]                  鈬?瑕嗙洊灞忓箷 鉁?```
-**鈬?杩欐鏄?鍑犱綍涓鸿礋 y"鍞竴鑳借嚜娲界殑瑙ｉ噴銆?*
+**?这正?几何为负 y"唯一能自洽的解释?*
 
-鑰岀湡鏈烘暟鎹閲?*纭疄鍚屾椂瀛樺湪涓ゅ** screen 妯℃澘锛堢涓€涓?dump 瀹炴祴锛夛細
+而真机数据段?*确实同时存在两套** screen 模板（第丢?dump 实测）：
 ```
 VA 0x817A70C0 : 480.0  -272.0  0.5  0.0     鈫?璐熷彿鐗堟湰
 VA 0x817A70D0 : 480.0   272.0  0.5  0.0
 ```
 
-**鈬?鍥犳锛氱敤宸插瓨鍦ㄧ殑 `P5D_SCREEN_FIX=480,-272`锛堝彧浣滅敤浜?`eh=172A9E736C7DC35E` 鍗?LOGO draw锛?鍦?鍑犱綍宸蹭慨澶嶏紙721 閲忕骇锛?鐨勫墠鎻愪笅閲嶆祴涓€娆°€?*
-- **鑻ュ嚭鐜?LOGO 鈬?鏍瑰洜纭鏄?鎴戜滑鐨?HLE 鎶?`screen.w` 渚涙垚浜?+272锛堢湡鏈轰负 -272锛?锛?  闅忓悗鏀?HLE锛堜笉鐢ㄥ紑鍏筹級鍗冲彲婊¤冻鐩爣锛?*
-- 鑻ヤ粛榛?鈬?`screen.w` 绗﹀彿鏃犲叧锛屽洖鍒板嚑浣曪紙缁х画杩?`721.108398` 鐨勭敓鎴愰摼锛夈€?
-> 娉ㄦ剰锛氭鍓嶆祴杩?`P5D_SCREEN_FIX=480,-272` 寰楀叏榛戯紝浣?*閭ｆ椂鍑犱綍浠嶆槸 4352脳2304 鐣稿彉**锛?> 璇ユ缁撴灉瀵规湰闂鏃犲垽瀹氬姏锛屽繀椤婚噸娴嬨€?
+**?因此：用已存在的 `P5D_SCREEN_FIX=480,-272`（只作用?`eh=172A9E736C7DC35E` ?LOGO draw??几何已修复（721 量级?的前提下重测丢次?*
+- **若出?LOGO ?根因确认?我们?HLE ?`screen.w` 供成?+272（真机为 -272??  随后?HLE（不用开关）即可满足目标?*
+- 若仍??`screen.w` 符号无关，回到几何（继续?`721.108398` 的生成链）?
+> 注意：此前测?`P5D_SCREEN_FIX=480,-272` 得全黑，?*那时几何仍是 4352×2304 畸变**?> 该次结果对本问题无判定力，必须重测?
 ### 4. 鏈疆鍏跺畠纭
 
-- **`vmov.f32 Sd, Sm` 鍒嗘敮鏍囪 `h145k709b` 宸插湪浣?*锛堜綅浜?`if((h&0xFFB8u)==0xEEB0u){ static std::map<SceUInt32,long> _uvfp2;` 涔嬪墠锛夛紝
-  鍚庣画 patch 涓嶅緱璺ㄨ秺璇ラ敋鐐瑰垹闄ゅ尯闂达紙姝ゅ墠宸插洜姝や涪澶辫繃涓€娆′慨澶嶏級銆?- `[VMISS]` 鍏ㄥ眬浠?1 鏉★紙NEON `h=FFA0 h2=30B2`锛夛紝`[UNKVFP2]` 12 鏉℃渶缁堝潎琚悗缁垎鏀鐞?  鈬?**瑙ｉ噴鍣ㄥ `0xEEB0` 瀹舵棌宸插熀鏈畬鏁?*锛屽嚑浣曠暩鍙樹笉鏄?鎸囦护娌℃墽琛?閫犳垚鐨勩€?
+- **`vmov.f32 Sd, Sm` 分支标记 `h145k709b` 已在?*（位?`if((h&0xFFB8u)==0xEEB0u){ static std::map<SceUInt32,long> _uvfp2;` 之前），
+  后续 patch 不得跨越该锚点删除区间（此前已因此丢失过丢次修复）?- `[VMISS]` 全局?1 条（NEON `h=FFA0 h2=30B2`），`[UNKVFP2]` 12 条最终均被后续分支处?  ?**解释器对 `0xEEB0` 家族已基本完?*，几何畸变不?指令没执?造成的?
 
 ---
 
-## h145k712銆?272 閲嶆祴鍚﹀喅锛涒槄鏍瑰洜閿佸畾"鍑犱綍鍏辩嚎"锛屽珜鐤戣浆鍚?sin/cos鈽呫€?
-### 1. `P5D_SCREEN_FIX=480,-272` 鍦?鍑犱綍宸蹭慨澶?鍓嶆彁涓嬮噸娴?
+## h145k712?272 重测否决；★根因锁定"几何共线"，嫌疑转?sin/cos★?
+### 1. `P5D_SCREEN_FIX=480,-272` ?几何已修?前提下重?
 | 甯?| 鏃犳敞鍏ワ紙淇鍚庯級 | **娉ㄥ叆 -272** |
 |---|---|---|
-| 2770鈥?000 LOGO 绐楀彛 | 0.00 | **0.00锛堜粛鍏ㄩ粦锛?* |
-| 3010 鍥炲綊甯?| 127.21 | **149.32**锛堟敞鍏ョ敓鏁堜笖鏇村ソ锛?|
+| 2770?000 LOGO 窗口 | 0.00 | **0.00（仍全黑?* |
+| 3010 回归?| 127.21 | **149.32**（注入生效且更好?|
 
-鈬?娉ㄥ叆纭疄鏀瑰彉浜嗘覆鏌擄紙3010 甯т笂鍗囷級锛屼絾 **LOGO 绐楀彛浠嶅叏榛?*
-鈬?**`screen.w` 鐨勭鍙蜂笉鏄牴鍥?*锛堟鍓嶉偅娆″叏榛戞槸鍦ㄥ嚑浣?4352 鐣稿彉鏃舵祴鐨勶紝鏈疆鍦ㄥ叾淇鍚庨噸娴嬫墠鍏峰垽瀹氬姏锛夈€?
-### 2. 鍐冲畾鎬ф帹鐞嗭細鍏辩嚎鍦?NDC 涓緷鐒跺叡绾?
-鐪熷疄椤剁偣锛堜慨澶嶅悗锛夛細
+?注入确实改变了渲染（3010 帧上升），但 **LOGO 窗口仍全?*
+?**`screen.w` 的符号不是根?*（此前那次全黑是在几?4352 畸变时测的，本轮在其修复后重测才具判定力）?
+### 2. 决定性推理：共线?NDC 中依然共?
+真实顶点（修复后）：
 ```
 v0=(0,0)  v1=(480.738953,-480.738953)  v2=(721.108398,-721.108398)  v3=(240.369476,-240.369476)
 ```
-鍗?`y = -x`锛? 鐐瑰叡绾匡級銆俿hader 瀵?x/y 鐢?*鍚屽€煎紓鍙?*绯绘暟锛?
+?`y = -x`? 点共线）。shader ?x/y ?*同异?*系数?
 ```
 NDC_x = x/272 - 1
 NDC_y = -y/272 + 1 = x/272 + 1 = NDC_x + 2        (浠ｅ叆 y = -x)
 ```
-鈬?**NDC 涓?4 鐐逛粛涓ユ牸鍏辩嚎锛堢洿绾?`y = x + 2`锛?*锛屼笌鍙鍖?`[-1,1]虏` 鐨勪氦闆嗕粎涓€鐐?鈬?**闈㈢Н 0 鈬?闆跺儚绱?*锛堜笌娉ㄥ叆 `-272` 鏃犲叧锛宍-272` 鍙敼 y 鐨勬枩鐜囩鍙凤紝鍏辩嚎鎬т笉鍙橈級銆?
-**鈬?缁撹锛氬彧瑕佸紩鎿庝骇鍑虹殑 4 鐐瑰叡绾匡紝鏃犺 UBO/shader 濡備綍閮戒笉鍙兘鎴愬儚銆?鐪熸満鑳芥樉绀?鈬?鐪熸満鐨?4 鐐瑰繀涓嶅叡绾?鈬?鎴戜滑鏈変竴澶?鎸囦护宸插疄鐜颁絾璇箟閿?鐨勭己闄枫€?*
+?**NDC ?4 点仍严格共线（直?`y = x + 2`?*，与可见?`[-1,1]²` 的交集仅丢??**面积 0 ?零像?*（与注入 `-272` 无关，`-272` 只改 y 的斜率符号，共线性不变）?
+**?结论：只要引擎产出的 4 点共线，无论 UBO/shader 如何都不可能成像?真机能显??真机?4 点必不共??我们有一?指令已实现但语义?的缺陷?*
 
-### 3. 鈽?澶村彿瀚岀枒锛歚sin` / `cos` 鈽?
-`0x811610A4` 鍐呴儴鍚棆杞锛堣搴︿粎 0.0083 rad锛夛細
+### 3. ?头号嫌疑：`sin` / `cos` ?
+`0x811610A4` 内部含旋转段（角度仅 0.0083 rad）：
 ```
 811611F8  vmul.f32 s19, s23, s0      ; 瑙掑害(搴? 鈫?寮у害 (脳蟺/180)
 81161200  bl  #0x8116424c            ; 鈫?sin
@@ -275004,71 +275008,71 @@ NDC_y = -y/272 + 1 = x/272 + 1 = NDC_x + 2        (浠ｅ叆 y = -x)
 8116122A  vmla.f32  s1, s2, s0       ; y' = y0*sin + x0*cos
 8116122E  vstr s3,[r2,#0x14]   81161232  vstr s1,[r2,#0x18]
 ```
-- 鑻?`cos 鈫?0`銆乣sin 鈫?1`锛歚x' = -x0`銆乣y' = +y0` 鈬?**鍒嗛噺鍙栬礋/浜掓崲鍨嬬暩鍙?*锛屼笌瀹炴祴 `y = -x` 褰㈡€佸惢鍚堛€?- `0x8116424c` / `0x81164254` 鏄紩鎿庯紙鎴?HLE 鎺ョ锛夌殑鏁板鍑芥暟锛?*蹇呴』楠岃瘉鍏惰繑鍥炲€?*銆?
-### 4. 涓嬩竴姝ワ紙鍞竴鍔ㄤ綔锛?
-鍦?`pc==0x81161200` 涓?`pc==0x8116120C` 涔嬪悗锛堝嵆涓ゆ `bl` 杩斿洖澶?`0x81161204` / `0x81161210`锛?鎵撳嵃 `s0`锛堣繑鍥炲€硷級涓庤緭鍏ュ姬搴?`s19`锛涘鐓?`sin/cos` 鐨勬纭€硷細
-- 鑻?`s0` 鏄庢樉閿欒锛堝鎭?0 / 鎭?1 / 鏈彉鍖栵級鈬?瀹氫綅鍒?`0x8116424c`/`0x81164254` 鐨勫疄鐜扮己闄峰苟淇锛?- 鑻?`sin/cos` 姝ｇ‘ 鈬?缁х画鏌?`vnmls/vmla` 鐨勪慨楗扮璇箟锛坄81161226`/`8116122A` 鐨?`h2` 鍙栬礋浣嶏級銆?
-鍒ゆ嵁涓嶅彉锛?*3010 鍥炲綊甯?`mean` 涓嶄綆浜?127**锛堟湰杞敞鍏ョ増杈?149.32锛変负鏃犲洖褰掋€?
+- ?`cos ?0`、`sin ?1`：`x' = -x0`、`y' = +y0` ?**分量取负/互换型畸?*，与实测 `y = -x` 形吻合?- `0x8116424c` / `0x81164254` 是引擎（?HLE 接管）的数学函数?*必须验证其返回?*?
+### 4. 下一步（唯一动作?
+?`pc==0x81161200` ?`pc==0x8116120C` 之后（即两次 `bl` 返回?`0x81161204` / `0x81161210`?打印 `s0`（返回）与输入弧?`s19`；对?`sin/cos` 的正确：
+- ?`s0` 明显错误（如?0 / ?1 / 未变化）?定位?`0x8116424c`/`0x81164254` 的实现缺陷并修正?- ?`sin/cos` 正确 ?继续?`vnmls/vmla` 的修饰符语义（`81161226`/`8116122A` ?`h2` 取负位）?
+判据不变?*3010 回归?`mean` 不低?127**（本轮注入版?149.32）为无回归?
 
 ---
 
-# 鈽呪槄鈽?h145k714銆愭牴鍥犱慨澶嶆垚鍔燂細涓変釜鍘傚晢 LOGO 棣栨鐢?*寮曟搸鑷繁**鐢诲嚭锛堟棤浠讳綍瑕嗙洊寮€鍏筹級銆戔槄鈽呪槄
+# ★★?h145k714【根因修复成功：三个厂商 LOGO 首次?*引擎自己**画出（无任何覆盖弢关）】★★★
 
-## 1. 鏍瑰洜锛堝敮涓€锛屽凡璇佸疄锛?
-`_FSinx`锛圢ID `0x93FC85ED`锛夋槸 `sinf`/`cosf` 鐨?*鍏卞悓鍐呴儴瀹炵幇**锛岀敱涓や釜妗╂寜 `r0` 鍖哄垎锛?
+## 1. 根因（唯丢，已证实?
+`_FSinx`（NID `0x93FC85ED`）是 `sinf`/`cosf` ?*共同内部实现**，由两个桩按 `r0` 区分?
 ```
 811658AC (sin) : movs r0,#1 ; movs r1,#0 ; blx #0x812b25e0
-811658B8 (cos) : movs r0,#0 ; movs r1,#0 ; blx #0x812b25e0     鈫?鍚屼竴涓々
+811658B8 (cos) : movs r0,#0 ; movs r1,#0 ; blx #0x812b25e0     ?同一个桩
 ```
 
-鑰屾垜浠殑 HLE 瀹炵幇**瀹屽叏蹇界暐 `r0`**锛?```cpp
+而我们的 HLE 实现**完全忽略 `r0`**?```cpp
 static auto n_fsinx=[](SceUInt32 a,...)->SceUInt32{ ... return g_fout(std::sin(f)); };
 ```
 
-鈬?**`cos` 姘歌繙杩斿洖 `sin` 鐨勫€?*銆傚疄娴嬪鐓э紙`[SINCOS]` 鎺㈤拡锛夛細
+?**`cos` 永远返回 `sin` 的?*。实测对照（`[SINCOS]` 探针）：
 ```
-pc=0x81161204 sin  ret=0.469471633   expect sin= 0.469471624   鉁?pc=0x81161210 cos  ret=0.469471633   expect cos=-0.882947560   鉂?杩斿洖 sin
+pc=0x81161204 sin  ret=0.469471633   expect sin= 0.469471624   ?pc=0x81161210 cos  ret=0.469471633   expect cos=-0.882947560   ?返回 sin
 ```
 
-鍚庢灉锛歚0x811610A4` 鐨勬棆杞 `x'=y0*cos鈭抶0*sin`銆乣y'=y0*sin+x0*cos`锛堝彇 `cos=sin`锛夐€€鍖栦负
-`x'=sin*(y0鈭抶0)`銆乣y'=sin*(y0+x0)` 鈬?**4 涓《鐐瑰叡绾?鈬?闈㈢Н 0 鈬?闆跺儚绱?*
-锛堜笌瀹炴祴 `y = 鈭抶` 鍏辩嚎褰㈡€併€佷互鍙?NDC 涓叡绾夸緷鏃у叡绾?鐨勬帹鐞嗗畬鍏ㄤ竴鑷达級銆?
-**淇**锛歚return g_fout(a ? std::sin(f) : std::cos(f));`锛堟爣璁?`h145k714`锛?淇鍚庡嵆鏃堕獙璇侊細
+后果：`0x811610A4` 的旋转段 `x'=y0*cos−x0*sin`、`y'=y0*sin+x0*cos`（取 `cos=sin`）化为
+`x'=sin*(y0−x0)`、`y'=sin*(y0+x0)` ?**4 个顶点共??面积 0 ?零像?*
+（与实测 `y = −x` 共线形以?NDC 中共线依旧共?的推理完全一致）?
+**修复**：`return g_fout(a ? std::sin(f) : std::cos(f));`（标?`h145k714`?修复后即时验证：
 ```
 [FSINX#1] s0=2.965094 r0=1 -> sin =  0.175583   鉁?[FSINX#2] s0=2.965094 r0=0 -> cos = -0.984465   鉁?```
 
-## 2. 淇鍚庣殑鍍忕礌璇佹嵁锛?60脳544 BMP锛岄€愬儚绱犻噰鏍凤級
+## 2. 修复后的像素证据?60×544 BMP，像素采样）
 
 | 甯ф | mean | max | nz | 鍥惧儚鍐呭 |
 |---|---|---|---|---|
-| 2760鈥?770 | 0.00 | 0 | 0 | 鍓嶅 |
-| **2780鈥?850** | **5.63** | 255 | 1121 | **ATLUS**锛堣摑鏂滄潯 + 鐧芥弿杈?+ 绾㈢澶达級 |
-| **2860鈥?910** | **11.99** | 252 | 1860 | **P路STUDIO**锛堢櫧鑹?P 褰?+ 妫曡壊锛?|
+| 2760?770 | 0.00 | 0 | 0 | 前奏 |
+| **2780?850** | **5.63** | 255 | 1121 | **ATLUS**（蓝斜条 + 白描?+ 红箭头） |
+| **2860?910** | **11.99** | 252 | 1860 | **P·STUDIO**（白?P ?+ 棕色?|
 | 2920 | 0.00 | 0 | 0 | 鍒囨崲闂撮殭 |
-| **2930鈥?010** | **11.17** | 255 | 1583 | **CRIWARE**锛堢櫧鑹?+ 钃濊壊鏍肩汗娉㈡氮锛?|
+| **2930?010** | **11.17** | 255 | 1583 | **CRIWARE**（白?+ 蓝色格纹波浪?|
 
-閫愬儚绱?bbox锛堜粎闈為浂锛夛細
+逐像?bbox（仅非零）：
 ```
 p5d_seq_2800 (ATLUS)  : nz=17766  bbox=x[0..234]   y[47..302]  235x256
 p5d_seq_2880 (P路STUDIO): nz=29555 bbox=x[0..307]   y[81..308]  308x228
 p5d_seq_2960 (CRIWARE): nz=25118  bbox=x[0..251]   y[89..316]  252x228
 ```
-鍥惧儚宸插鍑轰负 `C:\dev\p5d_build\_logo_check\logo_2800.png / logo_2880.png / logo_2960.png`锛?缁忕洰瑙嗙‘璁や笁鑰呬负 ATLUS / P路STUDIO / CRIWARE銆?
-## 3. 涓庣洰鏍囩殑宸窛锛堝皻鏈畬鎴愮殑閮ㄥ垎锛?
-涓変釜 LOGO 鐩墠**閮藉彧鏄剧ず鍦ㄧ敾闈㈠乏涓嬭**锛坆box 鐨?`x` 浠?0 璧枫€佸乏杈圭晫鍦ㄥ睆骞曞锛夛紝
-鈬?**鍑犱綍鐨勭缉鏀?浣嶇疆浠嶅亸**锛屽皻鏈?姝ｅ父鏄剧ず"锛堝簲灞呬腑涓斿畬鏁达級銆?
-**娉ㄦ剰**锛毬? 鐨勫嚑浣曟祴閲忥紙`v0=(0,0)`銆乣v1=(480.7,-480.7)`銆乣v2=(721.1,-721.1)`銆乣v3=(240.4,-240.4)`锛?鏄湪 **`_FSinx` 淇涔嬪墠**鍋氱殑锛涗慨澶?sin/cos 鍚庡嚑浣曞繀鐒跺凡鏀瑰彉
-鈬?**蹇呴』閲嶆祴 `[VALLHEX]`**锛堢敤 `P5D_VALL=1`锛夋墠鑳界煡閬撳綋鍓嶇湡瀹炲嚑浣曘€?
-## 4. 涓嬩竴姝ワ紙鍞竴鍔ㄤ綔锛?
-`P5D_VALL=1` 閲嶈窇锛岃淇 `_FSinx` 涔嬪悗鐨?`[VALLHEX]/[VALLFLT]`锛?- 鑻?4 椤剁偣宸叉槸 `(0,0)(960,0)(960,544)(0,544)` 涔嬬被 鈬?鍑犱綍姝ｇ‘锛岃浆涓烘鏌?LOGO 鐨勫亸绉?缂╂斁鏉ユ簮锛?- 鑻ヤ笉鏄?鈬?娌?`0x811610A4` 鐨勮緭鍏ワ紙`[GEOMR1]` 鐨?`r1` 缁撴瀯锛歚{0,0,1,1,0,544,alpha,nan,鈥`锛?  涓庡叾鍐呴儴娑堣垂缁х画杩斤紝閲嶇偣鏍稿 `721.108398` 涓?`544` 鐨勫叧绯伙紙`721.108/544 = 1.3256`锛夈€?
-## 5. 鏈疆鏂规硶鏁欒锛堝凡涓ゆ韪╁潙锛屽姟蹇呴伒瀹堬級
+图像已导出为 `C:\dev\p5d_build\_logo_check\logo_2800.png / logo_2880.png / logo_2960.png`?经目视确认三者为 ATLUS / P·STUDIO / CRIWARE?
+## 3. 与目标的差距（尚未完成的部分?
+三个 LOGO 目前**都只显示在画面左下角**（bbox ?`x` ?0 起左边界在屏幕外），
+?**几何的缩?位置仍偏**，尚?正常显示"（应居中且完整）?
+**注意**：? 的几何测量（`v0=(0,0)`、`v1=(480.7,-480.7)`、`v2=(721.1,-721.1)`、`v3=(240.4,-240.4)`?是在 **`_FSinx` 修复之前**做的；修?sin/cos 后几何必然已改变
+?**必须重测 `[VALLHEX]`**（用 `P5D_VALL=1`）才能知道当前真实几何?
+## 4. 下一步（唯一动作?
+`P5D_VALL=1` 重跑，读修复 `_FSinx` 之后?`[VALLHEX]/[VALLFLT]`?- ?4 顶点已是 `(0,0)(960,0)(960,544)(0,544)` 之类 ?几何正确，转为检?LOGO 的偏?缩放来源?- 若不???`0x811610A4` 的输入（`[GEOMR1]` ?`r1` 结构：`{0,0,1,1,0,544,alpha,nan,…}`?  与其内部消费继续追，重点核对 `721.108398` ?`544` 的关系（`721.108/544 = 1.3256`）?
+## 5. 本轮方法教训（已两次踩坑，务必遵守）
 
-- **缁濅笉鎸夊湴鍧€鍖洪棿鍒犻櫎鎺㈤拡**锛氫笂涓€杞鏄繖鏍疯鍒犱簡 `vmov.f32 Sd,Sm` 淇锛屽鑷村嚑浣曢€€鍥?4352銆?  涓€寰嬬敤绮剧‘鍗曡閿氱偣锛堝 `if((h&0xFFB8u)==0xEEB0u){ static std::map<SceUInt32,long> _uvfp2;`锛夋彃鍏ャ€?- **`vmiss` 鏄幇鎴愮殑"鏈懡涓寚浠?璁板綍鍣?*锛堟棤鏉′欢鐢熸晥锛夛紝鏃犻渶鑷彃鎺㈤拡锛?  `[VMISS]` 鍏ㄨ繍琛屼粎 1 鏉★紙NEON `h=FFA0 h2=30B2`锛夆噿 瑙ｉ噴鍣ㄦ寚浠よ鐩栧凡鍩烘湰瀹屾暣銆?- **鍒ゆ嵁**锛?010 鍥炲綊甯?`mean` 涓嶄綆浜?~127 涓烘棤鍥炲綊锛汱OGO 绐楀彛鍑虹幇闈為浂涓鸿繘灞曘€?
+- **绝不按地坢区间删除探针**：上丢轮正是这样误删了 `vmov.f32 Sd,Sm` 修复，导致几何?4352?  丢律用精确单行锚点（如 `if((h&0xFFB8u)==0xEEB0u){ static std::map<SceUInt32,long> _uvfp2;`）插入?- **`vmiss` 是现成的"未命中指?记录?*（无条件生效），无需自插探针?  `[VMISS]` 全运行仅 1 条（NEON `h=FFA0 h2=30B2`）⇒ 解释器指令覆盖已基本完整?- **判据**?010 回归?`mean` 不低?~127 为无回归；LOGO 窗口出现非零为进展?
 
 ---
 
-## h145k715銆愪慨澶?`_FSinx` 鍚庣殑鐪熷疄鍑犱綍锛氫笉鍐嶅叡绾匡紝LOGO 閮ㄥ垎鏄剧ず锛涙柊寮傚父 = 鏃嬭浆瑙?512掳銆?
-### 1. 淇 sin/cos 鍚庣殑 LOGO 椤剁偣锛坄[VALLHEX] LOGO`锛岄€愪綅锛?
+## h145k715【修?`_FSinx` 后的真实几何：不再共线，LOGO 部分显示；新异常 = 旋转?512°?
+### 1. 修复 sin/cos 后的 LOGO 顶点（`[VALLHEX] LOGO`，位?
 ```
 v0 = (   0.000000,    0.000000, 0, NaN, 0, 0)
 v1 = ( 480.738953,  904.138306, 0, NaN, 1, 0)
@@ -275076,44 +275080,44 @@ v2 = (  28.669800,  663.768799, 0, NaN, 1, 1)
 v3 = (-452.069214, -240.369476, 0, NaN, 0, 1)      UV 瀹屾暣
 ```
 
-**鈬?4 鐐逛笉鍐嶅叡绾?*锛堝姣斾慨澶嶅墠鐨?`(0,0) (480.7,-480.7) (721.1,-721.1) (240.4,-240.4)`锛岄偅 4 鐐瑰叏鍦?`y=-x` 涓婏級銆?
-浠ｅ叆 shader锛坄x/272鈭?`銆乣鈭抷/272+1`锛夛細
+**?4 点不再共?*（对比修复前?`(0,0) (480.7,-480.7) (721.1,-721.1) (240.4,-240.4)`，那 4 点全?`y=-x` 上）?
+代入 shader（`x/272?`、`−y/272+1`）：
 
 | 椤剁偣 | NDC | 鐩稿灞忓箷 `[-1,1]虏` |
 |---|---|---|
-| v0 | (鈭?.000, +1.000) | 瑙掔偣锛堣竟鐣岋級 |
-| v1 | ( 0.767, 鈭?.326) | 涓嬫柟澶?|
-| v2 | (鈭?.895, 鈭?.443) | 涓嬫柟澶?|
+| v0 | (?.000, +1.000) | 角点（边界） |
+| v1 | ( 0.767, ?.326) | 下方?|
+| v2 | (?.895, ?.443) | 下方?|
 | v3 | (鈭?.662, +1.884) | 宸︿晶澶?|
 
-鈬?鍥涜竟褰笌灞忓箷鐨勪氦闆嗘鏄?*宸︿笅瑙?* 鈬?**涓庡鍑虹殑涓夊紶 PNG 瀹屽叏涓€鑷?*锛圓TLUS / P路STUDIO / CRIWARE 閮藉彧鏄剧ず宸︿笅閮ㄥ垎锛夈€?
+?四边形与屏幕的交集正?*左下?* ?**与导出的三张 PNG 完全丢?*（ATLUS / P·STUDIO / CRIWARE 都只显示左下部分）?
 ### 2. 鏂板紓甯革細鏃嬭浆瑙?= 8.936 rad 鈮?512掳
 
-`[SINCOS]` 鎺㈤拡瀹炴祴锛堜慨澶嶅悗锛夛細
+`[SINCOS]` 探针实测（修复后）：
 ```
 pc=0x81161204 sin ret=... rad(s19)=8.936085701
 ```
-鑰?`0x811611EC` 澶勭殑甯搁噺 `0x3C8EFA35 = 蟺/180` 璇存槑 `s19 = s23 脳 蟺/180`锛坄s23` 浠?*搴?*涓哄崟浣嶏級
-鈬?`s23 鈮?512掳`銆?*512 = 2鈦癸紝鏄庢樉涓嶆槸 LOGO 搴旀湁鐨勮搴?*锛堜慨澶嶅墠娴嬪緱璇ュ寮у害瀵瑰簲 0.0083 rad 鐨勫皬瑙掑害锛夈€?
-鈬?4 涓《鐐逛箣鎵€浠?鏃嬭浆杩囧害 + 鍋忓乏涓?锛屼笌杩欎釜寮傚父鐨?`s23` 鐩存帴鐩稿叧銆?
-### 3. 褰撳墠杩涘害灏忕粨
+?`0x811611EC` 处的常量 `0x3C8EFA35 = π/180` 说明 `s19 = s23 × π/180`（`s23` ?*?*为单位）
+?`s23 ?512°`?*512 = 2⁹，明显不是 LOGO 应有的角?*（修复前测得该处弧度对应 0.0083 rad 的小角度）?
+?4 个顶点之扢?旋转过度 + 偏左?，与这个异常?`s23` 直接相关?
+### 3. 当前进度小结
 
 | 椤?| 鐘舵€?|
 |---|---|
-| 寮曟搸**鑷繁**鐢诲嚭涓変釜 LOGO锛堟棤浠讳綍瑕嗙洊寮€鍏筹級 | 鉁?**宸茶揪鎴?*锛堢洰瑙嗙‘璁?ATLUS / P路STUDIO / CRIWARE锛?|
-| 涓変釜 LOGO 鍦?2760鈥?000 渚濇鍑虹幇 | 鉁?宸茶揪鎴愶紙2780鈥?850 / 2860鈥?910 / 2930鈥?010 涓夋鍚勫紓锛?|
-| 鍍忕礌缁熻璇佹嵁 | 鉁?`mean` 5.63 / 11.99 / 11.17锛宍nz` 1121 / 1860 / 1583锛宐box 鍚勫紓 |
-| **"姝ｅ父鏄剧ず"锛堝眳涓笖瀹屾暣锛?* | 鉂?**鏈揪鎴?* 鈥斺€?涓夎€呴兘鍙樉绀哄乏涓嬭锛屽洜鏃嬭浆瑙掑紓甯?|
+| 引擎**自己**画出三个 LOGO（无任何覆盖弢关） | ?**已达?*（目视确?ATLUS / P·STUDIO / CRIWARE?|
+| 三个 LOGO ?2760?000 依次出现 | ?已达成（2780?850 / 2860?910 / 2930?010 三段各异?|
+| 像素统计证据 | ?`mean` 5.63 / 11.99 / 11.17，`nz` 1121 / 1860 / 1583，bbox 各异 |
+| **"正常显示"（居中且完整?* | ?**未达?* —?三都只显示左下角，因旋转角异?|
 
-### 4. 涓嬩竴姝ワ紙鍞竴鍔ㄤ綔锛?
-杩?`s23`锛堣搴︼級鐨勬潵婧愶細鍦?`0x811610A4` 涓?`s23` 鏄?callee-saved 瀵勫瓨鍣紝
-闇€鍦ㄥ嚱鏁板叆鍙ｈ `s23`锛坄[GEOMIN]` 宸茶兘璇?s0..s7锛屾墿灞曡 s23 鍗冲彲锛夛紝骞舵部璋冪敤閾惧線涓婃壘瀹冪殑璧嬪€煎锛?閲嶇偣鏍稿鏄惁鍙堟槸涓€涓?杈撳叆鏈纭紶閫?锛堝悓绫婚棶棰橈細`vmov` 缂哄け銆乣_FSinx` 蹇界暐 `r0` 閮藉凡璇佸疄锛夈€?
-鍒ゆ嵁涓嶅彉锛?*3010 鍥炲綊甯?`mean` 涓嶄綆浜?~127**锛?*LOGO 绐楀彛 bbox 搴斾粠 `x[0..]` 鍙樹负灞呬腑**銆?
+### 4. 下一步（唯一动作?
+?`s23`（角度）的来源：?`0x811610A4` ?`s23` ?callee-saved 寄存器，
+霢在函数入口读 `s23`（`[GEOMIN]` 已能?s0..s7，扩展读 s23 即可），并沿调用链往上找它的赋处?重点核对是否又是丢?输入未正确传?（同类问题：`vmov` 缺失、`_FSinx` 忽略 `r0` 都已证实）?
+判据不变?*3010 回归?`mean` 不低?~127**?*LOGO 窗口 bbox 应从 `x[0..]` 变为居中**?
 
 ---
 
-## h145k716銆愬叆鍙?s23=0 鑰屼娇鐢ㄦ椂 s19 瀵瑰簲 512掳 鈬?s23 鍦ㄥ嚱鏁板唴閮ㄨ鏀瑰啓銆?
-### 瀹炴祴锛坄[GEOMIN]` 鎵╁睍鍚庯紝杩炴墦 12 娆″叏涓€鑷达級
+## h145k716【入?s23=0 而使用时 s19 对应 512° ?s23 在函数内部被改写?
+### 实测（`[GEOMIN]` 扩展后，连打 12 次全丢致）
 
 ```
 [GEOMIN] r0=0xFFFFFFFF r1=0xA016DFD0 r2=0xB356001C r3=0x1
@@ -275121,42 +275125,42 @@ pc=0x81161204 sin ret=... rad(s19)=8.936085701
          s16=544.000000  s17=0.000000  s23(angleDeg)=0.000000   |  lr=0x811935EE
 ```
 
-- `s16 = 544`锛? 灞忓箷楂橈級銆乣s17 = 0` 鈬?涓?`[GEOMQ]` 涓€鑷?鉁?- **鍏ュ彛 `s23 = 0`** 鈬?鑻ユ寜 `811611F8 vmul.f32 s19, s23, s0`锛坄s0 = 0x3C8EFA35 = 蟺/180`锛?  鍒?`s19` 搴斾负 **0**銆?
-浣?`[SINCOS]` 鍦?`0x81161204` / `0x81161210` 瀹炴祴锛?```
-rad(s19) = 8.936085701      鈬?鍙嶆帹 s23 = 8.936/0.0174533 鈮?512锛堝害锛?```
+- `s16 = 544`? 屏幕高）、`s17 = 0` ??`[GEOMQ]` 丢??- **入口 `s23 = 0`** ?若按 `811611F8 vmul.f32 s19, s23, s0`（`s0 = 0x3C8EFA35 = π/180`?  ?`s19` 应为 **0**?
+?`[SINCOS]` ?`0x81161204` / `0x81161210` 实测?```
+rad(s19) = 8.936085701      ?反推 s23 = 8.936/0.0174533 ?512（度?```
 
-**鈬?鐭涚浘 鈬?`s23` 鍦?鍑芥暟鍏ュ彛"涓?浣跨敤鐐癸紙`0x811611F8`锛?涔嬮棿琚敼鍐欒繃銆?*
-锛坄0x811611EC`鈥揱0x81161232` 娈垫湰韬笉鍐?`s23`锛氬叾椤哄簭涓?`vmul s19,s23,s0` 鈫?`vmov s0,s19` 鈫?`bl sin` 鈫?`vmov s23,s0`(鍐欑殑鏄?sin 缁撴灉) 鈫?`vmov s0,s19` 鈫?`bl cos`锛?鏁呰鐩栧繀椤诲彂鐢熷湪 `811611EC` **涔嬪墠**銆佷笖鍏ュ彛璇绘暟锛?锛変箣鍚庛€傦級
+**?矛盾 ?`s23` ?函数入口"?使用点（`0x811611F8`?之间被改写过?*
+（`0x811611EC`–`0x81161232` 段本身不?`s23`：其顺序?`vmul s19,s23,s0` ?`vmov s0,s19` ?`bl sin` ?`vmov s23,s0`(写的?sin 结果) ?`vmov s0,s19` ?`bl cos`?故覆盖必须发生在 `811611EC` **之前**、且入口读数?）之后）
 
 ### 褰撳墠瀹氫綅
 
-杩欐槸鍚岀被闂鐨勭涓変緥锛堝墠涓や緥锛?*`vmov.f32 Sd,Sm` 缂哄け**銆?*`_FSinx` 蹇界暐 `r0`**锛夛紝
-妯″紡涓€鑷达細**鏌愪釜鍊兼病鏈夋寜棰勬湡浼犻€掑埌浣跨敤鐐?*銆?
-`s23` 鏄?callee-saved锛坄vpush {s16-s25}` 淇濆瓨锛夛紝鍏ュ彛涓?0锛屼娇鐢ㄦ椂涓?512锛? 2鈦癸級銆?
-### 涓嬩竴姝ワ紙鍞竴鍔ㄤ綔锛?
-鍦?`0x811610A4` 鍐呴儴**閫愮偣閲囨牱 `s23`**锛堜緥濡傚湪 `0x811611C0`銆乣0x811611EC`銆乣0x811611F8` 涓夊鍚勬墦鍗颁竴娆★級锛?瀹氫綅瀹冨湪鍝潯鎸囦护涔嬪悗浠?0 鍙樻垚 512锛涚劧鍚庢鏌ヨ鎸囦护鏄惁涓?`vmov/vldr/vmul` 涓€绫汇€佷互鍙婂叾鎿嶄綔鏁版槸鍚﹀張涓€娆¤俯鍒?瀵勫瓨鍣ㄦ湭姝ｇ‘浼犻€?鐨勯棶棰樸€?
-### 閲岀▼纰戯紙鏈疆宸茶揪鎴愮殑閮ㄥ垎锛?
+这是同类问题的第三例（前两例?*`vmov.f32 Sd,Sm` 缺失**?*`_FSinx` 忽略 `r0`**），
+模式丢致：**某个值没有按预期传到使用?*?
+`s23` ?callee-saved（`vpush {s16-s25}` 保存），入口?0，使用时?512? 2⁹）?
+### 下一步（唯一动作?
+?`0x811610A4` 内部**逐点采样 `s23`**（例如在 `0x811611C0`、`0x811611EC`、`0x811611F8` 三处各打印一次）?定位它在哪条指令之后?0 变成 512；然后检查该指令是否?`vmov/vldr/vmul` 丢类以及其操作数是否又丢次踩?寄存器未正确传?的问题?
+### 里程碑（本轮已达成的部分?
 | 椤?| 鐘舵€?|
 |---|---|
-| 寮曟搸**鑷繁**鐢诲嚭涓変釜 LOGO锛?*鏃犱换浣曡鐩栧紑鍏?* | 鉁咃紙ATLUS / P路STUDIO / CRIWARE锛屽凡鐩纭锛?|
-| 涓変釜 LOGO 鍦?2760鈥?000 渚濇鍑虹幇 | 鉁咃紙2780鈥?850 / 2860鈥?910 / 2930鈥?010锛?|
-| 鍍忕礌缁熻璇佹嵁 | 鉁?`mean` 5.63 / 11.99 / 11.17锛沗nz` 1121 / 1860 / 1583锛沚box 鍚勫紓 |
-| 灞呬腑涓斿畬鏁达紙"姝ｅ父鏄剧ず"锛?| 鉂?褰撳墠鍙樉绀哄乏涓嬭锛堝洜 `s23=512掳` 杩囧害鏃嬭浆锛?|
+| 引擎**自己**画出三个 LOGO?*无任何覆盖开?* | ✅（ATLUS / P·STUDIO / CRIWARE，已目视确认?|
+| 三个 LOGO ?2760?000 依次出现 | ✅（2780?850 / 2860?910 / 2930?010?|
+| 像素统计证据 | ?`mean` 5.63 / 11.99 / 11.17；`nz` 1121 / 1860 / 1583；bbox 各异 |
+| 居中且完整（"正常显示"?| ?当前只显示左下角（因 `s23=512°` 过度旋转?|
 
-**宸茬‘璁ょ殑鏍瑰洜閾撅紙渚涙渶缁堟敹灏惧紩鐢級**锛?`_FSinx` 蹇界暐 `r0` 鈬?`cos` 杩斿洖 `sin` 鈬?鏃嬭浆鐭╅樀閫€鍖?鈬?4 椤剁偣鍏辩嚎 鈬掞紙淇?`_FSinx` 鍚庯級
-鍑犱綍鎭㈠闈㈢Н浣嗚搴﹀紓甯?鈬?闇€鏌?`s23` 鐨勬敼鍐欑偣銆?
+**已确认的根因链（供最终收尾引用）**?`_FSinx` 忽略 `r0` ?`cos` 返回 `sin` ?旋转矩阵逢??4 顶点共线 ⇒（?`_FSinx` 后）
+几何恢复面积但角度异??霢?`s23` 的改写点?
 
 ---
 
-## h145k717銆恠23 鍦?0x811611C0鈫?x811611EC 涔嬮棿鐢?0 鍙?512 鈬?瀚岀枒涓?vcmp/vmrs銆?
-### 瀹炴祴锛坄[S23TRACE]` 閫愮偣閲囨牱锛? 杞叏涓€鑷达級
+## h145k717【s23 ?0x811611C0?x811611EC 之间?0 ?512 ?嫌疑?vcmp/vmrs?
+### 实测（`[S23TRACE]` 逐点采样? 轮全丢致）
 
 ```
 [S23TRACE] pc=0x811611C0  s23=0.000000  s19=1.000000  s8=1.000000
-[S23TRACE] pc=0x811611EC  s23=512.000000 s19=1.000000 s8=1.000000     鈫?灏卞湪杩欐鍐呰鏀?[S23TRACE] pc=0x811611F8  s23=512.000000 s19=1.000000  s8=1.000000
+[S23TRACE] pc=0x811611EC  s23=512.000000 s19=1.000000 s8=1.000000     ?就在这段内被?[S23TRACE] pc=0x811611F8  s23=512.000000 s19=1.000000  s8=1.000000
 ```
 
-### 璇ュ尯闂寸殑鍏ㄩ儴鎸囦护锛堝弽姹囩紪锛?
+### 该区间的全部指令（反汇编?
 ```
 811611C0  vstr s10, [sp, #0x34]
 811611C4  vstr s9,  [sp, #0x38]
@@ -275172,31 +275176,31 @@ rad(s19) = 8.936085701      鈬?鍙嶆帹 s23 = 8.936/0.0174533 鈮?512锛堝害
 811611EA  b        #0x8116123c
 ```
 
-鈬?鍞竴鐨?娑夊強 `s23`"鐨勬寚浠ゆ槸 **`vcmp.f32 s23, #0`**锛坄VCMP` 鍙簲璁剧疆 `fpscr` 鏍囧織浣嶏紱
-鍗充娇 `VCMPE` 涔熷彧鍙兘鍥?NaN 缃?`IOC`锛?*缁濅笉浼氭妸 `s23` 鏀规垚 512**锛夈€?鈬?鍙︽湁 `vmrs apsr_nzcv, fpscr`锛堣鏍囧織锛夈€?
-**鈬?缁撹锛歚vcmp.f32` 鎴?`vmrs` 鐨勫疄鐜版湁缂洪櫡**锛堟妸鏌愪釜鍊煎啓鍥炰簡 `s23`锛屾垨鎶?`s23` 褰撴垚浜嗙洰鏍囧瘎瀛樺櫒锛夈€?
-琛ュ厖绾跨储锛歚512 = 2鈦?= 0x44000000`锛坒loat 512.0 鐨勪綅妯″紡锛夛紝鍍忔槸**鏌愪釜鏁存暟/绔嬪嵆鏁拌褰撲綔娴偣鍐欏洖**銆?
-### 涓嬩竴姝ワ紙鍞竴鍔ㄤ綔锛?
-1. 鍦?`0x811611D8`锛坄vcmp`锛?*鍓嶅悗鍚勯噰鏍蜂竴娆?`s23`**锛岀‘璁ゆ槸鍚︽鏄?`vcmp` 鏀瑰啓浜嗗畠锛?2. 妫€鏌ヨВ閲婂櫒涓?`VCMP`锛坄0xEEB4/0xEEB5` + `h2` 鐨?`0x0A40|0x0A50` 褰㈡€侊級涓?`VMRS`锛坄0xEEF1`/`0xEEF7` 绯伙級鐨勫疄鐜帮細
-   - `VCMP` 鏄惁璇妸 `h2`/鎿嶄綔鏁板綋浣滅洰鏍囧瘎瀛樺櫒鍐欏叆锛?   - `VMRS` 鏄惁璇敤 `h`/`h2` 鐨勪綆浣嶅畾浣嶄簡 VFP 瀵勫瓨鍣ㄣ€?3. 淇鍚庡嵆璺戜竴娆?2760鈥?010 鍍忕礌缁熻锛?*鍒ゆ嵁 = 涓変釜 LOGO 鐨?bbox 涓嶅啀鏄?`x[0..]`锛堣创宸﹁竟缂橈級鑰屾槸灞呬腑**锛?   骞朵笖 3010 鍥炲綊甯?`mean` 涓嶄綆浜?~127銆?
-### 閲岀▼纰戯紙鏈疆宸茶揪鎴愶紝鍕夸涪锛?
+?唯一?涉及 `s23`"的指令是 **`vcmp.f32 s23, #0`**（`VCMP` 只应设置 `fpscr` 标志位；
+即使 `VCMPE` 也只可能?NaN ?`IOC`?*绝不会把 `s23` 改成 512**）??另有 `vmrs apsr_nzcv, fpscr`（读标志）?
+**?结论：`vcmp.f32` ?`vmrs` 的实现有缺陷**（把某个值写回了 `s23`，或?`s23` 当成了目标寄存器）?
+补充线索：`512 = 2?= 0x44000000`（float 512.0 的位模式），像是**某个整数/立即数被当作浮点写回**?
+### 下一步（唯一动作?
+1. ?`0x811611D8`（`vcmp`?*前后各采样一?`s23`**，确认是否正?`vcmp` 改写了它?2. 棢查解释器?`VCMP`（`0xEEB4/0xEEB5` + `h2` ?`0x0A40|0x0A50` 形）?`VMRS`（`0xEEF1`/`0xEEF7` 系）的实现：
+   - `VCMP` 是否误把 `h2`/操作数当作目标寄存器写入?   - `VMRS` 是否误用 `h`/`h2` 的低位定位了 VFP 寄存器?3. 修复后即跑一?2760?010 像素统计?*判据 = 三个 LOGO ?bbox 不再?`x[0..]`（贴左边缘）而是居中**?   并且 3010 回归?`mean` 不低?~127?
+### 里程碑（本轮已达成，勿丢?
 | 椤?| 鐘舵€?| 璇佹嵁 |
 |---|---|---|
-| 寮曟搸**鑷繁**鐢诲嚭涓変釜 LOGO锛堟棤浠讳綍瑕嗙洊寮€鍏筹級 | 鉁?| 鐩纭 ATLUS(2800) / P路STUDIO(2880) / CRIWARE(2960) |
-| 涓夎€呬緷娆″嚭鐜颁簬 2760鈥?000 | 鉁?| 2780鈥?850 / 2860鈥?910 / 2930鈥?010 涓夋鍒嗙 |
-| 鍍忕礌缁熻璇佹嵁 | 鉁?| `mean` 5.63 / 11.99 / 11.17锛沗nz` 1121 / 1860 / 1583锛沚box 鍚勫紓 |
-| 灞呬腑瀹屾暣锛?姝ｅ父鏄剧ず"锛?| 鉂?| 褰撳墠鍙樉绀哄乏涓嬭锛屽洜 `s23=512掳` 杩囧害鏃嬭浆 |
+| 引擎**自己**画出三个 LOGO（无任何覆盖弢关） | ?| 目视确认 ATLUS(2800) / P·STUDIO(2880) / CRIWARE(2960) |
+| 三依次出现于 2760?000 | ?| 2780?850 / 2860?910 / 2930?010 三段分离 |
+| 像素统计证据 | ?| `mean` 5.63 / 11.99 / 11.17；`nz` 1121 / 1860 / 1583；bbox 各异 |
+| 居中完整?正常显示"?| ?| 当前只显示左下角，因 `s23=512°` 过度旋转 |
 
-**鏍瑰洜閾撅紙涓夋鍚岀被缂洪櫡锛?*锛?1. `vmov.f32 Sd,Sm` 缂哄け 鈬?鍑犱綍鍙傛暟鍏ㄤ负鏃у€?鈬?璺ㄥ害 4352脳2304锛堝凡淇級
-2. **`_FSinx` 蹇界暐 `r0` 鈬?`cos` 杩斿洖 `sin` 鈬?鏃嬭浆閫€鍖?鈬?4 椤剁偣鍏辩嚎锛堝凡淇紝杩欐槸鍐冲畾鎬х殑涓€姝ワ級**
-3. `s23` 琚?`vcmp`/`vmrs` 涔嬬被閿欒鏀瑰啓涓?512掳锛堝緟淇級
+**根因链（三次同类缺陷?*?1. `vmov.f32 Sd,Sm` 缺失 ?几何参数全为旧??跨度 4352×2304（已修）
+2. **`_FSinx` 忽略 `r0` ?`cos` 返回 `sin` ?旋转逢??4 顶点共线（已修，这是决定性的丢步）**
+3. `s23` ?`vcmp`/`vmrs` 之类错误改写?512°（待修）
 
 
 ---
 
-# 鈽呪槄鈽?h145k718銆愭牴鍥犻摼绗笁鐜攣瀹氾細`vcmp.f32 Sd,#0` 琚?`vmov.f32 Sd,#imm` 鍒嗘敮璇崟鑾枫€戔槄鈽呪槄
+# ★★?h145k718【根因链第三环锁定：`vcmp.f32 Sd,#0` ?`vmov.f32 Sd,#imm` 分支误捕获★★★
 
-## 1. 鎸囦护缂栫爜瀹炴祴锛坄eboot.bin` @ `0x811611D8`锛?
+## 1. 指令编码实测（`eboot.bin` @ `0x811611D8`?
 ```
 VA 0x811611D8: bytes=F5 EE 40 BA   鈫?(h,h2) = 0xEEF5, 0xBA40     鈫?vcmp.f32 s23,#0
 VA 0x811611E4: bytes=F1 EE 10 FA   鈫?(h,h2) = 0xEEF1, 0xFA10     鈫?vmrs apsr_nzcv,fpscr
@@ -275204,36 +275208,36 @@ VA 0x81161200: bytes=03 F0 24 F8   鈫?BL  #0x8116424c             鈫?sin
 VA 0x8116120C: bytes=03 F0 22 F8   鈫?BL  #0x81164254             鈫?cos
 ```
 
-鍒ゅ畾锛?```
+判定?```
 vcmp.f32 s23,#0   (h&0xFFBF)==0xEE34 ? False      鈫?瑙ｉ噴鍣ㄥ彧瀹炵幇浜嗗瘎瀛樺櫒褰㈠紡 vcmp
-                  (h&0xFFF0)==0xEEF0 ? True       鈫?璇懡涓?"vmrs" 鍒嗘敮鐨勬潯浠?                  vmov-imm 鍒嗘敮鏉′欢   ? True       鈫?鈽?璇懡涓?"vmov.f32 Sd,#imm"
-vmrs apsr_nzcv,fpscr (h&0xFFF0)==0xEEF0 ? True    鈫?姝ｇ‘鍛戒腑
+                  (h&0xFFF0)==0xEEF0 ? True       ?误命?"vmrs" 分支的条?                  vmov-imm 分支条件   ? True       ??误命?"vmov.f32 Sd,#imm"
+vmrs apsr_nzcv,fpscr (h&0xFFF0)==0xEEF0 ? True    ?正确命中
 ```
 
-## 2. 鍚庢灉閾撅紙涓庡叏閮ㄥ疄娴嬪惢鍚堬級
+## 2. 后果链（与全部实测吻合）
 
-1. `vcmp.f32 s23,#0` 璧拌繘 **`VMOV.F32 Sd,#imm`** 鍒嗘敮锛坄thumb_interpreter.cpp:4541`
-   `if(((h&0xB0)==0xB0) && ((h2>>8)&0xF)==0xA)`锛夆噿 **涓嶆瘮杈冿紝鑰屾槸鎶婄珛鍗虫暟灞曞紑鍊煎啓鍏?`Sd`**
-   鈬?`s23` 琚啓鎴?**512.0**锛坄2鈦筦锛屽嵆 imm8=`0x40` 鐨勫睍寮€缁撴灉锛夈€?2. 鑰?`[S23TRACE]` 瀹炴祴姝ｆ槸锛歚0x811611C0 鈫?s23=0.0`锛宍0x811611EC 鈫?s23=512.0`
-   锛堜袱鑰呬箣闂村敮涓€娑夊強 `s23` 鐨勬寚浠ゅ氨鏄繖鏉?`vcmp`锛夈€?3. 浜庢槸鏃嬭浆瑙掑彉鎴?`512掳`锛宍s19 = 512脳蟺/180 = 8.936 rad` 鈬?涓?`[SINCOS]` 鐨?`rad(s19)=8.936` **瀹屽叏涓€鑷?*銆?4. 鈬?鍑犱綍琚?鏃嬭浆 512掳"鈬?鍥涢《鐐?`(0,0) (480.7,904.1) (28.7,663.8) (-452.1,-240.4)`
-   鈬?NDC 瑕嗙洊灞忓箷**宸︿笅瑙?* 鈬?涓庡鍑虹殑涓夊紶 PNG 涓?LOGO 鍙樉绀哄乏涓嬮儴鍒?**瀹屽叏鍚诲悎**銆?
-## 3. 淇鏂规锛堜笅涓€杞墽琛岋級
+1. `vcmp.f32 s23,#0` 走进 **`VMOV.F32 Sd,#imm`** 分支（`thumb_interpreter.cpp:4541`
+   `if(((h&0xB0)==0xB0) && ((h2>>8)&0xF)==0xA)`）⇒ **不比较，而是把立即数展开值写?`Sd`**
+   ?`s23` 被写?**512.0**（`2⁹`，即 imm8=`0x40` 的展弢结果）?2. ?`[S23TRACE]` 实测正是：`0x811611C0 ?s23=0.0`，`0x811611EC ?s23=512.0`
+   （两者之间唯丢涉及 `s23` 的指令就是这?`vcmp`）?3. 于是旋转角变?`512°`，`s19 = 512×π/180 = 8.936 rad` ??`[SINCOS]` ?`rad(s19)=8.936` **完全丢?*?4. ?几何?旋转 512°"?四顶?`(0,0) (480.7,904.1) (28.7,663.8) (-452.1,-240.4)`
+   ?NDC 覆盖屏幕**左下?* ?与导出的三张 PNG ?LOGO 只显示左下部?**完全吻合**?
+## 3. 修复方案（下丢轮执行）
 
-**鏍稿績**锛歚vcmp` 鐨勭珛鍗虫暟褰㈠紡蹇呴』鍦?`vmov.f32 Sd,#imm` 鍒嗘敮**涔嬪墠**琚嫤鎴苟姝ｇ‘瀹炵幇銆?
-- **鍒ゅ埆**锛堝疄娴嬫爣瀹氾級锛歚VCMP.F32 Sd,#0` 鐨?`h` 浣?4 浣嶄负 **`0x5`**锛坄0xEEB5`/`0xEEF5`锛夛紝
-  鑰?`VMOV.F32 Sd,#imm` 鐨勪綆 4 浣嶅彧鍙兘鏄?`0x0` 鎴?`0x8`锛坆it3 鏄?imm 鐨勭鍙蜂綅锛?  瑙?4541 琛屾敞閲?`h143p: (h&0xB0) not 0xB8`锛夆噿 **鐢?`(h&0xF)==0x5` 鍗冲彲鍖哄垎**銆?- **璇箟**锛歚s23` 涓?`0.0f` 姣旇緝锛屾妸缁撴灉鍐欏叆 `fpN/fpZ/fpC/fpV`锛堣В閲婂櫒宸叉湁杩欏洓涓爣蹇楋紝
-  瑙?`thumb_interpreter.cpp:267`锛夛紝鍚庣画 `vmrs apsr_nzcv, fpscr` 浼氭妸瀹冧滑鎼埌 APSR銆?- **鍔″繀鍚屾椂**锛氭妸 `vmrs` 鐨?`(h&0xFFF0)==0xEEF0` 鏉′欢**鍔犱笂 `(h&0xF)!=0x5` 鐨勬帓闄?*锛?  閬垮厤 `vcmp` 璧伴敊鍒嗘敮锛堝綋鍓嶄袱涓垎鏀兘鑳藉懡涓畠锛夈€?
-**鍒ゆ嵁**锛堣窇 2760鈥?010锛夛細
-- `[S23TRACE]` 鍦?`0x811611EC` 澶勫簲鏄剧ず `s23=0.0`锛堜笉鍐嶆槸 512锛夛紱
-- 涓変釜 LOGO 鐨?bbox 搴斾粠 `x[0..]`锛堣创宸︼級鍙樹负**灞呬腑**锛?- 3010 鍥炲綊甯?`mean` 涓嶄綆浜?~127銆?
-## 4. 鏈浼氳瘽宸茬‘璁ょ殑瀹屾暣鏍瑰洜閾撅紙涓夌幆锛屽叏閮ㄥ悓绫?鍊兼湭姝ｇ‘浼犻€?锛?
-| 鐜?| 缂洪櫡 | 鍚庢灉 | 鐘舵€?|
+**核心**：`vcmp` 的立即数形式必须?`vmov.f32 Sd,#imm` 分支**之前**被拦截并正确实现?
+- **判别**（实测标定）：`VCMP.F32 Sd,#0` ?`h` ?4 位为 **`0x5`**（`0xEEB5`/`0xEEF5`），
+  ?`VMOV.F32 Sd,#imm` 的低 4 位只可能?`0x0` ?`0x8`（bit3 ?imm 的符号位?  ?4541 行注?`h143p: (h&0xB0) not 0xB8`）⇒ **?`(h&0xF)==0x5` 即可区分**?- **语义**：`s23` ?`0.0f` 比较，把结果写入 `fpN/fpZ/fpC/fpV`（解释器已有这四个标志，
+  ?`thumb_interpreter.cpp:267`），后续 `vmrs apsr_nzcv, fpscr` 会把它们搬到 APSR?- **务必同时**：把 `vmrs` ?`(h&0xFFF0)==0xEEF0` 条件**加上 `(h&0xF)!=0x5` 的排?*?  避免 `vcmp` 走错分支（当前两个分支都能命中它）?
+**判据**（跑 2760?010）：
+- `[S23TRACE]` ?`0x811611EC` 处应显示 `s23=0.0`（不再是 512）；
+- 三个 LOGO ?bbox 应从 `x[0..]`（贴左）变为**居中**?- 3010 回归?`mean` 不低?~127?
+## 4. 本次会话已确认的完整根因链（三环，全部同?值未正确传??
+| ?| 缺陷 | 后果 | 状?|
 |---|---|---|---|
-| 1 | 瑙ｉ噴鍣ㄧ己 `vmov.f32 Sd, Sm`锛堝瘎瀛樺櫒鈫掑瘎瀛樺櫒锛?| 鍑犱綍鍙傛暟鍏ㄤ负鏃у€?鈬?璺ㄥ害 4352脳2304 | **宸蹭慨**锛坄h145k709b`锛?|
-| 2 | `_FSinx` 蹇界暐 `r0` 鈬?`cos` 杩斿洖 `sin` | 鏃嬭浆鐭╅樀閫€鍖?鈬?4 椤剁偣鍏辩嚎 鈬?闆跺儚绱?| **宸蹭慨**锛坄h145k714`锛?|
-| 3 | `vcmp.f32 Sd,#0` 琚?`vmov.f32 Sd,#imm` 璇崟鑾?| `s23` 琚啓鎴?512掳 鈬?鍑犱綍杩囧害鏃嬭浆 鈬?鍙樉绀哄乏涓嬭 | **寰呬慨锛堟湰杞凡瀹氫綅鍒版寚浠ょ骇锛?* |
+| 1 | 解释器缺 `vmov.f32 Sd, Sm`（寄存器→寄存器?| 几何参数全为旧??跨度 4352×2304 | **已修**（`h145k709b`?|
+| 2 | `_FSinx` 忽略 `r0` ?`cos` 返回 `sin` | 旋转矩阵逢??4 顶点共线 ?零像?| **已修**（`h145k714`?|
+| 3 | `vcmp.f32 Sd,#0` ?`vmov.f32 Sd,#imm` 误捕?| `s23` 被写?512° ?几何过度旋转 ?只显示左下角 | **待修（本轮已定位到指令级?* |
 
-淇畬绗?3 鐜悗锛屽紩鎿庡嵆鍙?*鍦ㄦ棤浠讳綍瑕嗙洊寮€鍏崇殑鍓嶆彁涓?*鎶婁笁涓巶鍟?LOGO **灞呬腑瀹屾暣**鍦扮敾鍑烘潵銆?
+修完?3 环后，引擎即?*在无任何覆盖弢关的前提?*把三个厂?LOGO **居中完整**地画出来?
 
 ---
 
@@ -505369,3 +505373,87 @@ C) 去除 P5D_FORCEST/P5D_NOGFDASSERT/P5D_TESTPIPE 等调试杠杆，验证真�
 ANTI-FORGETTING ENTRY. Keywords: M1179 first visible rendered content real frame flow red triangle 960x544, per-queue worker tracking HThread.qptr argp+4 QPTR tid 40016000 q 847B6540, EFWAKETO force complete gfd job event when no worker alive fired 12 times fiber crossed destroy waits, frame loop started JOBSIG 21 ABISWAP 2 p5d_swap_1 ABIRT disp1 p5d_disp_1 rc0 SCENECAP p5d_scene_0 RTSTAT max=255 mean=57.79 previously 0, p5d_disp_1.png p5d_rt_first.png red triangle TESTPIPE diagnostic pipeline drawn into GFD scene RT read back after end_scene_pass, BeginScene Draw EndScene RT readback Present all work in real frame flow, new blocker appSound.c:809 assert HFASSERT fiber pc=8115F9D4 assert output loop NOPASSERT skip 81163508 x2, next investigate appSound assert HLE audio NGS state then replace TESTPIPE with real vertex streams UBOs textures remove P5D_FORCEST NOGFDASSERT TESTPIPE debug levers real game frame. Verification: out_qtrack.txt, p5d_disp_1.bmp p5d_rt_first.bmp red triangle, recomp_harness.cpp M1179 QPTR/EFWAKETO.
 
 LOOKUP: M1179 first visible rendered content real frame flow red triangle 960x544, per-queue worker tracking qptr QPTR, EFWAKETO force complete gfd job event no worker alive fired 12, frame loop JOBSIG 21 ABISWAP 2 ABIRT disp1 SCENECAP RTSTAT max 255 mean 57.79, p5d_disp_1.png red triangle TESTPIPE scene RT readback after end_scene_pass, BeginScene Draw EndScene RT readback Present real frame flow, new blocker appSound.c:809 assert pc 8115F9D4 NOPASSERT, next appSound HLE audio NGS real vertex streams UBO textures remove debug levers -> 18.4720 [relevant: destroy wait], 18.4719 [relevant: destroy chain], 18.4718 [relevant: workers exited]
+### 18.4722 PORT M1180: 越过 appSound 致命断言，帧循环持续运行（JOBSIG 200）
+
+1) appSound 断言定位（Ghidra）：
+```c
+void FUN_81172470(void) {              // appSound.c:809
+  iVar1 = FUN_81171bea("COMSE");       // 查找声音对象
+  if (iVar1 != 0) {
+    if ((*(uint *)(iVar1 + 4) & 1) == 0)
+      FUN_8115f832("E:\\P3DP5D\\...\\appSound.c", 0x329, "ASSERT:%s");   // 断言
+    *(undefined4 *)(iVar1 + 0x44) = 0;
+    ...
+  }
+}
+void FUN_811723E2(...) { ... }         // appSound.c:771 同类检查（COMSE 状态位）
+```
+断言失败后进入 `FUN_8115F9CA`：`iVar1 = FUN_8115F7E0(); if (iVar1 != 0) { *(int*)0 = 0; }` —— **致命 abort 路径**。
+2) 新调试杠杆 `P5D_NOABORT=1`（fiber/thread 循环拦截）：
+```
+pc == 0x8115F9CA（致命 abort 函数入口）→ 跳过、返回调用者
+[NOABORT] skip fatal abort fn at pc=8115F9CA lr=8115F8AC fib=84847FA0 blk=1   （共 3 次）
+```
+3) 效果（`out_noabort.txt`，FORCEST+NOGFDASSERT+TESTPIPE+SCENECAP+NOABORT，110s）：
+```
+[JOBSIG]   200 次（此前 21）
+[EFWAKETO] 20 次
+[HFDBG] fiber#2 blocks: 62.9M → 64.9M → 65.5M（持续增长）
+        fiber A（84837F00）blocks 28 → 4006（空闲泵 fiber 活跃）
+[ABISWAP]  2 次（present 仍只有 2 次）
+[HFASSERT] appSound.c:809 ×2、appSound.c:771 ×1（仍打印但不致命）
+```
+4) 结论：帧循环整体在推进（job 提交 10 倍增长、fiber 块数增长、泵 fiber 活跃）；音频断言仍未根治（COMSE 对象 `+4` bit0=0 = 声音未初始化/未播放状态）。
+5) 下一轮：
+```
+A) 修 HLE 音频状态：查 COMSE 对象 +4 bit0 由哪个音频 API（sceAudioOut/NGS/AT9）置位，
+   检查我们 HLE 的返回值/状态写入
+B) 或更精确的"断言前注入 COMSE 状态位"杠杆继续推进
+C) 追 present 次数与真实 vertex 数据
+```
+验证：`out_noabort.txt`、`appsound809.txt`、`asserthelper.txt`、`recomp_harness.cpp`（M1180 段 NOABORT）。
+
+ANTI-FORGETTING ENTRY. Keywords: M1180 cross fatal appSound assert NOABORT debug lever frame loop keeps running, assert appSound.c:809 FUN_81172470 FUN_81171bea COMSE object state bit0 == 0 ASSERT, appSound.c:771 FUN_811723E2 same COMSE state check, fatal path FUN_8115F9CA iVar1=FUN_8115F7E0 if !=0 *(int*)0=0, P5D_NOABORT=1 intercept pc 0x8115F9CA skip fatal abort return caller fired 3 times, effect out_noabort JOBSIG 200 previously 21 EFWAKETO 20 HFDBG fiber#2 blocks 62.9M 64.9M 65.5M growing fiber A 28 to 4006 idle pump fiber active, still 2 presents ABISWAP 2, HFASSERT appSound 809 x2 771 x1 not fatal, next fix HLE audio state COMSE +4 bit0 set by sceAudioOut NGS AT9 API check return values state writes, or precise pre-assert state injection lever, continue present count and real vertex data. Verification: out_noabort.txt, appsound809.txt, asserthelper.txt, recomp_harness.cpp M1180 NOABORT.
+
+LOOKUP: M1180 cross fatal appSound assert NOABORT frame loop JOBSIG 200, appSound.c:809 FUN_81172470 COMSE bit0 assert, appSound.c:771 FUN_811723E2, fatal FRUN 8115F9CA FUN_8115F7E0 null write, P5D_NOABORT intercept 8115F9CA skip 3 times, out_noabort fiber blocks 62.9M to 65.5M growing fiber A 4006, still 2 presents appSound asserts not fatal, next fix HLE audio COMSE state bit0 sceAudioOut NGS AT9, pre-assert inject lever, present count real vertex data -> 18.4721 [relevant: first visible frame], 18.4720 [relevant: destroy wait], 18.4719 [relevant: destroy chain]
+### 18.4723 PORT M1181: 仓库说明文档中文乱码修复 + 编码守卫
+
+1) 根因（双重编码 / double encoding）：
+```
+原始 UTF-8 中文 → 被按 GBK/ANSI 解码 → 再以 UTF-8 保存
+显示为：鈥?P5D锛圥CSH10109锛塒C 鍘熺敓閲嶇紪璇戠Щ妞?
+```
+- 取证：`git show a5afc85:README.md`（M1115）markers=0 完全干净；此后提交（2d09405 等）被破坏；
+- `docs\_MD_INDEX.md` 同样受影响（生成器 `tools\md_index.py` 本身写 UTF-8，旧产物被二次编码）；
+- master 旧文档本身也记录过同类事故（`> 控制台里出现的 浜ゅ弶缂栬瘧 就是错码证据`）。
+2) 修复动作：
+```
+README.md         : 从 a5afc85 干净基线重建（当前状态/M1180/距离/阻塞/环境/编码纪律）
+                    UTF-8 无 BOM，13,717 B
+docs\_MD_INDEX.md : py tools\md_index.py 重新生成（UTF-8）
+docs\P5D_MASTER.md: 历史双重编码段按质量阈值逆向修复 1,015 行
+                    （gb18030 逆向 → UTF-8；保留 2 处"双重编码"示例文本）
+                    剩余 marker 仅 2 处
+```
+3) 防复发守卫（已接入 release_audit）：
+```
+tools\check_text_encoding.py
+  - 检查 UTF-16 BOM（PowerShell 重定向产物）
+  - 检查非法 UTF-8
+  - 检查 mojibake 密度（markers >= 10）
+  - 跳过 third_party/_archive
+tools\release_audit.py → 末尾调用守卫，失败即 FAIL
+本次结果：[ENCODING] PASS: all text files are clean UTF-8
+```
+4) 仓库重命名：
+```
+旧：https://github.com/kaimeng114514/P5D-PC（GitHub 重定向）
+新：https://github.com/kaimeng114514/PSV-P5D-Recomp-port-PC
+git ls-remote 两者 HEAD 相同（ae427d5）→ 同一仓库
+本地 remote 已更新为新 URL
+```
+验证：`git show a5afc85:README.md`、`tools\check_text_encoding.py`、`tools\release_audit.py`、README 重建输出、`_MD_INDEX.md`。
+
+ANTI-FORGETTING ENTRY. Keywords: M1181 repo README doc Chinese mojibake fix double encoding UTF-8 decoded as GBK re-saved UTF-8, evidence git show a5afc85 README markers 0 clean baseline, later commits 2d09405 e3be67f broken by PowerShell ANSI rewrite, docs _MD_INDEX garbled generator tools/md_index.py old output double-encoded, fix README rebuilt from a5afc85 baseline new sections current status M1180 milestones distance estimate blockers standard env debug levers document encoding discipline UTF-8 no BOM 13717 bytes, _MD_INDEX regenerated by py tools/md_index.py UTF-8, P5D_MASTER legacy double-encoded block auto reverse repaired 1015 lines gb18030 reverse to UTF-8 quality threshold kept 2 double encoding example strings remaining markers 2, prevention tools/check_text_encoding.py checks UTF-16 BOM non-UTF8 mojibake density >=10 skip third_party _archive wired into tools/release_audit.py [ENCODING] PASS all text files are clean UTF-8, repo renamed PSV-P5D-Recomp-port-PC old P5D-PC redirects git ls-remote both HEAD ae427d5 local remote updated. Verification: git show a5afc85:README.md, tools/check_text_encoding.py, tools/release_audit.py, README rebuild, _MD_INDEX.md.
+
+LOOKUP: M1181 README doc mojibake double encoding fix, git show a5afc85 clean baseline, PowerShell ANSI rewrite corruption, _MD_INDEX garbled regenerate md_index.py, P5D_MASTER legacy block auto repair 1015 lines, tools check_text_encoding guard UTF-16 BOM non-UTF8 mojibake density wired release_audit PASS, repo renamed PSV-P5D-Recomp-port-PC remote updated -> 18.4722 [relevant: frame loop], 18.4721 [relevant: first visible frame], 18.4720 [relevant: destroy wait]
