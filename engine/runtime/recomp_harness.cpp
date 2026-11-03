@@ -2322,6 +2322,11 @@ static void hf_fiber_thread(HFiber* f) {
             _tot[_f]=_nD+_nB; }
           printf("[NODEINV] fb=%u slot0=%d slot1=%d slot2=%d hfblk=%u\n", _fb2, _tot[0],_tot[1],_tot[2], (unsigned)g_hf_blocks); fflush(stdout); } } }
 
+    if ((pc & ~1u) == 0x8119934Au) { static int _dt=0; if (!_dt) { _dt=1;
+        printf("[DISPATCHTABLE] table=813B1DDC first 48 entries:\n");
+        for (int _k=0;_k<48;++_k) { uint32_t _hp=0; uint8_t* q=GP(0x813B1DDCu + (uint32_t)_k*4u); if(q) std::memcpy(&_hp,q,4);
+          if (_hp) printf("[DISPATCHTABLE]  type=%d handler=%08X\n", _k, _hp); }
+        fflush(stdout); } }
     if ((pc & ~1u) == 0x8119934Au) { static uint32_t _fb=0; ++_fb;
       if (_fb<=8u) {
         uint32_t _idx=0; { uint8_t* q=GP(0x816CC700u); if(q) std::memcpy(&_idx,q,4); }
@@ -6095,7 +6100,7 @@ static uint32_t call_guest_cb2(RecState* s, uint32_t entry, uint32_t a0, uint32_
           printf("[GATEPROBE3N] FUN_811C0654 frame=%u base=%08X A=%08X B=%08X n=%u\n", _fr, _base, _c0, _c1, g_main_n); fflush(stdout);} } }
     { // DISPATCHPROBE2: nested FUN_811EDE52(type,value) -> table[type](ctx)
       static int _dp2=-1; if (_dp2<0) _dp2 = getenv("P5D_DISPATCHPROBE") ? 1 : 0;
-      if (_dp2 && q == 0x811EDE52u) { static int _dn2=0; if (_dn2++<40) {
+      if (_dp2 && q == 0x811EDE52u) { static int _dn2=0; if (_dn2++<200) {
           uint32_t _ty=s->r[0]; uint32_t _hb=0; uint8_t* q2=GP(0x813B1DDCu + _ty*4u); if(q2) std::memcpy(&_hb,q2,4);
           printf("[DISPATCHPROBE2] type=%u val=%08X handler=%08X lr=%08X n=%u\n", _ty, s->r[1], _hb, s->r[14], g_main_n); fflush(stdout);} } }
     { // NESTCMDEXEC: probes for GFD command handlers inside nested guest calls
