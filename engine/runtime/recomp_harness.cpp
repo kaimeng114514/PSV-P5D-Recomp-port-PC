@@ -2246,6 +2246,15 @@ static void hf_fiber_thread(HFiber* f) {
     if (!fn) { fprintf(stderr, "[HF-NOBLK] fib=%08X pc=%08X\n", f->addr, pc); break; }
     g_cur_block = pc; f->cur_pc = pc; ++f->blocks; ++g_hf_blocks;
     { uint32_t _p0 = pc & ~1u;
+      if (_p0 == 0x811F37ACu || _p0 == 0x811F3750u || _p0 == 0x811F36C6u || _p0 == 0x811EFDEEu || _p0 == 0x811E649Au) {
+        static uint32_t _c1=0,_c2=0,_c3=0,_c4=0,_c5=0;
+        uint32_t* _p=nullptr; const char* _nm="?";
+        if (_p0==0x811F37ACu){_p=&_c1;_nm="jobC0";} else if (_p0==0x811F3750u){_p=&_c2;_nm="jobC1";}
+        else if (_p0==0x811F36C6u){_p=&_c3;_nm="jobC2";} else if (_p0==0x811EFDEEu){_p=&_c4;_nm="cmdBuild";} else {_p=&_c5;_nm="submit";}
+        ++(*_p);
+        if ((*_p) <= 6 || ((*_p) % 500u) == 0u) { printf("[CHANNELJOB] %s n=%u r0=%08X r1=%08X r2=%08X hfblk=%u\n", _nm, *_p, s->r[0], s->r[1], s->r[2], (unsigned)g_hf_blocks); fflush(stdout); } } }
+
+    { uint32_t _p0 = pc & ~1u;
       if (_p0 == 0x811C041Cu || _p0 == 0x811EB930u || _p0 == 0x811EBAC0u || _p0 == 0x811EBAB4u || _p0 == 0x811BFCD8u || _p0 == 0x811BFE28u || _p0 == 0x811EB930u) {
         static uint32_t _nr=0,_ex=0,_ca=0,_cb=0,_nb1=0,_nb2=0;
         uint32_t* _p=nullptr; const char* _nm="?";
