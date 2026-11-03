@@ -18,6 +18,7 @@ static void hle_pump_win_messages(void) {
 static void hle_pump_win_messages(void) {}
 #endif
 #include <thread>
+#include <condition_variable>
 #include <mutex>
 #include <atomic>
 #include <chrono>
@@ -75,7 +76,7 @@ static void abi_tex_encode(unsigned char* t, unsigned int typeMask, unsigned int
 // 18.4512 M967: p5d::mem address-space registration for the HLE heap arenas (texture resolve needs translate()).
 namespace p5d { namespace mem { void register_region(unsigned int vaddr, unsigned int size, void* host, const char* name); } }
 static int g_loadclear_env = 0;
-static int g_hostthreads = 0;
+static int g_hostthreads = 0; static int g_hostfiber = 0;   // M1155: every guest fiber = host thread (P0)
 static volatile int g_shutdown = 0;
 static uint32_t g_last_alloc_sz = 0, g_last_alloc_fp = 0;
 static int g_allocf_n = 0;
@@ -2038,6 +2039,144 @@ static uint32_t p5d_vdec_hle(uint32_t stub_va, RecState* s) {
   return 0xFFFFFFFFu;
 }
 
+
+// ===================== M1155 P0: host fibers (one native thread per guest fiber) =====================
+// Model (nativ-style): sceFiberRun/Switch/ReturnToThread map to real std::thread park/resume with
+// condvars; guest code inside a fiber runs the normal AOT dispatcher (gbn) with its own RecState.
+// Sync primitives keep using the existing host-thread blocking wait paths (tl_ht_tid != 0).
+struct HFWait { std::mutex m; std::condition_variable cv; bool go=false; uint32_t ret=0; };
+struct HFiber {
+  uint32_t addr=0, entry=0, arg_init=0, sp_top=0, tls=0, owner_tid=0;
+  RecState rs; std::thread th; std::mutex m; std::condition_variable cv;
+  bool go=false, started=false, finalize=false;
+  uint32_t run_arg=0, resume_out=0;
+  HFWait* owner=nullptr;
+  int starts=0, switches=0, rets=0;
+  uint32_t cur_pc=0; uint32_t blocks=0;
+};
+static std::mutex g_hf_lk;
+static std::map<uint32_t,HFiber*> g_hf;
+static thread_local HFiber* tl_hf = nullptr;
+static thread_local HFWait* tl_hfw = nullptr;
+static std::mutex g_hfw_lk;
+static std::map<uint32_t,HFWait*> g_hfw;
+static int g_hf_n = 0, g_hf_ev_n = 0; static volatile uint32_t g_hf_blocks = 0;
+static HFWait* hf_wait_for(uint32_t tid) {
+  std::lock_guard<std::mutex> g(g_hfw_lk);
+  auto it = g_hfw.find(tid); if (it != g_hfw.end()) return it->second;
+  HFWait* w = new HFWait(); g_hfw[tid] = w; return w;
+}
+static HFiber* hf_lookup(uint32_t addr) {
+  std::lock_guard<std::mutex> g(g_hf_lk);
+  auto it = g_hf.find(addr); if (it != g_hf.end()) return it->second;
+  HFiber* f = new HFiber(); f->addr = addr; g_hf[addr] = f; return f;
+}
+static void hf_park(HFiber* f) {
+  std::unique_lock<std::mutex> lk(f->m);
+  f->go = false;
+  f->cv.wait(lk, [&]{ return f->go || f->finalize; });
+  f->go = false;
+}
+static void hf_resume(HFiber* f) {
+  { std::lock_guard<std::mutex> lk(f->m); f->go = true; }
+  f->cv.notify_all();
+}
+static void hf_note(const char* what, HFiber* f, uint32_t a) {
+  if (g_hf_ev_n++ < 200) { printf("[HF-%s] fib=%08X arg=%08X entry=%08X start=%d cur=%08X blk=%u\n", what, f->addr, a, f->entry, f->starts, tl_hf?tl_hf->addr:0u, (unsigned)g_blkcnt_total); fflush(stdout); }
+}
+static void hf_fiber_thread(HFiber* f) {
+  tl_hf = f;
+  tl_ht_tid = f->owner_tid ? f->owner_tid : 0x40010000u;
+  f->tls = 0;
+  RecState* s = &f->rs;
+  std::memset(s, 0, sizeof(*s));
+  s->base = gp_img; s->mem_size = IMG_SIZE;
+  s->r[0] = f->arg_init; s->r[9] = f->tls;
+  s->r[13] = f->sp_top ? f->sp_top : 0xA0D00000u;
+  s->r[14] = 0xFFFFFFFEu; s->r[15] = f->entry & ~1u; s->apsr = 0x03000000u;
+  if (!gbn(s->r[15])) { fprintf(stderr, "[HF-NOBLK] fib=%08X entry=%08X\n", f->addr, f->entry); return; }
+  uint32_t pc = s->r[15];
+  while (!g_shutdown) {
+    BlockFn fn = gbn(pc);
+    if (!fn) { int back=0; uint32_t bq=gbn_back(pc,&back); if (bq && back<=16) { pc=bq; fn=gbn(pc); } }
+    if (!fn) { if (g_hf_n++ < 20) { fprintf(stderr, "[HF-NOBLK] fib=%08X pc=%08X blk=%08X\n", f->addr, pc, g_cur_block); fflush(stderr); } break; }
+    g_cur_block = pc; f->cur_pc = pc; ++f->blocks; ++g_hf_blocks;
+    uint32_t nx = fn(s);
+    if (nx == 0u || nx == 0xFFFFFFF0u || nx == 0xFFFFFFFEu || nx == 0xFFFFFFFDu) break;
+    pc = nx;
+  }
+  // the SDK forbids an entry returning; treat it as ReturnToThread(r0) and park forever afterwards
+  { HFWait* w = f->owner; if (w) { { std::lock_guard<std::mutex> lk(w->m); w->ret = s->r[0]; w->go = true; } w->cv.notify_all(); } }
+  std::unique_lock<std::mutex> lk(f->m);
+  for (;;) f->cv.wait(lk);
+}
+static void hf_start(HFiber* f) {
+  bool start = false;
+  { std::lock_guard<std::mutex> lk(f->m); if (!f->started) { f->started = true; start = true; } }
+  if (start) { ++f->starts; f->th = std::thread(hf_fiber_thread, f); f->th.detach(); }
+  else hf_resume(f);
+}
+// sceFiberRun(fiber, arg, out)
+static uint32_t hf_do_run(uint32_t addr, uint32_t arg, uint32_t outp) {
+  uint32_t tid = tl_ht_tid ? tl_ht_tid : 0x40010000u;
+  HFiber* f = hf_lookup(addr);
+  f->owner_tid = tid; f->owner = hf_wait_for(tid);
+  { std::lock_guard<std::mutex> lk(f->m); f->run_arg = arg; }
+  hf_note("run", f, arg);
+  hf_start(f);
+  HFWait* w = f->owner;
+  std::unique_lock<std::mutex> lk(w->m);
+  w->go = false;
+  w->cv.wait(lk, [&]{ return w->go; });
+  w->go = false;
+  if (outp) { uint8_t* p = GP(outp); if (p) std::memcpy(p, &w->ret, 4); }
+  return 0;
+}
+// sceFiberSwitch(fiber, arg, out)
+static uint32_t hf_do_switch(uint32_t addr, uint32_t arg, uint32_t outp) {
+  HFiber* cur = tl_hf;
+  if (!cur) return hf_do_run(addr, arg, outp);          // called from thread context
+  HFiber* t = hf_lookup(addr);
+  if (t == cur) { if (outp) { uint8_t* p = GP(outp); if (p) std::memcpy(p, &arg, 4); } return 0; }
+  { std::lock_guard<std::mutex> lk(t->m); t->run_arg = arg; t->owner_tid = cur->owner_tid; t->owner = cur->owner; }
+  cur->resume_out = outp;
+  ++cur->switches;
+  hf_note("switch", t, arg);
+  hf_start(t);
+  hf_park(cur);
+  if (cur->resume_out) { uint8_t* p = GP(cur->resume_out); if (p) std::memcpy(p, &cur->run_arg, 4); cur->resume_out = 0; }
+  return 0;
+}
+// sceFiberReturnToThread(arg)
+static uint32_t hf_do_return(uint32_t arg) {
+  HFiber* cur = tl_hf;
+  if (!cur) return 0;
+  ++cur->rets;
+  hf_note("ret", cur, arg);
+  HFWait* w = cur->owner;
+  if (w) { { std::lock_guard<std::mutex> lk(w->m); w->ret = arg; w->go = true; } w->cv.notify_all(); }
+  hf_park(cur);
+  if (cur->resume_out) { uint8_t* p = GP(cur->resume_out); if (p) std::memcpy(p, &cur->run_arg, 4); cur->resume_out = 0; }
+  return 0;
+}
+// _sceFiberInitializeImpl(fiber, name, entry, arg, ctx_addr, ctx_size) - ctx args from the guest stack
+static uint32_t hf_do_init(RecState* s) {
+  HFiber* f = hf_lookup(s->r[0] & ~1u);
+  f->entry = s->r[2] & ~1u; f->arg_init = s->r[3];
+  uint32_t sa0 = 0, sa1 = 0;
+  { uint8_t* q = GP(s->r[13]); if (q) std::memcpy(&sa0, q, 4); }
+  { uint8_t* q = GP(s->r[13] + 4u); if (q) std::memcpy(&sa1, q, 4); }
+  if (sa0 >= 0x80600000u && sa0 < 0xB0000000u && sa1 >= 0x400u && sa1 <= 0x400000u) {
+    uint32_t base = sa0, size = sa1;
+    f->sp_top = (base + size - 0x10u) & ~0xFu;
+  } else {
+    uint32_t st = hle_malloc(0x20000u);
+    f->sp_top = st ? (st + 0x1F000u) : 0xA0D00000u;
+  }
+  if (g_hf_n++ < 40) { printf("[HF-INIT] fib=%08X entry=%08X arg=%08X sp=%08X ctx=%08X/%08X\n", f->addr, f->entry, f->arg_init, f->sp_top, sa0, sa1); fflush(stdout); }
+  return 0;
+}
+
 extern "C" uint32_t hle_call(uint32_t stub_va, RecState* s) {
   if (g_ngs_env < 0) { const char* _ge = getenv("P5D_NGS"); g_ngs_env = (_ge && atoi(_ge) != 0) ? 1 : 0; }
   if (g_main_n < 4000u) { static std::set<uint32_t> _seen; static int _n = 0;
@@ -2792,6 +2931,7 @@ extern "C" uint32_t hle_call(uint32_t stub_va, RecState* s) {
       fflush(stdout);
       r0 = 0; break; }
     case 0x812B1B80u: {                                               // sceFiberRun(fiber, ...): start/resume the fiber
+      if (g_hostfiber) { { static int _hfr=0; if (_hfr++<40) { printf("[HFRUN] fib=%08X arg=%08X out=%08X lr=%08X blk=%u\n", s->r[0]&~1u, s->r[1], s->r[2], s->r[14], (unsigned)g_blkcnt_total); fflush(stdout); } } r0 = hf_do_run(s->r[0]&~1u, s->r[1], s->r[2]); break; }
       { static int _frn = 0; if (_frn++ < 24) { uint32_t _fb = s->r[0] & ~1u; auto _fi = g_fctx.find(_fb);
           printf("[FIBRUN] #%d lr=%08X arg=%08X fb=%08X curfib=%08X hasctx=%d fpc=%08X fentry=%08X farg=%08X\n", _frn-1, s->r[14], s->r[1], _fb, g_cur_fiber, (int)(_fi!=g_fctx.end()), _fi!=g_fctx.end()?_fi->second.r[15]:0u, _fi!=g_fctx.end()?_fi->second.r[14]:0u, _fi!=g_fctx.end()?_fi->second.r[0]:0u); fflush(stdout); } }
       if (g_blkcnt_total > 1400000u) { static int _frl=0; if (_frl++ < 40) { printf("[FRUN2] n=%u r0=%08X cur=%08X fex=%d inexec=%d lr=%08X sp=%08X ring:", g_blkcnt_total, s->r[0], g_cur_fiber, g_in_fex, g_in_fiber_exec, s->r[14], s->r[13]);
@@ -2836,6 +2976,7 @@ extern "C" uint32_t hle_call(uint32_t stub_va, RecState* s) {
       }
       break; }
     case 0x812B1BA0u: {                                               // sceFiberSwitch(fiber, ...): start/resume target
+      if (g_hostfiber) { { static int _hfs=0; if (_hfs++<80) { printf("[HFSW] fib=%08X arg=%08X out=%08X lr=%08X cur=%08X blk=%u\n", s->r[0]&~1u, s->r[1], s->r[2], s->r[14], tl_hf?tl_hf->addr:0u, (unsigned)g_blkcnt_total); fflush(stdout); } } r0 = hf_do_switch(s->r[0]&~1u, s->r[1], s->r[2]); break; }
       { static int _fsn = 0; static uint32_t _lastpc = 0xFFFFFFFFu; if (_fsn < 4000) { uint32_t _fb = s->r[0] & ~1u; auto _fi = g_fctx.find(_fb); uint32_t _pc = _fi!=g_fctx.end()?_fi->second.r[15]:0u;
           if (_pc != _lastpc) { _lastpc = _pc; ++_fsn; printf("[FIBSW] #%d n=%u lr=%08X fb=%08X fpc=%08X flr=%08X fr0=%08X blk=%u\n", _fsn-1, g_main_n, s->r[14], _fb, _pc, _fi!=g_fctx.end()?_fi->second.r[14]:0u, _fi!=g_fctx.end()?_fi->second.r[0]:0u, g_blkcnt_total); fflush(stdout); }
           static std::map<uint32_t,uint32_t> _freq; static uint32_t _recent[8]; static int _ri = 0; ++_freq[_pc]; _recent[_ri++ & 7] = _pc;
@@ -2932,10 +3073,11 @@ extern "C" uint32_t hle_call(uint32_t stub_va, RecState* s) {
       rc_restore(s);
       g_in_fiber_exec = 0;
       break; }
-    case 0x812B1B60u: { static int _frt = 0; if (_frt++ < 60) { auto _ff=[&](uint32_t fb)->uint32_t { uint8_t* q=GP(fb+0x80u); uint32_t v=0; if(q) std::memcpy(&v,q,4); return v; };
+    case 0x812B1B60u: { if (g_hostfiber) { r0 = hf_do_return(s->r[0]); break; } static int _frt = 0; if (_frt++ < 60) { auto _ff=[&](uint32_t fb)->uint32_t { uint8_t* q=GP(fb+0x80u); uint32_t v=0; if(q) std::memcpy(&v,q,4); return v; };
         printf("[FIBRT] #%d n=%u curfib=%08X lr=%08X fpc=%08X sp=%08X r0=%08X flagsA=%08X flagsB=%08X\n", _frt-1, g_main_n, g_cur_fiber, s->r[14], g_cur_fiber?(g_fctx.count(g_cur_fiber)?g_fctx[g_cur_fiber].r[15]:0u):0u, s->r[13], s->r[0], _ff(0x84836300u), _ff(0x848463A0u)); fflush(stdout); } }
       r0 = 0; g_fiber_flag_return = 1; break;         // sceFiberReturnToThread
     case 0x812B1BB0u: {                                               // _sceFiberInitializeImpl(fiber, name, entry, arg, ...)
+      if (g_hostfiber) { r0 = hf_do_init(s); break; }
       if (g_finit_n++ < 10) {
         uint32_t f84 = 0, f88 = 0; uint32_t off0 = s->r[0] - IMG_VA_BASE;
         if (off0 + 0x90 <= IMG_SIZE) { std::memcpy(&f84, gp_img+off0+0x84, 4); std::memcpy(&f88, gp_img+off0+0x88, 4); }
@@ -2955,7 +3097,8 @@ extern "C" uint32_t hle_call(uint32_t stub_va, RecState* s) {
       if (g_fiblog_n++ < 10) { printf("[FIBINIT] fiber=%08X entry=%08X arg=%08X list=%zu\n", s->r[0], s->r[2], s->r[3], g_fiber_list.size()); fflush(stdout); }
       g_fiber_entry = s->r[2]; g_fiber_arg = s->r[3]; r0 = 0; break; }   // 0 = success (wrapper checks cmp r0,#0)
     case 0x812B1B70u:                                                 // sceFiberGetSelf(out): return the CURRENT fiber object
-      { // 18.3768: real sceFiberGetSelf returns the CURRENT fiber, i.e. 0 when not running inside a fiber.
+      {
+        if (g_hostfiber) { uint32_t _cur = tl_hf ? tl_hf->addr : 0u; if (s->r[0]) { uint8_t* _p = GP(s->r[0]); if (_p) std::memcpy(_p, &_cur, 4); } r0 = 0; break; } // 18.3768: real sceFiberGetSelf returns the CURRENT fiber, i.e. 0 when not running inside a fiber.
         // Inside fiber_exec return the real fiber object (fiber list mgmt needs non-zero); at thread level return 0
         // so the game's main loop takes its "no current fiber" exit path.
         static uint32_t g_dummy_getself = 0;
@@ -5251,6 +5394,7 @@ static void guest_thread_run(uint32_t tid) {
     { static int _tr=0; if (_tr++ < 100) { printf("[HTBLK] tid=%08X pc=%08X r0=%08X r1=%08X r2=%08X r3=%08X r4=%08X r5=%08X sp=%08X lr=%08X\n", tid, pc, s->r[0],s->r[1],s->r[2],s->r[3],s->r[4],s->r[5],s->r[13],s->r[14]); fflush(stdout); } }
     job_probes(pc, s);
     BlockFn fn = gbn(pc);
+    if (!fn) { int _bk=0; uint32_t _bq=gbn_back(pc,&_bk); if (_bq && _bk<=16) { pc=_bq; fn=gbn(pc); } }
     if (!fn) { if (g_ht_bad_n++ < 20) { printf("[HT-NOBLK] tid=%08X pc=%08X\n", tid, pc); fflush(stdout); } break; }
     g_cur_block = pc;
     uint32_t nx = fn(s);
@@ -5871,6 +6015,8 @@ int main(int argc, char** argv) {
                g_loop_site, g_loop_cnt[0], g_loop_cnt[1], g_loop_cnt[2], g_loop_cnt[3], g_blkcnt_total, g_cur_block, g_cur_fiber, g_in_fex, g_in_fiber_exec, g_pumping2, g_current_loop_pc);
         printf("[WDRING]"); for (int i = 52; i < 64; ++i) printf(" %08X", g_pc_ring[(g_pc_ring_n + (unsigned)i) & 63u]); printf("\n");
         for (auto& kv : g_fctx) { printf("[WDCTX] fib=%08X pc=%08X sp=%08X r0=%08X r5=%08X\n", kv.first, kv.second.r[15], kv.second.r[13], kv.second.r[0], kv.second.r[5]); }
+         { std::lock_guard<std::mutex> _lg(g_hf_lk); for (auto& _kv : g_hf) { HFiber* _f=_kv.second; printf("[HFDBG] addr=%08X entry=%08X st=%d started=%d go=%d owner=%08X pc=%08X blocks=%u\n", _f->addr, _f->entry, 0, (int)_f->started, (int)_f->go, _f->owner_tid, _f->cur_pc, (unsigned)_f->blocks); } }
+         printf("[HFBLOCKS] %u\n", (unsigned)g_hf_blocks);
         for (auto& kv : g_fctx) { printf("[WDCTX] fib=%08X pc=%08X sp=%08X r0=%08X r5=%08X\n", kv.first, kv.second.r[15], kv.second.r[13], kv.second.r[0], kv.second.r[5]); }
 
          if (g_blkcnt_total > 65000000u) { static int _ts=0; if (_ts++ < 40) {
@@ -5907,6 +6053,7 @@ int main(int argc, char** argv) {
   { const char* _bt = getenv("P5D_BOOT_THUNK"); g_boot_thunk = (_bt && atoi(_bt) != 0) ? 1 : 0; }
   { const char* _hx = getenv("P5D_HACKS"); g_hacks = (_hx && atoi(_hx) != 0) ? 1 : 0;
   { const char* _ht = getenv("P5D_HOSTTHREADS"); g_hostthreads = (_ht && atoi(_ht) != 0) ? 1 : 0; }
+  { const char* _hfib = getenv("P5D_HOSTFIBER"); g_hostfiber = (_hfib && atoi(_hfib) != 0) ? 1 : 0; if (g_hostfiber) { g_hostthreads = 1; tl_ht_tid = 0x40010000u; printf("[HF] host-fiber model ON (P5D_HOSTFIBER=1): fibers=native threads, main tid=40010000\n"); fflush(stdout); } }
   { const char* _ht3 = getenv("P5D_THRPUMP3"); g_thrpump3 = (_ht3 && atoi(_ht3) != 0) ? 1 : 0; }
   { const char* _tp = getenv("P5D_THRPUMP"); g_thrpump_env = (_tp && atoi(_tp) != 0) ? 1 : 0; }   // 18.4265: re-wire the fiber-world thread pump (was dead code since the env parse was missing)
     printf("[HACKS] semantic patch stack %s\n", g_hacks ? "ENABLED (P5D_HACKS=1)" : "DISABLED (clean baseline)"); fflush(stdout); }
