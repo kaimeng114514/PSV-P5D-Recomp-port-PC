@@ -2245,6 +2245,25 @@ static void hf_fiber_thread(HFiber* f) {
     if (!fn) { int back=0; uint32_t bq=gbn_back(pc,&back); if (bq && back<=16) { pc=bq; fn=gbn(pc); } }
     if (!fn) { fprintf(stderr, "[HF-NOBLK] fib=%08X pc=%08X\n", f->addr, pc); break; }
     g_cur_block = pc; f->cur_pc = pc; ++f->blocks; ++g_hf_blocks;
+    if ((pc & ~1u) == 0x8119934Au) { static uint32_t _fb=0; ++_fb;
+      uint32_t _idx=0; { uint8_t* q=GP(0x816CC700u); if(q) std::memcpy(&_idx,q,4); }
+      uint32_t _a0=0; { uint8_t* q=GP(0x816CC6CCu + (_idx&7u)*4u); if(q) std::memcpy(&_a0,q,4); }
+      uint32_t _a1=0; { uint8_t* q=GP(0x816CC6D8u + (_idx&7u)*4u); if(q) std::memcpy(&_a1,q,4); }
+      uint32_t _pa=0; { uint8_t* q=GP(0x816CC6E4u + (_idx&7u)*4u); if(q) std::memcpy(&_pa,q,4); }
+      uint32_t _ca=0; { uint8_t* r2=GP(_pa+0xCu); if(r2) std::memcpy(&_ca,r2,4); }
+      uint32_t _n6f4=0; { uint8_t* q=GP(0x816CC6F4u); if(q) std::memcpy(&_n6f4,q,4); }
+      printf("[FRAMEBODY] n=%u idx=%u chAptr=%08X chAhead=%08X Bbase=%08X Dbase=%08X Dn=%u", _fb,_idx,_pa,_ca,_a0,_a1,_n6f4);
+      for (uint32_t _i=0;_i<(_n6f4<100u?_n6f4:100u);++_i) { uint32_t _h=0,_t=0;
+        { uint8_t* q=GP(_a1 + _i*0x20u + 0x14u); if(q) std::memcpy(&_h,q,4); }
+        { uint8_t* q=GP(_a1 + _i*0x20u + 0x18u); if(q) std::memcpy(&_t,q,4); }
+        if(_h||_t) printf(" D%u[h=%08X t=%08X]",_i,_h,_t); }
+      for (uint32_t _i=0;_i<3u;++_i) { uint32_t _h=0; { uint8_t* q=GP(_a0 + _i*0x20u + 0x14u); if(q) std::memcpy(&_h,q,4); }
+        if(_h) printf(" B%u[h=%08X]",_i,_h); }
+      printf(" hfblk=%u\n", (unsigned)g_hf_blocks); fflush(stdout); }
+    if ((pc & ~1u) == 0x811C041Cu) { static uint32_t _rn=0; ++_rn;
+      if (_rn<=24u || (_rn%2000u)==0u) { uint32_t _idx=0; { uint8_t* q=GP(0x816CC700u); if(q) std::memcpy(&_idx,q,4); }
+        printf("[REGIDX] n=%u type=%08X idx=%u node=%08X hfblk=%u\n", _rn, s->r[0], _idx, s->r[1], (unsigned)g_hf_blocks); fflush(stdout); } }
+
     { static uint64_t _qs=0; if (g_hf_blocks - _qs >= 3000000u) { _qs = g_hf_blocks;
         printf("[QSN] hfblk=%u", (unsigned)g_hf_blocks);
         for (int _i=0;_i<3;++_i) { uint32_t _q=0; uint8_t* _p=GP(0x8169E080u + (uint32_t)_i*4u); if (_p) std::memcpy(&_q,_p,4);
@@ -5552,7 +5571,8 @@ static uint32_t mb_811E649A(RecState* s) {
   if (_en && fn != 0u) {
     static int _n = 0;
     if (_n++ < 24) { printf("[SYNCTASK] #%d fn=%08X arg=%08X desc=%08X r0=%08X\n", _n-1, fn, arg, desc, s->r[0]); fflush(stdout); }
-    (void)call_guest_cb2(s, fn & ~1u, desc + 4u, 0u, 4000000);
+    { uint64_t _b0 = g_hf_blocks; uint32_t _rc = call_guest_cb2(s, fn & ~1u, desc + 4u, 0u, 4000000); uint64_t _b1 = g_hf_blocks;
+      static int _se=0; if (_se++ < 30) { printf("[SYNCEND] fn=%08X rc=%08X blocks=%llu hfblk=%u\n", fn, _rc, (unsigned long long)(_b1-_b0), (unsigned)g_hf_blocks); fflush(stdout); } }
   }
   return nx;
 }
