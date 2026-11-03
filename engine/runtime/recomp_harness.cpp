@@ -4057,7 +4057,8 @@ static uint32_t fiber_exec_to_completion(RecState* s) {
       if ((pc & ~1u) == 0x8101600Eu) { if (_job >= 0x80600000u && _job < 0x85000000u) _q = _job - 0x84u; }
       else { uint8_t* _gq = GP(0x81555EA4u); uint32_t _qv = 0; if (_gq) std::memcpy(&_qv, _gq, 4);
              if (_qv >= 0x80600000u && _qv < 0x85000000u) _q = _qv;          /* M1153B: jobqueue object = DAT_81555EA4 */
-             if (_q) { static int _jq2=0; if (_jq2++ < 20) { printf("[JOBQPTR] q=%08X head=%08X blk=%u \n", _q, [&]{uint32_t _h=0; uint8_t* _p=GP(_q+4u); if(_p) std::memcpy(&_h,_p,4); return _h;}(), (unsigned)g_blkcnt_total); fflush(stdout); } } }
+             if (_q) { static int _jq2=0; uint32_t _h=0; { uint8_t* _p=GP(_q+4u); if(_p) std::memcpy(&_h,_p,4); }
+                        if (_h && _jq2++ < 120) { printf("[JOBQPTR2] q=%08X head=%08X blk=%u\n", _q, _h, (unsigned)g_blkcnt_total); fflush(stdout); } } }
       if (_q >= 0x80600000u && _q < 0x85000000u) {
         static int _jd = 0;
         uint32_t _head = 0, _cb = 0, _arg = 0, _next = 0;
