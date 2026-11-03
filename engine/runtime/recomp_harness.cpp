@@ -2245,6 +2245,12 @@ static void hf_fiber_thread(HFiber* f) {
     if (!fn) { int back=0; uint32_t bq=gbn_back(pc,&back); if (bq && back<=16) { pc=bq; fn=gbn(pc); } }
     if (!fn) { fprintf(stderr, "[HF-NOBLK] fib=%08X pc=%08X\n", f->addr, pc); break; }
     g_cur_block = pc; f->cur_pc = pc; ++f->blocks; ++g_hf_blocks;
+    if ((pc & ~1u) == 0x81199002u || (pc & ~1u) == 0x81198E2Eu || (pc & ~1u) == 0x811E61FAu || (pc & ~1u) == 0x811991BEu) { // M1191: GFD init/term lifecycle
+      static int _a=0,_b=0,_c=0,_d=0; int *_p=nullptr;
+      if ((pc&~1u)==0x81199002u) _p=&_a; else if ((pc&~1u)==0x81198E2Eu) _p=&_b; else if ((pc&~1u)==0x811E61FAu) _p=&_c; else _p=&_d;
+      if ((*_p)++ < 12) { printf("[GFDLIFE] %s n=%d lr=%08X sp=%08X fib=%08X thr=%08X hfblk=%u\n",
+          (pc&~1u)==0x81199002u?"terminate":((pc&~1u)==0x81198E2Eu?"init":((pc&~1u)==0x811E61FAu?"qterm":"initPSP2")), *_p, s->r[14], s->r[13], tl_hf?tl_hf->addr:0u, tl_ht_tid, (unsigned)g_hf_blocks); fflush(stdout); } }
+
     if ((pc & ~1u) == 0x8115A38Au) {   // M1190: result of FUN_81007E50("SCENE1")
       static int _n=0; ++_n;
       if (_n<6 || (_n % 2000)==0) { printf("[SCNLOOKUP] n=%d SCENE1_ptr=%08X hfblk=%u\n", _n, s->r[0], (unsigned)g_hf_blocks); fflush(stdout); } }
@@ -5699,7 +5705,11 @@ static void guest_thread_run(uint32_t tid) {
   uint32_t pc = s->r[15];
   { static int _hr=0; if (_hr++<200) { printf("[HT-RUN] tid=%08X pc=%08X sp=%08X r0=%08X r1=%08X r4=%08X r5=%08X r9=%08X lr=%08X\n", tid, pc, s->r[13], s->r[0], s->r[1], s->r[4], s->r[5], s->r[9], s->r[14]); fflush(stdout); } }
   while (!t->exit_flag && !g_shutdown) {
-    if ((pc & ~1u) >= 0xFFFFFF00u || pc == 0u) { if (g_ht_bad_n++ < 20) { printf("[HT-SENTINEL] tid=%08X pc=%08X r0=%08X r1=%08X sp=%08X\n", tid, pc, s->r[0], s->r[1], s->r[13]); fflush(stdout); } break; }
+    if ((pc & ~1u) >= 0xFFFFFF00u || pc == 0u) {
+      // M1192: GFD worker threads must never die on a null task pointer (the guest calls a task fn via blx;
+      // if a queue slot is empty/garbage the blx goes to 0 and the thread would exit, killing all async tasks).
+      if (t->entry == 0x811E68C9u) { static int _wn = 0; if (_wn++ < 40) { printf("[WORKER-NULL] tid=%08X pc=%08X lr=%08X r0=%08X r1=%08X -> resume at lr\n", tid, pc, s->r[14], s->r[0], s->r[1]); fflush(stdout); } pc = s->r[14]; continue; }
+      if (g_ht_bad_n++ < 20) { printf("[HT-SENTINEL] tid=%08X pc=%08X r0=%08X r1=%08X sp=%08X\n", tid, pc, s->r[0], s->r[1], s->r[13]); fflush(stdout); } break; }
     tl_pc_ring[tl_pc_n & 63u] = pc; ++tl_pc_n;
     { static int _a6=0; if ((pc==0x8122C6B6u||pc==0x8122C6DCu||pc==0x8122C6F6u||pc==0x8122C718u) && _a6++ < 24) { printf("[A6B6] pc=%08X r0=%08X r1=%08X r2=%08X r3=%08X r4=%08X r5=%08X r6=%08X r7=%08X sp=%08X lr=%08X tid=%08X\n", pc, s->r[0],s->r[1],s->r[2],s->r[3],s->r[4],s->r[5],s->r[6],s->r[7],s->r[13],s->r[14],tid); fflush(stdout); } }
     { static int _tr=0; if (_tr++ < 100) { printf("[HTBLK] tid=%08X pc=%08X r0=%08X r1=%08X r2=%08X r3=%08X r4=%08X r5=%08X sp=%08X lr=%08X\n", tid, pc, s->r[0],s->r[1],s->r[2],s->r[3],s->r[4],s->r[5],s->r[13],s->r[14]); fflush(stdout); } }
@@ -5710,6 +5720,12 @@ static void guest_thread_run(uint32_t tid) {
     if (!fn) { if (g_ht_bad_n++ < 20) { printf("[HT-NOBLK] tid=%08X pc=%08X\n", tid, pc); fflush(stdout); } break; }
     g_cur_block = pc;
     t->pc_ring[(t->pc_n++) & 31u] = pc;
+    if ((pc & ~1u) == 0x81199002u || (pc & ~1u) == 0x81198E2Eu || (pc & ~1u) == 0x811E61FAu || (pc & ~1u) == 0x811991BEu) { // M1191: GFD init/term lifecycle
+      static int _a=0,_b=0,_c=0,_d=0; int *_p=nullptr;
+      if ((pc&~1u)==0x81199002u) _p=&_a; else if ((pc&~1u)==0x81198E2Eu) _p=&_b; else if ((pc&~1u)==0x811E61FAu) _p=&_c; else _p=&_d;
+      if ((*_p)++ < 12) { printf("[GFDLIFE] %s n=%d lr=%08X sp=%08X fib=%08X thr=%08X hfblk=%u\n",
+          (pc&~1u)==0x81199002u?"terminate":((pc&~1u)==0x81198E2Eu?"init":((pc&~1u)==0x811E61FAu?"qterm":"initPSP2")), *_p, s->r[14], s->r[13], tl_hf?tl_hf->addr:0u, tl_ht_tid, (unsigned)g_hf_blocks); fflush(stdout); } }
+
     if ((pc & ~1u) == 0x8115A38Au) {   // M1190: result of FUN_81007E50("SCENE1")
       static int _n=0; ++_n;
       if (_n<6 || (_n % 2000)==0) { printf("[SCNLOOKUP] n=%d SCENE1_ptr=%08X hfblk=%u\n", _n, s->r[0], (unsigned)g_hf_blocks); fflush(stdout); } }
