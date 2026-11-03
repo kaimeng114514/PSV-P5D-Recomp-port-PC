@@ -5994,6 +5994,9 @@ static uint32_t call_guest_cb2(RecState* s, uint32_t entry, uint32_t a0, uint32_
       printf("[REGCB] pc=%08X name=%s r0=%08X r1=%08X r2=%08X r3=%08X lr=%08X sp=%08X fib=%08X thr=%08X\n", pc, _nm, s->r[0], s->r[1], s->r[2], s->r[3], s->r[14], s->r[13], g_cur_fiber, g_cur_thr); fflush(stdout); }
     uint32_t q = pc & ~1u;
     if (q == 0x811E5EC2u) ++g_cb5ec2; else if (q == 0x811E5EC6u) ++g_cb5ec6; else if (q == 0x811E5EF0u) ++g_cb5ef0;
+    { // NESTCMDEXEC: probes for GFD command handlers inside nested guest calls
+      if (q==0x811E44D0u||q==0x811E4772u||q==0x811E46BAu||q==0x811E501Cu||q==0x811E5126u||q==0x811EBB90u||q==0x811EFD8Eu||q==0x811EF526u||q==0x811EF5DCu||q==0x811F3494u) {
+        static std::map<uint32_t,int> _nc; int nn=++_nc[q]; if (nn<=8) { printf("[NESTCMDEXEC] va=%08X #%d block=%u lr=%08X entry=%08X n=%u\n", q, nn, g_cur_block, s->r[14], entry, g_main_n); fflush(stdout);} } }
     if (q >= 0xFFFFFF00u || pc == 0u) break;
     BlockFn fn = gbn(pc);
     if (!fn) {
