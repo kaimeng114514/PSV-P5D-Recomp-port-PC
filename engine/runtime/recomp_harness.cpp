@@ -2707,7 +2707,8 @@ static uint32_t _ufd_vert_ubo = 0, _ufd_frag_ubo = 0;   // M1251: per-stage UBO 
             static int _cn = 0; if (_cn++ < 24) { printf("[ABIGXP] %s obj=%08X gxp=%08X hash=%016llX spv=%s\n", _frag?"frag":"vert", _o, _gxp, (unsigned long long)_h, _it->second.c_str()); fflush(stdout); } } } }
       if (strncmp(_ge->name, "sceGxmDraw", 10) == 0 && !_abi_vspv.empty() && !_abi_fspv.empty()) {   // 18.4483 M938: only real draws (not PrecomputedDrawInit/Size)
         { static std::vector<std::string> _pairs; static std::map<std::string,int> _cnt; std::string _cp = _abi_vspv + "|" + _abi_fspv; _cnt[_cp]++;
-          static int _dl=0; if (_dl++<60) { printf("[ABIDR] #%d v=%s f=%s n=%u lr=%08X blk=%08X\n", _dl, _abi_vspv.c_str(), _abi_fspv.c_str(), g_main_n, s->r[14], g_cur_block); fflush(stdout);} }
+          static int _dl=0; static int _dl2=0; if (_dl++<60) { printf("[ABIDR] #%d v=%s f=%s n=%u lr=%08X blk=%08X\n", _dl, _abi_vspv.c_str(), _abi_fspv.c_str(), g_main_n, s->r[14], g_cur_block); fflush(stdout);}
+          else if (_dl2++<60) { printf("[ABIDR2] #%d v=%s f=%s rt=%08X n=%u\n", _dl+_dl2-1, _abi_vspv.c_str(), _abi_fspv.c_str(), g_abi_cur_cd, g_main_n); fflush(stdout);} }
         std::string _vp = _abi_spvdir + "/" + _abi_vspv, _fp = _abi_spvdir + "/" + _abi_fspv;
         // 18.4498 M953: the real pipeline vertex layout is ONE binding with stride 128 (8 x vec4, locations 0..7);
         // the built-in test_triangle (28-byte stride) does not match it, so nothing rasterizes. Upload a proper
@@ -2798,6 +2799,7 @@ static uint32_t _ufd_vert_ubo = 0, _ufd_frag_ubo = 0;   // M1251: per-stage UBO 
           } }
         printf("[ABIBEGIN] surf=%08X data=%08X %ux%u n=%u\n", _csurf, _cd, _cw, _ch, g_main_n); fflush(stdout);
         g_abi_cur_cd = _cd; g_abi_cur_w = _cw; g_abi_cur_h = _ch;   // M1146
+        { static int _bp=0; if (_bp++<40) { printf("[PASSRT] begin cd=%08X w=%u h=%u n=%u\n", _cd, _cw, _ch, g_main_n); fflush(stdout);} }
         // M1143: the backend applies gxm viewport state at scene-pass begin; setting it at draw time was too
         // late (DRAWST still saw vp=0). Force a fullscreen viewport+enable BEFORE the pass begins.
         p5d::vulkan::set_gxm_viewport(0.0f, 960.0f, 0.0f, 544.0f, 0.0f, 1.0f);
@@ -5995,7 +5997,7 @@ static uint32_t call_guest_cb2(RecState* s, uint32_t entry, uint32_t a0, uint32_
     uint32_t q = pc & ~1u;
     if (q == 0x811E5EC2u) ++g_cb5ec2; else if (q == 0x811E5EC6u) ++g_cb5ec6; else if (q == 0x811E5EF0u) ++g_cb5ef0;
     { // NESTCMDEXEC: probes for GFD command handlers inside nested guest calls
-      if (q==0x811E44D0u||q==0x811E4772u||q==0x811E46BAu||q==0x811E501Cu||q==0x811E5126u||q==0x811EBB90u||q==0x811EFD8Eu||q==0x811EF526u||q==0x811EF5DCu||q==0x811F3494u) {
+      if (q==0x811E44D0u||q==0x811E4772u||q==0x811E46BAu||q==0x811E501Cu||q==0x811E5126u||q==0x811EBB90u||q==0x811EFD8Eu||q==0x811EF526u||q==0x811EF5DCu||q==0x811F3494u||q==0x811EC172u||q==0x811EC264u||q==0x811EC104u) {
         static std::map<uint32_t,int> _nc; int nn=++_nc[q]; if (nn<=8) { printf("[NESTCMDEXEC] va=%08X #%d block=%u lr=%08X entry=%08X n=%u\n", q, nn, g_cur_block, s->r[14], entry, g_main_n); fflush(stdout);} } }
     if (q >= 0xFFFFFF00u || pc == 0u) break;
     BlockFn fn = gbn(pc);
