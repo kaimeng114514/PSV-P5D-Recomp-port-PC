@@ -2612,6 +2612,21 @@ static void hf_fiber_thread(HFiber* f) {
       else if ((pc & ~1u) == 0x8119343Au) { static int _tg=0; if(_tg++<12){ const char* _nm="?"; uint8_t* _q=GP(s->r[0]); if(_q) _nm=(const char*)_q; printf("[LOGOTGA] FUN_8119343a name=%s mem=%08X a2=%08X n=%u\n", _nm, s->r[1], s->r[2], g_main_n); fflush(stdout);} }
       else if ((pc & ~1u) == 0x811610A4u) { static int _dr=0; if(_dr++<20){ printf("[LOGODRAW] FUN_811610a4 r0=%08X r1=%08X r2=%08X r3=%08X r4=%08X r5=%08X r6=%08X r7=%08X n=%u\n", s->r[0],s->r[1],s->r[2],s->r[3],s->r[4],s->r[5],s->r[6],s->r[7], g_main_n); fflush(stdout);} }
       else if ((pc & ~1u) == 0x8119351Cu) { static int _cb=0; if(_cb++<12){ printf("[LOGOCB] FUN_8119351c r0=%08X r1=%08X r2=%08X n=%u\n", s->r[0],s->r[1],s->r[2], g_main_n); fflush(stdout);} } }
+    if ((pc & ~1u) == 0x811C041Cu || (pc & ~1u) == 0x811C0884u || (pc & ~1u) == 0x811C09B6u) { // NODEW0
+      static int _nw=0;
+      if ((pc & ~1u) == 0x811C041Cu) { ++_nw;
+        uint32_t _node=s->r[1]; uint32_t _w0=0,_w1=0,_w2=0,_w3=0; uint8_t* _q=GP(_node);
+        if(_q){ std::memcpy(&_w0,_q,4); std::memcpy(&_w1,_q+4,4); std::memcpy(&_w2,_q+8,4); std::memcpy(&_w3,_q+12,4); }
+        if (_nw<=40 || (_nw%500)==0) { printf("[NODEW0] n=%d list=%08X node=%08X w0=%08X w1=%08X w2=%08X w3=%08X n=%u\n", _nw, s->r[0], _node, _w0,_w1,_w2,_w3, g_main_n); fflush(stdout); }
+        if (((_w0>=0x811E3000u && _w0<0x811E7000u) || (_w3>=0x811E3000u && _w3<0x811E7000u))) { static int _sp=0; if(_sp++<80) { printf("[SPRNODE] list=%08X node=%08X w0=%08X w1=%08X w2=%08X w3=%08X blk=%08X\n", s->r[0], _node, _w0,_w1,_w2,_w3, g_cur_block); fflush(stdout);} } }
+      else if ((pc & ~1u) == 0x811C0884u) { static int _ex=0; ++_ex; if(_ex<=20 || (_ex%500)==0){ uint32_t _h=0; uint8_t* _q=GP(s->r[0]); if(_q) std::memcpy(&_h,_q,4); printf("[NODEEXEC] n=%d r0=%08X r1=%08X r2=%08X r3=%08X headw0=%08X n=%u\n", _ex, s->r[0],s->r[1],s->r[2],s->r[3],_h, g_main_n); fflush(stdout);} }
+      else { static int _lb=0; if(_lb++<8){ printf("[NODEWRAP] r0=%08X r1=%08X r2=%08X r3=%08X n=%u\n", s->r[0],s->r[1],s->r[2],s->r[3], g_main_n); fflush(stdout);} } }
+    if ((pc & ~1u) == 0x81163ABCu || (pc & ~1u) == 0x81160814u || (pc & ~1u) == 0x81160516u || (pc & ~1u) == 0x8115FF12u) { // SPRGATE
+      static int _s1=0,_s2=0,_s3=0,_s4=0;
+      if ((pc & ~1u) == 0x81163ABCu) { if(_s1++<18) { printf("[SPRGATE] FUN_81163abc n=%d p1=%u p2=%08X p3=%08X p4=%08X n=%u\n", _s1, s->r[0],s->r[1],s->r[2],s->r[3], g_main_n); fflush(stdout);} }
+      else if ((pc & ~1u) == 0x81160814u) { if(_s2++<18) { printf("[SPRGATE] FUN_81160814 n=%d n=%u\n", _s2, g_main_n); fflush(stdout);} }
+      else if ((pc & ~1u) == 0x81160516u) { if(_s3++<10) { printf("[SPRGATE] FUN_81160516 n=%d r0=%08X r1=%08X n=%u\n", _s3, s->r[0],s->r[1], g_main_n); fflush(stdout);} }
+      else { if(_s4++<10) { printf("[SPRGATE] FUN_8115ff12 n=%d n=%u\n", _s4, g_main_n); fflush(stdout);} } }
     if ((pc & ~1u) == 0x811866A6u) {   // M1186: app movie-slot state machine (0x100 slots, stride 0x60, base DAT_81670B48)
       static int g_mvfast = -1; if (g_mvfast < 0) { const char* _e = getenv("P5D_MOVIEFAST"); g_mvfast = (_e && atoi(_e)) ? 1 : 0; }
       static int _mv = 0; ++_mv;
