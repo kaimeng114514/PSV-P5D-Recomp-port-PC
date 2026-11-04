@@ -302,6 +302,14 @@ static int g_acc_n = 0, g_lkin_n = 0, g_lkout_n = 0;
 extern "C" int g_watch_on = 1;
 extern "C" int g_badmem_safe = 0;   // BADMEM_SAFE: P() returns scratch instead of abort when set
 static uint32_t g_dbg_cur_f_ubo = 0;   // M1370 mirror of _cur_f_ubo for global probes
+static std::map<std::string,long> g_gxm_counts;   // GXMSTATS: full API call counts
+static void gxm_stats_dump(){ if(g_gxm_counts.empty()) return; std::vector<std::pair<long,std::string>> _v;
+  for(auto& kv:g_gxm_counts) _v.push_back({kv.second,kv.first});
+  std::sort(_v.begin(),_v.end(),[](const std::pair<long,std::string>&a,const std::pair<long,std::string>&b){return a.first>b.first;});
+  printf("[GXMSTATS] total_api=%zu\n", _v.size());
+  for(size_t i=0;i<_v.size() && i<80;++i) printf("[GXMSTATS] %-46s %ld\n", _v[i].second.c_str(), _v[i].first);
+  fflush(stdout); }
+static int g_gxm_stats_reg = (std::atexit(gxm_stats_dump), 0);
 static void crihot_hit(uint32_t pc);   // CRIHOT_FWD
 static void nodechain_hit(uint32_t pc, RecState* s);   // NODECHAIN_FWD
 static void decomp_hit(uint32_t pc, RecState* s);   // DECOMPPROBE_FWD
@@ -2889,6 +2897,7 @@ static uint32_t hle_call_inner(uint32_t stub_va, RecState* s) {
   }
   if (g_gxmabi) {
     const gxm_abi_entry* _ge = gxm_abi_lookup(stub_va);
+    if (_ge) g_gxm_counts[_ge->name]++;
     if (_ge) {
       // 18.4480 M935: GXP->SPIR-V pipeline wiring (was only present in the old eboot_probe host)
       static std::map<unsigned long long,std::string> _abi_man; static int _abi_man_st = -1; static std::string _abi_spvdir;
@@ -3167,6 +3176,7 @@ static uint32_t _ufd_vert_ubo = 0, _ufd_frag_ubo = 0;   // M1251: per-stage UBO 
             // acceptance baseline with host-decoded frames (NOMOVIE only gated the overlay blit).
             if (movie_host_on() || _dec) movie_advance_frame(); } }   // 18.4514 M969 / M1286
           p5d::vulkan::present_frame(_data);
+          { static int _ps=0; ++_ps; if (_ps % 100 == 0) { printf("[PERIODICSTATS] presents=%d\n", _ps); gxm_stats_dump(); } }
           { static int _sc = 0;   // 18.4516 M971: capture the swapchain (movie layer blitted inside present_frame)
             if (_sc < 8) { char _fn[64]; std::snprintf(_fn, sizeof(_fn), "p5d_swap_%d.bmp", _sc);
               int _src = p5d::vulkan::save_screenshot(_fn);
