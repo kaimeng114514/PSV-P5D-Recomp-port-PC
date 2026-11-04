@@ -3862,7 +3862,13 @@ static uint32_t _ufd_vert_ubo = 0, _ufd_frag_ubo = 0;   // M1251: per-stage UBO 
                 printf("\n"); for(unsigned _v=0;_v<4 && _v<_vc;++_v){ printf("[TXTVTX]  v%u:", _v); for(size_t _i=0;_i<(_av.size()<3?_av.size():3);++_i) printf(" loc%zu=(%.3f,%.3f,%.3f,%.3f)", _i, _vtx[(size_t)_v*32u+_i*4u], _vtx[(size_t)_v*32u+_i*4u+1], _vtx[(size_t)_v*32u+_i*4u+2], _vtx[(size_t)_v*32u+_i*4u+3]); printf("\n"); } fflush(stdout);} }
             static int _vn=0; if (_vn++<40) { printf("[ABIVTX] #%d vc=%u attrs=%u rc=%d n=%u v0=(%.3f,%.3f,%.3f,%.3f) v1=(%.3f,%.3f,%.3f,%.3f)\n", _vn,
               _vc, (unsigned)_av.size(), _rr, g_main_n, _vtx[0],_vtx[1],_vtx[2],_vtx[3], _vtx[32],_vtx[33],_vtx[34],_vtx[35]); fflush(stdout); }
-          } else { static int _fn=0; if (_fn++<6) { printf("[ABIVTX] FAIL vc=%u attrs=%u cur_obj=%08X streams=%zu n=%u\n", _vc,(unsigned)_av.size(),_cur_vobj,_stm2va.size(),g_main_n); fflush(stdout); } }
+          
+            // M1323: actually DRAW the content path (its gxm_draw_arrays was only inside the P5D_TPRD
+            // diagnostic branch, so normal runs uploaded vertices and never drew them).
+            { static int _cd=-1; if(_cd<0){ const char* _e=getenv("P5D_CPUDRAW"); _cd=(_e&&atoi(_e))?1:0; }
+              if (_cd) { p5d::vulkan::gxm_draw_arrays(_vc_x);
+                static int _cdn=0; if(_cdn++<24){ printf("[CPUDRAW] #%d vc=%u vc_x=%u n=%u\n", _cdn,_vc,_vc_x,g_main_n); fflush(stdout);} } }
+} else { static int _fn=0; if (_fn++<6) { printf("[ABIVTX] FAIL vc=%u attrs=%u cur_obj=%08X streams=%zu n=%u\n", _vc,(unsigned)_av.size(),_cur_vobj,_stm2va.size(),g_main_n); fflush(stdout); } }
         }
       }
       // 18.4510 M965: REAL sceGxmTextureInit* - encode the SceGxmTexture control block (16B)
