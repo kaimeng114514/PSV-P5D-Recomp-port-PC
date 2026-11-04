@@ -2593,7 +2593,7 @@ static void hf_fiber_thread(HFiber* f) {
     if ((pc & ~1u) == 0x811866A6u) {   // M1186: app movie-slot state machine (0x100 slots, stride 0x60, base DAT_81670B48)
       static int g_mvfast = -1; if (g_mvfast < 0) { const char* _e = getenv("P5D_MOVIEFAST"); g_mvfast = (_e && atoi(_e)) ? 1 : 0; }
       static int _mv = 0; ++_mv;
-      if (_mv == 1 || _mv == 1000 || _mv == 100000) {
+      if (_mv == 1 || _mv == 1000 || _mv == 100000 || (_mv % 100) == 0) {
         printf("[MOVIESLOT] call=%d", _mv);
         for (int _i=0;_i<4;++_i) { uint32_t _b = 0x81670B48u + (uint32_t)_i*0x60u; uint8_t* _p = GP(_b);
           if (_p) { uint32_t _act=*(uint32_t*)(_p+0), _cat=0,_st=0,_tot=0,_cur=0;
@@ -3298,6 +3298,12 @@ static uint32_t _ufd_vert_ubo = 0, _ufd_frag_ubo = 0;   // M1251: per-stage UBO 
           if (_cur_v_ubo) { uint8_t* _s=GP(_cur_v_ubo); if(_s){ for(int _r=0;_r<32;++_r) printf("[UBODUMP2] V row%d = %.4f %.4f %.4f %.4f\n", _r, ((float*)_s)[_r*4],((float*)_s)[_r*4+1],((float*)_s)[_r*4+2],((float*)_s)[_r*4+3]); } }
           if (_cur_f_ubo) { uint8_t* _s=GP(_cur_f_ubo); if(_s){ for(int _r=0;_r<8;++_r) printf("[UBODUMP2] F row%d = %.4f %.4f %.4f %.4f\n", _r, ((float*)_s)[_r*4],((float*)_s)[_r*4+1],((float*)_s)[_r*4+2],((float*)_s)[_r*4+3]); } }
           for (int _u=0;_u<16;++_u){ if(!_frag_tex[_u][0]&&!_frag_tex[_u][1]) continue; printf("[UBODUMP2] fragtex u=%d w0=%08X w1=%08X w2=%08X w3=%08X\n", _u, ((uint32_t*)_frag_tex[_u])[0],((uint32_t*)_frag_tex[_u])[1],((uint32_t*)_frag_tex[_u])[2],((uint32_t*)_frag_tex[_u])[3]); }
+          { static int _td=-1; if(_td<0){ const char* _e=getenv("P5D_TEXDATA"); _td=(_e&&atoi(_e))?1:0; }
+            if(_td){ for(int _u=0;_u<16;++_u){ if(!_frag_tex[_u][0]&&!_frag_tex[_u][1]) continue; uint32_t _dva=((uint32_t*)_frag_tex[_u])[2]; uint8_t* _dp=GP(_dva & 0xFFFFFFFCu); if(!_dp){ printf("[TEXDATA] u=%d dva=%08X unmapped\n",_u,_dva); continue; }
+              printf("[TEXDATA] u=%d dva=%08X bytes:",_u,_dva); for(int _k=0;_k<32;++_k) printf(" %02X", _dp[_k]); printf("\n");
+              long _nz=0; for(int _k=0;_k<4096;++_k) if(_dp[_k]) ++_nz; printf("[TEXDATA] u=%d nonzero/4096=%ld\n",_u,_nz); }
+              fflush(stdout); } }
+          
           { static int _sc=0; if(_sc++<3 && _cur_v_ubo){ uint8_t* _s=GP(_cur_v_ubo); if(_s){ int _nz=0; for(uint32_t _o=0;_o<0x4000u;_o+=4u){ float _f; std::memcpy(&_f,_s+_o,4); if(_f!=0.0f){ printf("[USSE-SCAN] off=%05X = %.4f (bits %08X)\n", _o, _f, ((uint32_t*)_s)[_o/4]); if(++_nz>=40) break; } } printf("[USSE-SCAN] done nonzero=%d\n", _nz); fflush(stdout);} } }
           fflush(stdout); } } }
       if (strncmp(_ge->name, "sceGxmDraw", 10) == 0 && strcmp(_ge->name, "sceGxmDrawPrecomputed") != 0) {
@@ -3494,6 +3500,9 @@ static uint32_t _ufd_vert_ubo = 0, _ufd_frag_ubo = 0;   // M1251: per-stage UBO 
           size_t _off = (size_t)_res * 16u + (size_t)_coff * 4u;
           if (_off + (size_t)_ccnt * 4u <= 0x1000u) {
             std::memcpy(_dst + _off, _ssrc, (size_t)_ccnt * 4u);
+            { static int _uw=-1; if(_uw<0){ const char* _e=getenv("P5D_UFDWHITE"); _uw=(_e&&atoi(_e))?1:0; }
+              if (_uw && _par==0x81539928u && _ccnt>=4u) { float _one[4]={1.f,1.f,1.f,1.f}; std::memcpy(_dst+_off,_one,16);
+                static int _uwn=0; if(_uwn++<8){ printf("[UFDWHITE] rColor forced to 1,1,1,1 ubo=%08X n=%u\n", _ubo, g_main_n); fflush(stdout);} } }
             static int _un=0; if (_un++<8) { printf("[ABIUFD] ubo=%08X res=%u coff=%u cnt=%u first=(%.3f,%.3f,%.3f,%.3f) n=%u\n", _ubo,_res,_coff,_ccnt,((float*)_ssrc)[0],((float*)_ssrc)[1],((float*)_ssrc)[2],((float*)_ssrc)[3], g_main_n); fflush(stdout); } } }
         s->r[0] = 0; return s->r[14];
       }
@@ -7024,6 +7033,8 @@ static int g_dd4bc_n = 0, g_dd4c8_n = 0;
 static int g_sched_n = 0;
 static int g_de912_n = 0, g_de9ba_n = 0;
 extern "C" void wr64_watch(uint32_t a, uint64_t v) {
+  { if (a >= 0x81670B48u && a < 0x81670B48u + 0x6000u) { static int _sw=0; if(_sw++<80){ printf("[SLOTWR64] a=%08X off=%05X v=%08X blk=%08X hle=%08X thr=%08X\n", a, a-0x81670B48u, v, g_cur_block, g_cur_hle_stub, g_cur_thr); fflush(stdout);} } }
+
   { if (a >= 0x94700000u && a < 0x94740000u) { static int _u64=0; if(_u64++<40){ printf("[USSEW64] a=%08X off=%05X v=%016llX blk=%08X\n", a, a-0x94700000u, (unsigned long long)v, g_cur_block); fflush(stdout);} } }
 
   { static int _lw=0; if ((a == 0x816CDB8Cu || a == 0x816CDB88u || a == 0x816CDB90u) && _lw++ < 40) { printf("[REGWR64] a=%08X v=%08X%08X blk=%08X fib=%08X thr=%08X\n", a, (uint32_t)(v>>32), (uint32_t)v, g_cur_block, g_cur_fiber, g_cur_thr); fflush(stdout); } }
@@ -7060,6 +7071,8 @@ extern "C" void wr16_watch(uint32_t a, uint32_t v) {
       if (g_w16_n++ < 240) { printf("[W16] a=%08X off=%02X v=%04X blk=%08X fib=%08X thr=%08X\n", a, a - g_watch_task, v, g_cur_block, g_cur_fiber, g_cur_thr); fflush(stdout); } } }
 }
 extern "C" void wr32_watch(uint32_t a, uint32_t v) {
+  { if (a >= 0x81670B48u && a < 0x81670B48u + 0x6000u && v != 0u) { static int _sw=0; if(_sw++<100){ printf("[SLOTWR] a=%08X slot=%u off=%02X v=%08X blk=%08X hle=%08X thr=%08X\n", a, (a-0x81670B48u)/0x60u, (a-0x81670B48u)%0x60u, v, g_cur_block, g_cur_hle_stub, g_cur_thr); fflush(stdout);} } }
+
   { if (a >= 0x94700000u && a < 0x94740000u) { static int _uw=0; if(_uw++<80){ printf("[USSEWR] a=%08X off=%05X v=%08X(%.3f) blk=%08X hle=%08X fib=%08X thr=%08X\n", a, a-0x94700000u, v, *(float*)&v, g_cur_block, g_cur_hle_stub, g_cur_fiber, g_cur_thr); fflush(stdout);} } }
 
   { if (a >= 0x8F343000u && a < 0x8F343100u) { static int _nl=0; if(_nl++<300){ printf("[NODELIFE] wr a=%08X v=%08X blk=%08X fib=%08X thr=%08X\n", a, v, g_cur_block, g_cur_fiber, g_cur_thr); fflush(stdout);} } }
