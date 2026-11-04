@@ -154,7 +154,7 @@ def emit(ins, sup):
     _vfp_ok = ("vldr","vstr","vcvt.f64.f32","vcvt.f32.f64","vcmp.f64","vneg.f64","vabs.f64")
     if _dregs and not (m in _vfp_ok and len(ops) <= 3):
         # 18.3921: NEON subset implementation (integer/bitwise first). D regs 14..45 -> s->d[0..31].
-        if m in ("vnmls.f32","vnmla.f32","vrsqrts.f32","vrsqrte.f32","vsqrt.f32","vrecpe.f32","vrecps.f32","vceq.i32","vtst.32","vmax.f32","vmin.f32","vacgt.f32","vadd.i32","vsub.i32","vtrn.32","vbit","vext.64") and len(ops) >= 2:
+        if m in ("vnmls.f32","vnmla.f32","vrsqrts.f32","vrsqrte.f32","vsqrt.f32","vrecpe.f32","vrecps.f32","vceq.i32","vtst.32","vmax.f32","vmin.f32","vacgt.f32","vadd.i32","vsub.i32","vtrn.32","vbit","vext.64","vrhadd.u16") and len(ops) >= 2:
             def _lanes(i):
                 if i >= len(ops) or ops[i].type != 1: return None
                 r = ops[i].reg
@@ -192,6 +192,9 @@ def emit(ins, sup):
                         _st.append("{ uint32_t _x[2], _y[2], _z[2]; memcpy(_x,&s->d[%d],8); memcpy(_y,&s->d[%d],8); memcpy(_z,&s->d[%d],8); for(int _i=0;_i<2;_i++){ float _fa,_fb,_fc; memcpy(&_fa,(char*)_x+_i*4,4); memcpy(&_fb,(char*)_y+_i*4,4); memcpy(&_fc,(char*)_z+_i*4,4); float _fo = _fc %s _fa*_fb; memcpy((char*)_z+_i*4,&_fo,4);} uint64_t _r; memcpy(&_r,_z,8); s->d[%d]=_r; }" % (_c,_a,_b,_a,_sgn,_a))
                     elif m == "vtrn.32":
                         _st.append("{ uint32_t _x=(uint32_t)(s->d[%d]&0xFFFFFFFFu), _y=(uint32_t)(s->d[%d]&0xFFFFFFFFu); s->d[%d]=(s->d[%d]&0xFFFFFFFF00000000ull)|_y; s->d[%d]=(s->d[%d]&0xFFFFFFFF00000000ull)|_x; }" % (_a,_b,_a,_a,_b,_b))
+                    elif m == "vrhadd.u16":
+                        # M1326: rounding halving add per u16 lane: dst=(src1+src2+1)>>1
+                        _st.append("{ uint64_t _a=s->d[%d],_b=s->d[%d],_r=0; for(int _i=0;_i<4;_i++){ uint32_t _x=(uint32_t)((_a>>(16*_i))&0xFFFFu),_y=(uint32_t)((_b>>(16*_i))&0xFFFFu); uint32_t _s=(_x+_y+1u)>>1u; _r|=((uint64_t)(uint16_t)_s)<<(16*_i);} s->d[%d]=_r; }" % (_b,_c,_a))
                     elif m == "vbit":
                         _st.append("s->d[%d] = (s->d[%d] & ~s->d[%d]) | (s->d[%d] & s->d[%d]);" % (_a,_a,_b,_c,_b))
                 if _st:
@@ -654,7 +657,15 @@ def emit(ins, sup):
         if m.startswith("vcvt.u32"): L.append("vfp_s_bits_set(s,%d,(uint32_t)vfp_sf(s,%d));" % (reg(0)-79, reg(1)-79))
         else: L.append("vfp_s_bits_set(s,%d,(uint32_t)(int32_t)vfp_sf(s,%d));" % (reg(0)-79, reg(1)-79))
     elif m == "vcmp.f32" and len(ops) >= 2:
-        L.append("{ float _a=vfp_sf(s,%d), _b=vfp_sf(s,%d); s->apsr=s->fp_nzcv=(_a==_b)?0x40000000u:((_a<_b)?0x80000000u:0x20000000u); }" % (reg(0)-79, reg(1)-79))
+        # M1334: operand may be a floating-point IMMEDIATE (e.g. vcmp.f32 sN,#0.0).  The old code
+        # emitted vfp_sf(s,-79) for immediates (garbage/out-of-bounds read) so every float-vs-zero
+        # comparison in the whole library used random values.  Handle both forms explicitly.
+        if ops[1].type == ARM_OP_REG:
+            _bexpr = "vfp_sf(s,%d)" % (reg(1)-79)
+        else:
+            _bf = float(getattr(ops[1], "fp", 0.0))
+            _bexpr = "(%.9gf)" % _bf
+        L.append("{ float _a=vfp_sf(s,%d), _b=%s; s->apsr=s->fp_nzcv=(_a==_b)?0x40000000u:((_a<_b)?0x80000000u:0x20000000u); }" % (reg(0)-79, _bexpr))
     elif m == "vmrs":
         L.append("s->apsr = s->fp_nzcv; /* vmrs APSR_nzcv,FPSCR */")
     elif m in ("vpush","vpop"):

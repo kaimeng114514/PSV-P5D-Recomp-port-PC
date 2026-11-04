@@ -723,6 +723,16 @@ static inline uint8_t* GP(uint32_t va) {
     fprintf(stderr, "\n"); return nullptr; }
   return gp_img + off;
 }
+
+extern "C" void p5d_va_dump(int tag, unsigned va, unsigned n) {
+  static int _c[8]={0};
+  int t=(tag>=0&&tag<8)?tag:0;
+  if (_c[t]++ >= 24) return;
+  if (n>32u) n=32u;
+  std::printf("[VADUMP] tag=%d va=%08X n=%u words:", tag, va, n);
+  for (unsigned i=0;i<n;i++){ uint32_t w=0; uint8_t* q=GP(va+i*4u); if(q) std::memcpy(&w,q,4); std::printf(" %08X", w); }
+  std::printf("\n"); std::fflush(stdout);
+}
 // M1316: guest-memory accessors for Project Nativ's USSE interpreter/translator (GPL-2+)
 extern "C" uint8_t* p5d_usse_G(uint32_t va) { static uint8_t _z[64] = {0}; uint8_t* _p = GP(va); return _p ? _p : _z; }
 extern "C" uint32_t p5d_usse_rd32(uint32_t va) { uint32_t v = 0; uint8_t* _p = GP(va); if (_p) std::memcpy(&v,_p,4); return v; }
