@@ -126,7 +126,7 @@ static int g_current_loop_pc = 0;   // 18.4226 watchdog: current dispatch pc
 #include <algorithm>
 #include "cpk_reader.h"
 
-struct RecState { uint32_t r[16]; uint32_t apsr; uint8_t* base; uint32_t mem_size; uint64_t d[32]; };
+struct RecState { uint32_t r[16]; uint32_t apsr; uint32_t fp_nzcv; uint8_t* base; uint32_t mem_size; uint64_t d[32]; };
 static RecState* SPTR(RecState* x) { return x; }
 template<class T> static RecState* SPTR(T& x) { return &x; }
 extern "C" uint32_t g_cur_block = 0;
@@ -2665,6 +2665,12 @@ static void hf_fiber_thread(HFiber* f) {
       static int _ca=0; if(_ca++<10){ printf("[CALLARGS] FUN_811610a4 n=%d r0=%08X r1=%08X r2=%08X r3=%08X\n", _ca, s->r[0],s->r[1],s->r[2],s->r[3]);
         printf("[CALLARGS]  d0..d9 floats:"); for(int _k=0;_k<10;++_k){ float _f; std::memcpy(&_f,&s->d[_k],4); printf(" %.3f",_f);} printf("\n");
         printf("[CALLARGS]  d0..d9 raw:"); for(int _k=0;_k<10;++_k){ uint32_t _w; std::memcpy(&_w,&s->d[_k],4); printf(" %08X",_w);} printf("\n"); fflush(stdout);} }
+    if ((pc & ~1u) == 0x81160516u || (pc & ~1u) == 0x81160514u) { // TEXSLOT: texture select
+      static int _ts=0; if(_ts++<40){ uint32_t _slot=0; uint8_t* _q=GP(0x81555458u); if(_q) std::memcpy(&_slot,_q,4);
+        printf("[TEXSLOT] FUN_81160516 n=%d unit=%u handle=%08X slot0_before=%08X n0=%u\n", _ts,(int)s->r[0],s->r[1],_slot,g_main_n); fflush(stdout);} }
+    if ((pc & ~1u) == 0x8115FF12u) { // TEXFLAGS: log flags changes
+      static uint32_t _lf=0xDEADBEEF; static int _tn=0; uint32_t _f=0; uint8_t* _q=GP(0x81555438u); if(_q) std::memcpy(&_f,_q,4);
+      if(_f!=_lf && _tn++<80){ _lf=_f; printf("[TEXFLAGS] n=%d flags=%08X n0=%u\n", _tn, _f, g_main_n); fflush(stdout);} }
     if ((pc & ~1u) == 0x811866A6u) {   // M1186: app movie-slot state machine (0x100 slots, stride 0x60, base DAT_81670B48)
       static int g_mvfast = -1; if (g_mvfast < 0) { const char* _e = getenv("P5D_MOVIEFAST"); g_mvfast = (_e && atoi(_e)) ? 1 : 0; }
       static int _mv = 0; ++_mv;
@@ -6458,6 +6464,9 @@ g_manual_blocks[0x811E63CEu] = (BlockFn)mb_811E63CE;
 g_manual_blocks[0x8128D570u] = (BlockFn)mb_8128D570;
 }
 static BlockFn gbn(uint32_t pc) {
+  { static int _tr=-1; static uint32_t _lo=0,_hi=0; static std::set<uint32_t> _seen;
+    if (_tr<0) { const char* _e=getenv("P5D_TRACE_RANGE"); if(_e && *_e){ unsigned _a=0,_b=0; if(sscanf(_e,"%x-%x",&_a,&_b)==2){ _lo=_a; _hi=_b; _tr=1; } else _tr=0; } else _tr=0; }
+    if (_tr && pc>=_lo && pc<_hi) { if(_seen.insert(pc).second && _seen.size()<400) { printf("[TRANGE] %08X blk=%u\n", pc, (unsigned)g_blkcnt_total); fflush(stdout); } } }
   { static int _mg_env=-1; if (_mg_env<0) { const char* _e=getenv("P5D_MGRPROBE"); _mg_env=(_e&&atoi(_e)!=0)?1:0; }
     if (_mg_env) {
       auto _ff=[&](uint32_t fb)->uint32_t { uint8_t* q=GP(fb+0x80u); uint32_t v=0; if(q) std::memcpy(&v,q,4); return v; };
@@ -7201,6 +7210,8 @@ extern "C" void wr16_watch(uint32_t a, uint32_t v) {
 }
 // M1370: g_dbg_cur_f_ubo mirror defined near top of file
 extern "C" void wr32_watch(uint32_t a, uint32_t v) {
+  { if (a >= 0x81555458u && a < 0x81555480u) { static int _sw=0; if(_sw++<60){ printf("[TEXSLOTWR] a=%08X v=%08X blk=%08X\n", a, v, g_cur_block); fflush(stdout);} } }
+
   { if (a >= 0x85410040u && a < 0x85410440u) { static int _cw=0; if(_cw++<160){ printf("[VCTXWR] a=%08X off=%03X v=%08X blk=%08X hle=%08X thr=%08X\n", a, a-0x85410040u, v, g_cur_block, g_cur_hle_stub, g_cur_thr); fflush(stdout);} } }
 
   { if (a >= 0x8F142000u && a < 0x8F144000u) { static int _vb=0; if(_vb++<120){ printf("[VBDWR] a=%08X v=%08X blk=%08X hle=%08X thr=%08X\n", a, v, g_cur_block, g_cur_hle_stub, g_cur_thr); fflush(stdout);} } }

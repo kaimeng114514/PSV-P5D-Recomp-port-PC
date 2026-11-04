@@ -654,9 +654,9 @@ def emit(ins, sup):
         if m.startswith("vcvt.u32"): L.append("vfp_s_bits_set(s,%d,(uint32_t)vfp_sf(s,%d));" % (reg(0)-79, reg(1)-79))
         else: L.append("vfp_s_bits_set(s,%d,(uint32_t)(int32_t)vfp_sf(s,%d));" % (reg(0)-79, reg(1)-79))
     elif m == "vcmp.f32" and len(ops) >= 2:
-        L.append("{ float _a=vfp_sf(s,%d), _b=vfp_sf(s,%d); s->apsr=(_a==_b)?0x40000000u:((_a<_b)?0x80000000u:0x20000000u); }" % (reg(0)-79, reg(1)-79))
+        L.append("{ float _a=vfp_sf(s,%d), _b=vfp_sf(s,%d); s->apsr=s->fp_nzcv=(_a==_b)?0x40000000u:((_a<_b)?0x80000000u:0x20000000u); }" % (reg(0)-79, reg(1)-79))
     elif m == "vmrs":
-        L.append("/* vmrs */")
+        L.append("s->apsr = s->fp_nzcv; /* vmrs APSR_nzcv,FPSCR */")
     elif m in ("vpush","vpop"):
         regs = [op.reg for op in ops if op.type == ARM_OP_REG]
         def vbits(r):
