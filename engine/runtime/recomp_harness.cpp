@@ -7,6 +7,11 @@
 //   0x812B19B0 sceFiosInitialize, 0x812B19C0 sceFiosFHClose, 0x812B1910 sceAppUtilInit, 0x812B2210 abort,
 //   0x812B22A0 malloc etc.
 #include <cstdio>
+#include <cstdlib>
+static int g_p5d_quiet = -1;
+static inline int p5d_quiet(void) { if (g_p5d_quiet < 0) g_p5d_quiet = (::getenv("P5D_QUIET") != nullptr) ? 1 : 0; return g_p5d_quiet; }
+#define QLOG(...) do { if (!p5d_quiet()) std::printf(__VA_ARGS__); } while (0)
+
 #ifdef _WIN32
 #include <windows.h>
 // 18.4489 M944: pump Win32 messages so the game window does not show "Not Responding"
@@ -946,7 +951,7 @@ static uint32_t hle_malloc(uint32_t n) {
   tl_last_malloc_n = n;   // 18.4241: host-thread model - allocator must be thread-safe
   uint64_t sz64 = ((uint64_t)n + 15ull) & ~15ull;
   if (sz64 > 0x20000000ull) {   // 18.4191: reject absurd sizes - the 32-bit +15 wrap used to bypass the arena checks and memset() crashed natively
-    printf("[HLE] malloc REJECT huge n=%08X\n", n); fflush(stdout); return 0;
+    QLOG("[HLE] malloc REJECT huge n=%08X\n", n); fflush(stdout); return 0;
   }
   uint32_t sz = (uint32_t)sz64;
   if (n >= 0x100000u) { uint32_t bp = (g_big_ptr + 15u) & ~15u;   // 18.4163: big blocks from the extended arena
@@ -977,7 +982,7 @@ static uint32_t hle_malloc(uint32_t n) {
   { uint32_t b2 = (g_big2_ptr + 15u) & ~15u;   // 18.4251: 96MB extra window (VA 0xA2000000-0xA8000000)
     if ((uint64_t)b2 + sz64 < (uint64_t)g_big2_end) { g_big2_ptr = b2 + sz; std::memset(GP(b2), 0, sz);
       if (g_big2n++ < 30) { printf("[BIG2] n=%08X -> %08X\n", n, b2); fflush(stdout); } return hle_malloc_ret(b2); } }
-  printf("[HLE] malloc OOM n=%u (all heaps full)\n", n); return 0;
+  QLOG("[HLE] malloc OOM n=%u (all heaps full)\n", n); return 0;
 }
 extern "C" uint32_t p5d_abi_guest_alloc(uint32_t n) { return hle_malloc(n); }   // 18.4474 M929: guest allocator for GXM ABI out-params (UBO)
 
@@ -1825,7 +1830,7 @@ static void job_probes(uint32_t pcv, RecState* s) {
         _a0 == 0x811821E2u || _a0 == 0x81182298u || _a0 == 0x811823FEu || _a0 == 0x81182742u || _a0 == 0x81182C56u ||
         _a0 == 0x81182F6Au || _a0 == 0x811830E2u) { static int _wv_n = 0; static int _wv_late = 0; ++_wv_n;
       int _late = (g_main_n > 10000000u && !_wv_late); if (_late) _wv_late = 1;
-      if (_wv_n <= 10 || (_wv_n % 2000) == 0 || _late) { printf("[VFW] #%d at=%08X n=%u late=%d r0=%08X r1=%08X r2=%08X fib=%08X\n", _wv_n, _a0, g_main_n, _late, s->r[0], s->r[1], s->r[2], g_cur_fiber); fflush(stdout); } } }
+      if (_wv_n <= 10 || (_wv_n % 2000) == 0 || _late) { QLOG("[VFW] #%d at=%08X n=%u late=%d r0=%08X r1=%08X r2=%08X fib=%08X\n", _wv_n, _a0, g_main_n, _late, s->r[0], s->r[1], s->r[2], g_cur_fiber); fflush(stdout); } } }
   { uint32_t _a0 = pcv & ~1u;
     if (_a0 == 0x811E5CCAu || _a0 == 0x811C6B9Eu || _a0 == 0x811C6ACCu || _a0 == 0x811C6D98u) { static int _pk_n = 0; static int _pk_late = 0; ++_pk_n;
       int _late = (g_main_n > 10000000u && !_pk_late); if (_late) _pk_late = 1;
@@ -2007,8 +2012,8 @@ static void job_probes(uint32_t pcv, RecState* s) {
   if ((pcv & ~1u) == 0x8123F04Cu) { uint8_t* _q = GP(s->r[13] + 0x100u); (void)_q; g_trap_can = s->r[13] + 0x100u; }
   else if ((pcv & ~1u) == 0x8123F14Au || (pcv & ~1u) == 0x8123F15Au) { g_trap_can = 0; }
   { static uint32_t _lastd=0; if (g_blkcnt_total - _lastd >= 500000u) { _lastd = g_blkcnt_total;
-      if (g_tdump_n++ < 16) { printf("[TDUMP] n=%u pcv=%08X fib=%08X thr=%08X threads=%zu\n", g_blkcnt_total, pcv, g_cur_fiber, g_cur_thr, g_thr.size());
-        for (auto& kv : g_thr) { HThread& t=kv.second; printf("[TDUMP]  tid=%08X entry=%08X alive=%d ready=%d wait=%d obj=%08X bits=%08X mode=%X ctxpc=%08X ctxsp=%08X ctxr0=%08X\n", kv.first, t.entry, t.alive, t.ready, t.waiting, t.wait_obj, t.wait_bits, t.wait_mode, t.ctx.r[15], t.ctx.r[13], t.ctx.r[0]); }
+      if (g_tdump_n++ < 16) { QLOG("[TDUMP] n=%u pcv=%08X fib=%08X thr=%08X threads=%zu\n", g_blkcnt_total, pcv, g_cur_fiber, g_cur_thr, g_thr.size());
+        for (auto& kv : g_thr) { HThread& t=kv.second; QLOG("[TDUMP]  tid=%08X entry=%08X alive=%d ready=%d wait=%d obj=%08X bits=%08X mode=%X ctxpc=%08X ctxsp=%08X ctxr0=%08X\n", kv.first, t.entry, t.alive, t.ready, t.waiting, t.wait_obj, t.wait_bits, t.wait_mode, t.ctx.r[15], t.ctx.r[13], t.ctx.r[0]); }
         { char _b[512]; int _o=0; _o+=snprintf(_b+_o,sizeof(_b)-_o,"[TDUMP]  eflags:"); for (auto& ek : g_eflag) { _o+=snprintf(_b+_o,sizeof(_b)-_o," %08X=%08X", ek.first, ek.second); if (_o>440) break; } printf("%s\n",_b); }
         { char _b[512]; int _o=0; _o+=snprintf(_b+_o,sizeof(_b)-_o,"[TDUMP]  semas:"); for (auto& sk : g_sema) { _o+=snprintf(_b+_o,sizeof(_b)-_o," %08X=%u", sk.first, sk.second); if (_o>440) break; } printf("%s\n",_b); }
         fflush(stdout); } } }
@@ -2323,7 +2328,7 @@ static void semaw_probe(uint32_t pcv, RecState* s) {
   static int _n = 0; if (_n++ > 300) return;
   uint32_t objp = s->r[0], sid = 0;
   { uint8_t* p = GP(objp); if (p) std::memcpy(&sid, p, 4); }
-  printf("[SEMAW] %s caller_lr=%08X objp=%08X sid=%08X fib=%08X thr=%08X blk=%08X\n",
+  QLOG("[SEMAW] %s caller_lr=%08X objp=%08X sid=%08X fib=%08X thr=%08X blk=%08X\n",
          q == 0x81207402u ? "WAIT" : "SIGNAL", s->r[14], objp, sid,
          tl_is_hfiber, tl_ht_tid, g_cur_block); fflush(stdout);
 }
@@ -2729,9 +2734,9 @@ static void hf_fiber_thread(HFiber* f) {
     { static uint64_t _ss=0;
       if (g_hf_blocks - _ss >= 4000000u) { _ss = g_hf_blocks;
         if (f && f->addr == 0x84847FA0u) {
-          printf("[STACKSAMP] hfblk=%u pc=%08X lr=%08X sp=%08X fib=%08X regs:", (unsigned)g_hf_blocks, pc, s->r[14], s->r[13], f->addr);
+          QLOG("[STACKSAMP] hfblk=%u pc=%08X lr=%08X sp=%08X fib=%08X regs:", (unsigned)g_hf_blocks, pc, s->r[14], s->r[13], f->addr);
           for (int _k=0;_k<10;++_k) printf(" r%d=%08X", _k, s->r[_k]);
-          printf("\n[STACKSAMP] stack:");
+          QLOG("\n[STACKSAMP] stack:");
           for (int _k=0;_k<40;++_k) { uint32_t _v=0; uint8_t* _q=GP(s->r[13] + (uint32_t)_k*4u); if (_q) std::memcpy(&_v,_q,4); printf(" %08X", _v); }
           printf("\n"); fflush(stdout); } } }
 
@@ -3018,12 +3023,12 @@ static uint32_t hle_call_inner(uint32_t stub_va, RecState* s) {
     if (_seen.insert(stub_va).second && _n++ < 400) {
       char _sa[96] = {0}; uint8_t* _p = (s->r[0] >= 0x80600000u && s->r[0] < 0x85000000u) ? GP(s->r[0]) : nullptr;
       if (_p) { int _ok = 1; for (int _k = 0; _k < 60; ++_k) { char _c = (char)_p[_k]; if (!_c) break; if (_c < 32 || _c > 126) { _ok = 0; break; } _sa[_k] = _c; } if (!_ok) _sa[0] = 0; }
-      printf("[EARLYHLE] n=%u va=%08X r0=%08X r1=%08X r2=%08X r3=%08X str0=%s lr=%08X\n", g_main_n, stub_va, s->r[0], s->r[1], s->r[2], s->r[3], _sa, s->r[14]); fflush(stdout); } }
+      QLOG("[EARLYHLE] n=%u va=%08X r0=%08X r1=%08X r2=%08X r3=%08X str0=%s lr=%08X\n", g_main_n, stub_va, s->r[0], s->r[1], s->r[2], s->r[3], _sa, s->r[14]); fflush(stdout); } }
   hw_check(stub_va);
   { uint32_t _vd = p5d_vdec_hle(stub_va, s); if (_vd != 0xFFFFFFFFu) return _vd; }   // 18.4523 M978
   g_cur_hle_stub = stub_va;   // 18.4241: diagnostics for host-thread BADMEM
   g_cur_hle_lr = s->r[14];
-  if (g_hle_n < 6000) printf("[HLE] #%d va=%08X lr=%08X a0=%08X a1=%08X a2=%08X\n", g_hle_n, stub_va, s->r[14], s->r[0], s->r[1], s->r[2]);
+  if (g_hle_n < 6000) QLOG("[HLE] #%d va=%08X lr=%08X a0=%08X a1=%08X a2=%08X\n", g_hle_n, stub_va, s->r[14], s->r[0], s->r[1], s->r[2]);
   { static int _h57 = 0; if (g_main_n >= 59000000u && _h57++ < 3000) { uint32_t _a3 = 0; printf("[H57] va=%08X pc=%08X lr=%08X a0=%08X a1=%08X a2=%08X a3=%08X fib=%08X thr=%08X\n", stub_va, g_cur_block, s->r[14], s->r[0], s->r[1], s->r[2], _a3, g_cur_fiber, g_cur_thr); fflush(stdout); } }
   { static int _p1_env = -1; if (_p1_env < 0) { const char* _e = getenv("P5D_P1TICK"); _p1_env = (_e && atoi(_e)) ? 1 : 0; }
     if (_p1_env && g_main_n >= 59500000u && (g_main_n % 1000000u) < 2000u) { static uint32_t _p1_last = 0;
@@ -3456,7 +3461,7 @@ static uint32_t _ufd_vert_ubo = 0, _ufd_frag_ubo = 0;   // M1251: per-stage UBO 
         uint32_t _prog = s->r[0]; uint8_t* _q = GP(s->r[1]);
         const char* _nm = _q ? (const char*)_q : nullptr;
         uint32_t _rv = _nm ? _gxp_find_by_name(_prog, _nm) : 0u;
-        static int _n2=0; if (_n2++<200) { printf("[ABIPARAM] ByName prog=%08X name=%s -> %08X\n", _prog, _nm?_nm:"?", _rv); fflush(stdout); }
+        static int _n2=0; if (_n2++<200) { QLOG("[ABIPARAM] ByName prog=%08X name=%s -> %08X\n", _prog, _nm?_nm:"?", _rv); fflush(stdout); }
         { static int _pd=0; if (_pd++<3 && _nm) { uint8_t* _g=GP(_prog); printf("[PARAMDIAG] prog=%08X name=%s\n", _prog, _nm);
             if (_g) { uint32_t _v[12]={0}; for(int _k=0;_k<12;++_k) std::memcpy(&_v[_k],_g+_k*4,4);
               printf("[PARAMDIAG] hdr: %08X %08X %08X %08X | %08X %08X %08X %08X | %08X %08X %08X %08X\n", _v[0],_v[1],_v[2],_v[3],_v[4],_v[5],_v[6],_v[7],_v[8],_v[9],_v[10],_v[11]);
@@ -3477,7 +3482,7 @@ static uint32_t _ufd_vert_ubo = 0, _ufd_frag_ubo = 0;   // M1251: per-stage UBO 
         else if (_sem==5) _cand = "vertex.indices";
         uint32_t _rv = _gxp_find_by_name(_prog, _cand);
         if (!_rv && _sem==2) _rv = _gxp_find_by_name(_prog, "vertex.texcoord0");
-        static int _n3=0; if (_n3++<80) { printf("[ABIPARAM] BySem prog=%08X sem=%u idx=%u -> %s -> %08X\n", _prog, _sem, _idx, _cand, _rv); fflush(stdout); }
+        static int _n3=0; if (_n3++<80) { QLOG("[ABIPARAM] BySem prog=%08X sem=%u idx=%u -> %s -> %08X\n", _prog, _sem, _idx, _cand, _rv); fflush(stdout); }
         if (_rv) { s->r[0]=_rv; return s->r[14]; } }
       if (strncmp(_ge->name, "sceGxmProgramParameterGetCategory", 33) == 0) {
         uint8_t* _q = GP(s->r[0]); uint32_t _rv=0; if (_q) { uint16_t _w=0; std::memcpy(&_w,_q+4,2); _rv=_w&0xFu; }
@@ -3505,10 +3510,10 @@ static uint32_t _ufd_vert_ubo = 0, _ufd_frag_ubo = 0;   // M1251: per-stage UBO 
             if (_q) { std::memcpy(_q, &_nextid, 4); _pid2spv[_nextid] = _it->second; _pid2gxp[_nextid] = s->r[1];
               { static int _gd=0; if (_gd++<250) { uint32_t _gxp=s->r[1]; uint8_t* _g=GP(_gxp); if(_g){ uint32_t _sz=0,_pc=0,_po=0; std::memcpy(&_sz,_g+8,4); std::memcpy(&_pc,_g+0x24,4); std::memcpy(&_po,_g+0x28,4);
                   uint32_t _bf=0,_tu1=0,_tu2=0; std::memcpy(&_bf,_g+0x18,4); std::memcpy(&_tu1,_g+0x1C,4); std::memcpy(&_tu2,_g+0x20,4);
-                  printf("[GXPDIAG] gxp=%08X size=%u pc=%u po=%X bf=%08X tu1=%08X tu2=%08X spv=%s\n", _gxp,_sz,_pc,_po,_bf,_tu1,_tu2,_it->second.c_str());
+                  QLOG("[GXPDIAG] gxp=%08X size=%u pc=%u po=%X bf=%08X tu1=%08X tu2=%08X spv=%s\n", _gxp,_sz,_pc,_po,_bf,_tu1,_tu2,_it->second.c_str());
                   if ((_tu1|_tu2)) { static int _texprog_n=0; if (_texprog_n++<60) { g_spv_tu[_it->second] = (_tu1|_tu2); printf("[GXPTEX] gxp=%08X tu1=%08X tu2=%08X spv=%s\n", _gxp, _tu1, _tu2, _it->second.c_str()); fflush(stdout); } }
                   uint32_t _pb=0x28u+_po;
-                  for(uint32_t _i=0;_i<_pc && _i<6u;++_i){ if(_pb+_i*16u+16u>_sz) break; int32_t _no=0; std::memcpy(&_no,_g+_pb+_i*16u,4); const char* _nm=(const char*)(_g+_pb+_i*16u+_no); printf("[GXPDIAG]  P%u name=%s\n",_i,_nm); } } } }
+                  for(uint32_t _i=0;_i<_pc && _i<6u;++_i){ if(_pb+_i*16u+16u>_sz) break; int32_t _no=0; std::memcpy(&_no,_g+_pb+_i*16u,4); const char* _nm=(const char*)(_g+_pb+_i*16u+_no); QLOG("[GXPDIAG]  P%u name=%s\n",_i,_nm); } } } }
               static int _n=0; if (_n++<12) printf("[ABIPGID] id=%08X hash=%016llX spv=%s n=%u\n", _nextid, (unsigned long long)_gh, _it->second.c_str(), g_main_n);
               _nextid += 0x20u; } } }
         else if (strstr(_ge->name, "ShaderPatcherCreateVertexProgram") || strstr(_ge->name, "ShaderPatcherCreateFragmentProgram")) {
@@ -3565,9 +3570,9 @@ static uint32_t _ufd_vert_ubo = 0, _ufd_frag_ubo = 0;   // M1251: per-stage UBO 
                   }
                 }
                 _vobj2attrs[_nextobj] = _av; _vobj2strms[_nextobj] = _sv;
-                printf("[ABIVFMT] obj=%08X attrN=%u streamN=%u n=%u\n", _nextobj, (unsigned)_av.size(), (unsigned)_sv.size(), g_main_n);
-                for (size_t _i=0;_i<_av.size() && _i<8;++_i) printf("[ABIVFMT]  attr%zu stream=%u off=%u fmt=%u comps=%u\n", _i, _av[_i].stream, _av[_i].offset, _av[_i].fmt, _av[_i].comps);
-                for (size_t _i=0;_i<_sv.size() && _i<8;++_i) printf("[ABIVFMT]  strm%zu stride=%u idx=%u\n", _i, _sv[_i].stride, _sv[_i].index);
+                QLOG("[ABIVFMT] obj=%08X attrN=%u streamN=%u n=%u\n", _nextobj, (unsigned)_av.size(), (unsigned)_sv.size(), g_main_n);
+                for (size_t _i=0;_i<_av.size() && _i<8;++_i) QLOG("[ABIVFMT]  attr%zu stream=%u off=%u fmt=%u comps=%u\n", _i, _av[_i].stream, _av[_i].offset, _av[_i].fmt, _av[_i].comps);
+                for (size_t _i=0;_i<_sv.size() && _i<8;++_i) QLOG("[ABIVFMT]  strm%zu stride=%u idx=%u\n", _i, _sv[_i].stride, _sv[_i].index);
                 fflush(stdout); }
               _nextobj += 0x40u; } } }
         else if (strstr(_ge->name, "PrecomputedVertexStateInit") || strstr(_ge->name, "PrecomputedFragmentStateInit") || strstr(_ge->name, "PrecomputedDrawInit")) {
@@ -3604,7 +3609,7 @@ static uint32_t _ufd_vert_ubo = 0, _ufd_frag_ubo = 0;   // M1251: per-stage UBO 
         static int _vsn=0; if (_vsn++<16) { printf("[ABIVS] %s idx=%u va=%08X n=%u\n", _ge->name, _si, _va, g_main_n); fflush(stdout); }
       }
       // 18.4500 M955: unpack the real GXM vertex streams into the pipeline layout (128B stride, loc0..7 vec4)
-      { if (strncmp(_ge->name, "sceGxmDraw", 6) == 0) { static std::map<uint32_t,long> _lrc; long& _c=_lrc[s->r[14]]; _c++; if (_c<=3 || (_c%500)==0) { printf("[DRAWLRC] lr=%08X name=%s n=%ld args=%08X %08X %08X %08X blk=%08X\n", s->r[14], _ge->name, _c, s->r[0],s->r[1],s->r[2],s->r[3], g_cur_block); fflush(stdout); } } }
+      { if (strncmp(_ge->name, "sceGxmDraw", 6) == 0) { static std::map<uint32_t,long> _lrc; long& _c=_lrc[s->r[14]]; _c++; if (_c<=3 || (_c%500)==0) { QLOG("[DRAWLRC] lr=%08X name=%s n=%ld args=%08X %08X %08X %08X blk=%08X\n", s->r[14], _ge->name, _c, s->r[0],s->r[1],s->r[2],s->r[3], g_cur_block); fflush(stdout); } } }
       { if (strncmp(_ge->name, "sceGxmDraw", 10) == 0 && s->r[14] != 0x811EC006u) { static int _ud=0; if (_ud++<10) {
           printf("[UBODUMP2] draw#%d lr=%08X cur_v_ubo=%08X cur_f_ubo=%08X\n", _ud, s->r[14], _cur_v_ubo, _cur_f_ubo);
           if (_cur_v_ubo) { uint8_t* _s=GP(_cur_v_ubo); if(_s){ for(int _r=0;_r<32;++_r) printf("[UBODUMP2] V row%d = %.4f %.4f %.4f %.4f\n", _r, ((float*)_s)[_r*4],((float*)_s)[_r*4+1],((float*)_s)[_r*4+2],((float*)_s)[_r*4+3]); } }
@@ -4030,7 +4035,7 @@ static uint32_t _ufd_vert_ubo = 0, _ufd_frag_ubo = 0;   // M1251: per-stage UBO 
         if (strstr(_ge->name, "BeginScene") || strstr(_ge->name, "EndScene") || strstr(_ge->name, "DisplayQueueAddEntry") || strstr(_ge->name, "Present")) { if (g_gxmabi_scene_n++ < 800) _always = 1; }
         else if (strstr(_ge->name, "Draw")) { if (g_gxmabi_draw_n++ < 400) _always = 1; }
         else if (strstr(_ge->name, "SetVertexProgram") || strstr(_ge->name, "SetFragmentProgram") || strstr(_ge->name, "SetUniform") || strstr(_ge->name, "SetVertexStream") || strstr(_ge->name, "SetTexture") || strstr(_ge->name, "PrecomputedDrawSetParams") || strstr(_ge->name, "SetDefaultUniformBuffer") || strstr(_ge->name, "TextureInit")) { if (g_gxmabi_draw_n++ < 1200) _always = 1; }
-        if (_always || g_gxmabi_n++ < 4000) { printf("[GXMABI] %s va=%08X r0=%08X r1=%08X r2=%08X r3=%08X ret=%08X lr=%08X blk=%08X sp=%08X\n", _ge->name, stub_va, s->r[0], s->r[1], s->r[2], s->r[3], _rv, s->r[14], g_cur_block, s->r[13]); fflush(stdout); } }
+        if (_always || g_gxmabi_n++ < 4000) { QLOG("[GXMABI] %s va=%08X r0=%08X r1=%08X r2=%08X r3=%08X ret=%08X lr=%08X blk=%08X sp=%08X\n", _ge->name, stub_va, s->r[0], s->r[1], s->r[2], s->r[3], _rv, s->r[14], g_cur_block, s->r[13]); fflush(stdout); } }
       s->r[0] = _rv; return s->r[14];
     }
     else { static int _um=0; if (stub_va>=0x812B1000u && stub_va<0x812B2000u && _um++<80) {
@@ -4698,7 +4703,7 @@ static uint32_t _ufd_vert_ubo = 0, _ufd_frag_ubo = 0;   // M1251: per-stage UBO 
         oi_out = (uint32_t)oi;
         if (g_path_n++ < 12) printf("[PATH] '%s' args=%08X,%08X,%08X,%08X,%08X\n", out, args[0], args[1], args[2], args[3], args[4]);
       }
-      if (g_pfmt_n < 6) { printf("[PFMT2] dst=%08X fmt=%08X oi=%u ret=%u\n", s->r[0], s->r[1], oi_out, oi_out); fflush(stdout); }
+      if (g_pfmt_n < 6) { QLOG("[PFMT2] dst=%08X fmt=%08X oi=%u ret=%u\n", s->r[0], s->r[1], oi_out, oi_out); fflush(stdout); }
       r0 = oi_out; break; }   // 18.4189: formatter returns the number of bytes written (caller does ptr += r0)
     case 0x812B1800u: {                                               // 18.4243: sceDisplaySetFrameBuf (NID 7A410B64, SceDisplayUser) - REAL mapping
       g_fb_addr = s->r[0]; g_fb_pitch = s->r[1];
@@ -4954,7 +4959,7 @@ static uint32_t _ufd_vert_ubo = 0, _ufd_frag_ubo = 0;   // M1251: per-stage UBO 
       if (obj == 0x50011000u) { static int _q0w=0; if(_q0w++<20){ printf("[Q0WAIT] tid=%08X need=%u have=%u hfiber=%d lr=%08X blk=%u\n", g_cur_thr, need, (g_sema.count(obj)?g_sema[obj]:0u), (int)tl_is_hfiber, s->r[14], (unsigned)g_hf_blocks); fflush(stdout);} }
       auto it = g_sema.find(obj);
       uint32_t have = (it == g_sema.end()) ? 0u : it->second;
-      if (obj == 0x50018000u) { static int _gfs=0; if (_gfs++ < 100) { printf("[GFS] wait tid=%08X have=%u lr=%08X fib=%08X blk=%08X n=%u\n", g_cur_thr, have, s->r[14], g_cur_fiber, g_cur_block, g_blkcnt_total); fflush(stdout); } }
+      if (obj == 0x50018000u) { static int _gfs=0; if (_gfs++ < 100) { QLOG("[GFS] wait tid=%08X have=%u lr=%08X fib=%08X blk=%08X n=%u\n", g_cur_thr, have, s->r[14], g_cur_fiber, g_cur_block, g_blkcnt_total); fflush(stdout); } }
       if (g_thr_log_n++ < 80) printf("[SEM] wait obj=%08X need=%u have=%u cur_thr=%08X lr=%08X\n", obj, need, have, g_cur_thr, s->r[14]);
       if (tl_ht_tid) { hle_wait_begin(); uint64_t _ws_poll = 0; for (;;) { if (g_shutdown) break; uint32_t _h = (g_sema.count(obj) ? g_sema[obj] : 0u); if (_h >= need) { g_sema[obj] = _h - need; break; } if (((++_ws_poll) % 5000000ull) == 0ull) { static int _ws=0; if (_ws++<60) { printf("[WSTUCK] tid=%08X obj=%08X need=%u have=%u lr=%08X blk=%u\n", tl_ht_tid, obj, need, (g_sema.count(obj)?g_sema[obj]:0u), s->r[14], (unsigned)g_blkcnt_total); fflush(stdout);} }
         if (!g_fastsleep) std::this_thread::sleep_for(std::chrono::microseconds(200)); } r0 = 0; break; } hle_wait_end();
@@ -4989,7 +4994,7 @@ static uint32_t _ufd_vert_ubo = 0, _ufd_frag_ubo = 0;   // M1251: per-stage UBO 
         int _w=0; for (auto& _kv : g_thr) if (_kv.second.waiting && _kv.second.wait_obj==obj) ++_w;
         std::fprintf(stderr,"[GSIG] obj=%08X count=%u waiters=%d thr=%08X lr=%08X blk=%08X n=%u\n", obj,
           (g_sema.count(obj)?g_sema[obj]:0u), _w, g_cur_thr, s->r[14], g_cur_block, g_blkcnt_total); std::fflush(stderr); } }
-      if (obj == 0x50018000u) { static int _gfs2=0; if (_gfs2++ < 100) { printf("[GFS] signal thr=%08X lr=%08X fib=%08X blk=%08X n=%u count=%u\n", g_cur_thr, s->r[14], g_cur_fiber, g_cur_block, g_blkcnt_total, (g_sema.count(obj)?g_sema[obj]:0u)); fflush(stdout); } }
+      if (obj == 0x50018000u) { static int _gfs2=0; if (_gfs2++ < 100) { QLOG("[GFS] signal thr=%08X lr=%08X fib=%08X blk=%08X n=%u count=%u\n", g_cur_thr, s->r[14], g_cur_fiber, g_cur_block, g_blkcnt_total, (g_sema.count(obj)?g_sema[obj]:0u)); fflush(stdout); } }
       g_sema[obj] += 1;
       { uint32_t _tok = g_cur_thr ? g_cur_thr : (0xF0000000u | (g_cur_fiber & 0xFFFFFFu)); g_sema_owner[obj] = _tok; g_sema_owner_lr[obj] = s->r[14]; }
       if (g_thr_log_n++ < 80) printf("[SEM] signal obj=%08X count=%u cur_thr=%08X lr=%08X\n", obj, g_sema[obj], g_cur_thr, s->r[14]);
@@ -5061,7 +5066,7 @@ static uint32_t _ufd_vert_ubo = 0, _ufd_frag_ubo = 0;   // M1251: per-stage UBO 
       if (g_main_n >= 59000000u) { static int _se_n=0; if (_se_n++ < 200) { printf("[SETEF57] obj=%08X bits=%08X pc=%08X fib=%08X\n", s->r[0], s->r[1], g_cur_block, g_cur_fiber); fflush(stdout); } }
       uint32_t obj = s->r[0], bits = s->r[1];
       if (obj == 0x60012000u || obj == 0x60013000u || obj == 0x60011000u) { static int _jg=0; if (_jg++<40) { printf("[JOBSET] obj=%08X bits=%08X fib=%08X thr=%08X lr=%08X pc=%08X\n", obj,bits,tl_hf?tl_hf->addr:0u,tl_ht_tid,s->r[14],g_cur_block); fflush(stdout); } }
-      { static int _sf=0; if (obj != 0x6001C000u && _sf++ < 300) { printf("[EFALL] obj=%08X bits=%08X fib=%08X thr=%08X lr=%08X pc=%08X blk=%u\n", obj, bits, tl_hf?tl_hf->addr:0u, tl_ht_tid, s->r[14], g_cur_block, (unsigned)g_blkcnt_total); fflush(stdout); } }
+      { static int _sf=0; if (obj != 0x6001C000u && _sf++ < 300) { QLOG("[EFALL] obj=%08X bits=%08X fib=%08X thr=%08X lr=%08X pc=%08X blk=%u\n", obj, bits, tl_hf?tl_hf->addr:0u, tl_ht_tid, s->r[14], g_cur_block, (unsigned)g_blkcnt_total); fflush(stdout); } }
       g_eflag[obj] |= bits;
       if (g_thr_log_n++ < 80) printf("[EVT] set obj=%08X bits=%08X cur_thr=%08X lr=%08X\n", obj, bits, g_cur_thr, s->r[14]);
       if (g_evt2_n++ < 60) { printf("[EVT2] set obj=%08X bits=%08X thr=%08X lr=%08X\n", obj, bits, g_cur_thr, s->r[14]); fflush(stdout); }
@@ -6966,9 +6971,9 @@ static void stalldump_hit(uint32_t pc, RecState* s) {   // STALLDUMP: periodic d
 static void decomp_hit(uint32_t pc, RecState* s) {   // DECOMPPROBE: decompression call args
   static int _env=-1; if (_env<0) _env = getenv("P5D_DECOMPPROBE") ? 1 : 0; if (!_env || !s) return;
   uint32_t _p = pc & ~1u;
-  if (_p == 0x811DF434u) { static int _n=0; ++_n; if (_n<=300) { printf("[DECOMP] #%d 434 r0=%08X r1=%08X r2=%08X r3=%08X lr=%08X n=%u\n", _n, s->r[0],s->r[1],s->r[2],s->r[3],s->r[14], g_main_n); fflush(stdout);} else if ((_n%200)==0) { printf("[DECOMP] 434 calls=%d\n", _n); fflush(stdout);} }
-  if (_p == 0x811DF91Au) { static int _n2=0; ++_n2; if (_n2<=20) { printf("[DECOMP] #%d 1A r0=%08X r1=%08X r2=%08X r3=%08X lr=%08X n=%u\n", _n2, s->r[0],s->r[1],s->r[2],s->r[3],s->r[14], g_main_n); fflush(stdout);} }
-  if (_p == 0x811E56A4u) { static int _n3=0; ++_n3; if (_n3<=20) { printf("[DECOMP] #%d 6A4 r0=%08X r1=%08X r2=%08X r3=%08X lr=%08X n=%u\n", _n3, s->r[0],s->r[1],s->r[2],s->r[3],s->r[14], g_main_n); fflush(stdout);} }
+  if (_p == 0x811DF434u) { static int _n=0; ++_n; if (_n<=300) { QLOG("[DECOMP] #%d 434 r0=%08X r1=%08X r2=%08X r3=%08X lr=%08X n=%u\n", _n, s->r[0],s->r[1],s->r[2],s->r[3],s->r[14], g_main_n); fflush(stdout);} else if ((_n%200)==0) { printf("[DECOMP] 434 calls=%d\n", _n); fflush(stdout);} }
+  if (_p == 0x811DF91Au) { static int _n2=0; ++_n2; if (_n2<=20) { QLOG("[DECOMP] #%d 1A r0=%08X r1=%08X r2=%08X r3=%08X lr=%08X n=%u\n", _n2, s->r[0],s->r[1],s->r[2],s->r[3],s->r[14], g_main_n); fflush(stdout);} }
+  if (_p == 0x811E56A4u) { static int _n3=0; ++_n3; if (_n3<=20) { QLOG("[DECOMP] #%d 6A4 r0=%08X r1=%08X r2=%08X r3=%08X lr=%08X n=%u\n", _n3, s->r[0],s->r[1],s->r[2],s->r[3],s->r[14], g_main_n); fflush(stdout);} }
 }
 
 static void nodechain_hit(uint32_t pc, RecState* s) {   // NODECHAIN: GFD node list traversal diagnostics
@@ -7382,8 +7387,8 @@ extern "C" uint32_t p5d_abi_untranslate(const void* hp) {
 
 static void hw_check(uint32_t pcv) {
   { static uint32_t _lastd=0, _hc=0; _hc++; if ((_hc % 100000u) == 0u) { _lastd = _hc;
-      if (g_tdump_n++ < 16) { printf("[TDUMP] n=%u pcv=%08X fib=%08X thr=%08X threads=%zu\n", g_blkcnt_total, pcv, g_cur_fiber, g_cur_thr, g_thr.size());
-        for (auto& kv : g_thr) { HThread& t=kv.second; printf("[TDUMP]  tid=%08X entry=%08X alive=%d ready=%d wait=%d obj=%08X bits=%08X mode=%X ctxpc=%08X ctxsp=%08X ctxr0=%08X\n", kv.first, t.entry, t.alive, t.ready, t.waiting, t.wait_obj, t.wait_bits, t.wait_mode, t.ctx.r[15], t.ctx.r[13], t.ctx.r[0]); }
+      if (g_tdump_n++ < 16) { QLOG("[TDUMP] n=%u pcv=%08X fib=%08X thr=%08X threads=%zu\n", g_blkcnt_total, pcv, g_cur_fiber, g_cur_thr, g_thr.size());
+        for (auto& kv : g_thr) { HThread& t=kv.second; QLOG("[TDUMP]  tid=%08X entry=%08X alive=%d ready=%d wait=%d obj=%08X bits=%08X mode=%X ctxpc=%08X ctxsp=%08X ctxr0=%08X\n", kv.first, t.entry, t.alive, t.ready, t.waiting, t.wait_obj, t.wait_bits, t.wait_mode, t.ctx.r[15], t.ctx.r[13], t.ctx.r[0]); }
         { char _b[512]; int _o=0; _o+=snprintf(_b+_o,sizeof(_b)-_o,"[TDUMP]  eflags:"); for (auto& ek : g_eflag) { _o+=snprintf(_b+_o,sizeof(_b)-_o," %08X=%08X", ek.first, ek.second); if (_o>440) break; } printf("%s\n",_b); }
         { char _b[512]; int _o=0; _o+=snprintf(_b+_o,sizeof(_b)-_o,"[TDUMP]  semas:"); for (auto& sk : g_sema) { _o+=snprintf(_b+_o,sizeof(_b)-_o," %08X=%u", sk.first, sk.second); if (_o>440) break; } printf("%s\n",_b); }
         fflush(stdout); } } }
@@ -7655,7 +7660,7 @@ extern "C" void wr32_watch(uint32_t a, uint32_t v) {
 
   for (int _i = 0; _i < g_cwatch_n; ++_i) if (a == g_cwatch_va[_i]) { static int _cw=0; if (_cw++<80) { printf("[COMSEW] a=%08X v=%08X blk=%08X fib=%08X thr=%08X lr=%08X\n", a,v,g_cur_block,g_cur_fiber,g_cur_thr,g_cur_hle_ret_lr); fflush(stdout); } }
   for (int _i = 0; _i < g_qwatch_n; ++_i) if (a == g_qwatch_va[_i]) { static int _qw=0; if (_qw++<60) { printf("[QSTATEW] a=%08X v=%08X blk=%08X fib=%08X thr=%08X lr=%08X sp=%08X\n", a,v,g_cur_block,g_cur_fiber,g_cur_thr,g_cur_hle_ret_lr,g_snap_r[13]); fflush(stdout); } }
-  if (g_cri_reader && a >= g_cri_reader && a < g_cri_reader + 0x120u) { static int _rs=0; if (_rs++ < 120) { printf("[READERSTAT] a=%08X off=%03X v=%08X blk=%08X fib=%08X thr=%08X lr=%08X sp=%08X\n", a, a-g_cri_reader, v, g_cur_block, g_cur_fiber, g_cur_thr, g_cur_hle_ret_lr, g_snap_r[13]); fflush(stdout); } }
+  if (g_cri_reader && a >= g_cri_reader && a < g_cri_reader + 0x120u) { static int _rs=0; if (_rs++ < 120) { QLOG("[READERSTAT] a=%08X off=%03X v=%08X blk=%08X fib=%08X thr=%08X lr=%08X sp=%08X\n", a, a-g_cri_reader, v, g_cur_block, g_cur_fiber, g_cur_thr, g_cur_hle_ret_lr, g_snap_r[13]); fflush(stdout); } }
   { if (a >= 0x848FC368u && a < 0x848FC4A0u) { static int _pw2=0; if (_pw2++ < 300) { printf("[PROGWR] a=%08X off=%03X v=%08X blk=%u fib=%08X pc=%08X\n", a, a-0x848FC368u, v, g_blkcnt_total, g_cur_fiber, g_cur_block); fflush(stdout); } } }
   { if (a >= 0x848FC368u && a < 0x848FC3B0u) { static int _prw=0; if (_prw++ < 300) { printf("[READERWR] a=%08X off=%03X v=%08X blk=%u fib=%08X pc=%08X\n", a, a-0x848FC368u, v, g_blkcnt_total, g_cur_fiber, g_cur_block); fflush(stdout); } } }
   { if (g_scwatch && a >= g_scwatch && a < g_scwatch + 0x50u) { static int _scw=0; if (_scw++ < 240) { std::fprintf(stderr,"[SCW] a=%08X off=%02X v=%08X blk=%08X fib=%08X thr=%08X\n", a, a-g_scwatch, v, g_cur_block, g_cur_fiber, g_cur_thr); std::fflush(stderr); } } }
@@ -7713,13 +7718,13 @@ extern "C" void wr32_watch(uint32_t a, uint32_t v) {
     printf("[STKW] a=%08X v=%08X blk=%08X enter_sp=%08X fib=%08X fex=%d\n", a, v, g_cur_block, g_snap_r[13], g_cur_fiber, g_in_fex); fflush(stdout); ++n; return;
   }
   if (a == 0x813AFC0Cu) {
-    printf("[SLOTW] GLOB813AFC0C v=%08X blk=%08X\n", v, g_cur_block); fflush(stdout); ++n; return;
+    QLOG("[SLOTW] GLOB813AFC0C v=%08X blk=%08X\n", v, g_cur_block); fflush(stdout); ++n; return;
   }
   if (a >= 0x816CBF0Cu && a < 0x816CBF0Cu + 0x60u * 16u) {
-    printf("[SLOTW] slot a=%08X v=%08X blk=%08X\n", a, v, g_cur_block); fflush(stdout); ++n; return;
+    QLOG("[SLOTW] slot a=%08X v=%08X blk=%08X\n", a, v, g_cur_block); fflush(stdout); ++n; return;
   }
   if (a >= 0x816CBC08u && a < 0x816CBC08u + 0x310u) {
-    printf("[SLOTW] gsc a=%08X v=%08X blk=%08X\n", a, v, g_cur_block); fflush(stdout); ++n; return;
+    QLOG("[SLOTW] gsc a=%08X v=%08X blk=%08X\n", a, v, g_cur_block); fflush(stdout); ++n; return;
   }
 }
 
@@ -7928,10 +7933,10 @@ static void wd_loop() {
     std::this_thread::sleep_for(std::chrono::seconds(2));
     uint32_t n = g_blkcnt_total;
     if (n == last_n) { ++stall; } else { stall = 0; last_n = n; }
-    printf("[WD] n=%u blk=%08X fib=%08X thr=%08X stall=%d hle_ring:", n, g_cur_block, g_cur_fiber, g_cur_thr, stall);
+    QLOG("[WD] n=%u blk=%08X fib=%08X thr=%08X stall=%d hle_ring:", n, g_cur_block, g_cur_fiber, g_cur_thr, stall);
     int cnt = g_hle_ring_n < 12 ? g_hle_ring_n : 12;
     for (int i = 0; i < cnt; ++i) { int idx = (g_hle_ring_n - cnt + i) & 127; printf(" %08X@%08X", g_hle_ring_va[idx], g_hle_ring_lr[idx]); }
-    printf("\n[WD] pcring:");
+    QLOG("\n[WD] pcring:");
     for (int i = 0; i < 16; ++i) printf(" %08X", g_pc_ring[(g_pc_ring_n - 16u + (uint32_t)i) & 63u]);
     printf("\n"); fflush(stdout);
   }
@@ -7964,16 +7969,16 @@ int main(int argc, char** argv) {
   std::atexit(shutdown_threads);
   if (!g_wd_thread) { g_wd_thread = 1; std::thread([](){
       for (;;) { std::this_thread::sleep_for(std::chrono::seconds(2));
-        printf("[WD] loop=%d cnt=%u/%u/%u/%u total=%u blk=%08X fib=%08X fex=%d ex=%d pump=%d curpc=%08X\n",
+        QLOG("[WD] loop=%d cnt=%u/%u/%u/%u total=%u blk=%08X fib=%08X fex=%d ex=%d pump=%d curpc=%08X\n",
                g_loop_site, g_loop_cnt[0], g_loop_cnt[1], g_loop_cnt[2], g_loop_cnt[3], g_blkcnt_total, g_cur_block, g_cur_fiber, g_in_fex, g_in_fiber_exec, g_pumping2, g_current_loop_pc);
         printf("[WDRING]"); for (int i = 52; i < 64; ++i) printf(" %08X", g_pc_ring[(g_pc_ring_n + (unsigned)i) & 63u]); printf("\n");
         for (auto& kv : g_fctx) { printf("[WDCTX] fib=%08X pc=%08X sp=%08X r0=%08X r5=%08X\n", kv.first, kv.second.r[15], kv.second.r[13], kv.second.r[0], kv.second.r[5]); }
-         { std::lock_guard<std::mutex> _lg(g_hf_lk); for (auto& _kv : g_hf) { HFiber* _f=_kv.second; printf("[HFDBG] addr=%08X entry=%08X st=%d started=%d go=%d owner=%08X pc=%08X blocks=%u\n", _f->addr, _f->entry, 0, (int)_f->started, (int)_f->go, _f->owner_tid, _f->cur_pc, (unsigned)_f->blocks); } }
-         { std::lock_guard<std::mutex> _lg(g_hf_lk); for (auto& _kv : g_hf) { HFiber* _f=_kv.second; printf("[HFHLE] addr=%08X n=%u:", _f->addr, _f->hle_n); for (int _i=0;_i<12;++_i) printf(" %08X", _f->hle_ring[(_f->hle_n - 12u + (uint32_t)_i) & 15u]); printf("\n"); } }
-         printf("[HFBLOCKS] %u\n", (unsigned)g_hf_blocks);
-         { static int _td=0; if (_td++ < 60) { for (auto& _kv : g_thr) { HThread& _th=_kv.second; printf("[THRDBG] tid=%08X entry=%08X alive=%d ready=%d wait=%d obj=%08X bits=%08X mode=%X pc=%08X sp=%08X r0=%08X blk=%08X\n", _kv.first, _th.entry, _th.alive, _th.ready, _th.waiting, _th.wait_obj, _th.wait_bits, _th.wait_mode, _th.gctx.r[15], _th.gctx.r[13], _th.gctx.r[0], _th.gctx.r[0]);
-             { printf("[THRHLE] tid=%08X n=%u:", _kv.first, _th.hle_n); for (int _i=0;_i<10;++_i) printf(" %08X", _th.hle_ring[(_th.hle_n - 10u + (uint32_t)_i) & 15u]); printf("\n"); }
-             if (_kv.first == 0x4001A000u || _kv.first == 0x4001B000u || _kv.first == 0x4001C000u || _kv.first == 0x4001D000u || _kv.first == 0x40020000u) { printf("[TPCRING] tid=%08X n=%u:", _kv.first, _th.pc_n); for (int _i=0;_i<24;++_i) printf(" %08X", _th.pc_ring[(_th.pc_n - 24u + (uint32_t)_i) & 31u]); printf("\n"); } } } }
+         { std::lock_guard<std::mutex> _lg(g_hf_lk); for (auto& _kv : g_hf) { HFiber* _f=_kv.second; QLOG("[HFDBG] addr=%08X entry=%08X st=%d started=%d go=%d owner=%08X pc=%08X blocks=%u\n", _f->addr, _f->entry, 0, (int)_f->started, (int)_f->go, _f->owner_tid, _f->cur_pc, (unsigned)_f->blocks); } }
+         { std::lock_guard<std::mutex> _lg(g_hf_lk); for (auto& _kv : g_hf) { HFiber* _f=_kv.second; QLOG("[HFHLE] addr=%08X n=%u:", _f->addr, _f->hle_n); for (int _i=0;_i<12;++_i) printf(" %08X", _f->hle_ring[(_f->hle_n - 12u + (uint32_t)_i) & 15u]); printf("\n"); } }
+         QLOG("[HFBLOCKS] %u\n", (unsigned)g_hf_blocks);
+         { static int _td=0; if (_td++ < 60) { for (auto& _kv : g_thr) { HThread& _th=_kv.second; QLOG("[THRDBG] tid=%08X entry=%08X alive=%d ready=%d wait=%d obj=%08X bits=%08X mode=%X pc=%08X sp=%08X r0=%08X blk=%08X\n", _kv.first, _th.entry, _th.alive, _th.ready, _th.waiting, _th.wait_obj, _th.wait_bits, _th.wait_mode, _th.gctx.r[15], _th.gctx.r[13], _th.gctx.r[0], _th.gctx.r[0]);
+             { QLOG("[THRHLE] tid=%08X n=%u:", _kv.first, _th.hle_n); for (int _i=0;_i<10;++_i) printf(" %08X", _th.hle_ring[(_th.hle_n - 10u + (uint32_t)_i) & 15u]); printf("\n"); }
+             if (_kv.first == 0x4001A000u || _kv.first == 0x4001B000u || _kv.first == 0x4001C000u || _kv.first == 0x4001D000u || _kv.first == 0x40020000u) { QLOG("[TPCRING] tid=%08X n=%u:", _kv.first, _th.pc_n); for (int _i=0;_i<24;++_i) printf(" %08X", _th.pc_ring[(_th.pc_n - 24u + (uint32_t)_i) & 31u]); printf("\n"); } } } }
         for (auto& kv : g_fctx) { printf("[WDCTX] fib=%08X pc=%08X sp=%08X r0=%08X r5=%08X\n", kv.first, kv.second.r[15], kv.second.r[13], kv.second.r[0], kv.second.r[5]); }
 
          if (g_blkcnt_total > 65000000u) { static int _ts=0; if (_ts++ < 40) {
