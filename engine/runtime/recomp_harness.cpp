@@ -2665,12 +2665,41 @@ static void hf_fiber_thread(HFiber* f) {
       static int _ca=0; if(_ca++<10){ printf("[CALLARGS] FUN_811610a4 n=%d r0=%08X r1=%08X r2=%08X r3=%08X\n", _ca, s->r[0],s->r[1],s->r[2],s->r[3]);
         printf("[CALLARGS]  d0..d9 floats:"); for(int _k=0;_k<10;++_k){ float _f; std::memcpy(&_f,&s->d[_k],4); printf(" %.3f",_f);} printf("\n");
         printf("[CALLARGS]  d0..d9 raw:"); for(int _k=0;_k<10;++_k){ uint32_t _w; std::memcpy(&_w,&s->d[_k],4); printf(" %08X",_w);} printf("\n"); fflush(stdout);} }
-    if ((pc & ~1u) == 0x81160516u || (pc & ~1u) == 0x81160514u) { // TEXSLOT: texture select
-      static int _ts=0; if(_ts++<40){ uint32_t _slot=0; uint8_t* _q=GP(0x81555458u); if(_q) std::memcpy(&_slot,_q,4);
-        printf("[TEXSLOT] FUN_81160516 n=%d unit=%u handle=%08X slot0_before=%08X n0=%u\n", _ts,(int)s->r[0],s->r[1],_slot,g_main_n); fflush(stdout);} }
+    if ((pc & ~1u) == 0x81160516u) { // TEXSLOT: texture select
+      static int _ts=0,_ts0=0; ++_ts; uint32_t _u=s->r[0], _hd=s->r[1];
+      bool _interesting = (_u==0) || (_hd>=0x84600000u && _hd<0xA0000000u);
+      if (_interesting && _ts0++<80){ uint32_t _slot=0; uint8_t* _q=GP(0x81555458u); if(_q) std::memcpy(&_slot,_q,4);
+        printf("[TEXSLOT] FUN_81160516 n=%d unit=%u handle=%08X lr=%08X slot0_before=%08X n0=%u\n", _ts,_u,_hd,s->r[14],_slot,g_main_n); fflush(stdout);} }
     if ((pc & ~1u) == 0x8115FF12u) { // TEXFLAGS: log flags changes
       static uint32_t _lf=0xDEADBEEF; static int _tn=0; uint32_t _f=0; uint8_t* _q=GP(0x81555438u); if(_q) std::memcpy(&_f,_q,4);
       if(_f!=_lf && _tn++<80){ _lf=_f; printf("[TEXFLAGS] n=%d flags=%08X n0=%u\n", _tn, _f, g_main_n); fflush(stdout);} }
+    if ((pc & ~1u) == 0x81193584u || (pc & ~1u) == 0x81193588u || (pc & ~1u) == 0x81193590u || (pc & ~1u) == 0x81193592u
+        || (pc & ~1u) == 0x8116F7CAu || (pc & ~1u) == 0x811DAB8Cu || (pc & ~1u) == 0x811DAF12u || (pc & ~1u) == 0x8116F8D2u) { // TEXOBJ
+      static int _z=0,_s=0,_h=0,_a=0,_tr=0,_ti=0,_tp=0,_td=0;
+      uint32_t _b=pc & ~1u;
+      if (_b==0x81193584u) { if(_z++<10) printf("[TEXOBJ] iVar4==0 (no texture) n=%d n0=%u\n", _z, g_main_n); }
+      else if (_b==0x81193588u) { if(_s++<10){ uint32_t _st=0; uint8_t* _q=GP(s->r[4]); if(_q) std::memcpy(&_st,_q,4); printf("[TEXOBJ] state-check obj=%08X state=%u n=%d\n", s->r[4], _st, _s); fflush(stdout);} }
+      else if (_b==0x81193590u) { if(_h++<10){ printf("[TEXOBJ] state==3 -> handle=%08X n=%d\n", s->r[4], _h); fflush(stdout);} }
+      else if (_b==0x81193592u) { if(_a++<10) printf("[TEXOBJ] after-select n=%d handle_r5=%08X obj=%08X\n", _a, s->r[5], s->r[4]); }
+      else if (_b==0x8116F7CAu) { if(_tr++<8) printf("[TEXOBJ] TASKREG logoTMX n=%d n0=%u\n", _tr, g_main_n); }
+      else if (_b==0x811DAB8Cu) { if(_ti++<8) printf("[TEXOBJ] TASKINIT n=%d n0=%u\n", _ti, g_main_n); }
+      else if (_b==0x811DAF12u) { if(_tp++<8) printf("[TEXOBJ] TASKPOLL n=%d n0=%u\n", _tp, g_main_n); }
+      else { if(_td++<8) printf("[TEXOBJ] FUN_8116f8d2 n=%d n0=%u\n", _td, g_main_n); } }
+    if ((pc & ~1u) == 0x811604C2u || (pc & ~1u) == 0x8116046Eu || (pc & ~1u) == 0x81160526u || (pc & ~1u) == 0x8116052Eu) { // TEXBR
+      static int _b1=0,_b2=0,_b3=0,_b4=0;
+      uint32_t _bb=pc & ~1u;
+      if (_bb==0x811604C2u){ if(_b1++<60) printf("[TEXBR] FUN_811604c2 param=%u n=%d\n", s->r[0], _b1); }
+      else if (_bb==0x8116046Eu){ if(_b2++<10) printf("[TEXBR] FUN_8116046e param=%u n=%d\n", s->r[0], _b2); }
+      else if (_bb==0x81160526u){ if(_b3++<40) printf("[TEXBR] branch-SET n=%d\n", _b3); }
+      else { if(_b4++<10) printf("[TEXBR] branch-CLEAR n=%d\n", _b4); } }
+    if ((pc & ~1u) == 0x8115FF12u) { // FORCETEX lever
+      static int _ft=-1; if(_ft<0){ const char* _e=getenv("P5D_FORCETEX"); _ft=(_e&&atoi(_e))?1:0; }
+      if (_ft) { uint32_t _slot=0; uint8_t* _q=GP(0x81555458u); if(_q) std::memcpy(&_slot,_q,4);
+        if (_slot) { uint32_t _f=0; uint8_t* _qf=GP(0x81555438u); if(_qf){ std::memcpy(&_f,_qf,4); _f |= 0x400u; std::memcpy(_qf,&_f,4); } } } }
+    if ((pc & ~1u) >= 0x811604C2u && (pc & ~1u) < 0x81160516u) { // TEXCASE6: blocks inside FUN_811604C2
+      static int _tc=0; if(_tc++<40){ printf("[TEXCASE6] %08X n=%d\n", pc & ~1u, _tc); fflush(stdout);} }
+    if ((pc & ~1u) == 0x8116050Cu || (pc & ~1u) == 0x81160512u || (pc & ~1u) == 0x8116050Au) { // TEXCASE6B
+      static int _td=0; if(_td++<20){ printf("[TEXCASE6B] case6 block %08X n=%d\n", pc & ~1u, _td); fflush(stdout);} }
     if ((pc & ~1u) == 0x811866A6u) {   // M1186: app movie-slot state machine (0x100 slots, stride 0x60, base DAT_81670B48)
       static int g_mvfast = -1; if (g_mvfast < 0) { const char* _e = getenv("P5D_MOVIEFAST"); g_mvfast = (_e && atoi(_e)) ? 1 : 0; }
       static int _mv = 0; ++_mv;
@@ -7048,9 +7077,13 @@ extern "C" void harness_badmem(uint32_t va) {
   std::fprintf(stderr, "\n");
 }
 extern "C" uint32_t id_tbb(uint32_t insn_pc, uint32_t addr, RecState* s) {
+  // M1302 FIX: ARM TBB [PC,Rm] target = (PC_value) + 2*Byte[PC_value + Rm], where PC_value = insn_pc+4
+  // (NO align4: compiler emits the byte table immediately after the 4-byte TBB at insn+4, unaligned).
+  // Previous code aligned the base to 4, shifting every switch target by -2 when (insn+4)%4 != 0,
+  // so many switch dispatches landed on the previous block (wrong case) or a no-op block.
   uint32_t off = addr - IMG_VA_BASE;
   uint32_t b = (off < IMG_SIZE) ? gp_img[off] : 0;
-  uint32_t t = (((insn_pc + 4) & ~3u) + (b << 1)) & ~1u;
+  uint32_t t = (insn_pc + 4u + (b << 1)) & ~1u;
   if (gbn(t)) return t;
   { int back = 0; uint32_t bq = gbn_back(t, &back);
     if (bq) { if (g_back_n++ < 8) printf("[TBB-BACK] target=%08X -> block %08X (back %d)\n", t, bq, back); return bq; } }
@@ -7210,7 +7243,8 @@ extern "C" void wr16_watch(uint32_t a, uint32_t v) {
 }
 // M1370: g_dbg_cur_f_ubo mirror defined near top of file
 extern "C" void wr32_watch(uint32_t a, uint32_t v) {
-  { if (a >= 0x81555458u && a < 0x81555480u) { static int _sw=0; if(_sw++<60){ printf("[TEXSLOTWR] a=%08X v=%08X blk=%08X\n", a, v, g_cur_block); fflush(stdout);} } }
+  { if (a == 0x81555458u) { static int _sw=0,_swz=0; ++_sw; if (v!=0 && ++_swz<=30){ printf("[TEXSLOTWR] slot0 = %08X blk=%08X (writes=%d)\n", v, g_cur_block, _sw); fflush(stdout);} } }
+  { if (a == 0x81555438u) { static int _fw=0,_fw4=0; ++_fw; if ((v & 0x400u) && _fw4++<30){ printf("[TEXFLAGWR] flags has0x400 v=%08X blk=%08X (writes=%d)\n", v, g_cur_block, _fw); fflush(stdout);} } }
 
   { if (a >= 0x85410040u && a < 0x85410440u) { static int _cw=0; if(_cw++<160){ printf("[VCTXWR] a=%08X off=%03X v=%08X blk=%08X hle=%08X thr=%08X\n", a, a-0x85410040u, v, g_cur_block, g_cur_hle_stub, g_cur_thr); fflush(stdout);} } }
 
