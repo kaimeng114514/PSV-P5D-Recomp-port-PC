@@ -1,0 +1,35 @@
+OpCapability Shader
+%1 = OpExtInstImport "GLSL.std.450"
+OpMemoryModel Logical GLSL450
+OpEntryPoint Fragment %main "main" %out %in0 %in1
+OpExecutionMode %main OriginUpperLeft
+OpDecorate %out Location 0
+OpDecorate %in0 Location 0
+OpDecorate %in1 Location 1
+OpDecorate %tex DescriptorSet 0
+OpDecorate %tex Binding 2
+%void = OpTypeVoid
+%f = OpTypeFloat 32
+%v2 = OpTypeVector %f 2
+%v4 = OpTypeVector %f 4
+%img = OpTypeImage %f 2D 0 0 0 1 Unknown
+%simg = OpTypeSampledImage %img
+%fn = OpTypeFunction %void
+%pIn = OpTypePointer Input %v4
+%pOut = OpTypePointer Output %v4
+%pTex = OpTypePointer UniformConstant %simg
+%in0 = OpVariable %pIn Input
+%in1 = OpVariable %pIn Input
+%out = OpVariable %pOut Output
+%tex = OpVariable %pTex UniformConstant
+%main = OpFunction %void None %fn
+%lbl = OpLabel
+%u4 = OpLoad %v4 %in1
+%ux = OpCompositeExtract %f %u4 0
+%uy = OpCompositeExtract %f %u4 1
+%uv2 = OpCompositeConstruct %v2 %ux %uy
+%sm = OpLoad %simg %tex
+%c = OpImageSampleImplicitLod %v4 %sm %uv2
+OpStore %out %c
+OpReturn
+OpFunctionEnd

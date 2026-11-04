@@ -3081,8 +3081,7 @@ static uint32_t _ufd_vert_ubo = 0, _ufd_frag_ubo = 0;   // M1251: per-stage UBO 
             // M1142C: force a fullscreen viewport using the convention the backend used in the older movie path
             // (DRAWST vp=0,0,960,544 when xo=0,xs=960,yo=0,ys=544) and ENABLE it: the game's last
             // sceGxmSetViewportEnable(0) had disabled the viewport, which kept vp degenerate -> black.
-            p5d::vulkan::set_gxm_viewport(0.0f, 960.0f, 0.0f, 544.0f, 0.0f, 1.0f);
-            p5d::vulkan::set_gxm_viewport_enable(1);
+        if (getenv("P5D_FORCEVP")) { p5d::vulkan::set_gxm_viewport(0.0f, 960.0f, 0.0f, 544.0f, 0.0f, 1.0f); p5d::vulkan::set_gxm_viewport_enable(1); }
             p5d::vulkan::gxm_draw_arrays(6u);
             printf("[ABIDRAWTEST] gxm_draw_arrays(3) issued n=%u\n", g_main_n); fflush(stdout);
             if (g_abi_cur_cd) { int _rc = p5d::vulkan::save_rt_screenshot(g_abi_cur_cd, "p5d_drawtest_rt.bmp");
@@ -3148,7 +3147,7 @@ static uint32_t _ufd_vert_ubo = 0, _ufd_frag_ubo = 0;   // M1251: per-stage UBO 
               if (_cur_f_ubo){ uint8_t* _src=GP(_cur_f_ubo); if(_src) p5d::vulkan::update_fragment_uniform_buffer_raw(_src,0x1000u); }
               if (!_abi_vspv.empty() && !_abi_fspv.empty()) { std::string _vp=_abi_spvdir+"/"+_abi_vspv, _fp=_abi_spvdir+"/"+_abi_fspv; (void)p5d::vulkan::select_real_pipeline(_vp.c_str(),_fp.c_str()); }
               int _rr = p5d::vulkan::upload_vertex_stream(_pvtx.data(),(unsigned)(_vc*128u),_vc);
-              p5d::vulkan::set_gxm_viewport(0.0f,960.0f,0.0f,544.0f,0.0f,1.0f); p5d::vulkan::set_gxm_viewport_enable(1);
+              if (getenv("P5D_FORCEVP")) { p5d::vulkan::set_gxm_viewport(0.0f,960.0f,0.0f,544.0f,0.0f,1.0f); p5d::vulkan::set_gxm_viewport_enable(1); }
               p5d::vulkan::gxm_draw_arrays(_vc);
               static int _pn=0; if (_pn++<30) { printf("[PREDRAW] #%d draw=%08X vp=%08X vc=%u ic=%u it=%u vspv=%s fspv=%s rc=%d\n", _pn,_d,_ps.vp,_vc,_icount,_itype,_abi_vspv.c_str(),_abi_fspv.c_str(),_rr); fflush(stdout);} }
             else { static int _fn=0; if(_fn++<6){ printf("[PREDRAW] FAIL draw=%08X vp=%08X vc=%u attrs=%zu streams=%zu\n",_d,_ps.vp,_vc,(unsigned)_av.size(),(size_t)_stm2va.size()); fflush(stdout);} } }
@@ -3211,8 +3210,7 @@ static uint32_t _ufd_vert_ubo = 0, _ufd_frag_ubo = 0;   // M1251: per-stage UBO 
         { static int _bp=0; if (_bp++<40) { printf("[PASSRT] begin cd=%08X w=%u h=%u n=%u\n", _cd, _cw, _ch, g_main_n); fflush(stdout);} }
         // M1143: the backend applies gxm viewport state at scene-pass begin; setting it at draw time was too
         // late (DRAWST still saw vp=0). Force a fullscreen viewport+enable BEFORE the pass begins.
-        p5d::vulkan::set_gxm_viewport(0.0f, 960.0f, 0.0f, 544.0f, 0.0f, 1.0f);
-        p5d::vulkan::set_gxm_viewport_enable(1);
+        if (getenv("P5D_FORCEVP")) { p5d::vulkan::set_gxm_viewport(0.0f, 960.0f, 0.0f, 544.0f, 0.0f, 1.0f); p5d::vulkan::set_gxm_viewport_enable(1); }
         if (_cd && _cw && _ch) p5d::vulkan::begin_scene_pass(_cd, _cw, _ch);
         else p5d::vulkan::begin_frame();
         printf("[ABIVP2] forced fullscreen viewport before scene pass n=%u\n", g_main_n); fflush(stdout);
@@ -3223,10 +3221,15 @@ static uint32_t _ufd_vert_ubo = 0, _ufd_frag_ubo = 0;   // M1251: per-stage UBO 
         float _f[6];
         // M1142B: sceGxmSetViewport(context, xOffset, xScale, yOffset, yScale, zOffset, zScale) -
         // r1..r3 = xOffset/xScale/yOffset, yScale/zOffset/zScale are STACK args (sp+0,+4,+8).
-        _f[0] = 0.0f; { uint32_t _b = s->r[1]; std::memcpy(&_f[0], &_b, 4); }
-        _f[1] = 0.0f; { uint32_t _b = s->r[2]; std::memcpy(&_f[1], &_b, 4); }
-        _f[2] = 0.0f; { uint32_t _b = s->r[3]; std::memcpy(&_f[2], &_b, 4); }
-        for (int _i = 3; _i < 6; ++_i) { uint32_t _b = 0; uint8_t* _q = GP(s->r[13] + (uint32_t)(_i - 3) * 4u); if (_q) std::memcpy(&_b, _q, 4); std::memcpy(&_f[_i], &_b, 4); }
+        // M1314: GXM float args arrive in VFP s0..s5 (ARM EABI), NOT r1..r3.
+        // RecState.d[] holds guest d14..d45; vfp_s_get maps sN -> d[N>>1] low/high word,
+        // so s0..s5 = s->d[0] low/high, s->d[1] low/high, s->d[2] low/high.
+        for (int _i = 0; _i < 6; ++_i) {
+          uint64_t _dd = s->d[_i >> 1];
+          uint32_t _bits = (_i & 1) ? (uint32_t)(_dd >> 32) : (uint32_t)_dd;
+          std::memcpy(&_f[_i], &_bits, 4);
+        }
+        printf("[ABIVPF] raw s0..s5 = %.3f %.3f %.3f %.3f %.3f %.3f (r1..r3=%08X %08X %08X)\n", _f[0],_f[1],_f[2],_f[3],_f[4],_f[5], s->r[1],s->r[2],s->r[3]); fflush(stdout);
         p5d::vulkan::set_gxm_viewport(_f[0], _f[1], _f[2], _f[3], _f[4], _f[5]);
         static int _vp = 0; if (_vp++ < 30) { printf("[ABIVP] xo=%.2f xs=%.2f yo=%.2f ys=%.2f zo=%.2f zs=%.2f n=%u\n", _f[0],_f[1],_f[2],_f[3],_f[4],_f[5],g_main_n); fflush(stdout); }
         s->r[0] = 0; return s->r[14]; }
