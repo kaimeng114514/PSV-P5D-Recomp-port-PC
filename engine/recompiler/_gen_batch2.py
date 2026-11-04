@@ -600,7 +600,16 @@ def emit(ins, sup):
     # --- VFP ---
     if m.startswith("vmov") and len(ops) >= 2:
         if isi(1):
-            if reg(0) >= 79: L.append("vfp_s_bits_set(s, %d, f32_bits((float)%.9g));" % (reg(0)-79, float(ops[1].imm)))
+            if ops[1].type == 4:
+                # M1300 FIX: VFP floating-point immediate operand (type ARM_OP_FP) carries .fp;
+                # capstone's .imm is 0 for these, which generated every vmov.f32 sN,#imm as 0.0f
+                # and broke ALL float constants passed as function arguments (e.g. sprite scale 1.0).
+                import struct as _struct
+                _fv = float(getattr(ops[1], "fp", 0.0))
+                _bits = _struct.unpack("<I", _struct.pack("<f", _fv))[0]
+                if reg(0) >= 79: L.append("vfp_s_bits_set(s, %d, 0x%Xu);" % (reg(0)-79, _bits))
+                else: L.append("%s = 0x%Xu;" % (R(reg(0)), _bits))
+            elif reg(0) >= 79: L.append("vfp_s_bits_set(s, %d, f32_bits((float)%.9g));" % (reg(0)-79, float(ops[1].imm)))
             else: L.append("%s = f32_bits((float)%.9g);" % (R(reg(0)), float(ops[1].imm)))
         elif isr(1):
             if reg(0) >= 79:

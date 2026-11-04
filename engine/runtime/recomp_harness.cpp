@@ -2654,6 +2654,17 @@ static void hf_fiber_thread(HFiber* f) {
           printf("[LOCAL4]  v%d: %.1f %.1f %.1f color=%08X uv=%.3f,%.3f\n", _v,_f[0],_f[1],_f[2], *(uint32_t*)(_q+_v*24+12), _f[4],_f[5]); } }
         uint8_t* _o=GP(_op); if(_o){ printf("[LOCAL4]  out: %08X %08X %08X %08X %08X %08X\n", ((uint32_t*)_o)[0],((uint32_t*)_o)[1],((uint32_t*)_o)[2],((uint32_t*)_o)[3],((uint32_t*)_o)[4],((uint32_t*)_o)[5]); }
         fflush(stdout);} }
+    if ((pc & ~1u) == 0x81160516u || (pc & ~1u) == 0x811634D0u || (pc & ~1u) == 0x811934EAu || (pc & ~1u) == 0x8115FF12u) { // TEXHANDLE
+      static int _t1=0,_t2=0,_t3=0,_t4=0;
+      if ((pc & ~1u) == 0x81160516u) { if(_t1++<16){ printf("[TEXHANDLE] FUN_81160516 n=%d unit=%d handle=%08X n0=%u\n", _t1, (int)s->r[0], s->r[1], g_main_n); fflush(stdout);} }
+      else if ((pc & ~1u) == 0x811634D0u) { if(_t2++<16){ printf("[TEXHANDLE] FUN_811634d0 n=%d a0=%08X a1=%08X n0=%u\n", _t2, s->r[0], s->r[1], g_main_n); fflush(stdout);} }
+      else if ((pc & ~1u) == 0x811934EAu) { if(_t3++<16){ printf("[TEXHANDLE] after FUN_8116332a ret_handle=%08X n0=%u\n", s->r[0], g_main_n); fflush(stdout);} }
+      else { if(_t4++<16){ uint32_t _f=0,_s=0,_slot=0; uint8_t* _q=GP(0x81555438u); if(_q) std::memcpy(&_f,_q,4); uint8_t* _q2=GP(0x81555458u); if(_q2) std::memcpy(&_slot,_q2,4); uint32_t _v80=0; uint8_t* _q3=GP(0x81555480u); if(_q3) std::memcpy(&_v80,_q3,4); (void)_s;
+          printf("[TEXHANDLE] FUN_8115ff12 n=%d flags=%08X slot0=%08X prev=%08X n0=%u\n", _t4, _f, _slot, _v80, g_main_n); fflush(stdout);} } }
+    if ((pc & ~1u) == 0x811610A4u) { // CALLARGS dump
+      static int _ca=0; if(_ca++<10){ printf("[CALLARGS] FUN_811610a4 n=%d r0=%08X r1=%08X r2=%08X r3=%08X\n", _ca, s->r[0],s->r[1],s->r[2],s->r[3]);
+        printf("[CALLARGS]  d0..d9 floats:"); for(int _k=0;_k<10;++_k){ float _f; std::memcpy(&_f,&s->d[_k],4); printf(" %.3f",_f);} printf("\n");
+        printf("[CALLARGS]  d0..d9 raw:"); for(int _k=0;_k<10;++_k){ uint32_t _w; std::memcpy(&_w,&s->d[_k],4); printf(" %08X",_w);} printf("\n"); fflush(stdout);} }
     if ((pc & ~1u) == 0x811866A6u) {   // M1186: app movie-slot state machine (0x100 slots, stride 0x60, base DAT_81670B48)
       static int g_mvfast = -1; if (g_mvfast < 0) { const char* _e = getenv("P5D_MOVIEFAST"); g_mvfast = (_e && atoi(_e)) ? 1 : 0; }
       static int _mv = 0; ++_mv;

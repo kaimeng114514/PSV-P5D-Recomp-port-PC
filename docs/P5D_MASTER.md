@@ -1313,6 +1313,8 @@
 | M1297 | §18.4839: ★★★★★★★★★★★★ **澄清"context 结构体"归属 + sprite 顶点变换细节：0x816CBC08 是 GFD 自己的状态/队列结构（真实 GXM context 指针是 85410040）；NODEMEMCPY 显示 sprite quad 顶点经 FUN_81163abc→FUN_8116397a 变换后写入 GFD USSE 顶点缓冲 8F343030..060，位置 (0,0)(0,0)(960,0)(0,544)，但每个顶点第 4 个 word（颜色/UV 槽）变换结果为 0 —— 即使 FUN_811610a4 传入 color=0xFFFFFFFF，说明颜色/纹理信息不是走顶点色，而应在别处（参数/UBO/预计算纹理）**。① 澄清：GFD 命令 handler（811E52D8/537A/53D4）里的 `r12=0x816CBC08` 是 **GFD 引擎自己的状态结构**（写 +0x240..0x253 顶点格式描述），不是 GXM context；真实 GXM context 指针从 DRAWLRC 可知为 **0x85410040**（sceGxmSetVertexUniformBuffer 等 ctx 参数）。② sprite 提交链再确认：FUN_811610a4（此轮反汇编调用点，0x81161282-0x811612A6）：`r0=0, r1=sp+0x54(顶点数组), r2=4(数量), r3=sp+0x8(&local_f0), [sp]=6(param_5), [sp+4]=0(param_6)` → `bl 0x81163abc`；param_4/param_5 均非零 ⇒ 注册不会被跳过；`FUN_81160814` gate 返回非 0 才调用。③ NODEMEMCPY（callerLR=81163A48=FUN_81163abc 内 memcpy）：写入 16B 顶点：
 | M1298 | §18.4840: ★★★★★★★★★★★★ **GFD 状态结构 0x816CBC08 布局首次 dump 出关键字段（屏幕 960x544 stride1024、GXM context=85410040、当前 RT=8CF00000、+0x220..0x244 为 36 个 GXP program 指针数组 8153xxxx）+ sprite 顶点变换函数 FUN_8116397a 解码：输入 24B/顶点(x,y,z,color,u,v) → 输出 16B/顶点(x,y,z,color) + 独立索引缓冲（2B/索引），UV 被丢弃 ⇒ UI 图元管线是纯颜色管线**。① GFD 状态结构 dump（content draw 时，0x816CBC08）：
 | M1299 | §18.4841: ★★★★★★★★★★★★ **决定性相关性实验：即使确认进入 logo 绘制阶段（LOGODRAW=20、SPRGATE=46），GXM 全量统计仍显示纹理绑定与预计算绘制调用数为 0 ⇒ 当前流程中 logo 路径确实从未走到 GXM 纹理绑定；同时在 AOT 代码里首次定位到「设置片元纹理」的 GFD 命令 handler 块（811E462A 等）——它们存在但从未执行，说明**纹理设置命令从未被排队**。① 定位到的调用 SetFragmentTexture 的 AOT 块（batch_016）：`blk_811E462A`、`blk_811E6E30/811E6E58/811E6EA8/811E6EC2/811E6F26/811E6F40/811E6F5A`、`blk_811E7D76/811E7DB4/811E7FAE/811E7FC8/811E80B4/...`（811E4628 区域紧邻已知 draw command handler 811E44D0/811E472E，**是 GFD 命令 handler 层的 SetFragmentTexture 命令**）；另 `blk_811E45E6` 调 PrecomputedVertexStateSetTexture、`blk_811E472E` 调 DrawPrecomputed（已知）。② 相关性实测（100s，746 presents）：`LOGODRAW`（FUN_811610a4 进入）=20、`SPRGATE`（FUN_81163abc 进入）=46、`LOCAL4`（0x811612A6 调用点）=0（说明 FUN_81163abc 另有调用者，如 FUN_81160b7e）；GXMSTATS 中 **SetFragmentTexture/SetVertexTexture/DrawPrecomputed 仍完全缺失（0 次）** ⇒ logo 阶段也没有任何纹理绑定 API 调用。③ GFD 状态/纹理句柄：FUN_81160516(0, handle) 把 handle 存 `DAT_81555458[unit]`（GFD 全局纹理槽数组），FUN_8115ff12（1354B 大函数）按位掩码把 GFD 渲染状态转成命令：其中 `DAT_81555438 & 0x400` 分支处理纹理槽（比较 DAT_81555480 vs DAT_81555458 后调 FUN_811634d0(0,0) / FUN_811634d0(0)→FUN_811bfa0e）。**若纹理槽为 0（handle 从未设置成功），该分支只清除/写入 0，不会产生真正的纹理绑定命令**。④ 结论：下一步要查 TGA→GFD 纹理创建链的结果：a) 在 `FUN_81160516` 入口 probe param_2（纹理 handle）是否非零 b) probe `FUN_8116332a`（纹理创建）的返回值 c) 检查 `FUN_8116f7ca("logoTMX",…,LAB_8119341e_1)` 的异步任务是否完成（TGA 加载可能是延迟任务，未完成则纹理不可用）d) 若 handle 非零但纹理命令未排队，追 FUN_8115ff12 中 `0x400` 位与 FUN_811634d0→FUN_811bfa0e 是否被调用 |
+| M1300 | §18.4842: ★★★★★★★★★★★★★★★★★★★ **AOT 翻译器根因修复：capstone 的 VFP 浮点立即数（`vmov.f32 sN,#imm`）操作数类型是 ARM_OP_FP，其 `.imm` 恒为 0、真值在 `.fp` 里；生成器却用 `.imm`，导致所有 `vmov.f32 sN,#imm` 被翻译成 0.0f ⇒ 所有以浮点常量作为函数参数的调用（如 sprite 缩放 1.0）全部变成 0，引擎提前返回、绘制链路中断**。修复：`_gen_batch2.py` 的 vmov 分支改用 `.fp` 并直接写 IEEE 位模式；对 38 个已生成批次用"旧块↔新块"对照**只替换 3,444 个受影响块的 `vfp_s_bits_set` 语句**（保留 9,589 个补充块与文件头），重编译 38 批次并重链接。**验证效果：① 修复前 `blk_811935C0` 生成 `vfp_s_bits_set(s, 3, f32_bits((float)0))`，修复后为 `vfp_s_bits_set(s, 3, 0x3F800000u)`；② CALLARGS 实测 FUN_811610a4 的 s4 从 0.0 变为 1.0；③ NODEMEMCPY 顶点数据从全 0 变为 `srcw=44700000 44080000 3F800000 00000000`（z=1.0 正确）；④ 同环境运行：PRES 从 ~600 暴涨到 **17,903**、sceGxmDraw 从 3,139 到 **89,639**、不再出现早期停摆（连续跑 20 分钟直到被杀）、[APPFRAME] 13,456 帧、[MOVIESLOT] 180；⑤ 但画面仍全黑（BMP 全黑）：GXM 纹理绑定 API 仍为 0 次，屏幕内容仍只有 5 draw/帧；另有 stderr 88,890 条 HLE-BADMEM（stub=812B1470/812B12E0，va=0/0x10020801 等）待查**。⑥ 修复产物：主 `recomp_split` 已用修复批次+重链接 exe；备份 `C:\dev\p5d_build\tools_backup\m1300\`（patch_vmov_immediates.py、_gen_split_fix.py、_gen_batch2_fixed.py、out_vfix_tail.txt）。⑦ 下一轮：a) 查 812B1470/812B12E0 的 BADMEM 是否来自 GFD/CRI 帧回调并把参数修正 b) 追 sprite 提交路径（FUN_811610a4 现在应能进 body）确认 FUN_81160516(0,handle) 调用与纹理槽 0x400 位 c) 若纹理仍不绑定，检查 GFD 纹理命令（811E462A handler）是否被排队 d) 复查 LOCAL4 探针 PC（0x811612A6 可能非块起点）|
+| §18.4842 | AOT translator ROOT-CAUSE FIX: for capstone, the VFP floating-point immediate operand (`vmov.f32 sN,#imm`) has type ARM_OP_FP whose `.imm` is always 0 while the real value is in `.fp`; the generator used `.imm`, so EVERY `vmov.f32 sN,#imm` was translated as 0.0f, making every float-constant function argument (e.g. sprite scale 1.0) zero, so the engine returned early and the drawing chain broke. Fix: in `_gen_batch2.py`'s vmov branch use `.fp` and emit the IEEE bit pattern directly; for the 38 already-generated batches, use old-block-vs-new-block comparison to replace ONLY the 3,444 affected blocks' `vfp_s_bits_set` statements (keeping 9,589 supplementary blocks and file headers), recompile all 38 batches and relink. Verification: (1) before fix blk_811935C0 generated `vfp_s_bits_set(s, 3, f32_bits((float)0))`, after fix it is `vfp_s_bits_set(s, 3, 0x3F800000u)`; (2) CALLARGS shows FUN_811610a4's s4 changed from 0.0 to 1.0; (3) NODEMEMCPY vertex data changed from all-zero to `srcw=44700000 44080000 3F800000 00000000` (z=1.0 correct); (4) same environment run: PRES jumped from ~600 to 17,903, sceGxmDraw from 3,139 to 89,639, no early stalls any more (ran 20 minutes until killed), [APPFRAME] 13,456 frames, [MOVIESLOT] 180; (5) but the screen is still all black (BMP all black): GXM texture-bind API calls remain 0 and the screen content is still only 5 draws/frame; stderr has 88,890 HLE-BADMEM entries (stub=812B1470/812B12E0, va=0/0x10020801 etc.) to investigate. (6) Artifacts: main recomp_split now uses the fixed batches with a relinked exe; backups in C:\dev\p5d_build\tools_backup\m1300\ (patch_vmov_immediates.py, _gen_split_fix.py, _gen_batch2_fixed.py, out_vfix_tail.txt). (7) Next round: (a) investigate whether the 812B1470/812B12E0 BADMEMs come from GFD/CRI frame callbacks and fix their arguments; (b) trace the sprite submission path (FUN_811610a4 should now enter its body) to confirm FUN_81160516(0,handle) is called and the texture-slot 0x400 bit is set; (c) if textures still do not bind, check whether the GFD texture command (811E462A handler) gets queued; (d) recheck the LOCAL4 probe PC (0x811612A6 may not be a block start). |
 | §18.4841 | Decisive correlation experiment: even after confirming the logo drawing phase is entered (LOGODRAW=20, SPRGATE=46), the full GXM statistics still show ZERO texture-binding and ZERO precomputed-draw calls, so in the current flow the logo path never reaches GXM texture binding; meanwhile we located for the first time the AOT blocks of the GFD set-fragment-texture command handler (811E462A etc.) - they exist but never execute, meaning the texture-set command is never queued. (1) AOT blocks calling SetFragmentTexture (batch_016): blk_811E462A, blk_811E6E30/811E6E58/811E6EA8/811E6EC2/811E6F26/811E6F40/811E6F5A, blk_811E7D76/811E7DB4/811E7FAE/811E7FC8/811E80B4/... (the 811E4628 area is adjacent to the known draw command handlers 811E44D0/811E472E and IS the GFD command-handler-layer SetFragmentTexture command); blk_811E45E6 calls PrecomputedVertexStateSetTexture and blk_811E472E calls DrawPrecomputed (known). (2) Correlation measurement (100s, 746 presents): LOGODRAW (entry FUN_811610a4)=20, SPRGATE (entry FUN_81163abc)=46, LOCAL4 (call site 0x811612A6)=0 (so FUN_81163abc has other callers such as FUN_81160b7e); GXMSTATS still completely lacks SetFragmentTexture/SetVertexTexture/DrawPrecomputed (0 calls), so even in the logo phase no texture-binding API is called. (3) GFD state/texture handles: FUN_81160516(0, handle) stores the handle into DAT_81555458[unit] (GFD global texture-slot array); FUN_8115ff12 (1354B) converts GFD render state into commands by bitmask, where the DAT_81555438 & 0x400 branch handles texture slots (comparing DAT_81555480 vs DAT_81555458 then calling FUN_811634d0(0,0)/FUN_811634d0(0) -> FUN_811bfa0e). If the texture slot is 0 (handle never set successfully), that branch only clears/writes 0 and produces no real texture-binding command. (4) Next: (a) probe FUN_81160516 entry param_2 (texture handle) for nonzero; (b) probe FUN_8116332a's return value; (c) check whether the FUN_8116f7ca("logoTMX",...,LAB_8119341e_1) async task completes; (d) if the handle is nonzero but no texture command is queued, trace the 0x400 bit in FUN_8115ff12 and whether FUN_811634d0->FUN_811bfa0e is called. |
 ```
 +000: 000003C0 00000220 00000400 00000001   → w=960, h=544, stride=1024, fmt?
@@ -510460,3 +510462,53 @@ D) 若 handle 非零但纹理命令未排队，追 FUN_8115ff12 的 0x400 位与
 ANTI-FORGETTING ENTRY. Keywords: M1299 correlation experiment logo phase LOGODRAW 20 SPRGATE 46 LOCAL4 0, GXMSTATS still 0 SetFragmentTexture SetVertexTexture DrawPrecomputed, AOT blocks calling SetFragmentTexture blk_811E462A blk_811E6E30 811E6E58 811E6EA8 811E6EC2 811E6F26 811E6F40 811E6F5A blk_811E7D76 811E7DB4 811E7FAE 811E7FC8 811E80B4, blk_811E45E6 PrecomputedVertexStateSetTexture, blk_811E472E DrawPrecomputed, GFD texture slots DAT_81555458 via FUN_81160516(0,handle), FUN_8115ff12 1354B bitmask render state DAT_81555438 &0x400 texture branch compares DAT_81555480 vs DAT_81555458 calls FUN_811634d0 FUN_811bfa0e, if slot 0 no texture command, next probe FUN_81160516 param_2 handle nonzero FUN_8116332a texture create return FUN_8116f7ca logoTMX async task complete LAB_8119341e_1, trace 0x400 bit FUN_811634d0 FUN_811bfa0e. Verification: out_logocorr.txt, batch_016 stub callers, ghidra f8115ff12.txt f8119343a.txt.
 
 LOOKUP: M1299 logo phase still no GXM texture binds, AOT blocks calling SetFragmentTexture 811E462A never executed, GFD texture slot DAT_81555458 handle path FUN_81160516, next probe texture handle nonzero and logoTMX async task -> 18.4840 [relevant: GFD state dump], 18.4839 [relevant: context], 18.4838 [relevant: API stats]
+### 18.4842 PORT M1300: AOT 翻译器根因修复 —— VFP 浮点立即数（vmov.f32 #imm）全部被翻译成 0.0f
+
+1) 根因：
+```
+capstone (ARM/Thumb) 解码 `vmov.f32 sN, #imm` 时：
+  操作数类型 = ARM_OP_FP (4)，真实浮点值在 op.fp
+  op.imm 恒为 0
+生成器 _gen_batch2.py 的 vmov 分支用 float(ops[1].imm) → 0.0f
+⇒ 所有 vmov.f32 sN,#imm 全部变成 0.0f
+⇒ 以浮点常量作为参数的调用（如 FUN_811610a4 的 scale=1.0）全部收 0
+⇒ 引擎提前 return，sprite/纹理/绘制链路中断
+```
+2) 修复：
+```
+_gen_batch2.py：vmov 分支改为
+  ops[1].type == 4 时用 float(ops[1].fp)，struct.pack('<f') → 0x...u 位模式
+已生成批次：旧块 vs 新块逐块对照，只替换 3,444 个受影响块的
+  vfp_s_bits_set(s, N, f32_bits((float)0));  →  vfp_s_bits_set(s, N, 0x3F800000u);
+（保留 9,589 个补充块与文件头）
+重编译 38 批次（38/38 ok, 272s）并重链接
+```
+3) 验证：
+```
+blk_811935C0: 修复前 vfp_s_bits_set(s, 3, f32_bits((float)0));
+              修复后 vfp_s_bits_set(s, 3, 0x3F800000u);
+CALLARGS:     FUN_811610a4 的 s4 由 0.0 → 1.0
+NODEMEMCPY:   顶点数据由全 0 → 44700000 44080000 3F800000 00000000 (z=1.0 正确)
+运行对比:     PRES 600 → 17,903；sceGxmDraw 3,139 → 89,639
+              不再早期停摆（连续跑 20 分钟）；[APPFRAME] 13,456 帧；[MOVIESLOT] 180
+画面:         仍全黑（BMP 全 0）；纹理绑定 API 仍 0 次；5 draw/帧
+stderr:       88,890 条 HLE-BADMEM（stub=812B1470/812B12E0, va=0/0x10020801）
+```
+4) 产物/备份：
+```
+主 recomp_split 已用修复批次并重链接 recomp_harness.exe
+备份 C:\dev\p5d_build\tools_backup\m1300\:
+  patch_vmov_immediates.py  _gen_split_fix.py  _gen_batch2_fixed.py  out_vfix_tail.txt
+```
+5) 下一轮：
+```
+A) 查 812B1470/812B12E0 的 HLE-BADMEM（是否 GFD/CRI 帧回调参数问题）
+B) FUN_811610a4 现在应能进 body：确认 FUN_81160516(0,handle)、纹理槽 0x400 位
+C) 纹理仍不绑定则查 GFD 纹理命令（811E462A handler）是否被排队
+D) 复查 LOCAL4 探针 PC（0x811612A6 可能非块起点）
+```
+验证：`out_vfix.txt`、`err_vfix.txt`、`_rblk935c0c.py`（修复前生成代码）、修复后 batch_013。
+
+ANTI-FORGETTING ENTRY. Keywords: M1300 vmov.f32 immediate root cause fix capstone ARM_OP_FP operand .imm always 0 real value in .fp, generator _gen_batch2.py used .imm so all vmov.f32 sN,#imm became 0.0f, all float-constant function arguments became 0, engine early return drawing broken, fix use .fp IEEE bits, 38 batches block comparison replaced 3444 blocks vfp_s_bits_set f32_bits((float)0) with 0x3F800000u, recompiled 38/38 272s relinked, evidence blk_811935C0 before/after, CALLARGS s4 0.0->1.0, NODEMEMCPY vertices 44700000 44080000 3F800000, PRES 600->17903, sceGxmDraw 3139->89639, no early stall ran 20 min, APPFRAME 13456 MOVIESLOT 180, screen still black BMP all black texture bind API 0, HLE-BADMEM 88890 stub 812B1470 812B12E0 va 0 10020801, next investigate BADMEM FUN_81160516 handle texture slot 0x400 bit GFD texture command 811E462A LOCAL4 probe PC 811612A6. Verification: out_vfix.txt err_vfix.txt fixed batch_013.
+
+LOOKUP: M1300 AOT vmov.f32 immediate root cause fixed (all float const args were 0), PRES 600->17903, screen still black textures unbound HLE-BADMEM -> 18.4841 [relevant: texture path], 18.4837 [relevant: pipeline], 18.4836 [relevant: sprite chain]
