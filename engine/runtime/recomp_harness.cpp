@@ -3270,6 +3270,7 @@ static uint32_t _ufd_vert_ubo = 0, _ufd_frag_ubo = 0;   // M1251: per-stage UBO 
         static int _vsn=0; if (_vsn++<16) { printf("[ABIVS] %s idx=%u va=%08X n=%u\n", _ge->name, _si, _va, g_main_n); fflush(stdout); }
       }
       // 18.4500 M955: unpack the real GXM vertex streams into the pipeline layout (128B stride, loc0..7 vec4)
+      { if (strncmp(_ge->name, "sceGxmDraw", 6) == 0) { static std::map<uint32_t,long> _lrc; long& _c=_lrc[s->r[14]]; _c++; if (_c<=3 || (_c%500)==0) { printf("[DRAWLRC] lr=%08X name=%s n=%ld args=%08X %08X %08X %08X blk=%08X\n", s->r[14], _ge->name, _c, s->r[0],s->r[1],s->r[2],s->r[3], g_cur_block); fflush(stdout); } } }
       if (strncmp(_ge->name, "sceGxmDraw", 10) == 0 && strcmp(_ge->name, "sceGxmDrawPrecomputed") != 0) {
         uint32_t _icount = _stk[0];   // sceGxmDraw(ctx,prim,indexType,indexData,indexCount): indexCount = first stack arg
         uint32_t _vc = _icount;
@@ -6709,6 +6710,8 @@ static void f960_dump(uint32_t tgt, RecState* s, const char* where) {
 
 extern "C" uint32_t id_reg(int idx, RecState* s) {
   uint32_t t = s->r[idx & 15] & ~1u;
+  { static int _hd=0; if (g_cur_block >= 0x811E4476u && g_cur_block <= 0x811E4498u && _hd++<80) { printf("[CMDHANDLER165] #%d target=%08X blk=%08X r0=%08X r1=%08X r2=%08X\n", _hd-1, t, g_cur_block, s->r[0], s->r[1], s->r[2]); fflush(stdout);} }
+  { if (t == 0x811E472Eu) { static int _dp=0; if(_dp++<12){ printf("[DRAWPRECOM-CALL] from blk=%08X #%d\n", g_cur_block, _dp); fflush(stdout);} } }
   if (t == 0x81159276u || t == 0x811DACFCu || t == 0x81178F10u) {
     static int _cb_n = 0;
     if (_cb_n++ < 60) {
