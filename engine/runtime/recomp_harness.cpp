@@ -2647,6 +2647,13 @@ static void hf_fiber_thread(HFiber* f) {
       static int _c1=0,_c2=0;
       if ((pc & ~1u) == 0x811E3960u) { if(_c1++<20) { printf("[SPRCMD] FUN_811e3960 n=%d r0=%08X r1=%u r2=%08X r3=%08X r4=%08X r5=%08X\n", _c1, s->r[0],s->r[1],s->r[2],s->r[3],s->r[4],s->r[5]); fflush(stdout);} }
       else { if(_c2++<20) { printf("[SPRCMD] FUN_811e3b54 n=%d r0=%08X r1=%u r2=%08X r3=%u r4=%u r5=%08X\n", _c2, s->r[0],s->r[1],s->r[2],s->r[3],s->r[4],s->r[5]); fflush(stdout);} } }
+    if ((pc & ~1u) == 0x811612A6u) { // LOCAL4 dump before bl 81163abc
+      static int _l4=0; if(_l4++<6){ uint32_t _vp=s->r[1], _op=s->r[3];
+        printf("[LOCAL4] n=%d verts=%08X out=%08X sp=%08X stk0=%08X stk1=%08X\n", _l4, _vp, _op, s->r[13], 0, 0);
+        uint8_t* _q=GP(_vp); if(_q){ for(int _v=0;_v<4;++_v){ float _f[6]; std::memcpy(_f,_q+_v*24,24);
+          printf("[LOCAL4]  v%d: %.1f %.1f %.1f color=%08X uv=%.3f,%.3f\n", _v,_f[0],_f[1],_f[2], *(uint32_t*)(_q+_v*24+12), _f[4],_f[5]); } }
+        uint8_t* _o=GP(_op); if(_o){ printf("[LOCAL4]  out: %08X %08X %08X %08X %08X %08X\n", ((uint32_t*)_o)[0],((uint32_t*)_o)[1],((uint32_t*)_o)[2],((uint32_t*)_o)[3],((uint32_t*)_o)[4],((uint32_t*)_o)[5]); }
+        fflush(stdout);} }
     if ((pc & ~1u) == 0x811866A6u) {   // M1186: app movie-slot state machine (0x100 slots, stride 0x60, base DAT_81670B48)
       static int g_mvfast = -1; if (g_mvfast < 0) { const char* _e = getenv("P5D_MOVIEFAST"); g_mvfast = (_e && atoi(_e)) ? 1 : 0; }
       static int _mv = 0; ++_mv;
@@ -7183,6 +7190,8 @@ extern "C" void wr16_watch(uint32_t a, uint32_t v) {
 }
 // M1370: g_dbg_cur_f_ubo mirror defined near top of file
 extern "C" void wr32_watch(uint32_t a, uint32_t v) {
+  { if (a >= 0x85410040u && a < 0x85410440u) { static int _cw=0; if(_cw++<160){ printf("[VCTXWR] a=%08X off=%03X v=%08X blk=%08X hle=%08X thr=%08X\n", a, a-0x85410040u, v, g_cur_block, g_cur_hle_stub, g_cur_thr); fflush(stdout);} } }
+
   { if (a >= 0x8F142000u && a < 0x8F144000u) { static int _vb=0; if(_vb++<120){ printf("[VBDWR] a=%08X v=%08X blk=%08X hle=%08X thr=%08X\n", a, v, g_cur_block, g_cur_hle_stub, g_cur_thr); fflush(stdout);} } }
 
   { if (g_dbg_cur_f_ubo && a >= g_dbg_cur_f_ubo && a < g_dbg_cur_f_ubo + 0x400u && v != 0u) { static int _fw=0; if(_fw++<120){ printf("[FUBOWR] off=%03X v=%08X(%.3f) blk=%08X hle=%08X thr=%08X\n", a-g_dbg_cur_f_ubo, v, *(float*)&v, g_cur_block, g_cur_hle_stub, g_cur_thr); fflush(stdout);} } }
