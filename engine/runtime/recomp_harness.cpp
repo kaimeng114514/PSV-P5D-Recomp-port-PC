@@ -3782,6 +3782,9 @@ static uint32_t _ufd_vert_ubo = 0, _ufd_frag_ubo = 0;   // M1251: per-stage UBO 
       if (sz > 0x100000u || g_big_n < 0) printf("[MEMALIGN] al=%08X sz=%08X raw=%08X -> %08X lr=%08X\n", al, sz, raw, r0, s->r[14]);
       break; }
     case 0x812B2270u: {   // NODEWR-MEMCPY
+      { uint32_t _ad=s->r[0], _al=s->r[2]; if ((_ad>=0x85C70000u && _ad<0x85C80000u) || (_ad>=0x99C60000u && _ad<0x99E00000u)) { static int _am2=0; if(_am2++<60){ uint32_t _s0=0,_s1=0; uint8_t* _p=GP(s->r[1]); if(_p){std::memcpy(&_s0,_p,4);std::memcpy(&_s1,_p+4,4);} printf("[ATLASMEM2] dst=%08X len=%u src=%08X srcw=%08X %08X blk=%08X lr=%08X\n",_ad,_al,s->r[1],_s0,_s1,g_cur_block,s->r[14]); fflush(stdout);} } }
+      { uint32_t _ad=s->r[0], _al=s->r[2]; if (_ad>=0x90240000u && _ad<0x903D0000u) { static int _am=0; if(_am++<40){ uint32_t _s0=0,_s1=0; uint8_t* _p=GP(s->r[1]); if(_p){std::memcpy(&_s0,_p,4);std::memcpy(&_s1,_p+4,4);} printf("[ATLASMEM] dst=%08X len=%u src=%08X srcw=%08X %08X blk=%08X lr=%08X\n",_ad,_al,s->r[1],_s0,_s1,g_cur_block,s->r[14]);
+              if (_al>=524288u && _am<=9) { printf("[ATLASSTK] sp=%08X:", s->r[13]); for(int _k=0;_k<16;++_k){ uint32_t _v=0; uint8_t* _q=GP(s->r[13]+(uint32_t)_k*4u); if(_q){std::memcpy(&_v,_q,4);} printf(" %08X",_v);} printf("\n[ATLASSTK] pcring:"); for(int _k=0;_k<16;++_k) printf(" %08X", g_pc_ring[(g_pc_ring_n-16u+(uint32_t)_k)&63u]); printf("\n"); fflush(stdout);} fflush(stdout);} } }
       { uint32_t _fd=s->r[0], _fl=s->r[2]; if (g_dbg_cur_f_ubo && _fd >= g_dbg_cur_f_ubo && _fd < g_dbg_cur_f_ubo + 0x400u) { static int _fm=0; if(_fm++<40){ uint32_t _w0=0,_w1=0; uint8_t* _p=GP(s->r[1]); if(_p){std::memcpy(&_w0,_p,4);std::memcpy(&_w1,_p+4,4);} printf("[FUBOMEM] memcpy dst_off=%03X len=%u srcw=%08X %08X blk=%08X\n", _fd-g_dbg_cur_f_ubo, _fl, _w0,_w1, g_cur_block); fflush(stdout);} } }
 
       { uint32_t _ud=s->r[0], _us=s->r[1], _un=s->r[2]; if (_ud >= 0x94700000u && _ud < 0x94740000u) { static int _um=0; if(_um++<80){ uint32_t _w0=0,_w1=0,_w2=0,_w3=0; uint8_t* _p=GP(_us); if(_p){std::memcpy(&_w0,_p,4);std::memcpy(&_w1,_p+4,4);std::memcpy(&_w2,_p+8,4);std::memcpy(&_w3,_p+12,4);} printf("[USSEMEM] memcpy dst=%08X off=%05X len=%u srcw=%08X %08X %08X %08X blk=%08X\n", _ud, _ud-0x94700000u, _un, _w0,_w1,_w2,_w3, g_cur_block); fflush(stdout);} } }
@@ -7239,6 +7242,8 @@ static void stkw_note(const char* tag, uint32_t a, uint32_t v, int width) {
   fflush(stdout);
 }
 extern "C" void wr8_watch(uint32_t a, uint32_t v) {
+  { if ((a >= 0x85C70000u && a < 0x85C80000u) || (a >= 0x99C60000u && a < 0x99E00000u)) { static int _p8=0; if(_p8++<100){ printf("[ATLASPX8] a=%08X v=%02X blk=%08X\n", a, v&0xFF, g_cur_block); fflush(stdout);} } }
+
   { if (a >= 0x94700000u && a < 0x94740000u) { static int _u8=0; if(_u8++<40){ printf("[USSEW8] a=%08X off=%05X v=%02X blk=%08X\n", a, a-0x94700000u, v&0xFF, g_cur_block); fflush(stdout);} } }
 
   { if (a >= 0x816CC728u && a < 0x816CC750u) { static int _m8=0; if(_m8++<120){ printf("[MODE730B] wr8 a=%08X v=%02X blk=%08X fib=%08X thr=%08X\n", a, v&0xFF, g_cur_block, g_cur_fiber, g_cur_thr); fflush(stdout);} } }
@@ -7249,6 +7254,8 @@ extern "C" void wr8_watch(uint32_t a, uint32_t v) {
   { static int _all=0; if (a == 0x84D2AAA4u && _all++ < 20) { printf("[STATEW8] v=%02X blk=%08X fib=%08X thr=%08X sp=%08X\n", v, g_cur_block, g_cur_fiber, g_cur_thr, g_snap_r[13]); fflush(stdout); } }
 }
 extern "C" void wr16_watch(uint32_t a, uint32_t v) {
+  { if ((a >= 0x85C70000u && a < 0x85C80000u) || (a >= 0x99C60000u && a < 0x99E00000u)) { static int _p16=0; if(_p16++<60){ printf("[ATLASPX16] a=%08X v=%04X blk=%08X\n", a, v&0xFFFF, g_cur_block); fflush(stdout);} } }
+
   { if (a >= 0x94700000u && a < 0x94740000u) { static int _u16=0; if(_u16++<40){ printf("[USSEW16] a=%08X off=%05X v=%04X blk=%08X\n", a, a-0x94700000u, v&0xFFFF, g_cur_block); fflush(stdout);} } }
 
   { if (a >= 0x816CC728u && a < 0x816CC750u) { static int _m16=0; if(_m16++<120){ printf("[MODE730B] wr16 a=%08X v=%04X blk=%08X fib=%08X thr=%08X\n", a, v&0xFFFF, g_cur_block, g_cur_fiber, g_cur_thr); fflush(stdout);} } }
@@ -7261,6 +7268,10 @@ extern "C" void wr16_watch(uint32_t a, uint32_t v) {
 }
 // M1370: g_dbg_cur_f_ubo mirror defined near top of file
 extern "C" void wr32_watch(uint32_t a, uint32_t v) {
+  { if ((a >= 0x85C70000u && a < 0x85C80000u) || (a >= 0x99C60000u && a < 0x99E00000u)) { static int _aw2=0; if(_aw2++<120){ printf("[ATLASWR2] a=%08X v=%08X blk=%08X\n", a, v, g_cur_block); fflush(stdout);} } }
+
+  { if (a >= 0x90240000u && a < 0x903D0000u) { static int _aw=0; if(_aw++<80){ printf("[ATLASWR] a=%08X v=%08X blk=%08X\n", a, v, g_cur_block); fflush(stdout);} } }
+
   { if (a == 0x81555458u) { static int _sw=0,_swz=0; ++_sw; if (v!=0 && ++_swz<=30){ printf("[TEXSLOTWR] slot0 = %08X blk=%08X (writes=%d)\n", v, g_cur_block, _sw); fflush(stdout);} } }
   { if (a == 0x81555438u) { static int _fw=0,_fw4=0; ++_fw; if ((v & 0x400u) && _fw4++<30){ printf("[TEXFLAGWR] flags has0x400 v=%08X blk=%08X (writes=%d)\n", v, g_cur_block, _fw); fflush(stdout);} } }
 
