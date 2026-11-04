@@ -3326,7 +3326,9 @@ static uint32_t _ufd_vert_ubo = 0, _ufd_frag_ubo = 0;   // M1251: per-stage UBO 
           if (_it != _abi_man.end()) { uint8_t* _q = GP(s->r[2]);
             if (_q) { std::memcpy(_q, &_nextid, 4); _pid2spv[_nextid] = _it->second; _pid2gxp[_nextid] = s->r[1];
               { static int _gd=0; if (_gd++<250) { uint32_t _gxp=s->r[1]; uint8_t* _g=GP(_gxp); if(_g){ uint32_t _sz=0,_pc=0,_po=0; std::memcpy(&_sz,_g+8,4); std::memcpy(&_pc,_g+0x24,4); std::memcpy(&_po,_g+0x28,4);
-                  printf("[GXPDIAG] gxp=%08X size=%u pc=%u po=%X spv=%s\n", _gxp,_sz,_pc,_po,_it->second.c_str());
+                  uint32_t _bf=0,_tu1=0,_tu2=0; std::memcpy(&_bf,_g+0x18,4); std::memcpy(&_tu1,_g+0x1C,4); std::memcpy(&_tu2,_g+0x20,4);
+                  printf("[GXPDIAG] gxp=%08X size=%u pc=%u po=%X bf=%08X tu1=%08X tu2=%08X spv=%s\n", _gxp,_sz,_pc,_po,_bf,_tu1,_tu2,_it->second.c_str());
+                  if ((_tu1|_tu2)) { static int _texprog_n=0; if (_texprog_n++<60) { printf("[GXPTEX] gxp=%08X tu1=%08X tu2=%08X spv=%s\n", _gxp, _tu1, _tu2, _it->second.c_str()); fflush(stdout); } }
                   uint32_t _pb=0x28u+_po;
                   for(uint32_t _i=0;_i<_pc && _i<6u;++_i){ if(_pb+_i*16u+16u>_sz) break; int32_t _no=0; std::memcpy(&_no,_g+_pb+_i*16u,4); const char* _nm=(const char*)(_g+_pb+_i*16u+_no); printf("[GXPDIAG]  P%u name=%s\n",_i,_nm); } } } }
               static int _n=0; if (_n++<12) printf("[ABIPGID] id=%08X hash=%016llX spv=%s n=%u\n", _nextid, (unsigned long long)_gh, _it->second.c_str(), g_main_n);
