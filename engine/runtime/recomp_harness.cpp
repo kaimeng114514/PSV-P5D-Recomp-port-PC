@@ -3738,7 +3738,13 @@ static uint32_t _ufd_vert_ubo = 0, _ufd_frag_ubo = 0;   // M1251: per-stage UBO 
                 uint32_t _gxp=0; { auto _gi=_obj2gxp.find(_cur_vobj); if(_gi!=_obj2gxp.end()) _gxp=_gi->second; }
                 uint32_t _def=_ufd_vert_ubo; if(!_def && _pend_vout){ uint8_t* _q=GP(_pend_vout); if(_q) std::memcpy(&_def,_q,4); }
                 _cpub = p5d_cpu_vp_apply(_vtx, _vc, (unsigned)_av.size(), _gxp, _def, _cur_v_ubo);
-                static int _cn=0; if(_cn++<24){ printf("[CPUVP] #%d obj=%08X gxp=%08X vc=%u nattr=%u ok=%d tex=%d spv=%s\n", _cn,_cur_vobj,_gxp,_vc,(unsigned)_av.size(),(int)_cpub,(int)_haztex,_abi_vspv.c_str()); fflush(stdout);} } }
+                static int _cn=0; if(_cn++<24){ printf("[CPUVP] #%d obj=%08X gxp=%08X vc=%u nattr=%u ok=%d tex=%d spv=%s\n", _cn,_cur_vobj,_gxp,_vc,(unsigned)_av.size(),(int)_cpub,(int)_haztex,_abi_vspv.c_str());
+                  for(size_t _i=0;_i<_av.size() && _i<8;++_i){ uint32_t _st=0; auto _st2b=_vobj2strms.find(_cur_vobj); if(_st2b!=_vobj2strms.end()) for(size_t _k=0;_k<_st2b->second.size();++_k) if(_st2b->second[_k].index==_av[_i].stream){_st=_st2b->second[_k].stride;break;}
+                    uint32_t _sv=(_stm2va.count(_av[_i].stream)?_stm2va[_av[_i].stream]:0u);
+                    printf("[AVDUMP] #%d attr%zu stream=%u off=%u fmt=%u comps=%u stride=%u sva=%08X raw=",_cn,_i,_av[_i].stream,_av[_i].offset,_av[_i].fmt,_av[_i].comps,_st,_sv);
+                    uint8_t* _q=GP(_sv+_av[_i].offset); if(_q){ for(int _w=0;_w<4;++_w){ uint32_t _x=0; std::memcpy(&_x,_q+_w*4,4); printf(" %08X",_x);} }
+                    printf(" packed="); for(int _c=0;_c<4;++_c) printf(" %.3f",_vtx[(size_t)_i*4u+(size_t)_c]); printf("\n"); }
+                  fflush(stdout);} } }
             if (_cpub) {
               bool _texfrag = (_abi_fspv.find("0084") != std::string::npos);
               std::string _vp = std::string(p5d_bridge_frag_dir()) + "/bridge_vert.spv";

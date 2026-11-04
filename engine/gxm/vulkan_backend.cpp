@@ -3728,6 +3728,13 @@ SceInt32 upload_vertex_stream(const void* data, SceUInt32 bytes, SceUInt32 verte
 void gxm_draw_arrays(SceUInt32 vertex_count) {
     VkCommandBuffer cmd = g_backend.current_cmd_buffer;
     if (!cmd) { LOGE("gxm_draw_arrays: no current command buffer"); return; }
+    // M1319: the old "fallback to the hard-coded test_triangle pipeline" drew non-original content
+    // (a red/green/blue gradient triangle) whenever no real pipeline was selected.  Log it, and skip
+    // the draw entirely unless P5D_TESTFALLBACK=1 (diagnostic only).
+    static int _fb = -1; if (_fb < 0) { const char* _e = getenv("P5D_TESTFALLBACK"); _fb = (_e && atoi(_e)) ? 1 : 0; }
+    if (!g_current_real_pipe) {
+      static int _np = 0; if (_np++ < 48) { printf("[NOPIPE] draw vc=%u -> test_triangle fallback %s\n", (unsigned)vertex_count, _fb ? "DRAWN" : "SKIPPED"); fflush(stdout); }
+      if (!_fb) return; }
     VkPipeline _draw_pipe = g_current_real_pipe ? g_current_real_pipe
                           : *reinterpret_cast<VkPipeline*>(&g_backend.graphics_pipeline);
     if (!_draw_pipe) { LOGE("gxm_draw_arrays: no graphics pipeline bound"); return; }
