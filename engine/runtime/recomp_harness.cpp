@@ -2851,6 +2851,7 @@ static uint32_t hle_call_inner(uint32_t stub_va, RecState* s) {
       static std::map<uint32_t, std::vector<AbiVAttr> > _vobj2attrs;
       static std::map<uint32_t, std::vector<AbiVStream> > _vobj2strms;
       static std::map<uint32_t, uint32_t> _pid2gxp;   // 18.4502 M957: program id -> GXP guest VA
+static std::map<uint32_t, uint32_t> _obj2gxp;   // M1290: patched program object -> real GXP guest VA
       static std::map<uint32_t, uint32_t> _stm2va;
       static uint32_t _cur_vobj = 0;
       static uint32_t _cur_v_ubo = 0, _cur_f_ubo = 0, _pend_vout = 0, _pend_fout = 0;
@@ -3153,6 +3154,11 @@ static uint32_t _ufd_vert_ubo = 0, _ufd_frag_ubo = 0;   // M1251: per-stage UBO 
           if (std::strcmp(nm, name) == 0) return gxpVA + pb + i*16u; }
         return 0; };
       auto _gxp_find_by_sem = [](uint32_t gxpVA, uint32_t sem, uint32_t idx) -> uint32_t { (void)gxpVA; (void)sem; (void)idx; return 0; };
+      if (strcmp(_ge->name, "sceGxmVertexProgramGetProgram") == 0 || strcmp(_ge->name, "sceGxmFragmentProgramGetProgram") == 0) {
+        uint32_t _obj = s->r[0]; auto _it = _obj2gxp.find(_obj);
+        uint32_t _rv = (_it != _obj2gxp.end()) ? _it->second : 0u;
+        static int _n=0; if (_n++<40) { printf("[BIGETPROG] %s obj=%08X -> gxp=%08X n=%u\n", _ge->name, _obj, _rv, g_main_n); fflush(stdout); }
+        s->r[0]=_rv; return s->r[14]; }
       if (strncmp(_ge->name, "sceGxmShaderPatcherGetProgramFromId", 35) == 0) {
         uint32_t _id = s->r[0]; auto _it = _pid2gxp.find(_id);
         uint32_t _rv = (_it != _pid2gxp.end()) ? _it->second : 0u;
@@ -3162,7 +3168,7 @@ static uint32_t _ufd_vert_ubo = 0, _ufd_frag_ubo = 0;   // M1251: per-stage UBO 
         uint32_t _prog = s->r[0]; uint8_t* _q = GP(s->r[1]);
         const char* _nm = _q ? (const char*)_q : nullptr;
         uint32_t _rv = _nm ? _gxp_find_by_name(_prog, _nm) : 0u;
-        static int _n2=0; if (_n2++<40) { printf("[ABIPARAM] ByName prog=%08X name=%s -> %08X\n", _prog, _nm?_nm:"?", _rv); fflush(stdout); }
+        static int _n2=0; if (_n2++<200) { printf("[ABIPARAM] ByName prog=%08X name=%s -> %08X\n", _prog, _nm?_nm:"?", _rv); fflush(stdout); }
         { static int _pd=0; if (_pd++<3 && _nm) { uint8_t* _g=GP(_prog); printf("[PARAMDIAG] prog=%08X name=%s\n", _prog, _nm);
             if (_g) { uint32_t _v[12]={0}; for(int _k=0;_k<12;++_k) std::memcpy(&_v[_k],_g+_k*4,4);
               printf("[PARAMDIAG] hdr: %08X %08X %08X %08X | %08X %08X %08X %08X | %08X %08X %08X %08X\n", _v[0],_v[1],_v[2],_v[3],_v[4],_v[5],_v[6],_v[7],_v[8],_v[9],_v[10],_v[11]);
@@ -3183,7 +3189,7 @@ static uint32_t _ufd_vert_ubo = 0, _ufd_frag_ubo = 0;   // M1251: per-stage UBO 
         else if (_sem==5) _cand = "vertex.indices";
         uint32_t _rv = _gxp_find_by_name(_prog, _cand);
         if (!_rv && _sem==2) _rv = _gxp_find_by_name(_prog, "vertex.texcoord0");
-        static int _n3=0; if (_n3++<24) { printf("[ABIPARAM] BySem prog=%08X sem=%u idx=%u -> %s -> %08X\n", _prog, _sem, _idx, _cand, _rv); fflush(stdout); }
+        static int _n3=0; if (_n3++<80) { printf("[ABIPARAM] BySem prog=%08X sem=%u idx=%u -> %s -> %08X\n", _prog, _sem, _idx, _cand, _rv); fflush(stdout); }
         if (_rv) { s->r[0]=_rv; return s->r[14]; } }
       if (strncmp(_ge->name, "sceGxmProgramParameterGetCategory", 33) == 0) {
         uint8_t* _q = GP(s->r[0]); uint32_t _rv=0; if (_q) { uint16_t _w=0; std::memcpy(&_w,_q+4,2); _rv=_w&0xFu; }
@@ -3208,6 +3214,10 @@ static uint32_t _ufd_vert_ubo = 0, _ufd_frag_ubo = 0;   // M1251: per-stage UBO 
           uint64_t _gh = hle_gxp_hash(s->r[1]); auto _it = _gh ? _abi_man.find(_gh) : _abi_man.end();
           if (_it != _abi_man.end()) { uint8_t* _q = GP(s->r[2]);
             if (_q) { std::memcpy(_q, &_nextid, 4); _pid2spv[_nextid] = _it->second; _pid2gxp[_nextid] = s->r[1];
+              { static int _gd=0; if (_gd++<250) { uint32_t _gxp=s->r[1]; uint8_t* _g=GP(_gxp); if(_g){ uint32_t _sz=0,_pc=0,_po=0; std::memcpy(&_sz,_g+8,4); std::memcpy(&_pc,_g+0x24,4); std::memcpy(&_po,_g+0x28,4);
+                  printf("[GXPDIAG] gxp=%08X size=%u pc=%u po=%X spv=%s\n", _gxp,_sz,_pc,_po,_it->second.c_str());
+                  uint32_t _pb=0x28u+_po;
+                  for(uint32_t _i=0;_i<_pc && _i<6u;++_i){ if(_pb+_i*16u+16u>_sz) break; int32_t _no=0; std::memcpy(&_no,_g+_pb+_i*16u,4); const char* _nm=(const char*)(_g+_pb+_i*16u+_no); printf("[GXPDIAG]  P%u name=%s\n",_i,_nm); } } } }
               static int _n=0; if (_n++<12) printf("[ABIPGID] id=%08X hash=%016llX spv=%s n=%u\n", _nextid, (unsigned long long)_gh, _it->second.c_str(), g_main_n);
               _nextid += 0x20u; } } }
         else if (strstr(_ge->name, "ShaderPatcherCreateVertexProgram") || strstr(_ge->name, "ShaderPatcherCreateFragmentProgram")) {
@@ -3215,6 +3225,7 @@ static uint32_t _ufd_vert_ubo = 0, _ufd_frag_ubo = 0;   // M1251: per-stage UBO 
           auto _it = _pid2spv.find(s->r[1]);
           if (_it != _pid2spv.end()) { uint8_t* _q = GP(_stk[2]);
             if (_q) { std::memcpy(_q, &_nextobj, 4); (_frag ? _fobj2spv : _vobj2spv)[_nextobj] = _it->second;
+            { auto _pg = _pid2gxp.find(s->r[1]); if (_pg != _pid2gxp.end()) _obj2gxp[_nextobj] = _pg->second; }
               static int _n2=0; if (_n2++<12) printf("[ABIPGOBJ] %s obj=%08X spv=%s n=%u\n", _frag?"frag":"vert", _nextobj, _it->second.c_str(), g_main_n);
               if (!_frag) {   // 18.4500 M955: parse SceGxmVertexAttribute[] / SceGxmVertexStream[]
                 uint32_t _ap = s->r[2], _ac = s->r[3], _sp2 = _stk[0], _sc = _stk[1];
@@ -3457,6 +3468,18 @@ static uint32_t _ufd_vert_ubo = 0, _ufd_frag_ubo = 0;   // M1251: per-stage UBO 
                   static int _tn2=0; if (_tn2++<8) { printf("[TPRD_HARD] hardcoded fullscreen triangle drawn pipe_rc=%d\n", _prc); fflush(stdout);} }
                 else p5d::vulkan::gxm_draw_arrays(_vc);
                 static int _tn=0; if (_tn++<8) { printf("[TPRD] testpipe with real verts vc=%u rc=%d pipe_rc=%d n=%u\n", _vc, _rr, _prc, g_main_n); fflush(stdout);} } }
+            { static int _vc2=-1; if(_vc2<0){ const char* _e=getenv("P5D_VTXCOLOR"); _vc2=(_e&&atoi(_e))?1:0; }
+              if(_vc2 && s->r[14]==0x811E45B6u && _av.size()>=2u){ static int _vcn=0; static float _last[4]={-1,-1,-1,-1};
+                float _c0=_vtx.size()>4?_vtx[4]:0.f, _c1=_vtx.size()>5?_vtx[5]:0.f, _c2=_vtx.size()>6?_vtx[6]:0.f, _c3=_vtx.size()>7?_vtx[7]:0.f;
+                if(_c0!=_last[0]||_c1!=_last[1]||_c2!=_last[2]||_c3!=_last[3]){ _last[0]=_c0;_last[1]=_c1;_last[2]=_c2;_last[3]=_c3;
+                  if(_vcn++<60){ printf("[VTXCOLOR] #%d vc=%u obj=%08X color0=(%.3f,%.3f,%.3f,%.3f) va=%08X n=%u\n", _vcn,_vc,_cur_vobj,_c0,_c1,_c2,_c3, _stm2va.count(0)?_stm2va[0]:0u, g_main_n); fflush(stdout);} } } }
+            { static int _vd2=-1; if(_vd2<0){ const char* _e=getenv("P5D_VTXDUMP"); _vd2=(_e&&atoi(_e))?1:0; }
+              if(_vd2 && s->r[14]==0x811E45B6u){ static int _vdn=0; if(_vdn++<8){ printf("[VTXDUMP] draw vc=%u attrN=%u cur_obj=%08X\n", _vc,(unsigned)_av.size(),_cur_vobj);
+                auto _st2=_vobj2strms.find(_cur_vobj);
+                if(_st2!=_vobj2strms.end()) for(size_t _k=0;_k<_st2->second.size() && _k<8;++_k) printf("[VTXDUMP]  strm%zu stride=%u idx=%u\n",_k,_st2->second[_k].stride,_st2->second[_k].index);
+                for(size_t _i=0;_i<_av.size() && _i<8;++_i){ printf("[VTXDUMP]  attr%zu stream=%u off=%u fmt=%u comps=%u va=%08X\n",_i,_av[_i].stream,_av[_i].offset,_av[_i].fmt,_av[_i].comps, _stm2va.count(_av[_i].stream)?_stm2va[_av[_i].stream]:0u);
+                  for(unsigned _v=0;_v<_vc && _v<4;++_v){ if((size_t)_v*32u+_i*4u+4u<=_vtx.size()) printf("[VTXDUMP]    v%u=(%.3f,%.3f,%.3f,%.3f)\n",_v,_vtx[(size_t)_v*32u+_i*4u],_vtx[(size_t)_v*32u+_i*4u+1],_vtx[(size_t)_v*32u+_i*4u+2],_vtx[(size_t)_v*32u+_i*4u+3]); } }
+                fflush(stdout);} } }
             static int _vn=0; if (_vn++<40) { printf("[ABIVTX] #%d vc=%u attrs=%u rc=%d n=%u v0=(%.3f,%.3f,%.3f,%.3f) v1=(%.3f,%.3f,%.3f,%.3f)\n", _vn,
               _vc, (unsigned)_av.size(), _rr, g_main_n, _vtx[0],_vtx[1],_vtx[2],_vtx[3], _vtx[32],_vtx[33],_vtx[34],_vtx[35]); fflush(stdout); }
           } else { static int _fn=0; if (_fn++<6) { printf("[ABIVTX] FAIL vc=%u attrs=%u cur_obj=%08X streams=%zu n=%u\n", _vc,(unsigned)_av.size(),_cur_vobj,_stm2va.size(),g_main_n); fflush(stdout); } }
