@@ -770,6 +770,33 @@ static const char* p5d_bridge_frag_dir() {
   return s.c_str();
 }
 
+// ===== M1321: GXM primitive topology -> Vulkan triangle list =====
+// The bridge/old pipelines are created with VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, while the engine's
+// quads arrive as GXM triangle STRIPS (4 vertices) / fans; drawing a 4-vertex strip as a list shows
+// only one triangle.  Expand indexed / strip / fan draws on the CPU into a plain triangle list.
+static void p5d_topology_expand(const std::vector<float>& vtx, unsigned vc,
+                                const std::vector<unsigned>& ord, uint32_t prim,
+                                std::vector<float>& out, unsigned& outn) {
+  out.clear(); outn = 0;
+  unsigned n = ord.empty() ? vc : (unsigned)ord.size();
+  auto vid = [&](unsigned k) -> unsigned { return ord.empty() ? k : ord[k]; };
+  auto push = [&](unsigned a) { if ((size_t)a * 32u + 32u <= vtx.size()) out.insert(out.end(), vtx.begin() + (size_t)a*32u, vtx.begin() + (size_t)a*32u + 32u); };
+  if (prim == 0x0C000000u) {                 // SCE_GXM_PRIMITIVE_TRIANGLE_STRIP
+    for (unsigned i = 0; i + 2u < n; ++i) {
+      unsigned a = vid(i), b = vid(i+1), c = vid(i+2);
+      if (i & 1u) { unsigned t = a; a = b; b = t; }
+      push(a); push(b); push(c);
+    }
+    outn = (n >= 3u) ? (n - 2u) * 3u : 0u;
+  } else if (prim == 0x10000000u) {          // SCE_GXM_PRIMITIVE_TRIANGLE_FAN
+    for (unsigned i = 1; i + 1u < n; ++i) { push(vid(0)); push(vid(i)); push(vid(i+1)); }
+    outn = (n >= 3u) ? (n - 2u) * 3u : 0u;
+  } else {                                    // TRIANGLES / default: reorder only
+    for (unsigned k = 0; k < n; ++k) push(vid(k));
+    outn = n;
+  }
+}
+
 
 // M1122 IOPUMP_WAIT: drive criFs load state machines from inside blocking delays too.
 // Reason: the guest ACF-read spin loop (FUN_812309A4: while (FUN_8128E9BC(reader,&st), st==1) { FUN_81283C84(); FUN_8127C0E8(10); })
@@ -3557,6 +3584,8 @@ static uint32_t _ufd_vert_ubo = 0, _ufd_frag_ubo = 0;   // M1251: per-stage UBO 
       if (strncmp(_ge->name, "sceGxmDraw", 10) == 0 && strcmp(_ge->name, "sceGxmDrawPrecomputed") != 0) {
         uint32_t _icount = _stk[0];   // sceGxmDraw(ctx,prim,indexType,indexData,indexCount): indexCount = first stack arg
         uint32_t _vc = _icount;
+        const uint32_t _prim = s->r[1]; const uint32_t _itype2 = s->r[2]; const uint32_t _idata2 = s->r[3];   // M1321 topology
+        std::vector<unsigned> _ord;   // M1321: vertex order (indexed draws reorder the packed vertices)
         {   // 18.4502 M957: indexed draw -> real vertex count = max(index)+1
           uint32_t _itype = s->r[2], _idata = s->r[3];
           if (_icount > 0u && _idata) { uint32_t _mx = 0; bool _any = false;
@@ -3576,6 +3605,17 @@ static uint32_t _ufd_vert_ubo = 0, _ufd_frag_ubo = 0;   // M1251: per-stage UBO 
             printf("}"); }
           { uint32_t _d=s->r[3]; printf(" drawptr=%08X bytes:", _d); for(int _i=0;_i<48;++_i){ uint8_t* _q=GP(_d+(uint32_t)_i); if(_q) printf(" %02X",*_q);} }
           printf(" stm2va_n=%zu\n", _stm2va.size()); fflush(stdout);} }
+        // M1321: record the index order (for indexed draws) / identity order (non-indexed).
+        if (_icount > 0u && _idata2) {
+          for (uint32_t _k = 0; _k < _icount && _k < 65536u; ++_k) {
+            uint32_t _ix = 0;
+            if (_itype2 == 0u) { uint16_t _v16 = 0; uint8_t* _q = GP(_idata2 + _k*2u); if (!_q) break; std::memcpy(&_v16,_q,2); _ix = _v16; }
+            else { uint8_t* _q = GP(_idata2 + _k*4u); if (!_q) break; std::memcpy(&_ix,_q,4); }
+            _ord.push_back(_ix);
+          }
+        } else {
+          for (uint32_t _k = 0; _k < _vc; ++_k) _ord.push_back(_k);
+        }
         auto _at = _vobj2attrs.find(_cur_vobj);
         if (_at != _vobj2attrs.end() && !_at->second.empty() && _vc > 0u && _vc <= 65536u) {
           const std::vector<AbiVAttr>& _av = _at->second;
@@ -3730,6 +3770,17 @@ static uint32_t _ufd_vert_ubo = 0, _ufd_frag_ubo = 0;   // M1251: per-stage UBO 
                   printf(" half:"); for (int _k=0;_k<16;++_k) { uint16_t _h=0; std::memcpy(&_h,_src+_k*2,2); printf(" %.4f", half_to_float(_h)); } printf("\n"); fflush(stdout);} }
             static int _un2=0; if (_un2++<8) { printf("[ABIUBO] upload frag ubo=%08X first=(%.3f,%.3f,%.3f,%.3f) n=%u\n", _cur_f_ubo,
               ((float*)_src)[0], ((float*)_src)[1], ((float*)_src)[2], ((float*)_src)[3], g_main_n); fflush(stdout); } } }
+          // M1320: per-draw inventory for the CPUVP bridge work (first 220 draws): pipeline names,
+          // vertex count and the engine's own colour/UV attributes of vertex 0.
+          { static int _dl=-1; if(_dl<0){ const char* _e=getenv("P5D_DRAWLOG"); _dl=(_e&&atoi(_e))?1:0; }
+            if(_dl){ static int _dn=0; if(_dn++<220){
+              bool _haztex=false; for(int _u=0;_u<16 && !_haztex;++_u) for(int _k=0;_k<16;++_k) if(_frag_tex[_u][_k]){_haztex=true;break;}
+              printf("[DRAWLOG] #%d lr=%08X prim=%08X vspv=%s fspv=%s vc=%u avN=%u tex=%d c0=(%.3f,%.3f,%.3f,%.3f) uv0=(%.3f,%.3f) p0=(%.3f,%.3f,%.3f,%.3f)\n",
+                _dn, s->r[14], s->r[1], _abi_vspv.c_str(), _abi_fspv.c_str(), _vc, (unsigned)_av.size(), (int)_haztex,
+                _vtx.size()>7?_vtx[4]:0.f,_vtx.size()>7?_vtx[5]:0.f,_vtx.size()>7?_vtx[6]:0.f,_vtx.size()>7?_vtx[7]:0.f,
+                _vtx.size()>9?_vtx[8]:0.f,_vtx.size()>9?_vtx[9]:0.f,
+                _vtx.size()>3?_vtx[0]:0.f,_vtx.size()>3?_vtx[1]:0.f,_vtx.size()>3?_vtx[2]:0.f,_vtx.size()>3?_vtx[3]:0.f);
+              fflush(stdout);} } }
           if (_ok) {
             bool _cpub = false; bool _haztex = false;
             { static int _cvp=-1; if(_cvp<0){ const char* _e=getenv("P5D_CPUVP"); _cvp=(_e&&atoi(_e))?1:0; }
@@ -3738,7 +3789,7 @@ static uint32_t _ufd_vert_ubo = 0, _ufd_frag_ubo = 0;   // M1251: per-stage UBO 
                 uint32_t _gxp=0; { auto _gi=_obj2gxp.find(_cur_vobj); if(_gi!=_obj2gxp.end()) _gxp=_gi->second; }
                 uint32_t _def=_ufd_vert_ubo; if(!_def && _pend_vout){ uint8_t* _q=GP(_pend_vout); if(_q) std::memcpy(&_def,_q,4); }
                 _cpub = p5d_cpu_vp_apply(_vtx, _vc, (unsigned)_av.size(), _gxp, _def, _cur_v_ubo);
-                static int _cn=0; if(_cn++<24){ printf("[CPUVP] #%d obj=%08X gxp=%08X vc=%u nattr=%u ok=%d tex=%d spv=%s\n", _cn,_cur_vobj,_gxp,_vc,(unsigned)_av.size(),(int)_cpub,(int)_haztex,_abi_vspv.c_str());
+                static int _cn=0; if(_cn++<200){ printf("[CPUVP] #%d obj=%08X gxp=%08X vc=%u nattr=%u ok=%d tex=%d spv=%s\n", _cn,_cur_vobj,_gxp,_vc,(unsigned)_av.size(),(int)_cpub,(int)_haztex,_abi_vspv.c_str());
                   for(size_t _i=0;_i<_av.size() && _i<8;++_i){ uint32_t _st=0; auto _st2b=_vobj2strms.find(_cur_vobj); if(_st2b!=_vobj2strms.end()) for(size_t _k=0;_k<_st2b->second.size();++_k) if(_st2b->second[_k].index==_av[_i].stream){_st=_st2b->second[_k].stride;break;}
                     uint32_t _sv=(_stm2va.count(_av[_i].stream)?_stm2va[_av[_i].stream]:0u);
                     printf("[AVDUMP] #%d attr%zu stream=%u off=%u fmt=%u comps=%u stride=%u sva=%08X raw=",_cn,_i,_av[_i].stream,_av[_i].offset,_av[_i].fmt,_av[_i].comps,_st,_sv);
@@ -3750,13 +3801,18 @@ static uint32_t _ufd_vert_ubo = 0, _ufd_frag_ubo = 0;   // M1251: per-stage UBO 
               std::string _vp = std::string(p5d_bridge_frag_dir()) + "/bridge_vert.spv";
               std::string _fp = std::string(p5d_bridge_frag_dir()) + (_texfrag ? "/bridge_tex_frag.spv" : "/bridge_flat_frag.spv");
               (void)p5d::vulkan::select_real_pipeline(_vp.c_str(), _fp.c_str());
-              static int _bn=0; if(_bn++<64){ printf("[CPUVP] bridge select texfrag=%d n=%u vc=%u",(int)_texfrag,g_main_n,_vc);
+              static int _bn=0; if(_bn++<200){ printf("[CPUVP] bridge select texfrag=%d n=%u vc=%u",(int)_texfrag,g_main_n,_vc);
                 for(unsigned _v=0;_v<_vc && _v<4;++_v) printf(" | v%u clip=(%.3f,%.3f,%.3f,%.3f) col=(%.3f,%.3f,%.3f,%.3f) uv=(%.3f,%.3f)",_v,
                   _vtx[(size_t)_v*32u],_vtx[(size_t)_v*32u+1],_vtx[(size_t)_v*32u+2],_vtx[(size_t)_v*32u+3],
                   _vtx[(size_t)_v*32u+4],_vtx[(size_t)_v*32u+5],_vtx[(size_t)_v*32u+6],_vtx[(size_t)_v*32u+7],
                   _vtx[(size_t)_v*32u+8],_vtx[(size_t)_v*32u+9]);
                 printf("\n"); fflush(stdout);} }
-            int _rr = p5d::vulkan::upload_vertex_stream(_vtx.data(), (unsigned)(_vc*128u), _vc);
+            std::vector<float> _vtx_x; unsigned _vc_x = _vc;
+            { static int _tg=-1; if(_tg<0){ const char* _e=getenv("P5D_TOPOLOGY"); _tg=(_e&&atoi(_e))?1:0; }
+              if (_tg) { p5d_topology_expand(_vtx, _vc, _ord, _prim, _vtx_x, _vc_x);
+                if (_vc_x == 0u) { _vtx_x = _vtx; _vc_x = _vc; } }
+              else { _vtx_x = _vtx; _vc_x = _vc; } }
+            int _rr = p5d::vulkan::upload_vertex_stream(_vtx_x.data(), (unsigned)(_vc_x*128u), _vc_x);
             { static int _tp=-1; if (_tp<0) _tp = (getenv("P5D_TPRD")!=nullptr)?1:0;
               static int _tph=-1; if (_tph<0) _tph = (getenv("P5D_TPRD_HARD")!=nullptr)?1:0;
               if (_tp) {
@@ -3775,7 +3831,7 @@ static uint32_t _ufd_vert_ubo = 0, _ufd_frag_ubo = 0;   // M1251: per-stage UBO 
                   p5d::vulkan::upload_vertex_stream(_tv.data(), 3u*128u, 3u);
                   p5d::vulkan::gxm_draw_arrays(3u);
                   static int _tn2=0; if (_tn2++<8) { printf("[TPRD_HARD] hardcoded fullscreen triangle drawn pipe_rc=%d\n", _prc); fflush(stdout);} }
-                else p5d::vulkan::gxm_draw_arrays(_vc);
+                else p5d::vulkan::gxm_draw_arrays(_vc_x);
                 static int _tn=0; if (_tn++<8) { printf("[TPRD] testpipe with real verts vc=%u rc=%d pipe_rc=%d n=%u\n", _vc, _rr, _prc, g_main_n); fflush(stdout);} } }
             { static int _vc2=-1; if(_vc2<0){ const char* _e=getenv("P5D_VTXCOLOR"); _vc2=(_e&&atoi(_e))?1:0; }
               if(_vc2 && s->r[14]==0x811E45B6u && _av.size()>=2u){ static int _vcn=0; static float _last[4]={-1,-1,-1,-1};
