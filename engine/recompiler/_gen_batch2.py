@@ -802,10 +802,12 @@ def emit(ins, sup):
         if m == "vsqrt.f32":
             L.append("vfp_sf_set(s, %d, __builtin_sqrtf(vfp_sf(s, %d)));" % (ops[0].reg - 79, ops[1].reg - 79))
         elif m == "vnmla.f32":
-            L.append("vfp_sf_set(s, %d, -(vfp_sf(s, %d)) + vfp_sf(s, %d) * vfp_sf(s, %d));"
+            # M1327: ARM VNMLA = -(dst) - op1*op2   (the previous emission was VNMLS semantics)
+            L.append("vfp_sf_set(s, %d, -(vfp_sf(s, %d) + vfp_sf(s, %d) * vfp_sf(s, %d)));"
                      % (ops[0].reg - 79, ops[0].reg - 79, ops[1].reg - 79, ops[2].reg - 79))
         else:
-            L.append("vfp_sf_set(s, %d, -(vfp_sf(s, %d) + vfp_sf(s, %d) * vfp_sf(s, %d)));"
+            # M1327: ARM VNMLS = -(dst) + op1*op2  (the previous emission was VNMLA semantics)
+            L.append("vfp_sf_set(s, %d, -(vfp_sf(s, %d)) + vfp_sf(s, %d) * vfp_sf(s, %d));"
                      % (ops[0].reg - 79, ops[0].reg - 79, ops[1].reg - 79, ops[2].reg - 79))
     elif m in ("cmp","cmpw"):
         if isi(1): L.append("{ uint32_t _a = %s; uint32_t _b = 0x%Xu; uint32_t _r = _a - _b; setf_sub(s, _a, _b, _r); }" % (R(reg(0)), imm(1)))

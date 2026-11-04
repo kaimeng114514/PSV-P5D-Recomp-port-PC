@@ -87,6 +87,8 @@ inline void* gxm_abi_xlate(uint32_t guest_va) {
     return host ? reinterpret_cast<void*>(static_cast<uintptr_t>(host)) : nullptr;
 }
 
+extern "C" uint32_t p5d_abi_guest_alloc(uint32_t n);   // 18.4474 M929: strong impl in recomp_harness.cpp
+
 inline uint32_t gxm_abi_untranslate_ptr(const void* host_ptr) {
     if (!host_ptr) return 0u;
     return p5d_abi_untranslate(host_ptr);
@@ -304,14 +306,14 @@ extern "C" uint32_t gxm_abi_call_11DC8DC9(uint32_t* regs, uint32_t* stack_args) 
 
 extern "C" uint32_t gxm_abi_call_126A3EB3(uint32_t* regs, uint32_t* stack_args) {
     // guest ABI:   unsigned int sceGxmTextureGetWidth(const SceGxmTexture * texture)
-    // backend ABI: SceInt32 sceGxmTextureGetWidth(void)   [runtime has a `(void)` placeholder / STUB_LOG only]
-    (void)regs;
+    // M1327: REAL implementation - decode the 16-byte GXM texture control block.
+    //   control word 1 bits 12..23 = (width - 1), bits 0..11 = (height - 1)
+    // (same formula the harness TEXDUMP uses: w=((w1>>12)&0xFFF)+1, h=(w1&0xFFF)+1)
     (void)stack_args;
-#if GXM_ABI_CALL_STUB_IMPLS
-    return (uint32_t)sceGxmTextureGetWidth();   // logs [STUB] via STUB_LOG
-#else
-    return 0u;   // same observable value as the current stub
-#endif
+    uint8_t* p = reinterpret_cast<uint8_t*>(gxm_abi_xlate(regs[0]));
+    if (!p) return 0u;
+    uint32_t w1 = 0; std::memcpy(&w1, p + 4, 4);
+    return ((w1 >> 12) & 0xFFFu) + 1u;
 }
 
 extern "C" uint32_t gxm_abi_call_126CDAA3(uint32_t* regs, uint32_t* stack_args) {
@@ -565,14 +567,12 @@ extern "C" uint32_t gxm_abi_call_4ED2E49D(uint32_t* regs, uint32_t* stack_args) 
 
 extern "C" uint32_t gxm_abi_call_5420A086(uint32_t* regs, uint32_t* stack_args) {
     // guest ABI:   unsigned int sceGxmTextureGetHeight(const SceGxmTexture * texture)
-    // backend ABI: SceInt32 sceGxmTextureGetHeight(void)   [runtime has a `(void)` placeholder / STUB_LOG only]
-    (void)regs;
+    // M1327: REAL implementation - decode the 16-byte GXM texture control block (bits 0..11 = height-1).
     (void)stack_args;
-#if GXM_ABI_CALL_STUB_IMPLS
-    return (uint32_t)sceGxmTextureGetHeight();   // logs [STUB] via STUB_LOG
-#else
-    return 0u;   // same observable value as the current stub
-#endif
+    uint8_t* p = reinterpret_cast<uint8_t*>(gxm_abi_xlate(regs[0]));
+    if (!p) return 0u;
+    uint32_t w1 = 0; std::memcpy(&w1, p + 4, 4);
+    return (w1 & 0xFFFu) + 1u;
 }
 
 extern "C" uint32_t gxm_abi_call_5C79D59A(uint32_t* regs, uint32_t* stack_args) {
@@ -692,15 +692,16 @@ extern "C" uint32_t gxm_abi_call_70C86868(uint32_t* regs, uint32_t* stack_args) 
 }
 
 extern "C" uint32_t gxm_abi_call_7B1FABB6(uint32_t* regs, uint32_t* stack_args) {
-    // guest ABI:   int sceGxmReserveFragmentDefaultUniformBuffer(SceGxmContext * context, void ** uniformBuffer)
-    // backend ABI: SceInt32 sceGxmReserveFragmentDefaultUniformBuffer(void)   [runtime has a `(void)` placeholder / STUB_LOG only]
-    (void)regs;
+    // 18.4474 M929: REAL implementation - allocate a 0x1000 guest UBO, write its guest VA to *out.
+    // guest ABI: int sceGxmReserveFragmentDefaultUniformBuffer(SceGxmContext * context, void ** uniformBuffer)
+    // The old body called the backend (void) placeholder which dereferenced a stale out pointer -> [BADMEM] va=0x6C.
     (void)stack_args;
-#if GXM_ABI_CALL_STUB_IMPLS
-    return (uint32_t)sceGxmReserveFragmentDefaultUniformBuffer();   // logs [STUB] via STUB_LOG
-#else
-    return 0u;   // same observable value as the current stub
-#endif
+    const uint32_t out_va = (regs ? regs[1] : 0u);
+    uint32_t ubo_va = p5d_abi_guest_alloc(0x1000u);
+    if (!ubo_va) return 0x80000001u;
+    uint8_t* slot = reinterpret_cast<uint8_t*>(gxm_abi_xlate(out_va));
+    if (slot) std::memcpy(slot, &ubo_va, sizeof(ubo_va));
+    return 0u;
 }
 
 extern "C" uint32_t gxm_abi_call_80CCEDBB(uint32_t* regs, uint32_t* stack_args) {
@@ -886,15 +887,16 @@ extern "C" uint32_t gxm_abi_call_91236858(uint32_t* regs, uint32_t* stack_args) 
 }
 
 extern "C" uint32_t gxm_abi_call_97118913(uint32_t* regs, uint32_t* stack_args) {
-    // guest ABI:   int sceGxmReserveVertexDefaultUniformBuffer(SceGxmContext * context, void ** uniformBuffer)
-    // backend ABI: SceInt32 sceGxmReserveVertexDefaultUniformBuffer(void)   [runtime has a `(void)` placeholder / STUB_LOG only]
-    (void)regs;
+    // 18.4474 M929: REAL implementation - allocate a 0x1000 guest UBO, write its guest VA to *out.
+    // guest ABI: int sceGxmReserveVertexDefaultUniformBuffer(SceGxmContext * context, void ** uniformBuffer)
+    // The old body called the backend (void) placeholder which dereferenced a stale out pointer -> [BADMEM] va=0x6C.
     (void)stack_args;
-#if GXM_ABI_CALL_STUB_IMPLS
-    return (uint32_t)sceGxmReserveVertexDefaultUniformBuffer();   // logs [STUB] via STUB_LOG
-#else
-    return 0u;   // same observable value as the current stub
-#endif
+    const uint32_t out_va = (regs ? regs[1] : 0u);
+    uint32_t ubo_va = p5d_abi_guest_alloc(0x1000u);
+    if (!ubo_va) return 0x80000001u;
+    uint8_t* slot = reinterpret_cast<uint8_t*>(gxm_abi_xlate(out_va));
+    if (slot) std::memcpy(slot, &ubo_va, sizeof(ubo_va));
+    return 0u;
 }
 
 extern "C" uint32_t gxm_abi_call_9D83CA3B(uint32_t* regs, uint32_t* stack_args) {
@@ -1003,13 +1005,15 @@ extern "C" uint32_t gxm_abi_call_B0F1E4EC(uint32_t* regs, uint32_t* stack_args) 
 extern "C" uint32_t gxm_abi_call_B291C959(uint32_t* regs, uint32_t* stack_args) {
     // guest ABI:   int sceGxmGetRenderTargetMemSize(const SceGxmRenderTargetParams * params, unsigned int * driverMemSize)
     // backend ABI: SceInt32 sceGxmGetRenderTargetMemSize(void)   [runtime has a `(void)` placeholder / STUB_LOG only]
-    (void)regs;
+    // 18.4449 M904: the runtime stub never fills the out param; the guest then used uninitialised stack garbage
+    // as the size for sceKernelAllocMemBlock (0x846001FC = 2.2GB -> OOM). Fill it with the empirical ARCH_10 value
+    // used by the harness HLE case 0x812B1580 (0x33D000).
     (void)stack_args;
-#if GXM_ABI_CALL_STUB_IMPLS
-    return (uint32_t)sceGxmGetRenderTargetMemSize();   // logs [STUB] via STUB_LOG
-#else
-    return 0u;   // same observable value as the current stub
-#endif
+    const uint32_t a1 = regs ? regs[1u] : 0u;
+    void* p1 = gxm_abi_xlate(a1);
+    uint32_t sz = 0x33D000u;
+    if (p1) std::memcpy(p1, &sz, 4);
+    return (uint32_t)sz;
 }
 
 extern "C" uint32_t gxm_abi_call_B627DE66(uint32_t* regs, uint32_t* stack_args) {
