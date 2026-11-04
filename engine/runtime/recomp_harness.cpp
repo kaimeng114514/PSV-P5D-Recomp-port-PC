@@ -3034,7 +3034,10 @@ static uint32_t _ufd_vert_ubo = 0, _ufd_frag_ubo = 0;   // M1251: per-stage UBO 
         int32_t _rc = p5d::vulkan::select_real_pipeline(_vp.c_str(), _fp.c_str());
         { static int _ad=-1; if(_ad<0){ const char* e=getenv("P5D_ALLDRAWS"); _ad=(e&&atoi(e))?1:0; }
           if(_ad){ static int _an=0; if(_an++<400){ uint32_t _vt=0,_ft=0; auto _i1=g_spv_tu.find(_abi_vspv); if(_i1!=g_spv_tu.end()) _vt=_i1->second; auto _i2=g_spv_tu.find(_abi_fspv); if(_i2!=g_spv_tu.end()) _ft=_i2->second;
-            printf("[ALLDRAW] #%d lr=%08X v=%s(tu=%X) f=%s(tu=%X) r1=%08X r2=%08X r3=%08X r4=%08X n=%u\n", _an, s->r[14], _abi_vspv.c_str(), _vt, _abi_fspv.c_str(), _ft, s->r[1],s->r[2],s->r[3],s->r[4], g_main_n); fflush(stdout);} } }
+            printf("[ALLDRAW] #%d lr=%08X v=%s(tu=%X) f=%s(tu=%X) r1=%08X r2=%08X r3=%08X r4=%08X n=%u\n", _an, s->r[14], _abi_vspv.c_str(), _vt, _abi_fspv.c_str(), _ft, s->r[1],s->r[2],s->r[3],s->r[4], g_main_n); fflush(stdout);
+            if(_ft){ static int _tx=0; if(_tx++<24){ uint32_t _w[4]={0,0,0,0}; for(int _k=0;_k<4;++_k) std::memcpy(&_w[_k],_frag_tex[0]+_k*4,4);
+              uint32_t _dv=0; std::memcpy(&_dv,_frag_tex[0]+8,4); uint32_t _s0=0,_s1=0; uint8_t* _q=GP(_dv); if(_q){ std::memcpy(&_s0,_q,4); std::memcpy(&_s1,_q+4,4); }
+              printf("[TEXDRAW] #%d unit0 w=%08X %08X %08X %08X data=%08X px=%08X %08X\n", _tx, _w[0],_w[1],_w[2],_w[3], _dv, _s0, _s1); fflush(stdout);} } } } }
         // 18.4496 M951 EXPERIMENT: vertex uniforms are all zero (RINIT zero table) -> the real vertex shader sends every
         // vertex to w=0 -> no fragments -> black even with the red diagnostic FS. Feed identity matrices once.
         { static int _id = 0; if (!_id) { _id = 1;
@@ -3529,8 +3532,8 @@ static uint32_t _ufd_vert_ubo = 0, _ufd_frag_ubo = 0;   // M1251: per-stage UBO 
             bool _nz = false; for (int _k = 0; _k < 16; ++_k) if (_frag_tex[_u][_k]) { _nz = true; break; }
             if (!_nz) continue;
             int _trc = p5d::vulkan::upload_gxm_control_resolved((unsigned)_u, _frag_tex[_u]);
-            static int _tn=0; if (_tn++<12) { printf("[ABITEX] unit=%u rc=%d w0=%08X w1=%08X data=%08X n=%u\n", (unsigned)_u, _trc,
-              ((uint32_t*)_frag_tex[_u])[0], ((uint32_t*)_frag_tex[_u])[1], ((uint32_t*)_frag_tex[_u])[2], g_main_n); fflush(stdout); } }
+            static int _tn=0; if (_tn++<300) { unsigned _tw=((((uint32_t*)_frag_tex[_u])[1]>>12)&0xFFFu)+1u, _th=((((uint32_t*)_frag_tex[_u])[1])&0xFFFu)+1u; printf("[ABITEX] unit=%u rc=%d w0=%08X w1=%08X data=%08X dims=%ux%u n=%u\n", (unsigned)_u, _trc,
+              ((uint32_t*)_frag_tex[_u])[0], ((uint32_t*)_frag_tex[_u])[1], ((uint32_t*)_frag_tex[_u])[2], _tw, _th, g_main_n); fflush(stdout); } }
           { static int _ne=-1; if (_ne<0) { const char* e=getenv("P5D_NODEEXEC"); _ne=(e&&atoi(e))?1:0; }
             if (_ne) { static int _dc=0; if (_dc++ < 24) { printf("[DRAWCTX] n=%d lr=%08X gcur=%08X vc=%u r0=%08X r1=%08X r2=%08X\n", _dc, s->r[14], g_cur_block, _vc, s->r[0], s->r[1], s->r[2]); fflush(stdout); } } }
           // 18.4507 M962: upload the engine-written default uniform buffers (real VS was receiving zeros)
@@ -3642,6 +3645,14 @@ static uint32_t _ufd_vert_ubo = 0, _ufd_frag_ubo = 0;   // M1251: per-stage UBO 
           if (_tfrag) _frag_tex_n++;
           static int _n=0; if (_n++<12) { printf("[ABITEXB] %s unit=%u ctrl=%08X w=%08X %08X n=%u\n", _tfrag?"frag":"vert",
             _unit, _ct, ((uint32_t*)_q)[0], ((uint32_t*)_q)[1], g_main_n); fflush(stdout); } }
+        s->r[0] = 0; return s->r[14];
+      }
+      // M1306: sceGxmTextureSetPalette(texture, paletteData) - must write palette_addr (=va>>6) into control word 3 bits 0..25
+      if (strncmp(_ge->name, "sceGxmTextureSetPalette", 23) == 0) {
+        uint32_t _tex = s->r[0], _pal = s->r[1]; uint8_t* _q = GP(_tex);
+        if (_q && _pal) { uint32_t _w3 = 0; std::memcpy(&_w3, _q + 12, 4);
+          _w3 = (_w3 & 0xFC000000u) | ((_pal >> 6) & 0x03FFFFFFu); std::memcpy(_q + 12, &_w3, 4);
+          static int _pn = 0; if (_pn++ < 12) { printf("[ABIPAL] tex=%08X pal=%08X -> w3=%08X n=%u\n", _tex, _pal, _w3, g_main_n); fflush(stdout); } }
         s->r[0] = 0; return s->r[14];
       }
       // 18.4509 M964: REAL sceGxmSetUniformDataF - the engine writes ALL uniforms through this call
