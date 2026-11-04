@@ -301,6 +301,7 @@ static int g_lktr_n = 0;
 static int g_acc_n = 0, g_lkin_n = 0, g_lkout_n = 0;
 extern "C" int g_watch_on = 1;
 extern "C" int g_badmem_safe = 0;   // BADMEM_SAFE: P() returns scratch instead of abort when set
+static uint32_t g_dbg_cur_f_ubo = 0;   // M1370 mirror of _cur_f_ubo for global probes
 static void crihot_hit(uint32_t pc);   // CRIHOT_FWD
 static void nodechain_hit(uint32_t pc, RecState* s);   // NODECHAIN_FWD
 static void decomp_hit(uint32_t pc, RecState* s);   // DECOMPPROBE_FWD
@@ -2968,12 +2969,12 @@ static uint32_t _ufd_vert_ubo = 0, _ufd_frag_ubo = 0;   // M1251: per-stage UBO 
       if (strcmp(_ge->name, "sceGxmPrecomputedVertexStateInit") == 0) { _preVertObj[s->r[0]].prog=s->r[1]; _preVertObj[s->r[0]].memBlock=s->r[2]; _resolve_prog_spv(s->r[1], false); s->r[0]=0; return s->r[14]; }
       if (strcmp(_ge->name, "sceGxmPrecomputedFragmentStateInit") == 0) { _preFragObj[s->r[0]].prog=s->r[1]; _preFragObj[s->r[0]].memBlock=s->r[2]; _resolve_prog_spv(s->r[1], true); s->r[0]=0; return s->r[14]; }
       if (strstr(_ge->name, "PrecomputedVertexStateSetUniformBuffer")) { uint32_t _o=s->r[0], _bi=s->r[1], _b=s->r[2]; if(_bi<8u) _preVertObj[_o].ubos[_bi]=_b; _cur_v_ubo=_b; s->r[0]=0; return s->r[14]; }
-      if (strstr(_ge->name, "PrecomputedFragmentStateSetUniformBuffer")) { uint32_t _o=s->r[0], _bi=s->r[1], _b=s->r[2]; if(_bi<8u) _preFragObj[_o].ubos[_bi]=_b; _cur_f_ubo=_b; s->r[0]=0; return s->r[14]; }
+      if (strstr(_ge->name, "PrecomputedFragmentStateSetUniformBuffer")) { uint32_t _o=s->r[0], _bi=s->r[1], _b=s->r[2]; if(_bi<8u) _preFragObj[_o].ubos[_bi]=_b; _cur_f_ubo=_b; g_dbg_cur_f_ubo = _cur_f_ubo; s->r[0]=0; return s->r[14]; }
       if (strstr(_ge->name, "PrecomputedVertexStateSetDefaultUniformBuffer")) { _preVertObj[s->r[0]].ubos[0]=s->r[1]; _cur_v_ubo=s->r[1]; s->r[0]=0; return s->r[14]; }
-      if (strstr(_ge->name, "PrecomputedFragmentStateSetDefaultUniformBuffer")) { _preFragObj[s->r[0]].ubos[0]=s->r[1]; _cur_f_ubo=s->r[1]; s->r[0]=0; return s->r[14]; }
+      if (strstr(_ge->name, "PrecomputedFragmentStateSetDefaultUniformBuffer")) { _preFragObj[s->r[0]].ubos[0]=s->r[1]; _cur_f_ubo=s->r[1]; g_dbg_cur_f_ubo = _cur_f_ubo; s->r[0]=0; return s->r[14]; }
       if (strcmp(_ge->name, "sceGxmSetPrecomputedVertexState") == 0) { _curPreVert=s->r[1]; auto _it=_preVertObj.find(s->r[1]); if(_it!=_preVertObj.end() && _it->second.prog){ _cur_vobj=_it->second.prog; _resolve_prog_spv(_it->second.prog,false); if(_it->second.ubos[0]) _cur_v_ubo=_it->second.ubos[0]; }
         static int _pn=0; if (_pn++<8){ printf("[PREHLE] SetVState state=%08X vp=%08X vspv=%s\n", s->r[1], _cur_vobj, _abi_vspv.c_str()); fflush(stdout);} s->r[0]=0; return s->r[14]; }
-      if (strcmp(_ge->name, "sceGxmSetPrecomputedFragmentState") == 0) { _curPreFrag=s->r[1]; auto _it=_preFragObj.find(s->r[1]); if(_it!=_preFragObj.end() && _it->second.prog){ _resolve_prog_spv(_it->second.prog,true); if(_it->second.ubos[0]) _cur_f_ubo=_it->second.ubos[0]; }
+      if (strcmp(_ge->name, "sceGxmSetPrecomputedFragmentState") == 0) { _curPreFrag=s->r[1]; auto _it=_preFragObj.find(s->r[1]); if(_it!=_preFragObj.end() && _it->second.prog){ _resolve_prog_spv(_it->second.prog,true); if(_it->second.ubos[0]) _cur_f_ubo=_it->second.ubos[0]; g_dbg_cur_f_ubo = _cur_f_ubo; }
         static int _pn=0; if (_pn++<8){ printf("[PREHLE] SetFState state=%08X fspv=%s\n", s->r[1], _abi_fspv.c_str()); fflush(stdout);} s->r[0]=0; return s->r[14]; }
       if (strcmp(_ge->name, "sceGxmDrawPrecomputed") == 0) {
         uint32_t _d=s->r[1]; auto _it=_preDraw.find(_d);
@@ -3162,6 +3163,15 @@ static uint32_t _ufd_vert_ubo = 0, _ufd_frag_ubo = 0;   // M1251: per-stage UBO 
         const char* _nm = _q ? (const char*)_q : nullptr;
         uint32_t _rv = _nm ? _gxp_find_by_name(_prog, _nm) : 0u;
         static int _n2=0; if (_n2++<40) { printf("[ABIPARAM] ByName prog=%08X name=%s -> %08X\n", _prog, _nm?_nm:"?", _rv); fflush(stdout); }
+        { static int _pd=0; if (_pd++<3 && _nm) { uint8_t* _g=GP(_prog); printf("[PARAMDIAG] prog=%08X name=%s\n", _prog, _nm);
+            if (_g) { uint32_t _v[12]={0}; for(int _k=0;_k<12;++_k) std::memcpy(&_v[_k],_g+_k*4,4);
+              printf("[PARAMDIAG] hdr: %08X %08X %08X %08X | %08X %08X %08X %08X | %08X %08X %08X %08X\n", _v[0],_v[1],_v[2],_v[3],_v[4],_v[5],_v[6],_v[7],_v[8],_v[9],_v[10],_v[11]);
+              uint32_t _pc=_v[9], _po=_v[10], _gsz=_v[2]; uint32_t _pb=0x28u+_po;
+              printf("[PARAMDIAG] pc=%u po=%u gsz=%u pb=%08X\n", _pc,_po,_gsz,_pb);
+              for (uint32_t _i=0;_i<_pc && _i<8u;++_i){ if (_pb+_i*16u+16u>_gsz) break; int32_t _no=0; std::memcpy(&_no,_g+_pb+_i*16u,4);
+                const char* _pn=nullptr; if (_no>=0 && _pb+_i*16u+(uint32_t)_no<_gsz) _pn=(const char*)(_g+_pb+_i*16u+_no);
+                printf("[PARAMDIAG]  P%u no=%d name=%s\n", _i,_no,_pn?_pn:"(bad)"); } }
+            fflush(stdout);} }
         if (_nm && _rv) { s->r[0]=_rv; return s->r[14]; } }
       if (strncmp(_ge->name, "sceGxmProgramFindParameterBySemantic", 36) == 0) {
         uint32_t _prog=s->r[0], _sem=s->r[1], _idx=s->r[2];
@@ -3298,6 +3308,10 @@ static uint32_t _ufd_vert_ubo = 0, _ufd_frag_ubo = 0;   // M1251: per-stage UBO 
           if (_cur_v_ubo) { uint8_t* _s=GP(_cur_v_ubo); if(_s){ for(int _r=0;_r<32;++_r) printf("[UBODUMP2] V row%d = %.4f %.4f %.4f %.4f\n", _r, ((float*)_s)[_r*4],((float*)_s)[_r*4+1],((float*)_s)[_r*4+2],((float*)_s)[_r*4+3]); } }
           if (_cur_f_ubo) { uint8_t* _s=GP(_cur_f_ubo); if(_s){ for(int _r=0;_r<8;++_r) printf("[UBODUMP2] F row%d = %.4f %.4f %.4f %.4f\n", _r, ((float*)_s)[_r*4],((float*)_s)[_r*4+1],((float*)_s)[_r*4+2],((float*)_s)[_r*4+3]); } }
           for (int _u=0;_u<16;++_u){ if(!_frag_tex[_u][0]&&!_frag_tex[_u][1]) continue; printf("[UBODUMP2] fragtex u=%d w0=%08X w1=%08X w2=%08X w3=%08X\n", _u, ((uint32_t*)_frag_tex[_u])[0],((uint32_t*)_frag_tex[_u])[1],((uint32_t*)_frag_tex[_u])[2],((uint32_t*)_frag_tex[_u])[3]); }
+          { static int _fd2=-1; if(_fd2<0){ const char* _e=getenv("P5D_FUBODUMP2"); _fd2=(_e&&atoi(_e))?1:0; }
+            if(_fd2 && _cur_f_ubo){ uint8_t* _s=GP(_cur_f_ubo); if(_s){ int _nz=0; for(int _k=0;_k<256;++_k){ float _f; std::memcpy(&_f,_s+_k*4,4); if(_f!=0.0f) ++_nz; }
+              printf("[FUBODUMP2] ubo=%08X nonzero/256=%d\n", _cur_f_ubo, _nz);
+              for(int _r=0;_r<16;++_r) printf("[FUBODUMP2] row%d = %.4f %.4f %.4f %.4f\n", _r, ((float*)_s)[_r*4],((float*)_s)[_r*4+1],((float*)_s)[_r*4+2],((float*)_s)[_r*4+3]); } } }
           { static int _td=-1; if(_td<0){ const char* _e=getenv("P5D_TEXDATA"); _td=(_e&&atoi(_e))?1:0; }
             if(_td){ for(int _u=0;_u<16;++_u){ if(!_frag_tex[_u][0]&&!_frag_tex[_u][1]) continue; uint32_t _dva=((uint32_t*)_frag_tex[_u])[2]; uint8_t* _dp=GP(_dva & 0xFFFFFFFCu); if(!_dp){ printf("[TEXDATA] u=%d dva=%08X unmapped\n",_u,_dva); continue; }
               printf("[TEXDATA] u=%d dva=%08X bytes:",_u,_dva); for(int _k=0;_k<32;++_k) printf(" %02X", _dp[_k]); printf("\n");
@@ -3522,7 +3536,7 @@ static uint32_t _ufd_vert_ubo = 0, _ufd_frag_ubo = 0;   // M1251: per-stage UBO 
       if (_pend_vout) { uint32_t _va = 0; uint8_t* _q = GP(_pend_vout); if (_q) std::memcpy(&_va, _q, 4);
         if (_va) { _cur_v_ubo = _va; static int _n=0; if (_n++<8) { printf("[ABIUBO] vert ubo=%08X n=%u\n", _va, g_main_n); fflush(stdout); } } _pend_vout = 0; }
       if (_pend_fout) { uint32_t _va = 0; uint8_t* _q = GP(_pend_fout); if (_q) std::memcpy(&_va, _q, 4);
-        if (_va) { _cur_f_ubo = _va; static int _n=0; if (_n++<8) { printf("[ABIUBO] frag ubo=%08X n=%u\n", _va, g_main_n); fflush(stdout); } } _pend_fout = 0; }
+        if (_va) { _cur_f_ubo = _va; g_dbg_cur_f_ubo = _cur_f_ubo; static int _n=0; if (_n++<8) { printf("[ABIUBO] frag ubo=%08X n=%u\n", _va, g_main_n); fflush(stdout); } } _pend_fout = 0; }
       { auto _t1 = std::chrono::steady_clock::now(); long long _us = std::chrono::duration_cast<std::chrono::microseconds>(_t1-_t0).count();
         static int _slow = 0; if (_us > 3000 && _slow++ < 80) { printf("[GXMSLOW] %s va=%08X took=%lld us blk=%08X n=%u r0=%08X r1=%08X lr=%08X\n", _ge->name, stub_va, _us, g_cur_block, g_main_n, s->r[0], s->r[1], s->r[14]); fflush(stdout); } }
       { static int _gxrv=0; if (_rv != 0u && _gxrv++ < 80) { printf("[GXMRV] blk=%08X va=%08X nid=%08X name=%s rv=%08X r0=%08X r1=%08X r2=%08X r3=%08X lr=%08X\n", g_cur_block, stub_va, _ge->nid, _ge->name, _rv, s->r[0], s->r[1], s->r[2], s->r[3], s->r[14]); fflush(stdout); } }
@@ -3604,6 +3618,8 @@ static uint32_t _ufd_vert_ubo = 0, _ufd_frag_ubo = 0;   // M1251: per-stage UBO 
       if (sz > 0x100000u || g_big_n < 0) printf("[MEMALIGN] al=%08X sz=%08X raw=%08X -> %08X lr=%08X\n", al, sz, raw, r0, s->r[14]);
       break; }
     case 0x812B2270u: {   // NODEWR-MEMCPY
+      { uint32_t _fd=s->r[0], _fl=s->r[2]; if (g_dbg_cur_f_ubo && _fd >= g_dbg_cur_f_ubo && _fd < g_dbg_cur_f_ubo + 0x400u) { static int _fm=0; if(_fm++<40){ uint32_t _w0=0,_w1=0; uint8_t* _p=GP(s->r[1]); if(_p){std::memcpy(&_w0,_p,4);std::memcpy(&_w1,_p+4,4);} printf("[FUBOMEM] memcpy dst_off=%03X len=%u srcw=%08X %08X blk=%08X\n", _fd-g_dbg_cur_f_ubo, _fl, _w0,_w1, g_cur_block); fflush(stdout);} } }
+
       { uint32_t _ud=s->r[0], _us=s->r[1], _un=s->r[2]; if (_ud >= 0x94700000u && _ud < 0x94740000u) { static int _um=0; if(_um++<80){ uint32_t _w0=0,_w1=0,_w2=0,_w3=0; uint8_t* _p=GP(_us); if(_p){std::memcpy(&_w0,_p,4);std::memcpy(&_w1,_p+4,4);std::memcpy(&_w2,_p+8,4);std::memcpy(&_w3,_p+12,4);} printf("[USSEMEM] memcpy dst=%08X off=%05X len=%u srcw=%08X %08X %08X %08X blk=%08X\n", _ud, _ud-0x94700000u, _un, _w0,_w1,_w2,_w3, g_cur_block); fflush(stdout);} } }
                                                 // memcpy(dst,src,n) -> dst
 
@@ -7070,7 +7086,10 @@ extern "C" void wr16_watch(uint32_t a, uint32_t v) {
   { if (g_watch_task && a >= g_watch_task && a < g_watch_task + 0x40u) {
       if (g_w16_n++ < 240) { printf("[W16] a=%08X off=%02X v=%04X blk=%08X fib=%08X thr=%08X\n", a, a - g_watch_task, v, g_cur_block, g_cur_fiber, g_cur_thr); fflush(stdout); } } }
 }
+// M1370: g_dbg_cur_f_ubo mirror defined near top of file
 extern "C" void wr32_watch(uint32_t a, uint32_t v) {
+  { if (g_dbg_cur_f_ubo && a >= g_dbg_cur_f_ubo && a < g_dbg_cur_f_ubo + 0x400u && v != 0u) { static int _fw=0; if(_fw++<120){ printf("[FUBOWR] off=%03X v=%08X(%.3f) blk=%08X hle=%08X thr=%08X\n", a-g_dbg_cur_f_ubo, v, *(float*)&v, g_cur_block, g_cur_hle_stub, g_cur_thr); fflush(stdout);} } }
+
   { if (a >= 0x81670B48u && a < 0x81670B48u + 0x6000u && v != 0u) { static int _sw=0; if(_sw++<100){ printf("[SLOTWR] a=%08X slot=%u off=%02X v=%08X blk=%08X hle=%08X thr=%08X\n", a, (a-0x81670B48u)/0x60u, (a-0x81670B48u)%0x60u, v, g_cur_block, g_cur_hle_stub, g_cur_thr); fflush(stdout);} } }
 
   { if (a >= 0x94700000u && a < 0x94740000u) { static int _uw=0; if(_uw++<80){ printf("[USSEWR] a=%08X off=%05X v=%08X(%.3f) blk=%08X hle=%08X fib=%08X thr=%08X\n", a, a-0x94700000u, v, *(float*)&v, g_cur_block, g_cur_hle_stub, g_cur_fiber, g_cur_thr); fflush(stdout);} } }
