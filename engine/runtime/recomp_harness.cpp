@@ -3482,8 +3482,9 @@ static uint32_t _ufd_vert_ubo = 0, _ufd_frag_ubo = 0;   // M1251: per-stage UBO 
       if (raw) r0 = (raw + al - 1u) & ~(al - 1u);
       if (sz > 0x100000u || g_big_n < 0) printf("[MEMALIGN] al=%08X sz=%08X raw=%08X -> %08X lr=%08X\n", al, sz, raw, r0, s->r[14]);
       break; }
-    case 0x812B2270u: {                                                // memcpy(dst,src,n) -> dst
-      uint32_t dst = s->r[0], src = s->r[1], n = s->r[2];
+    case 0x812B2270u: {   // NODEWR-MEMCPY                                                // memcpy(dst,src,n) -> dst
+
+      { static int _mc=0; uint32_t _d=s->r[0], _s2=s->r[1], _n=s->r[2]; if (_d >= 0x8F000000u && _d < 0x8F600000u && _mc++<120) { uint32_t _w0=0,_w1=0,_w2=0,_w3=0; uint8_t* _p=GP(_s2); if(_p){ std::memcpy(&_w0,_p,4); std::memcpy(&_w1,_p+4,4); std::memcpy(&_w2,_p+8,4); std::memcpy(&_w3,_p+12,4);} { uint32_t _clr=0; uint8_t* _q=GP(s->r[13]+4u); if(_q) std::memcpy(&_clr,_q,4); printf("[NODEMEMCPY] dst=%08X src=%08X n=%u srcw=%08X %08X %08X %08X blk=%08X lr=%08X callerLR=%08X sp=%08X fib=%08X thr=%08X\n", _d,_s2,_n,_w0,_w1,_w2,_w3, g_cur_block, s->r[14], _clr, s->r[13], g_cur_fiber,g_cur_thr); } fflush(stdout);} }      uint32_t dst = s->r[0], src = s->r[1], n = s->r[2];
       uint8_t* d = GP(dst); uint8_t* sp = GP(src);
       canhle_check(dst, n, "memcpy");
       if (g_sw8_on && dst < g_stkw_hi && (uint64_t)dst + n > g_stkw_lo) printf("[STKW-HLE] memcpy dst=%08X n=%u blk=%08X fib=%08X sp=%08X lr=%08X\n", dst, n, g_cur_block, g_cur_fiber, s->r[13], s->r[14]);
@@ -6910,6 +6911,8 @@ extern "C" void wr16_watch(uint32_t a, uint32_t v) {
       if (g_w16_n++ < 240) { printf("[W16] a=%08X off=%02X v=%04X blk=%08X fib=%08X thr=%08X\n", a, a - g_watch_task, v, g_cur_block, g_cur_fiber, g_cur_thr); fflush(stdout); } } }
 }
 extern "C" void wr32_watch(uint32_t a, uint32_t v) {
+  { static int _nw=0; if (a >= 0x8F000000u && a < 0x8F600000u && _nw++<200) { printf("[NODEWR32] a=%08X v=%08X blk=%08X fib=%08X thr=%08X\n", a, v, g_cur_block, g_cur_fiber, g_cur_thr); fflush(stdout); } }
+
   { static int _fw=0; if ((v==0x44700000u || v==0x44080000u) && _fw++<60) { printf("[FW960] a=%08X v=%08X blk=%08X fib=%08X thr=%08X lr=%08X sp=%08X\n", a, v, g_cur_block, g_cur_fiber, g_cur_thr, g_cur_hle_ret_lr, g_snap_r[13]); fflush(stdout); } }
 
   for (int _i = 0; _i < g_cwatch_n; ++_i) if (a == g_cwatch_va[_i]) { static int _cw=0; if (_cw++<80) { printf("[COMSEW] a=%08X v=%08X blk=%08X fib=%08X thr=%08X lr=%08X\n", a,v,g_cur_block,g_cur_fiber,g_cur_thr,g_cur_hle_ret_lr); fflush(stdout); } }
