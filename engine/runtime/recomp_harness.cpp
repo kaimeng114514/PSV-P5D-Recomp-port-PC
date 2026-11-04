@@ -3488,6 +3488,16 @@ static uint32_t _ufd_vert_ubo = 0, _ufd_frag_ubo = 0;   // M1251: per-stage UBO 
               if (_ix+1u > _mx) _mx = _ix+1u; _any = true; }
             if (_any) _vc = _mx;
             static int _ixn=0; if (_ixn++<8) { printf("[ABIIDX] icount=%u itype=%u idata=%08X maxvc=%u n=%u\n", _icount, _itype, _idata, _vc, g_main_n); fflush(stdout); } } }
+        if (_abi_fspv.find("frag_0084") != std::string::npos) { static int _ta=0; if(_ta++<12){ auto _aa=_vobj2attrs.find(_cur_vobj); auto _ss=_vobj2strms.find(_cur_vobj);
+          printf("[TXTATTR] #%d lr=%08X cur_obj=%08X inAttr=%d attrN=%u inStrm=%d strmN=%zu vc=%u aN_maps=%zu sN_maps=%zu v=%s f=%s\n", _ta, s->r[14], _cur_vobj, (int)(_aa!=_vobj2attrs.end()), (unsigned)(_aa!=_vobj2attrs.end()?_aa->second.size():0), (int)(_ss!=_vobj2strms.end()), _vobj2strms.size(), _vc, _vobj2attrs.size(), _vobj2strms.size(), _abi_vspv.c_str(), _abi_fspv.c_str()); fflush(stdout);} }
+        if (_abi_fspv.find("frag_0084") != std::string::npos) { static int _ts=0; if(_ts++<6){ printf("[TXTSTRM] #%d obj=%08X:", _ts, _cur_vobj);
+          auto _stq=_vobj2strms.find(_cur_vobj);
+          if(_stq!=_vobj2strms.end()) for(size_t _k=0;_k<_stq->second.size() && _k<4;++_k){ uint32_t _va=(_stm2va.count(_stq->second[_k].index)?_stm2va[_stq->second[_k].index]:0u);
+            printf(" strm%zu{idx=%u stride=%u va=%08X bytes:", _k, _stq->second[_k].index, _stq->second[_k].stride, _va);
+            for(int _i=0;_i<96;++_i){ uint8_t* _q=GP(_va+(uint32_t)_i); if(_q) printf(" %02X",*_q); }
+            printf("}"); }
+          { uint32_t _d=s->r[3]; printf(" drawptr=%08X bytes:", _d); for(int _i=0;_i<48;++_i){ uint8_t* _q=GP(_d+(uint32_t)_i); if(_q) printf(" %02X",*_q);} }
+          printf(" stm2va_n=%zu\n", _stm2va.size()); fflush(stdout);} }
         auto _at = _vobj2attrs.find(_cur_vobj);
         if (_at != _vobj2attrs.end() && !_at->second.empty() && _vc > 0u && _vc <= 65536u) {
           const std::vector<AbiVAttr>& _av = _at->second;
@@ -3510,6 +3520,13 @@ static uint32_t _ufd_vert_ubo = 0, _ufd_frag_ubo = 0;   // M1251: per-stage UBO 
             }
             if (!_ok) break;
           }
+          if (_abi_fspv.find("frag_0084") != std::string::npos) { static int _tu=0; if(_tu++<6){ printf("[TXTUBO] #%d cur_v_ubo=%08X cur_f_ubo=%08X cur_vobj=%08X:", _tu, _cur_v_ubo, _cur_f_ubo, _cur_vobj);
+            if(_cur_v_ubo){ for(int _i=0;_i<8;++_i){ float _f=0; uint8_t* _q=GP(_cur_v_ubo+(uint32_t)_i*4u); if(_q) std::memcpy(&_f,_q,4); printf(" %g",_f);} }
+            printf("\n"); fflush(stdout);} }
+          if (_abi_fspv.find("frag_0084") != std::string::npos) { static int _tv2=0; if(_tv2++<6){
+            printf("[TXTVTX2] #%d ok=%d obj=%08X attrN=%u vc=%u v=%s f=%s:", _tv2, (int)_ok, _cur_vobj, (unsigned)_av.size(), _vc, _abi_vspv.c_str(), _abi_fspv.c_str());
+            for(size_t _i=0;_i<_av.size() && _i<3;++_i) printf(" a%zu{fmt=%u comps=%u off=%u stream=%u}", _i,_av[_i].fmt,_av[_i].comps,_av[_i].offset,_av[_i].stream);
+            printf("\n"); for(unsigned _v=0;_v<4 && _v<_vc;++_v){ printf("[TXTVTX2]  v%u:", _v); for(size_t _i=0;_i<(_av.size()<3?_av.size():3);++_i) printf(" loc%zu=(%.3f,%.3f,%.3f,%.3f)", _i, _vtx[(size_t)_v*32u+_i*4u], _vtx[(size_t)_v*32u+_i*4u+1], _vtx[(size_t)_v*32u+_i*4u+2], _vtx[(size_t)_v*32u+_i*4u+3]); printf("\n"); } fflush(stdout);} }
           // 18.4521 M976: ENGINE-DRAWN MOVIE - when the bound fragment texture is the 960x544 movie texture,
           // upload our pre-decoded BGRA movie frame as that unit's content, so the ORIGINAL shader draws the movie.
           { static int _me = -1; if (_me < 0) _me = (getenv("P5D_MOVIE_ENGINE") != nullptr) ? 1 : 0;
@@ -3637,7 +3654,10 @@ static uint32_t _ufd_vert_ubo = 0, _ufd_frag_ubo = 0;   // M1251: per-stage UBO 
                 for(int _u=0;_u<16;++_u){ if(_frag_tex[_u][0]||_frag_tex[_u][1]){ uint32_t _w0=0; std::memcpy(&_w0,_frag_tex[_u],4); _tex=(_tex*31u)^_w0; } }
                 std::snprintf(_b,sizeof(_b),"vc=%u aN=%u bbox=%.0f,%.0f-%.0f,%.0f c0=%.1f,%.1f,%.1f,%.1f tex=%08X", _vc,(unsigned)_av.size(),_x0,_y0,_x1,_y1, _vtx[4],_vtx[5],_vtx[6],_vtx[7], _tex);
                 if(_sig.find(_b)==_sig.end() && _sig.size()<80){ _sig.insert(_b); printf("[DRAWSUM] %s\n", _b); fflush(stdout);} }
-              }            static int _vn=0; if (_vn++<40) { printf("[ABIVTX] #%d vc=%u attrs=%u rc=%d n=%u v0=(%.3f,%.3f,%.3f,%.3f) v1=(%.3f,%.3f,%.3f,%.3f)\n", _vn,
+              }            { static int _tv=0; if(_tv++<8 && _abi_fspv.find("frag_0084")!=std::string::npos){ printf("[TXTVTX] #%d obj=%08X attrN=%u vc=%u frag=%s:", _tv,_cur_vobj,(unsigned)_av.size(),_vc,_abi_fspv.c_str());
+                for(size_t _i=0;_i<_av.size() && _i<3;++_i) printf(" a%zu{fmt=%u comps=%u off=%u}", _i,_av[_i].fmt,_av[_i].comps,_av[_i].offset);
+                printf("\n"); for(unsigned _v=0;_v<4 && _v<_vc;++_v){ printf("[TXTVTX]  v%u:", _v); for(size_t _i=0;_i<(_av.size()<3?_av.size():3);++_i) printf(" loc%zu=(%.3f,%.3f,%.3f,%.3f)", _i, _vtx[(size_t)_v*32u+_i*4u], _vtx[(size_t)_v*32u+_i*4u+1], _vtx[(size_t)_v*32u+_i*4u+2], _vtx[(size_t)_v*32u+_i*4u+3]); printf("\n"); } fflush(stdout);} }
+            static int _vn=0; if (_vn++<40) { printf("[ABIVTX] #%d vc=%u attrs=%u rc=%d n=%u v0=(%.3f,%.3f,%.3f,%.3f) v1=(%.3f,%.3f,%.3f,%.3f)\n", _vn,
               _vc, (unsigned)_av.size(), _rr, g_main_n, _vtx[0],_vtx[1],_vtx[2],_vtx[3], _vtx[32],_vtx[33],_vtx[34],_vtx[35]); fflush(stdout); }
           } else { static int _fn=0; if (_fn++<6) { printf("[ABIVTX] FAIL vc=%u attrs=%u cur_obj=%08X streams=%zu n=%u\n", _vc,(unsigned)_av.size(),_cur_vobj,_stm2va.size(),g_main_n); fflush(stdout); } }
         }
