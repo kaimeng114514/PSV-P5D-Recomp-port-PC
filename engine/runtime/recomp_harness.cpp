@@ -725,6 +725,51 @@ extern "C" void p5d_usse_wr32(uint32_t va, uint32_t v) { uint8_t* _p = GP(va); i
 extern "C" void p5d_usse_wr16(uint32_t va, uint16_t v) { uint8_t* _p = GP(va); if (_p) std::memcpy(_p,&v,2); }
 extern "C" void p5d_usse_wr8 (uint32_t va, uint8_t  v) { uint8_t* _p = GP(va); if (_p) *_p = v; }
 
+// ===== M1317: CPU vertex-shader bridge =====
+// Runs the ORIGINAL vertex program (GXP, decoded by Project Nativ's USSE interpreter) on the CPU
+// for every vertex of a draw, then writes the resulting clip position / colour / texcoord back into
+// the packed vertex array in the layout the bridge shaders expect (loc0=clip pos, loc1=colour,
+// loc2=uv).  The GPU then only rasterises and (optionally) samples unit 0.  This keeps geometry,
+// colours, UVs and textures produced by the original game code while bypassing our old, broken
+// GXP->SPIR-V translations.
+static bool p5d_cpu_vp_apply(std::vector<float>& vtx, unsigned vc, unsigned nattr,
+                             uint32_t gxp_va, uint32_t def_ubo, uint32_t ubo0) {
+  if (!gxp_va || !vc || !nattr || vtx.size() < (size_t)vc * 32u) return false;
+  const UsseProgram* p = usse_get(gxp_va);
+  if (!p || !usse_supported(p) || usse_is_fragment(p) || usse_primary_reads_memory(p)) return false;
+  const UsseVertexLayout* vl = usse_vertex_layout(p);
+  if (!vl || vl->nattrs <= 0 || (unsigned)vl->nattrs > nattr || vl->nattrs > 8) return false;
+  // skip the fullscreen clear-style programs (no colour output, single position attribute)
+  if (vl->o_color0 < 0 && vl->nattrs <= 1 && vl->index_reg < 0) return false;
+  UsseDraw d; std::memset(&d, 0, sizeof(d));
+  uint32_t ubuf[14]; std::memset(ubuf, 0, sizeof(ubuf)); ubuf[0] = ubo0;
+  usse_setup_registers(p, &d, def_ubo, ubuf);
+  UsseInst si; std::memset(&si, 0, sizeof(si));
+  usse_run_secondary(p, &si, &d);
+  for (unsigned v = 0; v < vc; ++v) {
+    UsseInst vi; std::memset(&vi, 0, sizeof(vi));
+    for (int a = 0; a < vl->nattrs; ++a) {
+      const UsseAttrSlot* slot = &vl->attrs[a];
+      float comps[4] = {0,0,0,0};
+      for (int c = 0; c < slot->comps && c < 4; ++c) comps[c] = vtx[(size_t)v*32u + (size_t)a*4u + (size_t)c];
+      usse_pack_attr(&vi, slot, comps, nullptr, 0);
+    }
+    usse_run_primary(p, &vi, &d, nullptr, nullptr);
+    float* out = &vtx[(size_t)v*32u];
+    out[0] = vi.o[0].f; out[1] = vi.o[1].f; out[2] = vi.o[2].f; out[3] = vi.o[3].f;
+    // M1318: keep the engine's own per-vertex colour / texcoord attributes (the shader may pack the
+    // colour into O[4] with a non-obvious lane mapping, while the guest stream is authoritative).
+    if (vl->nattrs < 2) { out[4]=0.0f; out[5]=0.0f; out[6]=0.0f; out[7]=1.0f; }
+    if (vl->nattrs < 3) { out[8]=0.0f; out[9]=0.0f; out[10]=0.0f; out[11]=1.0f; }
+  }
+  return true;
+}
+static const char* p5d_bridge_frag_dir() {
+  static std::string s; static bool init = false;
+  if (!init) { init = true; const char* e = getenv("P5D_BRIDGE_DIR"); s = e ? e : "C:/dev/p5d_build/spv_nativ"; }
+  return s.c_str();
+}
+
 
 // M1122 IOPUMP_WAIT: drive criFs load state machines from inside blocking delays too.
 // Reason: the guest ACF-read spin loop (FUN_812309A4: while (FUN_8128E9BC(reader,&st), st==1) { FUN_81283C84(); FUN_8127C0E8(10); })
@@ -3086,7 +3131,7 @@ static uint32_t _ufd_vert_ubo = 0, _ufd_frag_ubo = 0;   // M1251: per-stage UBO 
         // M1142: actually ISSUE the draw for the uploaded test stream. Previously only upload_vertex_stream was
         // called and the real vkCmdDraw never happened, so every captured frame stayed black.
         { static int _tri2 = 0; static int _alw = -1; if (_alw < 0) { const char* _e = getenv("P5D_TESTPIPE_ALL"); _alw = (_e && atoi(_e)) ? 1 : 0; }
-          if (!_tri2 || (_alw && _tri2 < 60)) { _tri2++;
+          if ((!_tri2 && getenv("P5D_ABIDRAWTEST") != nullptr) || (_alw && _tri2 < 60)) { _tri2++;
             { static int _da=0; if (_da++<40) { printf("[ABIDRAWARGS] n=%u r0=%08X r1=%08X r2=%08X r3=%08X r4=%08X lr=%08X blk=%08X\n", g_main_n, s->r[0], s->r[1], s->r[2], s->r[3], s->r[4], s->r[14], g_cur_block); fflush(stdout); } }
             const char* _tp = getenv("P5D_TESTPIPE");   // M1147: force our own known-good red-triangle pipeline
             if (_tp && atoi(_tp)) {   // M1147B: backend needs the FULL path (it fopen()s the argument directly)
@@ -3161,7 +3206,21 @@ static uint32_t _ufd_vert_ubo = 0, _ufd_frag_ubo = 0;   // M1251: per-stage UBO 
 
               if (_cur_v_ubo){ uint8_t* _src=GP(_cur_v_ubo); if(_src) p5d::vulkan::update_uniform_buffer_raw(_src,0x1000u); }
               if (_cur_f_ubo){ uint8_t* _src=GP(_cur_f_ubo); if(_src) p5d::vulkan::update_fragment_uniform_buffer_raw(_src,0x1000u); }
-              if (!_abi_vspv.empty() && !_abi_fspv.empty()) { std::string _vp=_abi_spvdir+"/"+_abi_vspv, _fp=_abi_spvdir+"/"+_abi_fspv; (void)p5d::vulkan::select_real_pipeline(_vp.c_str(),_fp.c_str()); }
+              bool _cpub = false; bool _haztex = false;
+              { static int _cvp2=-1; if(_cvp2<0){ const char* _e=getenv("P5D_CPUVP"); _cvp2=(_e&&atoi(_e))?1:0; }
+                if (_cvp2) {
+                  for (int _u=0;_u<16;++_u){ for(int _k=0;_k<16;++_k) if(_frag_tex[_u][_k]){ _haztex=true; break; } if(_haztex) break; }
+                  uint32_t _gxp=0; { auto _gi=_obj2gxp.find(_cur_vobj); if(_gi!=_obj2gxp.end()) _gxp=_gi->second; }
+                  uint32_t _def=_ufd_vert_ubo; if(!_def && _pend_vout){ uint8_t* _q=GP(_pend_vout); if(_q) std::memcpy(&_def,_q,4); }
+                  unsigned _na=(unsigned)_av.size(); if(_na>8u) _na=8u;
+                  _cpub = p5d_cpu_vp_apply(_pvtx, _vc, _na, _gxp, _def, _cur_v_ubo);
+                  static int _cn2=0; if(_cn2++<24){ printf("[CPUVP] pre #%d obj=%08X gxp=%08X vc=%u nattr=%u ok=%d tex=%d spv=%s\n", _cn2,_cur_vobj,_gxp,_vc,_na,(int)_cpub,(int)_haztex,_abi_vspv.c_str()); fflush(stdout);} } }
+              if (_cpub) {
+                bool _texfrag = (_abi_fspv.find("0084") != std::string::npos);
+                std::string _vp = std::string(p5d_bridge_frag_dir()) + "/bridge_vert.spv";
+                std::string _fp = std::string(p5d_bridge_frag_dir()) + (_texfrag ? "/bridge_tex_frag.spv" : "/bridge_flat_frag.spv");
+                (void)p5d::vulkan::select_real_pipeline(_vp.c_str(), _fp.c_str());
+              } else if (!_abi_vspv.empty() && !_abi_fspv.empty()) { std::string _vp=_abi_spvdir+"/"+_abi_vspv, _fp=_abi_spvdir+"/"+_abi_fspv; (void)p5d::vulkan::select_real_pipeline(_vp.c_str(),_fp.c_str()); }
               int _rr = p5d::vulkan::upload_vertex_stream(_pvtx.data(),(unsigned)(_vc*128u),_vc);
               if (getenv("P5D_FORCEVP")) { p5d::vulkan::set_gxm_viewport(0.0f,960.0f,0.0f,544.0f,0.0f,1.0f); p5d::vulkan::set_gxm_viewport_enable(1); }
               p5d::vulkan::gxm_draw_arrays(_vc);
@@ -3672,6 +3731,25 @@ static uint32_t _ufd_vert_ubo = 0, _ufd_frag_ubo = 0;   // M1251: per-stage UBO 
             static int _un2=0; if (_un2++<8) { printf("[ABIUBO] upload frag ubo=%08X first=(%.3f,%.3f,%.3f,%.3f) n=%u\n", _cur_f_ubo,
               ((float*)_src)[0], ((float*)_src)[1], ((float*)_src)[2], ((float*)_src)[3], g_main_n); fflush(stdout); } } }
           if (_ok) {
+            bool _cpub = false; bool _haztex = false;
+            { static int _cvp=-1; if(_cvp<0){ const char* _e=getenv("P5D_CPUVP"); _cvp=(_e&&atoi(_e))?1:0; }
+              if (_cvp) {
+                for (int _u=0;_u<16;++_u){ for(int _k=0;_k<16;++_k) if(_frag_tex[_u][_k]){ _haztex=true; break; } if(_haztex) break; }
+                uint32_t _gxp=0; { auto _gi=_obj2gxp.find(_cur_vobj); if(_gi!=_obj2gxp.end()) _gxp=_gi->second; }
+                uint32_t _def=_ufd_vert_ubo; if(!_def && _pend_vout){ uint8_t* _q=GP(_pend_vout); if(_q) std::memcpy(&_def,_q,4); }
+                _cpub = p5d_cpu_vp_apply(_vtx, _vc, (unsigned)_av.size(), _gxp, _def, _cur_v_ubo);
+                static int _cn=0; if(_cn++<24){ printf("[CPUVP] #%d obj=%08X gxp=%08X vc=%u nattr=%u ok=%d tex=%d spv=%s\n", _cn,_cur_vobj,_gxp,_vc,(unsigned)_av.size(),(int)_cpub,(int)_haztex,_abi_vspv.c_str()); fflush(stdout);} } }
+            if (_cpub) {
+              bool _texfrag = (_abi_fspv.find("0084") != std::string::npos);
+              std::string _vp = std::string(p5d_bridge_frag_dir()) + "/bridge_vert.spv";
+              std::string _fp = std::string(p5d_bridge_frag_dir()) + (_texfrag ? "/bridge_tex_frag.spv" : "/bridge_flat_frag.spv");
+              (void)p5d::vulkan::select_real_pipeline(_vp.c_str(), _fp.c_str());
+              static int _bn=0; if(_bn++<64){ printf("[CPUVP] bridge select texfrag=%d n=%u vc=%u",(int)_texfrag,g_main_n,_vc);
+                for(unsigned _v=0;_v<_vc && _v<4;++_v) printf(" | v%u clip=(%.3f,%.3f,%.3f,%.3f) col=(%.3f,%.3f,%.3f,%.3f) uv=(%.3f,%.3f)",_v,
+                  _vtx[(size_t)_v*32u],_vtx[(size_t)_v*32u+1],_vtx[(size_t)_v*32u+2],_vtx[(size_t)_v*32u+3],
+                  _vtx[(size_t)_v*32u+4],_vtx[(size_t)_v*32u+5],_vtx[(size_t)_v*32u+6],_vtx[(size_t)_v*32u+7],
+                  _vtx[(size_t)_v*32u+8],_vtx[(size_t)_v*32u+9]);
+                printf("\n"); fflush(stdout);} }
             int _rr = p5d::vulkan::upload_vertex_stream(_vtx.data(), (unsigned)(_vc*128u), _vc);
             { static int _tp=-1; if (_tp<0) _tp = (getenv("P5D_TPRD")!=nullptr)?1:0;
               static int _tph=-1; if (_tph<0) _tph = (getenv("P5D_TPRD_HARD")!=nullptr)?1:0;
