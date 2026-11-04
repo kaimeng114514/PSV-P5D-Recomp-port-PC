@@ -3111,7 +3111,11 @@ static uint32_t _ufd_vert_ubo = 0, _ufd_frag_ubo = 0;   // M1251: per-stage UBO 
           { static int _nomovie = -1;   // 18.4551 M1006: P5D_NOMOVIE=1 disables the host movie overlay
             if (_nomovie < 0) { const char* _e = getenv("P5D_NOMOVIE"); _nomovie = (_e && atoi(_e)) ? 1 : 0; }
             { static int _dec = -1; if (_dec < 0) _dec = (getenv("P5D_MOVIE_DECODE") != nullptr) ? 1 : 0;
-            if (!_nomovie || _dec) movie_advance_frame(); } }   // 18.4514 M969: feed the offline-decoded movie frame as the texture source
+            // MOVIEPUMP: only run the offline movie pump when EXPLICITLY requested
+            // (host overlay P5D_MOVIEHOST=1 or engine-drawn decode path P5D_MOVIE_DECODE=1).
+            // Previously it ran unconditionally on every present, which polluted the
+            // acceptance baseline with host-decoded frames (NOMOVIE only gated the overlay blit).
+            if (movie_host_on() || _dec) movie_advance_frame(); } }   // 18.4514 M969 / M1286
           p5d::vulkan::present_frame(_data);
           { static int _sc = 0;   // 18.4516 M971: capture the swapchain (movie layer blitted inside present_frame)
             if (_sc < 8) { char _fn[64]; std::snprintf(_fn, sizeof(_fn), "p5d_swap_%d.bmp", _sc);
