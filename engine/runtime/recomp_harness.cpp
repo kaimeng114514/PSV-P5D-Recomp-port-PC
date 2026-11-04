@@ -302,7 +302,8 @@ static int g_acc_n = 0, g_lkin_n = 0, g_lkout_n = 0;
 extern "C" int g_watch_on = 1;
 extern "C" int g_badmem_safe = 0;   // BADMEM_SAFE: P() returns scratch instead of abort when set
 static uint32_t g_dbg_cur_f_ubo = 0;   // M1370 mirror of _cur_f_ubo for global probes
-static std::map<std::string,long> g_gxm_counts;   // GXMSTATS: full API call counts
+static std::map<std::string,long> g_gxm_counts;
+static std::map<std::string,uint32_t> g_spv_tu;   // M1304: spv name -> GXP texunit flags (from RegisterProgram)   // GXMSTATS: full API call counts
 static void gxm_stats_dump(){ if(g_gxm_counts.empty()) return; std::vector<std::pair<long,std::string>> _v;
   for(auto& kv:g_gxm_counts) _v.push_back({kv.second,kv.first});
   std::sort(_v.begin(),_v.end(),[](const std::pair<long,std::string>&a,const std::pair<long,std::string>&b){return a.first>b.first;});
@@ -3031,6 +3032,9 @@ static uint32_t _ufd_vert_ubo = 0, _ufd_frag_ubo = 0;   // M1251: per-stage UBO 
             int _rr = p5d::vulkan::upload_vertex_stream(_tv, (unsigned)sizeof(_tv), 6u);
             printf("[ABITRI] upload_vertex_stream rc=%d (stride128,6 verts,two windings) n=%u\n", _rr, g_main_n); fflush(stdout); } }
         int32_t _rc = p5d::vulkan::select_real_pipeline(_vp.c_str(), _fp.c_str());
+        { static int _ad=-1; if(_ad<0){ const char* e=getenv("P5D_ALLDRAWS"); _ad=(e&&atoi(e))?1:0; }
+          if(_ad){ static int _an=0; if(_an++<400){ uint32_t _vt=0,_ft=0; auto _i1=g_spv_tu.find(_abi_vspv); if(_i1!=g_spv_tu.end()) _vt=_i1->second; auto _i2=g_spv_tu.find(_abi_fspv); if(_i2!=g_spv_tu.end()) _ft=_i2->second;
+            printf("[ALLDRAW] #%d lr=%08X v=%s(tu=%X) f=%s(tu=%X) r1=%08X r2=%08X r3=%08X r4=%08X n=%u\n", _an, s->r[14], _abi_vspv.c_str(), _vt, _abi_fspv.c_str(), _ft, s->r[1],s->r[2],s->r[3],s->r[4], g_main_n); fflush(stdout);} } }
         // 18.4496 M951 EXPERIMENT: vertex uniforms are all zero (RINIT zero table) -> the real vertex shader sends every
         // vertex to w=0 -> no fragments -> black even with the red diagnostic FS. Feed identity matrices once.
         { static int _id = 0; if (!_id) { _id = 1;
@@ -3316,6 +3320,7 @@ static uint32_t _ufd_vert_ubo = 0, _ufd_frag_ubo = 0;   // M1251: per-stage UBO 
           const bool _pfrag = (strstr(_ge->name, "SetFragmentProgram") != nullptr);
           uint32_t _r1 = s->r[1]; auto _vm = _vobj2spv.find(_r1); auto _fm = _fobj2spv.find(_r1);
           if (_pfrag && _fm != _fobj2spv.end()) { if (_abi_fspv != _fm->second) { _abi_fspv = _fm->second;
+              { auto _tq=g_spv_tu.find(_fm->second); static int _tq_n=0; if(_tq!=g_spv_tu.end() && _tq->second && _tq_n++<40){ printf("[TEXPROGCUR] frag spv=%s tu=%X lr=%08X n=%u\n", _fm->second.c_str(), _tq->second, s->r[14], g_main_n); fflush(stdout);} }
               static int _pn9=0; if (_pn9++<60) { printf("[ABIPAIR3] v=%s f=%s n=%u lr=%08X\n", _abi_vspv.c_str(), _abi_fspv.c_str(), g_main_n, s->r[14]); fflush(stdout);} } }
           else if (!_pfrag && _vm != _vobj2spv.end()) { if (_abi_vspv != _vm->second) { _abi_vspv = _vm->second;
               static int _pn10=0; if (_pn10++<60) { printf("[ABIPAIR3] v=%s f=%s n=%u lr=%08X\n", _abi_vspv.c_str(), _abi_fspv.c_str(), g_main_n, s->r[14]); fflush(stdout);} } }
@@ -3328,7 +3333,7 @@ static uint32_t _ufd_vert_ubo = 0, _ufd_frag_ubo = 0;   // M1251: per-stage UBO 
               { static int _gd=0; if (_gd++<250) { uint32_t _gxp=s->r[1]; uint8_t* _g=GP(_gxp); if(_g){ uint32_t _sz=0,_pc=0,_po=0; std::memcpy(&_sz,_g+8,4); std::memcpy(&_pc,_g+0x24,4); std::memcpy(&_po,_g+0x28,4);
                   uint32_t _bf=0,_tu1=0,_tu2=0; std::memcpy(&_bf,_g+0x18,4); std::memcpy(&_tu1,_g+0x1C,4); std::memcpy(&_tu2,_g+0x20,4);
                   printf("[GXPDIAG] gxp=%08X size=%u pc=%u po=%X bf=%08X tu1=%08X tu2=%08X spv=%s\n", _gxp,_sz,_pc,_po,_bf,_tu1,_tu2,_it->second.c_str());
-                  if ((_tu1|_tu2)) { static int _texprog_n=0; if (_texprog_n++<60) { printf("[GXPTEX] gxp=%08X tu1=%08X tu2=%08X spv=%s\n", _gxp, _tu1, _tu2, _it->second.c_str()); fflush(stdout); } }
+                  if ((_tu1|_tu2)) { static int _texprog_n=0; if (_texprog_n++<60) { g_spv_tu[_it->second] = (_tu1|_tu2); printf("[GXPTEX] gxp=%08X tu1=%08X tu2=%08X spv=%s\n", _gxp, _tu1, _tu2, _it->second.c_str()); fflush(stdout); } }
                   uint32_t _pb=0x28u+_po;
                   for(uint32_t _i=0;_i<_pc && _i<6u;++_i){ if(_pb+_i*16u+16u>_sz) break; int32_t _no=0; std::memcpy(&_no,_g+_pb+_i*16u,4); const char* _nm=(const char*)(_g+_pb+_i*16u+_no); printf("[GXPDIAG]  P%u name=%s\n",_i,_nm); } } } }
               static int _n=0; if (_n++<12) printf("[ABIPGID] id=%08X hash=%016llX spv=%s n=%u\n", _nextid, (unsigned long long)_gh, _it->second.c_str(), g_main_n);
