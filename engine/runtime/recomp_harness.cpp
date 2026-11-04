@@ -1465,6 +1465,9 @@ namespace p5d { namespace vulkan { int32_t upload_gxm_control_resolved(unsigned 
 namespace p5d { namespace vulkan { int32_t upload_gxm_control_to_unit(unsigned int unit, const void* control16, const unsigned char* hostPixels, unsigned int bytes); } }   // 18.4521 M976
 namespace p5d { namespace vulkan { int upload_vertex_stream(const void* data, unsigned int bytes, unsigned int vertex_count); } }   // 18.4498 M953
 namespace p5d { namespace vulkan { void gxm_draw_arrays(unsigned int vertexCount); } }   // M1142: real vkCmdDraw for the uploaded vertex stream
+// M1329: backend indexed draw (uploads its own vertex+index data, handles STRIP/FAN + z clamp)
+namespace p5d { namespace vulkan { void gxm_draw_indexed_real(const void*, unsigned int, const void*, unsigned int, unsigned int, unsigned int); } }
+
 static uint32_t call_guest_cb4(RecState* s, uint32_t entry, uint32_t a0, uint32_t a1, uint32_t a2, uint32_t a3, int maxblocks);  // M1034 fwd
 static uint32_t g_abi_cur_cd = 0, g_abi_cur_w = 0, g_abi_cur_h = 0;   // M1146: current scene color surface for test-draw RT capture
 static void job_probes(uint32_t pcv, RecState* s) {
@@ -3821,11 +3824,14 @@ static uint32_t _ufd_vert_ubo = 0, _ufd_frag_ubo = 0;   // M1251: per-stage UBO 
                   _vtx[(size_t)_v*32u+8],_vtx[(size_t)_v*32u+9]);
                 printf("\n"); fflush(stdout);} }
             std::vector<float> _vtx_x; unsigned _vc_x = _vc;
+            const bool _isidx = (_icount > 0u && _idata2 != 0u);
             { static int _tg=-1; if(_tg<0){ const char* _e=getenv("P5D_TOPOLOGY"); _tg=(_e&&atoi(_e))?1:0; }
-              if (_tg) { p5d_topology_expand(_vtx, _vc, _ord, _prim, _vtx_x, _vc_x);
+              if (_isidx) { _vtx_x = _vtx; _vc_x = _vc; }   // M1329: indexed draws keep vertex-order geometry
+              else if (_tg) { p5d_topology_expand(_vtx, _vc, _ord, _prim, _vtx_x, _vc_x);
                 if (_vc_x == 0u) { _vtx_x = _vtx; _vc_x = _vc; } }
               else { _vtx_x = _vtx; _vc_x = _vc; } }
-            int _rr = p5d::vulkan::upload_vertex_stream(_vtx_x.data(), (unsigned)(_vc_x*128u), _vc_x);
+            int _rr = 0;
+            if (!_isidx) _rr = p5d::vulkan::upload_vertex_stream(_vtx_x.data(), (unsigned)(_vc_x*128u), _vc_x);
             { static int _tp=-1; if (_tp<0) _tp = (getenv("P5D_TPRD")!=nullptr)?1:0;
               static int _tph=-1; if (_tph<0) _tph = (getenv("P5D_TPRD_HARD")!=nullptr)?1:0;
               if (_tp) {
@@ -3879,8 +3885,20 @@ static uint32_t _ufd_vert_ubo = 0, _ufd_frag_ubo = 0;   // M1251: per-stage UBO 
             // M1323: actually DRAW the content path (its gxm_draw_arrays was only inside the P5D_TPRD
             // diagnostic branch, so normal runs uploaded vertices and never drew them).
             { static int _cd=-1; if(_cd<0){ const char* _e=getenv("P5D_CPUDRAW"); _cd=(_e&&atoi(_e))?1:0; }
-              if (_cd) { p5d::vulkan::gxm_draw_arrays(_vc_x);
-                static int _cdn=0; if(_cdn++<40){ printf("[CPUDRAW] #%d vc=%u vc_x=%u cpub=%d v=%s f=%s rt=%08X n=%u\n", _cdn,_vc,_vc_x,(int)_cpub,_abi_vspv.c_str(),_abi_fspv.c_str(),g_abi_cur_cd,g_main_n); fflush(stdout);} } }
+              if (_cd && (!getenv("P5D_ONLYTEX") || _abi_fspv.find("0084") != std::string::npos)) {
+                if (_isidx) {
+                  // M1329: indexed draw - upload our vertex-order records plus the engine's own index buffer
+                  // and submit an indexed draw so quads (icount=6 over 4 vertices) render both triangles.
+                  const bool _i16 = (_itype2 == 0u);
+                  p5d::vulkan::gxm_draw_indexed_real(_vtx_x.data(), (unsigned)(_vc_x*128u), GP(_idata2),
+                                                     (unsigned)(_icount * (_i16 ? 2u : 4u)), (unsigned)_icount, _i16 ? 1u : 0u);
+                } else {
+                  p5d::vulkan::gxm_draw_arrays(_vc_x);
+                }
+                static int _cdn=0; if(_cdn++<400){ printf("[CPUDRAW] #%d vc=%u vc_x=%u idx=%d ic=%u cpub=%d v=%s f=%s rt=%08X p0=(%.3f,%.3f,%.3f,%.3f) c0=(%.3f,%.3f,%.3f,%.3f) uv0=(%.3f,%.3f) n=%u\n", _cdn,_vc,_vc_x,(int)_isidx,(unsigned)_icount,(int)_cpub,_abi_vspv.c_str(),_abi_fspv.c_str(),g_abi_cur_cd,
+  _vtx.size()>3?_vtx[0]:0.f,_vtx.size()>3?_vtx[1]:0.f,_vtx.size()>3?_vtx[2]:0.f,_vtx.size()>3?_vtx[3]:0.f,
+  _vtx.size()>7?_vtx[4]:0.f,_vtx.size()>7?_vtx[5]:0.f,_vtx.size()>7?_vtx[6]:0.f,_vtx.size()>7?_vtx[7]:0.f,
+  _vtx.size()>9?_vtx[8]:0.f,_vtx.size()>9?_vtx[9]:0.f, g_main_n); fflush(stdout);} } }
 } else { static int _fn=0; if (_fn++<6) { printf("[ABIVTX] FAIL vc=%u attrs=%u cur_obj=%08X streams=%zu n=%u\n", _vc,(unsigned)_av.size(),_cur_vobj,_stm2va.size(),g_main_n); fflush(stdout); } }
         }
       }
