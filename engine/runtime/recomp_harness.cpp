@@ -562,6 +562,20 @@ static bool cpk_read_any_impl(const std::string& nm, std::vector<uint8_t>& out) 
   while (!k.empty() && k[0] == '/') k.erase(k.begin());
   if (g_cpk.contains(k) && g_cpk.read_member(k, out)) return true;
   if (g_cpk2.contains(k) && g_cpk2.read_member(k, out)) return true;
+  // CASEINS: CPK entries are uppercase on disk (e.g. MOVIE/C_P5D000.USM) while the game
+  // asks for lowercase paths (movie/c_p5d000.usm) -> case-insensitive fallback.
+  { auto _ci = [&](const std::string& _k)->std::string {
+      std::string _l = _k; for (char& c : _l) c = (char)std::tolower((unsigned char)c);
+      for (auto& kv : g_cpk.entries()) { std::string e = kv.first; for (char& c : e) c = (char)std::tolower((unsigned char)c);
+        if (e == _l) return kv.first; }
+      for (auto& kv : g_cpk2.entries()) { std::string e = kv.first; for (char& c : e) c = (char)std::tolower((unsigned char)c);
+        if (e == _l) return kv.first; }
+      return std::string(); };
+    static std::map<std::string,std::string> _cim; auto _it=_cim.find(k);
+    std::string _orig = (_it!=_cim.end()) ? _it->second : _ci(k);
+    if (_it==_cim.end()) { _cim[k]=_orig; if(!_orig.empty()) printf("[FIOSCI] %s -> %s\n", k.c_str(), _orig.c_str()); }
+    if (!_orig.empty()) { if (g_cpk.contains(_orig) && g_cpk.read_member(_orig, out)) return true;
+      if (g_cpk2.contains(_orig) && g_cpk2.read_member(_orig, out)) return true; } }
   // 18.3840: the loader prefixes paths with "app0:/data/" ("%s%s/%s.%s%s" with [0x816CDA1C]="/data"),
   // but CPK entries are stored WITHOUT the "data/" prefix (e.g. "title/title_p5.bin") -> retry stripped.
   if (k.size() > 5 && k.compare(0, 5, "data/") == 0) {
@@ -793,6 +807,8 @@ static uint32_t hle_malloc_ret(uint32_t p) {
 }
 namespace p5d { namespace vulkan { void set_texsrc_addr(unsigned int addr); } }   // 18.4514 M969
 extern "C" void p5d_movie_set_frame(const void* bgra, int w, int h);   // 18.4516 M971 (extern "C" in the backend)
+static int g_moviehost_env = -1;   // MOVIEHOST: host fullscreen movie blit layer (default OFF for acceptance)
+static inline int movie_host_on() { if (g_moviehost_env < 0) { const char* _e = getenv("P5D_MOVIEHOST"); g_moviehost_env = (_e && atoi(_e)) ? 1 : 0; } return g_moviehost_env; }
 namespace p5d { namespace vulkan { int save_screenshot(const char* filename); } }   // 18.4516 M971
 static uint32_t hle_malloc(uint32_t n) {
   std::lock_guard<std::mutex> _hlk(g_hle_mtx);
@@ -910,7 +926,7 @@ static void movie_advance_frame(void) {
       unsigned _rgb = (unsigned)std::strtoul(_mt + 6, nullptr, 16);
       unsigned char _b = (unsigned char)(_rgb & 0xFF), _g = (unsigned char)((_rgb >> 8) & 0xFF), _r = (unsigned char)((_rgb >> 16) & 0xFF);
       for (size_t _i = 0; _i < (size_t)g_movie_w * g_movie_h; ++_i) { _dst[_i*4+0]=_b; _dst[_i*4+1]=_g; _dst[_i*4+2]=_r; _dst[_i*4+3]=255; }
-      if (!g_movie_decode_only) p5d_movie_set_frame(_dst, (int)g_movie_w, (int)g_movie_h);
+      if (!g_movie_decode_only && movie_host_on()) p5d_movie_set_frame(_dst, (int)g_movie_w, (int)g_movie_h);
       static int _sn=0; if (_sn++ < 4) { printf("[MOVIE] solid test color=%06X set_frame\n", _rgb); fflush(stdout); }
       ++g_movie_frame; return; } }
   const uint8_t* _y = g_movie_nv12.data();
@@ -942,7 +958,7 @@ static void movie_advance_frame(void) {
           printf("[MOVIECAP] saved %s frame=%ld\n", _fn, g_movie_frame); fflush(stdout); _mc++; } } }
     // 18.4516 M971: also feed the host movie layer - present_frame blits g_movie_img fullscreen over the
     // swapchain image (vkCmdBlitImage), so the real movie frame becomes visible regardless of engine shaders.
-    if (!g_movie_decode_only) p5d_movie_set_frame(_dst, (int)g_movie_w, (int)g_movie_h);
+    if (!g_movie_decode_only && movie_host_on()) p5d_movie_set_frame(_dst, (int)g_movie_w, (int)g_movie_h);
     // MOVIETEX0: in decode-only mode write decoded BGRA into the engine's movie texture data VA
     if (g_movie_decode_only) { uint8_t* _g = GP(0x96900000u);
       if (_g) { std::memcpy(_g, _dst, (size_t)g_movie_w * g_movie_h * 4u);
