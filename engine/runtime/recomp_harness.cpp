@@ -733,7 +733,7 @@ extern "C" void p5d_usse_wr8 (uint32_t va, uint8_t  v) { uint8_t* _p = GP(va); i
 // colours, UVs and textures produced by the original game code while bypassing our old, broken
 // GXP->SPIR-V translations.
 static bool p5d_cpu_vp_apply(std::vector<float>& vtx, unsigned vc, unsigned nattr,
-                             uint32_t gxp_va, uint32_t def_ubo, uint32_t ubo0) {
+                             uint32_t gxp_va, uint32_t def_ubo, const uint32_t* ubuf_in) {
   if (!gxp_va || !vc || !nattr || vtx.size() < (size_t)vc * 32u) return false;
   const UsseProgram* p = usse_get(gxp_va);
   if (!p || !usse_supported(p) || usse_is_fragment(p) || usse_primary_reads_memory(p)) return false;
@@ -744,7 +744,8 @@ static bool p5d_cpu_vp_apply(std::vector<float>& vtx, unsigned vc, unsigned natt
   // clear colour of black (0,0,0,1); the old SPV clear pipeline rendered a bogus gradient triangle.
   const bool _clearish = (vl->o_color0 < 0 && vl->nattrs <= 1);
   UsseDraw d; std::memset(&d, 0, sizeof(d));
-  uint32_t ubuf[14]; std::memset(ubuf, 0, sizeof(ubuf)); ubuf[0] = ubo0;
+  uint32_t ubuf[14]; std::memset(ubuf, 0, sizeof(ubuf));
+  if (ubuf_in) std::memcpy(ubuf, ubuf_in, sizeof(ubuf));
   usse_setup_registers(p, &d, def_ubo, ubuf);
   UsseInst si; std::memset(&si, 0, sizeof(si));
   usse_run_secondary(p, &si, &d);
@@ -3093,6 +3094,8 @@ static std::map<uint32_t, uint32_t> _obj2gxp;   // M1290: patched program object
       static std::map<uint32_t, uint32_t> _stm2va;
       static uint32_t _cur_vobj = 0;
       static uint32_t _cur_v_ubo = 0, _cur_f_ubo = 0, _pend_vout = 0, _pend_fout = 0;
+      static uint32_t _vubuf[16] = {0};   // M1332: per-index vertex user uniform buffers (sceGxmSetVertexUniformBuffer)
+      static uint32_t _fubuf[16] = {0};   // M1332: per-index fragment user uniform buffers
 static uint32_t _last_ufd_ubo = 0;   // M1249: most recent SetUniformDataF target
 static uint32_t _ufd_vert_ubo = 0, _ufd_frag_ubo = 0;   // M1251: per-stage UBO from SetUniformDataF (program stage from GXP flags)   // 18.4507 M962
       static unsigned char _frag_tex[16][16]; static int _frag_tex_n = 0;   // 18.4510 M965: bound fragment textures
@@ -3212,8 +3215,8 @@ static uint32_t _ufd_vert_ubo = 0, _ufd_frag_ubo = 0;   // M1251: per-stage UBO 
         s->r[0]=0; return s->r[14]; }
       if (strcmp(_ge->name, "sceGxmPrecomputedVertexStateInit") == 0) { _preVertObj[s->r[0]].prog=s->r[1]; _preVertObj[s->r[0]].memBlock=s->r[2]; _resolve_prog_spv(s->r[1], false); s->r[0]=0; return s->r[14]; }
       if (strcmp(_ge->name, "sceGxmPrecomputedFragmentStateInit") == 0) { _preFragObj[s->r[0]].prog=s->r[1]; _preFragObj[s->r[0]].memBlock=s->r[2]; _resolve_prog_spv(s->r[1], true); s->r[0]=0; return s->r[14]; }
-      if (strstr(_ge->name, "PrecomputedVertexStateSetUniformBuffer")) { uint32_t _o=s->r[0], _bi=s->r[1], _b=s->r[2]; if(_bi<8u) _preVertObj[_o].ubos[_bi]=_b; _cur_v_ubo=_b; s->r[0]=0; return s->r[14]; }
-      if (strstr(_ge->name, "PrecomputedFragmentStateSetUniformBuffer")) { uint32_t _o=s->r[0], _bi=s->r[1], _b=s->r[2]; if(_bi<8u) _preFragObj[_o].ubos[_bi]=_b; _cur_f_ubo=_b; g_dbg_cur_f_ubo = _cur_f_ubo; s->r[0]=0; return s->r[14]; }
+      if (strstr(_ge->name, "PrecomputedVertexStateSetUniformBuffer")) { uint32_t _o=s->r[0], _bi=s->r[1], _b=s->r[2]; if(_bi<8u) _preVertObj[_o].ubos[_bi]=_b; if(_bi<16u) _vubuf[_bi]=_b; _cur_v_ubo=_b; s->r[0]=0; return s->r[14]; }
+      if (strstr(_ge->name, "PrecomputedFragmentStateSetUniformBuffer")) { uint32_t _o=s->r[0], _bi=s->r[1], _b=s->r[2]; if(_bi<8u) _preFragObj[_o].ubos[_bi]=_b; if(_bi<16u) _fubuf[_bi]=_b; _cur_f_ubo=_b; g_dbg_cur_f_ubo = _cur_f_ubo; s->r[0]=0; return s->r[14]; }
       if (strstr(_ge->name, "PrecomputedVertexStateSetDefaultUniformBuffer")) { _preVertObj[s->r[0]].ubos[0]=s->r[1]; _cur_v_ubo=s->r[1]; s->r[0]=0; return s->r[14]; }
       if (strstr(_ge->name, "PrecomputedFragmentStateSetDefaultUniformBuffer")) { _preFragObj[s->r[0]].ubos[0]=s->r[1]; _cur_f_ubo=s->r[1]; g_dbg_cur_f_ubo = _cur_f_ubo; s->r[0]=0; return s->r[14]; }
       if (strcmp(_ge->name, "sceGxmSetPrecomputedVertexState") == 0) { _curPreVert=s->r[1]; auto _it=_preVertObj.find(s->r[1]); if(_it!=_preVertObj.end() && _it->second.prog){ _cur_vobj=_it->second.prog; _resolve_prog_spv(_it->second.prog,false); if(_it->second.ubos[0]) _cur_v_ubo=_it->second.ubos[0]; }
@@ -3256,7 +3259,7 @@ static uint32_t _ufd_vert_ubo = 0, _ufd_frag_ubo = 0;   // M1251: per-stage UBO 
                   uint32_t _gxp=0; { auto _gi=_obj2gxp.find(_cur_vobj); if(_gi!=_obj2gxp.end()) _gxp=_gi->second; }
                   uint32_t _def=_ufd_vert_ubo; if(!_def && _pend_vout){ uint8_t* _q=GP(_pend_vout); if(_q) std::memcpy(&_def,_q,4); }
                   unsigned _na=(unsigned)_av.size(); if(_na>8u) _na=8u;
-                  _cpub = p5d_cpu_vp_apply(_pvtx, _vc, _na, _gxp, _def, _cur_v_ubo);
+                  _cpub = p5d_cpu_vp_apply(_pvtx, _vc, _na, _gxp, _def, _vubuf);
                   static int _cn2=0; if(_cn2++<24){ printf("[CPUVP] pre #%d obj=%08X gxp=%08X vc=%u nattr=%u ok=%d tex=%d spv=%s\n", _cn2,_cur_vobj,_gxp,_vc,_na,(int)_cpub,(int)_haztex,_abi_vspv.c_str()); fflush(stdout);} } }
               if (_cpub) {
                 bool _texfrag = (_abi_fspv.find("0084") != std::string::npos);
@@ -3804,7 +3807,7 @@ static uint32_t _ufd_vert_ubo = 0, _ufd_frag_ubo = 0;   // M1251: per-stage UBO 
                 for (int _u=0;_u<16;++_u){ for(int _k=0;_k<16;++_k) if(_frag_tex[_u][_k]){ _haztex=true; break; } if(_haztex) break; }
                 uint32_t _gxp=0; { auto _gi=_obj2gxp.find(_cur_vobj); if(_gi!=_obj2gxp.end()) _gxp=_gi->second; }
                 uint32_t _def=_ufd_vert_ubo; if(!_def && _pend_vout){ uint8_t* _q=GP(_pend_vout); if(_q) std::memcpy(&_def,_q,4); }
-                _cpub = p5d_cpu_vp_apply(_vtx, _vc, (unsigned)_av.size(), _gxp, _def, _cur_v_ubo);
+                _cpub = p5d_cpu_vp_apply(_vtx, _vc, (unsigned)_av.size(), _gxp, _def, _vubuf);
                 static int _cn=0; if(_cn++<200){ printf("[CPUVP] #%d obj=%08X gxp=%08X vc=%u nattr=%u ok=%d tex=%d spv=%s\n", _cn,_cur_vobj,_gxp,_vc,(unsigned)_av.size(),(int)_cpub,(int)_haztex,_abi_vspv.c_str());
                   for(size_t _i=0;_i<_av.size() && _i<8;++_i){ uint32_t _st=0; auto _st2b=_vobj2strms.find(_cur_vobj); if(_st2b!=_vobj2strms.end()) for(size_t _k=0;_k<_st2b->second.size();++_k) if(_st2b->second[_k].index==_av[_i].stream){_st=_st2b->second[_k].stride;break;}
                     uint32_t _sv=(_stm2va.count(_av[_i].stream)?_stm2va[_av[_i].stream]:0u);
@@ -3972,7 +3975,7 @@ static uint32_t _ufd_vert_ubo = 0, _ufd_frag_ubo = 0;   // M1251: per-stage UBO 
       if (strstr(_ge->name, "ReserveVertexDefaultUniformBuffer")) { _pend_vout = s->r[1]; }
       if (strstr(_ge->name, "ReserveFragmentDefaultUniformBuffer")) { _pend_fout = s->r[1]; }
       // VUBUF: capture vertex UBO related API calls + all SetUniformDataF ubo addresses
-      { if (strstr(_ge->name, "SetVertexUniformBuffer")) { _cur_v_ubo = s->r[2]; static int _n1=0; if (_n1++<24) { printf("[VUBUF] SetVertexUniformBuffer ctx=%08X idx=%u buf=%08X -> _cur_v_ubo (VUBUF2) n=%u\n", s->r[0], s->r[1], s->r[2], g_main_n); fflush(stdout);} }
+      { if (strstr(_ge->name, "SetVertexUniformBuffer")) { if (s->r[1] < 16u) _vubuf[s->r[1]] = s->r[2]; _cur_v_ubo = s->r[2]; static int _n1=0; if (_n1++<24) { printf("[VUBUF] SetVertexUniformBuffer ctx=%08X idx=%u buf=%08X -> _cur_v_ubo (VUBUF2) n=%u\n", s->r[0], s->r[1], s->r[2], g_main_n); fflush(stdout);} }
         if (strstr(_ge->name, "ReserveVertex")) { static int _n2=0; if (_n2++<24) { printf("[VUBUF] ReserveVertex out=%08X n=%u\n", s->r[1], g_main_n); fflush(stdout);} }
         if (strstr(_ge->name, "ReserveFragment")) { static int _n3=0; if (_n3++<24) { printf("[VUBUF] ReserveFragment out=%08X n=%u\n", s->r[1], g_main_n); fflush(stdout);} }
         if (strstr(_ge->name, "SetUniformDataF")) { static std::set<uint32_t> _seen; uint32_t _u=s->r[0]; if (_seen.find(_u)==_seen.end()) { _seen.insert(_u); printf("[VUBUF] SetUniformDataF NEW ubo=%08X par=%08X coff=%u cnt=%u n=%u (total distinct=%u)\n", _u, s->r[1], s->r[2], s->r[3], g_main_n, (unsigned)_seen.size()); fflush(stdout); } } }
