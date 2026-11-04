@@ -3728,6 +3728,15 @@ SceInt32 upload_vertex_stream(const void* data, SceUInt32 bytes, SceUInt32 verte
 void gxm_draw_arrays(SceUInt32 vertex_count) {
     VkCommandBuffer cmd = g_backend.current_cmd_buffer;
     if (!cmd) { LOGE("gxm_draw_arrays: no current command buffer"); return; }
+    // M1326: correlate every host-issued draw with the uploaded vertex data and the pass target.
+    if (g_draw_call_count < 80) {
+      const float* _v = (const float*)g_backend.vertex_buffer_mapped;
+      std::printf("[GXMD] #%ld vc=%u cmd=%p pipe=%p inRP=%d", g_draw_call_count, (unsigned)vertex_count,
+                  (void*)cmd, (void*)g_current_real_pipe, (int)g_backend.in_render_pass);
+      if (_v) for (int _k = 0; _k < 3 && (SceUInt32)_k < vertex_count; ++_k)
+        std::printf(" v%d=(%.2f,%.2f,%.2f,%.2f)", _k, _v[_k*32+0], _v[_k*32+1], _v[_k*32+2], _v[_k*32+3]);
+      std::printf("\n"); std::fflush(stdout);
+    }
     // M1319: the old "fallback to the hard-coded test_triangle pipeline" drew non-original content
     // (a red/green/blue gradient triangle) whenever no real pipeline was selected.  Log it, and skip
     // the draw entirely unless P5D_TESTFALLBACK=1 (diagnostic only).

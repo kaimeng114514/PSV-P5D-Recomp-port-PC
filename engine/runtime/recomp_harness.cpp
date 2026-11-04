@@ -739,8 +739,10 @@ static bool p5d_cpu_vp_apply(std::vector<float>& vtx, unsigned vc, unsigned natt
   if (!p || !usse_supported(p) || usse_is_fragment(p) || usse_primary_reads_memory(p)) return false;
   const UsseVertexLayout* vl = usse_vertex_layout(p);
   if (!vl || vl->nattrs <= 0 || (unsigned)vl->nattrs > nattr || vl->nattrs > 8) return false;
-  // skip the fullscreen clear-style programs (no colour output, single position attribute)
-  if (vl->o_color0 < 0 && vl->nattrs <= 1 && vl->index_reg < 0) return false;
+  // M1325: clear-style programs (single position attribute, no colour output) ARE bridged: their
+  // primary only computes the clip position and the fragment is the flat bridge with an engine
+  // clear colour of black (0,0,0,1); the old SPV clear pipeline rendered a bogus gradient triangle.
+  const bool _clearish = (vl->o_color0 < 0 && vl->nattrs <= 1);
   UsseDraw d; std::memset(&d, 0, sizeof(d));
   uint32_t ubuf[14]; std::memset(ubuf, 0, sizeof(ubuf)); ubuf[0] = ubo0;
   usse_setup_registers(p, &d, def_ubo, ubuf);
@@ -759,7 +761,7 @@ static bool p5d_cpu_vp_apply(std::vector<float>& vtx, unsigned vc, unsigned natt
     out[0] = vi.o[0].f; out[1] = vi.o[1].f; out[2] = vi.o[2].f; out[3] = vi.o[3].f;
     // M1318: keep the engine's own per-vertex colour / texcoord attributes (the shader may pack the
     // colour into O[4] with a non-obvious lane mapping, while the guest stream is authoritative).
-    if (vl->nattrs < 2) { out[4]=0.0f; out[5]=0.0f; out[6]=0.0f; out[7]=1.0f; }
+    if (_clearish || vl->nattrs < 2) { out[4]=0.0f; out[5]=0.0f; out[6]=0.0f; out[7]=1.0f; }
     if (vl->nattrs < 3) { out[8]=0.0f; out[9]=0.0f; out[10]=0.0f; out[11]=1.0f; }
   }
   return true;
@@ -3867,7 +3869,7 @@ static uint32_t _ufd_vert_ubo = 0, _ufd_frag_ubo = 0;   // M1251: per-stage UBO 
             // diagnostic branch, so normal runs uploaded vertices and never drew them).
             { static int _cd=-1; if(_cd<0){ const char* _e=getenv("P5D_CPUDRAW"); _cd=(_e&&atoi(_e))?1:0; }
               if (_cd) { p5d::vulkan::gxm_draw_arrays(_vc_x);
-                static int _cdn=0; if(_cdn++<24){ printf("[CPUDRAW] #%d vc=%u vc_x=%u n=%u\n", _cdn,_vc,_vc_x,g_main_n); fflush(stdout);} } }
+                static int _cdn=0; if(_cdn++<40){ printf("[CPUDRAW] #%d vc=%u vc_x=%u cpub=%d v=%s f=%s rt=%08X n=%u\n", _cdn,_vc,_vc_x,(int)_cpub,_abi_vspv.c_str(),_abi_fspv.c_str(),g_abi_cur_cd,g_main_n); fflush(stdout);} } }
 } else { static int _fn=0; if (_fn++<6) { printf("[ABIVTX] FAIL vc=%u attrs=%u cur_obj=%08X streams=%zu n=%u\n", _vc,(unsigned)_av.size(),_cur_vobj,_stm2va.size(),g_main_n); fflush(stdout); } }
         }
       }
