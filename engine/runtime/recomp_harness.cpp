@@ -2675,6 +2675,17 @@ static void hf_fiber_thread(HFiber* f) {
       static int _sn=0; if (_sn++<40) { const char* _nm="?"; uint8_t* _q=GP(s->r[0]); if(_q) _nm=(const char*)_q;
         printf("[SCNCALL] pc=%08X name=[%s] a1=%08X a2=%08X hfblk=%u\n", pc, _nm, s->r[1], s->r[2], (unsigned)g_hf_blocks); fflush(stdout); } }
 
+    // M1328: loading-state dump - the game sits in a loading loop for thousands of frames;
+    // dump the loader/manager objects so the total/progress counters and waiting condition are visible.
+    if ((pc & ~1u) == 0x8115A36Au) { static int _ld=-1; if(_ld<0){ const char* _e=getenv("P5D_LOADDBG"); _ld=(_e&&atoi(_e))?1:0; }
+      if(_ld){ static int _ln=0; if((_ln++ % 100)==0){
+        uint32_t _root=0; { uint8_t* _q=GP(0x813366CCu); if(_q) std::memcpy(&_root,_q,4); }
+        printf("[LOADDBG] n=%d root=%08X flagsAF820=", _ln, _root);
+        for(int _k=0;_k<8;++_k){ uint32_t _v=0; uint8_t* _q=GP(0x813AF820u+(uint32_t)_k*4u); if(_q) std::memcpy(&_v,_q,4); printf(" %08X",_v);} printf("\n");
+        for(int _r=0;_r<2;++_r){ uint32_t _base=_r?0x813AF820u:_root; if(!_base) continue;
+          printf("[LOADDBG]  %s %08X:", _r?"flags":"root", _base);
+          for(int _k=0;_k<32;++_k){ uint32_t _v=0; uint8_t* _q=GP(_base+(uint32_t)_k*4u); if(_q) std::memcpy(&_v,_q,4); printf(" %08X",_v);} printf("\n"); }
+        fflush(stdout); } } }
     if ((pc & ~1u) == 0x8115A36Au) {   // M1189: app per-frame callback
       static int _fc = 0; ++_fc;
       static int _re = 0; if (_re < 8 || (_fc % 20000) == 0) {

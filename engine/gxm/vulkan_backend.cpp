@@ -3729,9 +3729,15 @@ void gxm_draw_arrays(SceUInt32 vertex_count) {
     VkCommandBuffer cmd = g_backend.current_cmd_buffer;
     if (!cmd) { LOGE("gxm_draw_arrays: no current command buffer"); return; }
     // M1326: correlate every host-issued draw with the uploaded vertex data and the pass target.
-    if (g_draw_call_count < 80) {
+    // M1327: also sample a LATE frame window (P5D_GXMDFRAME=<frame>) to compare the loading-loop draws
+    // against the first frame.
+    static long _gxmdframe = -2; if (_gxmdframe == -2) { const char* _e = std::getenv("P5D_GXMDFRAME"); _gxmdframe = (_e && *_e) ? std::strtol(_e, nullptr, 10) : -1; }
+    static long _late_n = 0;
+    bool _gxlog = (g_draw_call_count < 80);
+    if (_gxmdframe >= 0 && (long)g_backend.frame_count >= _gxmdframe && (long)g_backend.frame_count <= _gxmdframe + 1 && _late_n < 240) { _gxlog = true; ++_late_n; }
+    if (_gxlog) {
       const float* _v = (const float*)g_backend.vertex_buffer_mapped;
-      std::printf("[GXMD] #%ld vc=%u cmd=%p pipe=%p inRP=%d", g_draw_call_count, (unsigned)vertex_count,
+      std::printf("[GXMD] fc=%llu #%ld vc=%u cmd=%p pipe=%p inRP=%d", (unsigned long long)g_backend.frame_count, g_draw_call_count, (unsigned)vertex_count,
                   (void*)cmd, (void*)g_current_real_pipe, (int)g_backend.in_render_pass);
       if (_v) for (int _k = 0; _k < 3 && (SceUInt32)_k < vertex_count; ++_k)
         std::printf(" v%d=(%.2f,%.2f,%.2f,%.2f)", _k, _v[_k*32+0], _v[_k*32+1], _v[_k*32+2], _v[_k*32+3]);
