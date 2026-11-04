@@ -2618,7 +2618,15 @@ static void hf_fiber_thread(HFiber* f) {
         uint32_t _node=s->r[1]; uint32_t _w0=0,_w1=0,_w2=0,_w3=0; uint8_t* _q=GP(_node);
         if(_q){ std::memcpy(&_w0,_q,4); std::memcpy(&_w1,_q+4,4); std::memcpy(&_w2,_q+8,4); std::memcpy(&_w3,_q+12,4); }
         if (_nw<=40 || (_nw%500)==0) { printf("[NODEW0] n=%d list=%08X node=%08X w0=%08X w1=%08X w2=%08X w3=%08X n=%u\n", _nw, s->r[0], _node, _w0,_w1,_w2,_w3, g_main_n); fflush(stdout); }
-        if (((_w0>=0x811E3000u && _w0<0x811E7000u) || (_w3>=0x811E3000u && _w3<0x811E7000u))) { static int _sp=0; if(_sp++<80) { printf("[SPRNODE] list=%08X node=%08X w0=%08X w1=%08X w2=%08X w3=%08X blk=%08X\n", s->r[0], _node, _w0,_w1,_w2,_w3, g_cur_block); fflush(stdout);} } }
+        if (((_w0>=0x811E3000u && _w0<0x811E7000u) || (_w3>=0x811E3000u && _w3<0x811E7000u))) { static int _sp=0; if(_sp++<80) { printf("[SPRNODE] list=%08X node=%08X w0=%08X w1=%08X w2=%08X w3=%08X blk=%08X\n", s->r[0], _node, _w0,_w1,_w2,_w3, g_cur_block); fflush(stdout);} }
+        if (_w0 >= 0x84000000u && _w0 < 0xA0000000u) {
+            uint32_t _c[8]={0,0,0,0,0,0,0,0}; uint8_t* _cq=GP(_w0 & ~1u);
+            if(_cq) for(int _k=0;_k<8;++_k) std::memcpy(&_c[_k],_cq+_k*4,4);
+            static std::set<uint32_t> _hc; if(_hc.find(_c[0])==_hc.end() && _hc.size()<40){ _hc.insert(_c[0]);
+              printf("[CMDCHAIN] NEWH handler=%08X list=%08X node=%08X chain=%08X words: %08X %08X %08X %08X %08X %08X %08X %08X\n", _c[0], s->r[0], _node, _w0, _c[0],_c[1],_c[2],_c[3],_c[4],_c[5],_c[6],_c[7]); fflush(stdout);}
+            /* SPRCHAIN: registrations whose draw vertex pointer is OUTSIDE the GFD 8F block */
+            if (_c[0]==0x811E44AFu && !(_c[2] >= 0x8F000000u && _c[2] < 0x91000000u)) { static int _sc2=0; if(_sc2++<40){
+              printf("[SPRCHAIN] list=%08X node=%08X chain=%08X vb=%08X words: %08X %08X %08X %08X %08X %08X %08X %08X\n", s->r[0], _node, _w0, _c[2], _c[0],_c[1],_c[2],_c[3],_c[4],_c[5],_c[6],_c[7]); fflush(stdout);} } } }
       else if ((pc & ~1u) == 0x811C0884u) { static int _ex=0; ++_ex; if(_ex<=20 || (_ex%500)==0){ uint32_t _h=0; uint8_t* _q=GP(s->r[0]); if(_q) std::memcpy(&_h,_q,4); printf("[NODEEXEC] n=%d r0=%08X r1=%08X r2=%08X r3=%08X headw0=%08X n=%u\n", _ex, s->r[0],s->r[1],s->r[2],s->r[3],_h, g_main_n); fflush(stdout);} }
       else { static int _lb=0; if(_lb++<8){ printf("[NODEWRAP] r0=%08X r1=%08X r2=%08X r3=%08X n=%u\n", s->r[0],s->r[1],s->r[2],s->r[3], g_main_n); fflush(stdout);} } }
     if ((pc & ~1u) == 0x81163ABCu || (pc & ~1u) == 0x81160814u || (pc & ~1u) == 0x81160516u || (pc & ~1u) == 0x8115FF12u) { // SPRGATE
@@ -2627,6 +2635,10 @@ static void hf_fiber_thread(HFiber* f) {
       else if ((pc & ~1u) == 0x81160814u) { if(_s2++<18) { printf("[SPRGATE] FUN_81160814 n=%d n=%u\n", _s2, g_main_n); fflush(stdout);} }
       else if ((pc & ~1u) == 0x81160516u) { if(_s3++<10) { printf("[SPRGATE] FUN_81160516 n=%d r0=%08X r1=%08X n=%u\n", _s3, s->r[0],s->r[1], g_main_n); fflush(stdout);} }
       else { if(_s4++<10) { printf("[SPRGATE] FUN_8115ff12 n=%d n=%u\n", _s4, g_main_n); fflush(stdout);} } }
+    if ((pc & ~1u) == 0x811E3960u || (pc & ~1u) == 0x811E3B54u) { // SPRCMD
+      static int _c1=0,_c2=0;
+      if ((pc & ~1u) == 0x811E3960u) { if(_c1++<20) { printf("[SPRCMD] FUN_811e3960 n=%d r0=%08X r1=%u r2=%08X r3=%08X r4=%08X r5=%08X\n", _c1, s->r[0],s->r[1],s->r[2],s->r[3],s->r[4],s->r[5]); fflush(stdout);} }
+      else { if(_c2++<20) { printf("[SPRCMD] FUN_811e3b54 n=%d r0=%08X r1=%u r2=%08X r3=%u r4=%u r5=%08X\n", _c2, s->r[0],s->r[1],s->r[2],s->r[3],s->r[4],s->r[5]); fflush(stdout);} } }
     if ((pc & ~1u) == 0x811866A6u) {   // M1186: app movie-slot state machine (0x100 slots, stride 0x60, base DAT_81670B48)
       static int g_mvfast = -1; if (g_mvfast < 0) { const char* _e = getenv("P5D_MOVIEFAST"); g_mvfast = (_e && atoi(_e)) ? 1 : 0; }
       static int _mv = 0; ++_mv;
