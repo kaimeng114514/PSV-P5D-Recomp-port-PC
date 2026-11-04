@@ -25,6 +25,11 @@ static void hle_pump_win_messages(void) {}
 #include <map>
 #include <utility>
 #include <string>
+
+// M1316: Project Nativ USSE decoder/interpreter (GPL-2+, engine/recompiler/nativ_usse)
+extern "C" {
+#include "nativ_usse/usse.h"
+}
 #include <set>
 #include <vector>
 #include <cmath>
@@ -710,6 +715,16 @@ static inline uint8_t* GP(uint32_t va) {
     fprintf(stderr, "\n"); return nullptr; }
   return gp_img + off;
 }
+// M1316: guest-memory accessors for Project Nativ's USSE interpreter/translator (GPL-2+)
+extern "C" uint8_t* p5d_usse_G(uint32_t va) { static uint8_t _z[64] = {0}; uint8_t* _p = GP(va); return _p ? _p : _z; }
+extern "C" uint32_t p5d_usse_rd32(uint32_t va) { uint32_t v = 0; uint8_t* _p = GP(va); if (_p) std::memcpy(&v,_p,4); return v; }
+extern "C" uint16_t p5d_usse_rd16(uint32_t va) { uint16_t v = 0; uint8_t* _p = GP(va); if (_p) std::memcpy(&v,_p,2); return v; }
+extern "C" uint8_t  p5d_usse_rd8 (uint32_t va) { uint8_t v = 0; uint8_t* _p = GP(va); if (_p) v = *_p; return v; }
+extern "C" uint64_t p5d_usse_rd64(uint32_t va) { uint64_t v = 0; uint8_t* _p = GP(va); if (_p) std::memcpy(&v,_p,8); return v; }
+extern "C" void p5d_usse_wr32(uint32_t va, uint32_t v) { uint8_t* _p = GP(va); if (_p) std::memcpy(_p,&v,4); }
+extern "C" void p5d_usse_wr16(uint32_t va, uint16_t v) { uint8_t* _p = GP(va); if (_p) std::memcpy(_p,&v,2); }
+extern "C" void p5d_usse_wr8 (uint32_t va, uint8_t  v) { uint8_t* _p = GP(va); if (_p) *_p = v; }
+
 
 // M1122 IOPUMP_WAIT: drive criFs load state machines from inside blocking delays too.
 // Reason: the guest ACF-read spin loop (FUN_812309A4: while (FUN_8128E9BC(reader,&st), st==1) { FUN_81283C84(); FUN_8127C0E8(10); })
@@ -3143,6 +3158,7 @@ static uint32_t _ufd_vert_ubo = 0, _ufd_frag_ubo = 0;   // M1251: per-stage UBO 
               if(!_ok) break; }
             if (_ok) {
               for (int _u=0;_u<16;++_u){ bool _nz=false; for(int _k=0;_k<16;++_k) if(_frag_tex[_u][_k]){_nz=true;break;} if(!_nz) continue; (void)p5d::vulkan::upload_gxm_control_resolved((unsigned)_u,_frag_tex[_u]); }
+
               if (_cur_v_ubo){ uint8_t* _src=GP(_cur_v_ubo); if(_src) p5d::vulkan::update_uniform_buffer_raw(_src,0x1000u); }
               if (_cur_f_ubo){ uint8_t* _src=GP(_cur_f_ubo); if(_src) p5d::vulkan::update_fragment_uniform_buffer_raw(_src,0x1000u); }
               if (!_abi_vspv.empty() && !_abi_fspv.empty()) { std::string _vp=_abi_spvdir+"/"+_abi_vspv, _fp=_abi_spvdir+"/"+_abi_fspv; (void)p5d::vulkan::select_real_pipeline(_vp.c_str(),_fp.c_str()); }
@@ -3530,6 +3546,50 @@ static uint32_t _ufd_vert_ubo = 0, _ufd_frag_ubo = 0;   // M1251: per-stage UBO 
             printf("[TXTVTX2] #%d ok=%d obj=%08X attrN=%u vc=%u v=%s f=%s:", _tv2, (int)_ok, _cur_vobj, (unsigned)_av.size(), _vc, _abi_vspv.c_str(), _abi_fspv.c_str());
             for(size_t _i=0;_i<_av.size() && _i<3;++_i) printf(" a%zu{fmt=%u comps=%u off=%u stream=%u}", _i,_av[_i].fmt,_av[_i].comps,_av[_i].offset,_av[_i].stream);
             printf("\n"); for(unsigned _v=0;_v<4 && _v<_vc;++_v){ printf("[TXTVTX2]  v%u:", _v); for(size_t _i=0;_i<(_av.size()<3?_av.size():3);++_i) printf(" loc%zu=(%.3f,%.3f,%.3f,%.3f)", _i, _vtx[(size_t)_v*32u+_i*4u], _vtx[(size_t)_v*32u+_i*4u+1], _vtx[(size_t)_v*32u+_i*4u+2], _vtx[(size_t)_v*32u+_i*4u+3]); printf("\n"); } fflush(stdout);} }
+          // M1316: CPU-verify the nativ USSE path for this content draw: decode the vertex GXP, build
+          // the SA block by running its secondary program, pack vertices into PA records and run the
+          // primary program, printing the resulting clip positions.
+          { static int _us=-1; if(_us<0){ const char* _e=getenv("P5D_USSE"); _us=(_e&&atoi(_e))?1:0; }
+            if(_us){ static int _un=0; if(_un++<12){
+              uint32_t _gxp=0; { auto _gi=_obj2gxp.find(_cur_vobj); if(_gi!=_obj2gxp.end()) _gxp=_gi->second; }
+              printf("[USSE] #%d obj=%08X gxp=%08X vspv=%s vc=%u attrN=%u ufd_v=%08X pend_v=%08X cur_v_ubo=%08X\n",
+                     _un,_cur_vobj,_gxp,_abi_vspv.c_str(),_vc,(unsigned)_av.size(),_ufd_vert_ubo,_pend_vout,_cur_v_ubo);
+              if(_gxp){
+                const UsseProgram* _p = usse_get(_gxp);
+                if(_p){
+                  UsseDraw _d; std::memset(&_d,0,sizeof(_d));
+                  uint32_t _ubuf[14]; std::memset(_ubuf,0,sizeof(_ubuf));
+                  _ubuf[0] = _cur_v_ubo;   // M1316: GXP ubinfo reside=0 -> user uniform buffer 0
+                  uint32_t _def = _ufd_vert_ubo;
+                  if(!_def && _pend_vout){ uint8_t* _q=GP(_pend_vout); if(_q) std::memcpy(&_def,_q,4); }
+                  usse_setup_registers(_p,&_d,_def,_ubuf);
+                  UsseInst _si; std::memset(&_si,0,sizeof(_si));
+                  usse_run_secondary(_p,&_si,&_d);
+                  printf("[USSE]  kind=%s supported=%d defUBO=%08X sa:", usse_is_fragment(_p)?"frag":"vert", usse_supported(_p), _def);
+                  for(int _k=0;_k<10;++_k) printf(" %08X(%.4f)", _d.sa[_k].u, _d.sa[_k].f);
+                  printf("\n");
+                  if(!usse_is_fragment(_p)){
+                    const UsseVertexLayout* _vl = usse_vertex_layout(_p);
+                    printf("[USSE]  vl nattrs=%d total_o=%d o_color0=%d\n", _vl->nattrs, _vl->total_o, _vl->o_color0);
+                    for(unsigned _v=0;_v<_vc && _v<4;++_v){
+                      UsseInst _vi; std::memset(&_vi,0,sizeof(_vi));
+                      for(int _i=0;_i<_vl->nattrs && (size_t)_i<_av.size();++_i){
+                        const UsseAttrSlot* _a=&_vl->attrs[_i];
+                        for(int _c=0;_c<_a->comps && _c<4;++_c){
+                          float _fv=_vtx[(size_t)_v*32u+(size_t)_i*4u+(size_t)_c];
+                          if(_a->reg+_c < 160) _vi.pa[_a->reg+_c].u = usse_float_to_lane(_fv, _a->type);
+                        }
+                      }
+                      usse_run_primary(_p,&_vi,&_d,nullptr,nullptr);
+                      printf("[USSE]  v%u pa0=(%.3f,%.3f,%.3f,%.3f) clip=(%.4f,%.4f,%.4f,%.4f) o4=(%.3f,%.3f,%.3f,%.3f)\n",
+                             _v, _vi.pa[0].f,_vi.pa[1].f,_vi.pa[2].f,_vi.pa[3].f,
+                             _vi.o[0].f,_vi.o[1].f,_vi.o[2].f,_vi.o[3].f,
+                             _vi.o[4].f,_vi.o[5].f,_vi.o[6].f,_vi.o[7].f);
+                    }
+                  }
+                }
+              }
+            } } }
           // 18.4521 M976: ENGINE-DRAWN MOVIE - when the bound fragment texture is the 960x544 movie texture,
           // upload our pre-decoded BGRA movie frame as that unit's content, so the ORIGINAL shader draws the movie.
           { static int _me = -1; if (_me < 0) _me = (getenv("P5D_MOVIE_ENGINE") != nullptr) ? 1 : 0;
