@@ -7072,6 +7072,8 @@ static int g_dd4bc_n = 0, g_dd4c8_n = 0;
 static int g_sched_n = 0;
 static int g_de912_n = 0, g_de9ba_n = 0;
 extern "C" void wr64_watch(uint32_t a, uint64_t v) {
+  { if (a >= 0x8F142000u && a < 0x8F144000u) { static int _vb64=0; if(_vb64++<60){ printf("[VBDWR64] a=%08X v=%016llX blk=%08X hle=%08X\n", a, (unsigned long long)v, g_cur_block, g_cur_hle_stub); fflush(stdout);} } }
+
   { if (a >= 0x81670B48u && a < 0x81670B48u + 0x6000u) { static int _sw=0; if(_sw++<80){ printf("[SLOTWR64] a=%08X off=%05X v=%08X blk=%08X hle=%08X thr=%08X\n", a, a-0x81670B48u, v, g_cur_block, g_cur_hle_stub, g_cur_thr); fflush(stdout);} } }
 
   { if (a >= 0x94700000u && a < 0x94740000u) { static int _u64=0; if(_u64++<40){ printf("[USSEW64] a=%08X off=%05X v=%016llX blk=%08X\n", a, a-0x94700000u, (unsigned long long)v, g_cur_block); fflush(stdout);} } }
@@ -7111,6 +7113,8 @@ extern "C" void wr16_watch(uint32_t a, uint32_t v) {
 }
 // M1370: g_dbg_cur_f_ubo mirror defined near top of file
 extern "C" void wr32_watch(uint32_t a, uint32_t v) {
+  { if (a >= 0x8F142000u && a < 0x8F144000u) { static int _vb=0; if(_vb++<120){ printf("[VBDWR] a=%08X v=%08X blk=%08X hle=%08X thr=%08X\n", a, v, g_cur_block, g_cur_hle_stub, g_cur_thr); fflush(stdout);} } }
+
   { if (g_dbg_cur_f_ubo && a >= g_dbg_cur_f_ubo && a < g_dbg_cur_f_ubo + 0x400u && v != 0u) { static int _fw=0; if(_fw++<120){ printf("[FUBOWR] off=%03X v=%08X(%.3f) blk=%08X hle=%08X thr=%08X\n", a-g_dbg_cur_f_ubo, v, *(float*)&v, g_cur_block, g_cur_hle_stub, g_cur_thr); fflush(stdout);} } }
 
   { if (a >= 0x81670B48u && a < 0x81670B48u + 0x6000u && v != 0u) { static int _sw=0; if(_sw++<100){ printf("[SLOTWR] a=%08X slot=%u off=%02X v=%08X blk=%08X hle=%08X thr=%08X\n", a, (a-0x81670B48u)/0x60u, (a-0x81670B48u)%0x60u, v, g_cur_block, g_cur_hle_stub, g_cur_thr); fflush(stdout);} } }
