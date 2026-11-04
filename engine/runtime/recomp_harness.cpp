@@ -6911,12 +6911,16 @@ static void stkw_note(const char* tag, uint32_t a, uint32_t v, int width) {
   fflush(stdout);
 }
 extern "C" void wr8_watch(uint32_t a, uint32_t v) {
+  { if (a >= 0x816CC728u && a < 0x816CC750u) { static int _m8=0; if(_m8++<120){ printf("[MODE730B] wr8 a=%08X v=%02X blk=%08X fib=%08X thr=%08X\n", a, v&0xFF, g_cur_block, g_cur_fiber, g_cur_thr); fflush(stdout);} } }
+
   if (g_sw8_on && ((a >= g_stkw_lo && a < g_stkw_hi) || (a >= 0x84856500u && a < 0x848565A0u))) stkw_note("w8", a, v, 8);
   { static int _ow=0; if (a >= 0x84D2AA90u && a < 0x84D2AB40u && _ow++ < 120) { printf("[OBJW8] a=%08X off=%03X v=%02X blk=%08X fib=%08X thr=%08X\n", a, a-0x84D2AAA0u, v, g_cur_block, g_cur_fiber, g_cur_thr); fflush(stdout); } }
   { static int _rg=0; if ((a >= 0x816CDB80u && a < 0x816CDBA0u) && _rg++ < 60) { printf("[REGWR8] a=%08X v=%02X blk=%08X fib=%08X thr=%08X\n", a, v, g_cur_block, g_cur_fiber, g_cur_thr); fflush(stdout); } }
   { static int _all=0; if (a == 0x84D2AAA4u && _all++ < 20) { printf("[STATEW8] v=%02X blk=%08X fib=%08X thr=%08X sp=%08X\n", v, g_cur_block, g_cur_fiber, g_cur_thr, g_snap_r[13]); fflush(stdout); } }
 }
 extern "C" void wr16_watch(uint32_t a, uint32_t v) {
+  { if (a >= 0x816CC728u && a < 0x816CC750u) { static int _m16=0; if(_m16++<120){ printf("[MODE730B] wr16 a=%08X v=%04X blk=%08X fib=%08X thr=%08X\n", a, v&0xFFFF, g_cur_block, g_cur_fiber, g_cur_thr); fflush(stdout);} } }
+
   if (g_sw8_on && ((a >= g_stkw_lo && a < g_stkw_hi) || (a >= 0x84856500u && a < 0x848565A0u))) stkw_note("w16", a, v, 16);
   { static int _ow=0; if (a >= 0x84D2AA90u && a < 0x84D2AB40u && _ow++ < 200) { printf("[OBJW16] a=%08X off=%03X v=%04X blk=%08X fib=%08X thr=%08X\n", a, a-0x84D2AAA0u, v, g_cur_block, g_cur_fiber, g_cur_thr); fflush(stdout); } }
   { if (a >= 0x84600000u && a < 0x84600080u) { static int _tw=0; if (_tw++ < 40) { printf("[TLSWR16] a=%08X v=%04X blk=%08X fib=%08X thr=%08X\n", a, v, g_cur_block, g_cur_fiber, g_cur_thr); fflush(stdout); } } }
@@ -6924,6 +6928,8 @@ extern "C" void wr16_watch(uint32_t a, uint32_t v) {
       if (g_w16_n++ < 240) { printf("[W16] a=%08X off=%02X v=%04X blk=%08X fib=%08X thr=%08X\n", a, a - g_watch_task, v, g_cur_block, g_cur_fiber, g_cur_thr); fflush(stdout); } } }
 }
 extern "C" void wr32_watch(uint32_t a, uint32_t v) {
+  { if (a >= 0x816CC728u && a < 0x816CC750u) { static int _m7=0; static uint32_t _last[10]={0,0,0,0,0,0,0,0,0,0}; int _i=(int)((a-0x816CC728u)>>2); if(_i>=0&&_i<10){ if(_last[_i]!=v || _m7<12){ _last[_i]=v; if(_m7++<200){ printf("[MODE730] wr a=%08X v=%08X blk=%08X fib=%08X thr=%08X\n", a, v, g_cur_block, g_cur_fiber, g_cur_thr); fflush(stdout);} } } } }
+
   { static int _nw=0; if (a >= 0x8F000000u && a < 0x8F600000u && _nw++<200) { printf("[NODEWR32] a=%08X v=%08X blk=%08X fib=%08X thr=%08X\n", a, v, g_cur_block, g_cur_fiber, g_cur_thr); fflush(stdout); } }
 
   { static int _fw=0; if ((v==0x44700000u || v==0x44080000u) && _fw++<60) { printf("[FW960] a=%08X v=%08X blk=%08X fib=%08X thr=%08X lr=%08X sp=%08X\n", a, v, g_cur_block, g_cur_fiber, g_cur_thr, g_cur_hle_ret_lr, g_snap_r[13]); fflush(stdout); } }
