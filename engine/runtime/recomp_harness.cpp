@@ -27,6 +27,14 @@ static void hle_pump_win_messages(void) {}
 #include <string>
 
 // M1316: Project Nativ USSE decoder/interpreter (GPL-2+, engine/recompiler/nativ_usse)
+extern "C" void p5d_geom_dbg(int tag, float a, float b, float c, float d,
+                             float e, float f, float g, float h2) {
+  static int _n1=0,_n2=0;
+  int* n = (tag==1)?&_n1:&_n2;
+  if (*n < 8) { ++*n;
+    std::printf("[GEOMDBG] tag=%d n=%d v=(%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f)\n",
+                tag,*n,a,b,c,d,e,f,g,h2); std::fflush(stdout); }
+}
 extern "C" {
 #include "nativ_usse/usse.h"
 }
@@ -3807,6 +3815,19 @@ static uint32_t _ufd_vert_ubo = 0, _ufd_frag_ubo = 0;   // M1251: per-stage UBO 
                 for (int _u=0;_u<16;++_u){ for(int _k=0;_k<16;++_k) if(_frag_tex[_u][_k]){ _haztex=true; break; } if(_haztex) break; }
                 uint32_t _gxp=0; { auto _gi=_obj2gxp.find(_cur_vobj); if(_gi!=_obj2gxp.end()) _gxp=_gi->second; }
                 uint32_t _def=_ufd_vert_ubo; if(!_def && _pend_vout){ uint8_t* _q=GP(_pend_vout); if(_q) std::memcpy(&_def,_q,4); }
+                if (_abi_fspv.find("0084") != std::string::npos) {
+                  static int _ubo_n=0; if(_ubo_n++<8){
+                    printf("[UBODIAG] #%d vub0=%08X vub1=%08X ufd=%08X curv=%08X pendv=%08X def=%08X\n",
+                      _ubo_n,_vubuf[0],_vubuf[1],_ufd_vert_ubo,_cur_v_ubo,_pend_vout,_def);
+                    const uint32_t* _bs[4]={_vubuf[0]?&_vubuf[0]:nullptr,_ufd_vert_ubo?&_ufd_vert_ubo:nullptr,_cur_v_ubo?&_cur_v_ubo:nullptr,_def?&_def:nullptr};
+                    (void)_bs;
+                    uint32_t _addrs[4]={_vubuf[0],_ufd_vert_ubo,_cur_v_ubo,_def};
+                    const char* _nm[4]={"vub0","ufd","curv","def"};
+                    for(int _bi=0;_bi<4;++_bi){ if(!_addrs[_bi]) continue; uint8_t* _q=GP(_addrs[_bi]);
+                      printf("[UBODIAG]  %s %08X floats:",_nm[_bi],_addrs[_bi]);
+                      if(_q) for(int _k=0;_k<16;++_k){ float _f=0; std::memcpy(&_f,_q+_k*4,4); printf(" %.4f",_f);} 
+                      printf("\n"); }
+                    fflush(stdout); } }
                 _cpub = p5d_cpu_vp_apply(_vtx, _vc, (unsigned)_av.size(), _gxp, _def, _vubuf);
                 static int _cn=0; if(_cn++<200){ printf("[CPUVP] #%d obj=%08X gxp=%08X vc=%u nattr=%u ok=%d tex=%d spv=%s\n", _cn,_cur_vobj,_gxp,_vc,(unsigned)_av.size(),(int)_cpub,(int)_haztex,_abi_vspv.c_str());
                   for(size_t _i=0;_i<_av.size() && _i<8;++_i){ uint32_t _st=0; auto _st2b=_vobj2strms.find(_cur_vobj); if(_st2b!=_vobj2strms.end()) for(size_t _k=0;_k<_st2b->second.size();++_k) if(_st2b->second[_k].index==_av[_i].stream){_st=_st2b->second[_k].stride;break;}
