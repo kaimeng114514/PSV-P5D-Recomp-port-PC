@@ -1311,6 +1311,28 @@
 | M1295 | §18.4837: ★★★★★★★★★★★★ **节点命令链结构完全解出（只有 3 种 handler）+ sprite 绘制命令生成确认 + 重大发现：全程只用了 3 种 shader 管线、无任何带纹理管线被使用 ⇒ TGA logo 图从未被采样，画面只能输出顶点色 quad**。① CMDCHAIN（按 handler 去重）全程只有 3 种命令链：`811E537B`（无参数设置命令）、`811E52D9`（参数 00040005/00010000 的设置命令）、**`811E44AF`（= 我们 M1279 补回的"设置顶点流"handler）**；draw 链结构固定：`[811E44AF, 0, vb1, 811E44D1, 0,0, vb2, mode=6]`（811E44D1 = FUN_811E44D0 绘制 handler）。② SPRCMD：`FUN_811e3b54`（GFD 图元命令生成器）被调用 20+ 次，参数 `(frame=84602050, type=3, count=4, verts=8F142130/8F343040/8F544040…, mode=6)` ⇒ **UI quad 绘制命令确实在生成，且顶点缓冲统一写入 8F142xxx/8F343xxx/8F544xxx 的 GFD USSE 块**（与 fade quad 同区域）。③ SPRCHAIN=0：全部 811E44AF draw 链的顶点缓冲都在 8F000000-0x91000000 区间，没有独立的 sprite 顶点区 ⇒ 所有 quad（含 UI sprite）共用 GFD USSE 顶点缓冲。④ **关键发现**：整段运行实际使用的 shader 管线只有 3 对：`vert_0000+frag_0000`(10 次)、`vert_0014+frag_0076`(34 次)、`vert_0014+frag_0079`(1 次)；**没有任何带纹理采样的管线被使用**（frag_0076/0079 SPIR-V 均无 Image/Sample 指令）⇒ 已加载的 atluslogo/crilogo/p-studio TGA 纹理**从未被任何 shader 采样**；结合 §18.4833/§18.4834（顶点色 RGB 恒 0），画面只能是黑块/透明块。⑤ 这就解释了为什么 LOGO 仍黑：**图像采样管线（应该带纹理的那个）从未被选中**——大概率对应 boot 时用 `PrecomputedFragmentStateSetTexture` 绑定纹理、`PrecomputedDrawInit/SetParams/SetStream` 预构建的 3 个 precomputed draw（draw=8F745F3C idxCount=252 等），而 `DrawPrecomputed` 从未被调用（PREDRAW=0）。⑥ 下一轮：a) 继续追 GFD 精灵绘制路径，确认带纹理绘制应该走哪条命令链/handler（把 CMDCHAIN 捕获窗口扩大/按帧重扫，避免 40 条去重上限漏掉后期 UI 节点）b) 解码 frag_0076 函数体，确认是否真是纯色直通 c) 检查 precomputed draw 的调用条件（GXM 命令链中 DrawPrecomputed handler 应在 811E4xxx/811E5xxx，可反编译相关 handler）d) 目标：让 UI 精灵走带纹理管线，使 TGA logo 显示 |
 | M1296 | §18.4838: ★★★★★★★★★★★★ **GXM API 全量统计（61 个 API）+ 决定性发现：`sceGxmSetFragmentTexture`/`sceGxmSetVertexTexture`/`sceGxmDrawPrecomputed`/`sceGxmSetPrecomputedVertexState` 全程调用次数全部为 0 ⇒ 纹理绑定与预计算绘制都没走 GXM API —— 结合 GFD 命令 handler 直接写 GXM context 结构体（0x816CBC08+0x240..0x253 顶点格式字段），推断 GFD 是**直接操作 context 内存**来设置状态/纹理，而我们的纹理捕获只基于 API 调用，所以永远为空**。① GXMSTATS（604 presents）关键计数：`ShaderPatcherGetProgramFromId=133649`、`ProgramFindParameterByName=116329`、`ParameterGetCategory=30488`、`FindParameterBySemantic=16786`、`GetResourceIndex=15683`、`RegisterProgram=4331`、`CreateVertexProgram=3236`、`CreateFragmentProgram=2167`、**`sceGxmDraw=3139`、`SetVertexStream=3139`**、`SetVertexProgram=1796`、`SetFragmentProgram=1797`、`SetUniformDataF=1197`、`SetVertexUniformBuffer=1197`、`BeginScene/EndScene=1197`、`DisplayQueueAddEntry=600`、`TextureInitLinear=541`、`TextureInitSwizzled=35`、`TextureInitTiled=2`、`PrecomputedDrawInit/SetParams=12`、`PrecomputedVertexStateInit=24`、`PrecomputedFragmentStateSetTexture=2`；**`sceGxmSetFragmentTexture=0`、`sceGxmSetVertexTexture=0`、`sceGxmDrawPrecomputed=0`、`sceGxmSetPrecomputedVertexState/FragmentState=0`**。② 但 ABI 表映射确认无误（812B12C0→SetFragmentTexture、812B1740→DrawPrecomputed 等均在表中）⇒ 游戏确实从不调用这些 API。③ GFD 命令 handler 反编译（811E52D8/811E537A/811E53D4）显示它们**直接写 GXM context 结构体**：`movw r12,#0xbc08; movt r12,#0x816c`（=0x816CBC08）后写 `[r12,#0x240]`、`[r12,#0x244]`、`[r12,#0x248]`、`[r12,#0x250..0x253]` 等字段（顶点格式/属性描述表 → `DAT_813B1BF8/1C2C/1C40`），并读 `[r12,#0x220]` 若非零调 0x811F043E。④ NODEMEMCPY 证实 sprite quad 顶点数据正确写入：`dst=8F343040 srcw=44700000(960.0) …`、`dst=8F343050 srcw=44700000 44080000(960,544)`、`dst=8F343060 srcw=0 44080000(0,544)`，`callerLR=81163A48`（FUN_81163abc 内）⇒ UI 全屏 quad 顶点布局正确。⑤ 结论/下一轮：a) 从 Vita3K `types.h` 取 SceGxmContext 结构布局，在 content draw 时**直接读 guest context（0x816CBC08）里的纹理单元/状态字段**，替代只靠 API 捕获的 `_frag_tex` b) 确认 GFD 往 context 写了哪些纹理控制块（sp 附近内容/偏移）c) 把读到的纹理喂给现有 upload_gxm_control_resolved，使 UI sprite 走带纹理管线 d) 顺便：本轮遇到一次 **PRES=0 早停竞态**（同二进制重跑正常 604 presents），继续记录待后续修复 |
 | M1297 | §18.4839: ★★★★★★★★★★★★ **澄清"context 结构体"归属 + sprite 顶点变换细节：0x816CBC08 是 GFD 自己的状态/队列结构（真实 GXM context 指针是 85410040）；NODEMEMCPY 显示 sprite quad 顶点经 FUN_81163abc→FUN_8116397a 变换后写入 GFD USSE 顶点缓冲 8F343030..060，位置 (0,0)(0,0)(960,0)(0,544)，但每个顶点第 4 个 word（颜色/UV 槽）变换结果为 0 —— 即使 FUN_811610a4 传入 color=0xFFFFFFFF，说明颜色/纹理信息不是走顶点色，而应在别处（参数/UBO/预计算纹理）**。① 澄清：GFD 命令 handler（811E52D8/537A/53D4）里的 `r12=0x816CBC08` 是 **GFD 引擎自己的状态结构**（写 +0x240..0x253 顶点格式描述），不是 GXM context；真实 GXM context 指针从 DRAWLRC 可知为 **0x85410040**（sceGxmSetVertexUniformBuffer 等 ctx 参数）。② sprite 提交链再确认：FUN_811610a4（此轮反汇编调用点，0x81161282-0x811612A6）：`r0=0, r1=sp+0x54(顶点数组), r2=4(数量), r3=sp+0x8(&local_f0), [sp]=6(param_5), [sp+4]=0(param_6)` → `bl 0x81163abc`；param_4/param_5 均非零 ⇒ 注册不会被跳过；`FUN_81160814` gate 返回非 0 才调用。③ NODEMEMCPY（callerLR=81163A48=FUN_81163abc 内 memcpy）：写入 16B 顶点：
+| M1298 | §18.4840: ★★★★★★★★★★★★ **GFD 状态结构 0x816CBC08 布局首次 dump 出关键字段（屏幕 960x544 stride1024、GXM context=85410040、当前 RT=8CF00000、+0x220..0x244 为 36 个 GXP program 指针数组 8153xxxx）+ sprite 顶点变换函数 FUN_8116397a 解码：输入 24B/顶点(x,y,z,color,u,v) → 输出 16B/顶点(x,y,z,color) + 独立索引缓冲（2B/索引），UV 被丢弃 ⇒ UI 图元管线是纯颜色管线**。① GFD 状态结构 dump（content draw 时，0x816CBC08）：
+```
++000: 000003C0 00000220 00000400 00000001   → w=960, h=544, stride=1024, fmt?
++008: 000003C0 00000220 00000000 022003C0
++010: 3F000000 ... 3F000000                 → 0.5f 相关（投影/缩放）
++018: 85293140 85410040 84600A50 00000000   → +0x1C = **85410040（GXM context）**
++01C/+01F 区域还有 85420040、8130C868 等
++034: 8CF00000                              → 当前 render target data
++220..0x244: 8153C058 8153C7DC 8153C2CC 8153C538 8153C068 …
+             → **36 个 GXP program 指针数组**（8153xxxx 区段）
++244: 8153A948 / +254: 8153DE7C 等           → program/参数集指针
+```
+② FUN_8116397a（顶点/索引变换）反编译：
+```
+输入：param_3 = 源顶点数组（stride 0x18=24B：x,y,z,color,u,v）
+输出：vertex buffer stride 0x10=16B（x,y,z,color）
+      index buffer（每索引 2B，由 FUN_81163900 生成）
+循环：FUN_811e6a4c(dst, src, 0x10) 每次拷 16B；src 前进 0x18
+⇒ **UV（偏移 16/20）不进入顶点数据**；UI 图元是 (位置+颜色) 的纯色管线
+```
+③ 下一轮：a) 在 FUN_811610a4 调用 FUN_81163abc 前 dump local_a4 4×6 floats，确认传入的 color=0xFFFFFFFF 与 uv 值 b) 追踪 FUN_8116397a 中颜色 word 是否被 FUN_811638a6/FUN_81163900 清零，或源顶点本身 color=0 c) 若 UI 确实只用纯色，则 TGA logo 一定由**另一条带纹理路径**绘制——继续在 GFD 状态/命令链中找纹理控制块（本轮 dump 的 +0x220 区是 program 指针，不是纹理）d) 结合 §18.4837 结论，下一轮重点：找 GFD 里 **SetFragmentTexture 等价命令**（可能由 GFD 内部执行而非走 GXM import） |
+| §18.4840 | First dump of the GFD state struct 0x816CBC08 layout (screen 960x544 stride 1024, GXM context=85410040, current RT=8CF00000, and +0x220..0x244 holding an array of 36 GXP program pointers 8153xxxx) + decoded the sprite vertex-transform function FUN_8116397a: input 24B/vertex (x,y,z,color,u,v) -> output 16B/vertex (x,y,z,color) plus a separate index buffer (2B/index), with UVs dropped, so the UI primitive pipeline is a pure-color pipeline. (1) GFD state dump at content draw (0x816CBC08): +0x000 = 000003C0 00000220 00000400 00000001 (w=960, h=544, stride=1024); +0x010 contains 3F000000 ... 3F000000 (0.5f related projection/scale); +0x018 = 85293140 85410040 84600A50 00000000 with +0x1C = 85410040 (GXM context) and 85420040/8130C868 nearby; +0x034 = 8CF00000 (current render target data); +0x220..0x244 = array of 36 GXP program pointers (8153C058 8153C7DC 8153C2CC 8153C538 8153C068 ...); +0x244 = 8153A948 / +0x254 = 8153DE7C etc. (program/parameter-set pointers). (2) FUN_8116397a (vertex/index transform) decompilation: input param_3 = source vertex array (stride 0x18=24B: x,y,z,color,u,v); output vertex buffer stride 0x10=16B (x,y,z,color) plus an index buffer (2B per index, generated by FUN_81163900); loop FUN_811e6a4c(dst, src, 0x10) copies 16B per vertex with src advancing 0x18, so UVs (offsets 16/20) never enter vertex data; the UI primitive pipeline is pure position+color. (3) Next round: (a) dump local_a4's 4x6 floats just before FUN_811610a4 calls FUN_81163abc to confirm the passed color=0xFFFFFFFF and UV values; (b) trace whether the color word is zeroed by FUN_811638a6/FUN_81163900 during FUN_8116397a, or whether the source vertex color is already 0; (c) if the UI is really pure-color, the TGA logos must be drawn by a separate textured path - keep looking for texture control blocks in GFD state/command chains (the +0x220 area dumped this round is program pointers, not textures); (d) combined with 18.4837, focus next on finding the GFD equivalent of SetFragmentTexture (possibly executed inside GFD rather than through the GXM import). |
 ```
 dst=8F343030 srcw=00000000 00000000 00000000 00000000
 dst=8F343040 srcw=00000000 00000000 00000000 00000000
@@ -510362,3 +510384,37 @@ D) 若纹理在某 handler 里设置，按真实布局捕获并喂给后端
 ANTI-FORGETTING ENTRY. Keywords: M1297 context struct clarification 0x816CBC08 is GFD own state struct not GXM context, real GXM context pointer 85410040, GFD handlers write vertex format descriptors +0x240..0x253, sprite submission call site FUN_811610a4 disasm 81161282-811612A6 r0=0 r1=sp+0x54 r2=4 r3=sp+0x8 stack 6 0 bl 81163abc, NODEMEMCPY callerLR 81163A48 vertices dst 8F343030 8F343040 8F343050 8F343060 positions (0,0)(0,0)(960,0)(0,544) word at offset 12 color/UV slot all zero even though color 0xFFFFFFFF passed, so color/texture not in vertex data, next decompile FUN_8116397a vertex transform FUN_811e3b54 command generator, dump GFD state struct 0x816CBC08 0x400 bytes at content draw find texture control blocks colors, capture textures real layout feed backend. Verification: out_gxmstats3.txt NODEMEMCPY section, ghidra f811610a4.txt disassembly.
 
 LOOKUP: M1297 0x816CBC08 GFD own state struct real context 85410040, sprite vertices color slot zero, next FUN_8116397a FUN_811e3b54 decompile dump GFD state struct textures -> 18.4838 [relevant: API stats], 18.4837 [relevant: command chains], 18.4836 [relevant: sprite submission]
+### 18.4840 PORT M1298: GFD 状态结构首 dump + sprite 顶点变换解出（UV 被丢弃，纯色管线）
+
+1) GFD 状态结构 0x816CBC08（content draw 时 dump）：
+```
++000: 000003C0 00000220 00000400 00000001   → w=960 h=544 stride=1024
++010: 3F000000 … 3F000000                   → 0.5f 缩放/投影相关
++018: 85293140 85410040 84600A50 00000000   → +0x1C = 85410040（GXM context）
++034: 8CF00000                              → 当前 RT data
++220..0x244: 8153C058 8153C7DC 8153C2CC 8153C538 8153C068 …
+             → 36 个 GXP program 指针数组
++244: 8153A948 / +254: 8153DE7C 等           → program/参数集指针
+```
+2) FUN_8116397a（顶点/索引变换）：
+```
+输入 param_3 = 源顶点数组 stride 0x18=24B：x,y,z,color,u,v
+输出 vertex buffer stride 0x10=16B：x,y,z,color
+      + index buffer（2B/索引，FUN_81163900 生成）
+循环 FUN_811e6a4c(dst, src, 0x10)，src += 0x18
+⇒ UV（偏移 16/20）不进入顶点数据
+⇒ UI 图元 = (位置+颜色) 纯色管线
+```
+3) 下一轮：
+```
+A) FUN_811610a4 调 FUN_81163abc 前 dump local_a4 4×6 floats（确认 color=0xFFFFFFFF/uv）
+B) 追 FUN_8116397a 中 color word 是否被 FUN_811638a6/FUN_81163900 清零，或源顶点 color 本就 0
+C) 若 UI 确实纯色，TGA logo 一定由另一条带纹理路径绘制 —— 继续在 GFD 状态/命令链找纹理控制块
+   （本轮 +0x220 区是 program 指针，不是纹理）
+D) 结合 §18.4837：重点找 GFD 内部 SetFragmentTexture 等价命令（可能不经 GXM import）
+```
+验证：`out_gfdstate.txt`、Ghidra `f8116397a.txt`。
+
+ANTI-FORGETTING ENTRY. Keywords: M1298 GFD state struct 0x816CBC08 dump screen 960x544 stride 1024 GXM context 85410040 RT 8CF00000, +0x220..0x244 36 GXP program pointers 8153C058 8153C7DC 8153C2CC 8153C538 8153C068, +0x244 8153A948 +0x254 8153DE7C, FUN_8116397a vertex transform input 24B stride x y z color u v output 16B x y z color + separate 2B index buffer FUN_81163900, UV dropped pure color UI pipeline, memcpy FUN_811e6a4c 0x10 src += 0x18, next dump local_a4 4x6 floats color 0xFFFFFFFF uv, FUN_811638a6 FUN_81163900 zero color, TGA textured path elsewhere find texture control block GFD internal SetFragmentTexture equivalent. Verification: out_gfdstate.txt, ghidra f8116397a.txt.
+
+LOOKUP: M1298 GFD state 0x816CBC08 layout + 36 program pointers, sprite transform drops UV pure color, next dump local_a4 color/uv and find textured LOGO path -> 18.4839 [relevant: context clarification], 18.4838 [relevant: API stats], 18.4837 [relevant: command chains]

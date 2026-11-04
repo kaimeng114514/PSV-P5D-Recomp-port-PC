@@ -3531,7 +3531,11 @@ static uint32_t _ufd_vert_ubo = 0, _ufd_frag_ubo = 0;   // M1251: per-stage UBO 
                 float _c0=_vtx.size()>4?_vtx[4]:0.f, _c1=_vtx.size()>5?_vtx[5]:0.f, _c2=_vtx.size()>6?_vtx[6]:0.f, _c3=_vtx.size()>7?_vtx[7]:0.f;
                 if(_c0!=_last[0]||_c1!=_last[1]||_c2!=_last[2]||_c3!=_last[3]){ _last[0]=_c0;_last[1]=_c1;_last[2]=_c2;_last[3]=_c3;
                   if(_vcn++<60){ printf("[VTXCOLOR] #%d vc=%u obj=%08X color0=(%.3f,%.3f,%.3f,%.3f) va=%08X n=%u\n", _vcn,_vc,_cur_vobj,_c0,_c1,_c2,_c3, _stm2va.count(0)?_stm2va[0]:0u, g_main_n); fflush(stdout);} } } }
-            { static int _vd2=-1; if(_vd2<0){ const char* _e=getenv("P5D_VTXDUMP"); _vd2=(_e&&atoi(_e))?1:0; }
+            { static int _gs=-1; if(_gs<0){ const char* _e=getenv("P5D_GFDSTATE"); _gs=(_e&&atoi(_e))?1:0; }
+              if(_gs && s->r[14]==0x811E45B6u){ static int _gsn=0; if(_gsn++<2){ printf("[GFDSTATE] draw#%d ctxbase=816CBC08\n", _gsn);
+                for(int _r=0;_r<0x30;_r+=8){ printf("[GFDSTATE] +%03X:", _r); for(int _k=0;_k<8;++_k){ uint32_t _w=0; uint8_t* _q=GP(0x816CBC08u+(_r+_k)*4u); if(_q) std::memcpy(&_w,_q,4); printf(" %08X",_w);} printf("\n"); }
+                for(int _r=0x220;_r<0x280;_r+=8){ printf("[GFDSTATE] +%03X:", _r); for(int _k=0;_k<8;++_k){ uint32_t _w=0; uint8_t* _q=GP(0x816CBC08u+(_r+_k)*4u); if(_q) std::memcpy(&_w,_q,4); printf(" %08X",_w);} printf("\n"); }
+                fflush(stdout);} } }            { static int _vd2=-1; if(_vd2<0){ const char* _e=getenv("P5D_VTXDUMP"); _vd2=(_e&&atoi(_e))?1:0; }
               if(_vd2 && s->r[14]==0x811E45B6u){ static int _vdn=0; if(_vdn++<8){ printf("[VTXDUMP] draw vc=%u attrN=%u cur_obj=%08X\n", _vc,(unsigned)_av.size(),_cur_vobj);
                 auto _st2=_vobj2strms.find(_cur_vobj);
                 if(_st2!=_vobj2strms.end()) for(size_t _k=0;_k<_st2->second.size() && _k<8;++_k) printf("[VTXDUMP]  strm%zu stride=%u idx=%u\n",_k,_st2->second[_k].stride,_st2->second[_k].index);
