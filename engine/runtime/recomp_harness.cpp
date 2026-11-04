@@ -2721,6 +2721,10 @@ static void hf_fiber_thread(HFiber* f) {
       static int _cj=0; bool _pl=(_cj<24); ++_cj; if(_pl){ printf("[CONVJOB] #%d job=%08X n=%u\n", _cj, s->r[0], g_main_n); fflush(stdout);} }
     if ((pc & ~1u) == 0x811E649Au) { // JOBDISP: FUN_811e649a(queue,desc)
       static int _jd=0; if(_jd++<24){ printf("[JOBDISP] #%d q=%u desc=%08X cb=%08X n=%u\n", _jd, s->r[0], s->r[1], s->r[2], g_main_n); fflush(stdout);} }
+    if ((pc & ~1u) == 0x811E68FCu) { // WORKERWK: job worker returned from WaitSema
+      static int _wk=0; if(_wk++<40){ printf("[WORKERWK] #%d tid=%08X fib=%08X lr=%08X blk=%u\n", _wk, g_cur_thr, g_cur_fiber, s->r[14], (unsigned)g_hf_blocks); fflush(stdout);} }
+    if ((pc & ~1u) == 0x811E6934u) { // WORKERCB: worker about to call job callback (blx r1)
+      static int _wc=0; if(_wc++<40){ printf("[WORKERCB] #%d tid=%08X cb=%08X arg=%08X lr=%08X blk=%u\n", _wc, g_cur_thr, s->r[1], s->r[0], s->r[14], (unsigned)g_hf_blocks); fflush(stdout);} }
     if ((pc & ~1u) == 0x811866A6u) {   // M1186: app movie-slot state machine (0x100 slots, stride 0x60, base DAT_81670B48)
       static int g_mvfast = -1; if (g_mvfast < 0) { const char* _e = getenv("P5D_MOVIEFAST"); g_mvfast = (_e && atoi(_e)) ? 1 : 0; }
       static int _mv = 0; ++_mv;
@@ -4648,6 +4652,7 @@ static uint32_t _ufd_vert_ubo = 0, _ufd_frag_ubo = 0;   // M1251: per-stage UBO 
       if (tl_is_hfiber) { static int _sf=0; uint32_t _o=s->r[0]; if ((_o & 0xFFFF0000u)==0x50010000u && _sf++<400) { uint32_t _h=(g_sema.count(_o)?g_sema[_o]:0u); printf("[SEMFIB] WAIT obj=%08X need=%u have=%u lr=%08X pc=%08X\n", _o, s->r[1], _h, s->r[14], g_cur_block); fflush(stdout); } }
       if (g_main_n >= 59000000u) { static int _ws_n=0; if (_ws_n++ < 200) { uint32_t _o=s->r[0],_nd=s->r[1]; uint32_t _h=(g_sema.count(_o)?g_sema[_o]:0u); printf("[WAITSEMA57] obj=%08X need=%08X have=%08X pc=%08X fib=%08X\n", _o,_nd,_h,g_cur_block,g_cur_fiber); fflush(stdout); } }
       uint32_t obj = s->r[0], need = s->r[1] ? s->r[1] : 1u;
+      if (obj == 0x50011000u) { static int _q0w=0; if(_q0w++<20){ printf("[Q0WAIT] tid=%08X need=%u have=%u hfiber=%d lr=%08X blk=%u\n", g_cur_thr, need, (g_sema.count(obj)?g_sema[obj]:0u), (int)tl_is_hfiber, s->r[14], (unsigned)g_hf_blocks); fflush(stdout);} }
       auto it = g_sema.find(obj);
       uint32_t have = (it == g_sema.end()) ? 0u : it->second;
       if (obj == 0x50018000u) { static int _gfs=0; if (_gfs++ < 100) { printf("[GFS] wait tid=%08X have=%u lr=%08X fib=%08X blk=%08X n=%u\n", g_cur_thr, have, s->r[14], g_cur_fiber, g_cur_block, g_blkcnt_total); fflush(stdout); } }
@@ -6886,7 +6891,15 @@ static void guest_thread_run(uint32_t tid) {
     if (!fn) { int _bk=0; uint32_t _bq=gbn_back(pc,&_bk); if (_bq && _bk<=16) { pc=_bq; fn=gbn(pc); } }
     if (!fn) { if (g_ht_bad_n++ < 20) { printf("[HT-NOBLK] tid=%08X pc=%08X\n", tid, pc); fflush(stdout); } break; }
     g_cur_block = pc;
-    t->pc_ring[(t->pc_n++) & 31u] = pc;    if ((pc & ~1u) == 0x811E6928u && tid >= 0x40011000u && tid <= 0x40016000u) { // M1193: GFD worker task dispatch
+    t->pc_ring[(t->pc_n++) & 31u] = pc;
+    if ((pc & ~1u) == 0x811E6936u && tid == 0x40011000u) { static int _q0c=0; if(_q0c++<20){ printf("[Q0CONVDONE] #%d tid=%08X r0=%08X blk=%u\n", _q0c, tid, s->r[0], (unsigned)g_hf_blocks); fflush(stdout);
+        const uint32_t _v[3]={0x85C77090u,0x85CF7090u,0x90249100u};
+        for(int _j=0;_j<3;++_j){ printf("[Q0DONE_DUMP] va=%08X:",_v[_j]); for(int _k=0;_k<8;++_k){ uint32_t _w=0; uint8_t* _q=GP(_v[_j]+(uint32_t)_k*4u); if(_q) std::memcpy(&_w,_q,4); printf(" %08X",_w);} printf("\n"); } fflush(stdout);} }
+    if (tid == 0x40011000u) { static int _q0=0; if(_q0++<400){ printf("[Q0THR] #%d pc=%08X r0=%08X lr=%08X blk=%u\n", _q0, pc, s->r[0], s->r[14], (unsigned)g_hf_blocks); fflush(stdout);} }
+    if ((pc & ~1u) == 0x811E68FCu && tid >= 0x40011000u && tid <= 0x40016000u) { // WORKERWK2: worker returned from WaitSema
+      static int _wk2=0; if(_wk2++<40){ printf("[WORKERWK2] #%d tid=%08X r0=%08X lr=%08X blk=%u\n", _wk2, tid, s->r[0], s->r[14], (unsigned)g_hf_blocks); fflush(stdout);} }
+    if ((pc & ~1u) == 0x811E6930u && tid >= 0x40011000u && tid <= 0x40016000u) { // WORKERCB2: worker about to call job callback
+      static int _wc2=0; if(_wc2++<40){ uint32_t _fn=0; uint8_t* _q=GP(s->r[11]); if(_q) std::memcpy(&_fn,_q,4); printf("[WORKERCB2] #%d tid=%08X fn=%08X r0=%08X r1=%08X lr=%08X blk=%u\n", _wc2, tid, _fn, s->r[0], s->r[1], s->r[14], (unsigned)g_hf_blocks); fflush(stdout);} }    if ((pc & ~1u) == 0x811E6928u && tid >= 0x40011000u && tid <= 0x40016000u) { // M1193: GFD worker task dispatch
       static uint32_t _dn = 0; ++_dn;
       uint32_t _fn = 0; { uint8_t* _q = GP(s->r[11]); if (_q) std::memcpy(&_fn, _q, 4); }
       if (_dn <= 12 || (_dn % 500u) == 0u) { printf("[WDISP] n=%u tid=%08X fn=%08X fp=%08X hfblk=%u\n", _dn, tid, _fn, s->r[11], (unsigned)g_hf_blocks); fflush(stdout); } }
@@ -7262,6 +7275,8 @@ static void stkw_note(const char* tag, uint32_t a, uint32_t v, int width) {
   fflush(stdout);
 }
 extern "C" void wr8_watch(uint32_t a, uint32_t v) {
+  { if (a >= 0x90249100u && a < 0x902C9100u) { static int _p8b=0; if(_p8b++<60){ printf("[ATLASPIX8] a=%08X v=%02X blk=%08X\n", a, v&0xFF, g_cur_block); fflush(stdout);} } }
+
   { if (a >= 0x90249000u && a < 0x902C9000u) { static int _ix8=0; if(_ix8++<80){ printf("[ATLASIDX8] a=%08X v=%02X blk=%08X\n", a, v&0xFF, g_cur_block); fflush(stdout);} } }
 
   { if ((a >= 0x85C70000u && a < 0x85C80000u) || (a >= 0x99C60000u && a < 0x99E00000u)) { static int _p8=0; if(_p8++<100){ printf("[ATLASPX8] a=%08X v=%02X blk=%08X\n", a, v&0xFF, g_cur_block); fflush(stdout);} } }
@@ -7276,6 +7291,8 @@ extern "C" void wr8_watch(uint32_t a, uint32_t v) {
   { static int _all=0; if (a == 0x84D2AAA4u && _all++ < 20) { printf("[STATEW8] v=%02X blk=%08X fib=%08X thr=%08X sp=%08X\n", v, g_cur_block, g_cur_fiber, g_cur_thr, g_snap_r[13]); fflush(stdout); } }
 }
 extern "C" void wr16_watch(uint32_t a, uint32_t v) {
+  { if (a >= 0x90249100u && a < 0x902C9100u) { static int _p16b=0; if(_p16b++<60){ printf("[ATLASPIX16] a=%08X v=%04X blk=%08X\n", a, v&0xFFFF, g_cur_block); fflush(stdout);} } }
+
   { if (a >= 0x90249000u && a < 0x902C9000u) { static int _ix16=0; if(_ix16++<60){ printf("[ATLASIDX16] a=%08X v=%04X blk=%08X\n", a, v&0xFFFF, g_cur_block); fflush(stdout);} } }
 
   { if ((a >= 0x85C70000u && a < 0x85C80000u) || (a >= 0x99C60000u && a < 0x99E00000u)) { static int _p16=0; if(_p16++<60){ printf("[ATLASPX16] a=%08X v=%04X blk=%08X\n", a, v&0xFFFF, g_cur_block); fflush(stdout);} } }
@@ -7292,6 +7309,10 @@ extern "C" void wr16_watch(uint32_t a, uint32_t v) {
 }
 // M1370: g_dbg_cur_f_ubo mirror defined near top of file
 extern "C" void wr32_watch(uint32_t a, uint32_t v) {
+  { if (a >= 0x90249100u && a < 0x902C9100u) { static int _p32b=0; if(_p32b++<100){ printf("[ATLASPIX32] a=%08X v=%08X blk=%08X\n", a, v, g_cur_block); fflush(stdout);} } }
+
+  { if (a >= 0x90249000u && a < 0x902C9000u) { static int _w32b=0; if(_w32b++<100){ printf("[ATLASW32B] a=%08X v=%08X blk=%08X\n", a, v, g_cur_block); fflush(stdout);} } }
+
   { if ((a >= 0x85C70000u && a < 0x85C80000u) || (a >= 0x99C60000u && a < 0x99E00000u)) { static int _aw2=0; if(_aw2++<120){ printf("[ATLASWR2] a=%08X v=%08X blk=%08X\n", a, v, g_cur_block); fflush(stdout);} } }
 
   { if (a >= 0x90240000u && a < 0x903D0000u) { static int _aw=0; if(_aw++<80){ printf("[ATLASWR] a=%08X v=%08X blk=%08X\n", a, v, g_cur_block); fflush(stdout);} } }
