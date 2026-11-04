@@ -2709,6 +2709,18 @@ static void hf_fiber_thread(HFiber* f) {
         if(_p){ for(int _k=0;_k<8;++_k){ uint32_t _v=0; uint8_t* _q=GP(_p+(uint32_t)_k*4u); if(_q) std::memcpy(&_v,_q,4); printf(" %08X",_v);} }
         printf("\n"); if(_p){ for(int _r=0;_r<2;++_r){ uint32_t _pp=0; uint8_t* _q=GP(_p+(_r?4u:0u)); uint32_t _off=(_r?4u:0u); if(_q){std::memcpy(&_pp,_q,4);} if(_pp){ printf("[TGADEC]  from+%u:",_off); uint8_t* _px=GP(_pp); if(_px){ for(int _k=0;_k<4;++_k){ uint32_t _v; std::memcpy(&_v,_px+_k*4,4); printf(" %08X",_v);} } printf("\n"); } } }
         fflush(stdout);} }
+    if ((pc & ~1u) == 0x8116332Au) { // TEXCREATE: appGxTexture(img)
+      static int _tc2=0; if(_tc2++<8){ uint32_t _p=s->r[0]; printf("[TEXCREATE] #%d img=%08X:", _tc2, _p);
+        if(_p){ for(int _k=0;_k<16;++_k){ uint32_t _v=0; uint8_t* _q=GP(_p+(uint32_t)_k*4u); if(_q) std::memcpy(&_v,_q,4); printf(" %08X",_v);} }
+        printf("\n"); fflush(stdout);} }
+    if ((pc & ~1u) == 0x811CA6B6u) { // TEXCONV: FUN_811ca6b6(img, param2, fmt, 0)
+      static int _cv=0; if(_cv++<12){ uint32_t _p=s->r[0]; printf("[TEXCONV] #%d img=%08X p2=%08X fmt=%u a3=%u:", _cv, _p, s->r[1], s->r[2], s->r[3]);
+        if(_p){ for(int _k=0;_k<8;++_k){ uint32_t _v=0; uint8_t* _q=GP(_p+(uint32_t)_k*4u); if(_q) std::memcpy(&_v,_q,4); printf(" %08X",_v);} }
+        printf("\n"); fflush(stdout);} }
+    if ((pc & ~1u) == 0x811CB0D8u) { // CONVJOB: texture conversion job callback (thumb addr 811CB0D9 -> block 811CB0D8)
+      static int _cj=0; bool _pl=(_cj<24); ++_cj; if(_pl){ printf("[CONVJOB] #%d job=%08X n=%u\n", _cj, s->r[0], g_main_n); fflush(stdout);} }
+    if ((pc & ~1u) == 0x811E649Au) { // JOBDISP: FUN_811e649a(queue,desc)
+      static int _jd=0; if(_jd++<24){ printf("[JOBDISP] #%d q=%u desc=%08X cb=%08X n=%u\n", _jd, s->r[0], s->r[1], s->r[2], g_main_n); fflush(stdout);} }
     if ((pc & ~1u) == 0x811866A6u) {   // M1186: app movie-slot state machine (0x100 slots, stride 0x60, base DAT_81670B48)
       static int g_mvfast = -1; if (g_mvfast < 0) { const char* _e = getenv("P5D_MOVIEFAST"); g_mvfast = (_e && atoi(_e)) ? 1 : 0; }
       static int _mv = 0; ++_mv;
@@ -7250,6 +7262,8 @@ static void stkw_note(const char* tag, uint32_t a, uint32_t v, int width) {
   fflush(stdout);
 }
 extern "C" void wr8_watch(uint32_t a, uint32_t v) {
+  { if (a >= 0x90249000u && a < 0x902C9000u) { static int _ix8=0; if(_ix8++<80){ printf("[ATLASIDX8] a=%08X v=%02X blk=%08X\n", a, v&0xFF, g_cur_block); fflush(stdout);} } }
+
   { if ((a >= 0x85C70000u && a < 0x85C80000u) || (a >= 0x99C60000u && a < 0x99E00000u)) { static int _p8=0; if(_p8++<100){ printf("[ATLASPX8] a=%08X v=%02X blk=%08X\n", a, v&0xFF, g_cur_block); fflush(stdout);} } }
 
   { if (a >= 0x94700000u && a < 0x94740000u) { static int _u8=0; if(_u8++<40){ printf("[USSEW8] a=%08X off=%05X v=%02X blk=%08X\n", a, a-0x94700000u, v&0xFF, g_cur_block); fflush(stdout);} } }
@@ -7262,6 +7276,8 @@ extern "C" void wr8_watch(uint32_t a, uint32_t v) {
   { static int _all=0; if (a == 0x84D2AAA4u && _all++ < 20) { printf("[STATEW8] v=%02X blk=%08X fib=%08X thr=%08X sp=%08X\n", v, g_cur_block, g_cur_fiber, g_cur_thr, g_snap_r[13]); fflush(stdout); } }
 }
 extern "C" void wr16_watch(uint32_t a, uint32_t v) {
+  { if (a >= 0x90249000u && a < 0x902C9000u) { static int _ix16=0; if(_ix16++<60){ printf("[ATLASIDX16] a=%08X v=%04X blk=%08X\n", a, v&0xFFFF, g_cur_block); fflush(stdout);} } }
+
   { if ((a >= 0x85C70000u && a < 0x85C80000u) || (a >= 0x99C60000u && a < 0x99E00000u)) { static int _p16=0; if(_p16++<60){ printf("[ATLASPX16] a=%08X v=%04X blk=%08X\n", a, v&0xFFFF, g_cur_block); fflush(stdout);} } }
 
   { if (a >= 0x94700000u && a < 0x94740000u) { static int _u16=0; if(_u16++<40){ printf("[USSEW16] a=%08X off=%05X v=%04X blk=%08X\n", a, a-0x94700000u, v&0xFFFF, g_cur_block); fflush(stdout);} } }
