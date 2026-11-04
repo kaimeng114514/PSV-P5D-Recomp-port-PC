@@ -3807,7 +3807,7 @@ static uint32_t _ufd_vert_ubo = 0, _ufd_frag_ubo = 0;   // M1251: per-stage UBO 
       break; }
     case 0x812B2270u: {   // NODEWR-MEMCPY
       { uint32_t _ad=s->r[0], _al=s->r[2]; if ((_ad>=0x85C70000u && _ad<0x85C80000u) || (_ad>=0x99C60000u && _ad<0x99E00000u)) { static int _am2=0; if(_am2++<60){ uint32_t _s0=0,_s1=0; uint8_t* _p=GP(s->r[1]); if(_p){std::memcpy(&_s0,_p,4);std::memcpy(&_s1,_p+4,4);} printf("[ATLASMEM2] dst=%08X len=%u src=%08X srcw=%08X %08X blk=%08X lr=%08X\n",_ad,_al,s->r[1],_s0,_s1,g_cur_block,s->r[14]); fflush(stdout);} } }
-      { uint32_t _ad=s->r[0], _al=s->r[2]; if (_ad>=0x90240000u && _ad<0x903D0000u) { static int _am=0; if(_am++<40){ uint32_t _s0=0,_s1=0; uint8_t* _p=GP(s->r[1]); if(_p){std::memcpy(&_s0,_p,4);std::memcpy(&_s1,_p+4,4);} printf("[ATLASMEM] dst=%08X len=%u src=%08X srcw=%08X %08X blk=%08X lr=%08X\n",_ad,_al,s->r[1],_s0,_s1,g_cur_block,s->r[14]);
+      { uint32_t _ad=s->r[0], _al=s->r[2]; if (_ad>=0x90240000u && _ad<0x903D0000u) { static int _am=0; if(_am++<40){ uint32_t _s0=0,_s1=0; uint8_t* _p=GP(s->r[1]); if(_p){std::memcpy(&_s0,_p,4);std::memcpy(&_s1,_p+4,4);} printf("[ATLASMEM] dst=%08X len=%u src=%08X srcw=%08X %08X blk=%08X lr=%08X hfblk=%u\n",_ad,_al,s->r[1],_s0,_s1,g_cur_block,s->r[14],(unsigned)g_hf_blocks);
               if (_al>=524288u && _am<=9) { printf("[ATLASSTK] sp=%08X:", s->r[13]); for(int _k=0;_k<16;++_k){ uint32_t _v=0; uint8_t* _q=GP(s->r[13]+(uint32_t)_k*4u); if(_q){std::memcpy(&_v,_q,4);} printf(" %08X",_v);} printf("\n[ATLASSTK] pcring:"); for(int _k=0;_k<16;++_k) printf(" %08X", g_pc_ring[(g_pc_ring_n-16u+(uint32_t)_k)&63u]); printf("\n"); fflush(stdout);} fflush(stdout);} } }
       { uint32_t _fd=s->r[0], _fl=s->r[2]; if (g_dbg_cur_f_ubo && _fd >= g_dbg_cur_f_ubo && _fd < g_dbg_cur_f_ubo + 0x400u) { static int _fm=0; if(_fm++<40){ uint32_t _w0=0,_w1=0; uint8_t* _p=GP(s->r[1]); if(_p){std::memcpy(&_w0,_p,4);std::memcpy(&_w1,_p+4,4);} printf("[FUBOMEM] memcpy dst_off=%03X len=%u srcw=%08X %08X blk=%08X\n", _fd-g_dbg_cur_f_ubo, _fl, _w0,_w1, g_cur_block); fflush(stdout);} } }
 
@@ -6896,6 +6896,14 @@ static void guest_thread_run(uint32_t tid) {
         const uint32_t _v[3]={0x85C77090u,0x85CF7090u,0x90249100u};
         for(int _j=0;_j<3;++_j){ printf("[Q0DONE_DUMP] va=%08X:",_v[_j]); for(int _k=0;_k<8;++_k){ uint32_t _w=0; uint8_t* _q=GP(_v[_j]+(uint32_t)_k*4u); if(_q) std::memcpy(&_w,_q,4); printf(" %08X",_w);} printf("\n"); } fflush(stdout);} }
     if (tid == 0x40011000u) { static int _q0=0; if(_q0++<400){ printf("[Q0THR] #%d pc=%08X r0=%08X lr=%08X blk=%u\n", _q0, pc, s->r[0], s->r[14], (unsigned)g_hf_blocks); fflush(stdout);} }
+    if ((pc & ~1u) == 0x811ED69Au) { // TEXUPLOAD2: FUN_811ed69a(image desc, extra) creates GXM texture and copies image
+      static int _tu2=0; if(_tu2++<12){ printf("[TEXUPLOAD2] #%d img=%08X extra=%08X tid=%08X:", _tu2, s->r[0], s->r[1], tid);
+        uint32_t _p=s->r[0]; if(_p){ for(int _k=0;_k<12;++_k){ uint32_t _v=0; uint8_t* _q=GP(_p+(uint32_t)_k*4u); if(_q) std::memcpy(&_v,_q,4); printf(" %08X",_v);} }
+        printf("\n"); uint32_t _off=0,_sz=0; { uint8_t* _q=GP(_p+0xcu); if(_q) std::memcpy(&_off,_q,4); _q=GP(_p+0x10u); if(_q) std::memcpy(&_sz,_q,4);} 
+        printf("[TEXUPLOAD4] #%d GXT off=%X size=%u px:", _tu2, _off, _sz); if(_p && _off<0x1000u){ for(int _k=0;_k<8;++_k){ uint32_t _v=0; uint8_t* _q=GP(_p+_off+(uint32_t)_k*4u); if(_q) std::memcpy(&_v,_q,4); printf(" %08X",_v);} } printf("\n"); fflush(stdout);} }
+    if ((pc & ~1u) == 0x811ED712u) { // TEXUPLOAD2: right before size/src setup (r10=desc, r8=size, r4=extra)
+      static int _tu3=0; if(_tu3++<12){ uint32_t _alloc=0; uint8_t* _q=GP(s->r[7]+0x10u); if(_q) std::memcpy(&_alloc,_q,4); uint32_t _va=0; if(_alloc){ uint8_t* _r=GP(_alloc); if(_r) std::memcpy(&_va,_r,4);} 
+        printf("[TEXUPLOAD3] #%d desc=%08X size=%u extra=%u alloc=%08X vram_va=%08X blk=%u\n", _tu3, s->r[10], s->r[8], s->r[4], _alloc, _va, (unsigned)g_hf_blocks); fflush(stdout);} }
     if ((pc & ~1u) == 0x811E68FCu && tid >= 0x40011000u && tid <= 0x40016000u) { // WORKERWK2: worker returned from WaitSema
       static int _wk2=0; if(_wk2++<40){ printf("[WORKERWK2] #%d tid=%08X r0=%08X lr=%08X blk=%u\n", _wk2, tid, s->r[0], s->r[14], (unsigned)g_hf_blocks); fflush(stdout);} }
     if ((pc & ~1u) == 0x811E6930u && tid >= 0x40011000u && tid <= 0x40016000u) { // WORKERCB2: worker about to call job callback
