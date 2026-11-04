@@ -3808,6 +3808,7 @@ static uint32_t _ufd_vert_ubo = 0, _ufd_frag_ubo = 0;   // M1251: per-stage UBO 
     case 0x812B2270u: {   // NODEWR-MEMCPY
       { uint32_t _ad=s->r[0], _al=s->r[2]; if ((_ad>=0x85C70000u && _ad<0x85C80000u) || (_ad>=0x99C60000u && _ad<0x99E00000u)) { static int _am2=0; if(_am2++<60){ uint32_t _s0=0,_s1=0; uint8_t* _p=GP(s->r[1]); if(_p){std::memcpy(&_s0,_p,4);std::memcpy(&_s1,_p+4,4);} printf("[ATLASMEM2] dst=%08X len=%u src=%08X srcw=%08X %08X blk=%08X lr=%08X\n",_ad,_al,s->r[1],_s0,_s1,g_cur_block,s->r[14]); fflush(stdout);} } }
       { uint32_t _ad=s->r[0], _al=s->r[2]; if (_ad>=0x90240000u && _ad<0x903D0000u) { static int _am=0; if(_am++<40){ uint32_t _s0=0,_s1=0; uint8_t* _p=GP(s->r[1]); if(_p){std::memcpy(&_s0,_p,4);std::memcpy(&_s1,_p+4,4);} printf("[ATLASMEM] dst=%08X len=%u src=%08X srcw=%08X %08X blk=%08X lr=%08X hfblk=%u\n",_ad,_al,s->r[1],_s0,_s1,g_cur_block,s->r[14],(unsigned)g_hf_blocks);
+        if(_ad>=0x8C600000u && _ad<0xA0000000u){ static int _vs=0; if(_vs++<8){ printf("[VRAMCOPY] sp=%08X:", s->r[13]); for(int _k=0;_k<8;++_k){ uint32_t _v=0; uint8_t* _q=GP(s->r[13]+(uint32_t)_k*4u); if(_q) std::memcpy(&_v,_q,4); printf(" %08X",_v);} printf(" pcr:"); for(int _k=0;_k<10;++_k) printf(" %08X", g_pc_ring[(g_pc_ring_n-10u+(uint32_t)_k)&63u]); printf("\n"); } }
               if (_al>=524288u && _am<=9) { printf("[ATLASSTK] sp=%08X:", s->r[13]); for(int _k=0;_k<16;++_k){ uint32_t _v=0; uint8_t* _q=GP(s->r[13]+(uint32_t)_k*4u); if(_q){std::memcpy(&_v,_q,4);} printf(" %08X",_v);} printf("\n[ATLASSTK] pcring:"); for(int _k=0;_k<16;++_k) printf(" %08X", g_pc_ring[(g_pc_ring_n-16u+(uint32_t)_k)&63u]); printf("\n"); fflush(stdout);} fflush(stdout);} } }
       { uint32_t _fd=s->r[0], _fl=s->r[2]; if (g_dbg_cur_f_ubo && _fd >= g_dbg_cur_f_ubo && _fd < g_dbg_cur_f_ubo + 0x400u) { static int _fm=0; if(_fm++<40){ uint32_t _w0=0,_w1=0; uint8_t* _p=GP(s->r[1]); if(_p){std::memcpy(&_w0,_p,4);std::memcpy(&_w1,_p+4,4);} printf("[FUBOMEM] memcpy dst_off=%03X len=%u srcw=%08X %08X blk=%08X\n", _fd-g_dbg_cur_f_ubo, _fl, _w0,_w1, g_cur_block); fflush(stdout);} } }
 
@@ -6898,9 +6899,9 @@ static void guest_thread_run(uint32_t tid) {
     if (tid == 0x40011000u) { static int _q0=0; if(_q0++<400){ printf("[Q0THR] #%d pc=%08X r0=%08X lr=%08X blk=%u\n", _q0, pc, s->r[0], s->r[14], (unsigned)g_hf_blocks); fflush(stdout);} }
     if ((pc & ~1u) == 0x811ED69Au) { // GXTSCAN: find where nonzero pixels are inside GXT buffer
       static int _gs=0; if(_gs++<8){ uint32_t _p=s->r[0]; uint32_t _off=0,_sz=0; if(_p){ uint8_t* _q=GP(_p+0xcu); if(_q)std::memcpy(&_off,_q,4); _q=GP(_p+0x10u); if(_q)std::memcpy(&_sz,_q,4);} 
-        if(_p && _off<0x1000u && _sz && _sz<0x200000u){ uint32_t _limit=_sz; if(_limit>0x80000u)_limit=0x80000u; uint32_t _nz=0,_first=0xFFFFFFFFu; uint32_t _n=0;
-          for(uint32_t _i=0;_i<_limit;++_i){ uint8_t* _b=GP(_p+_off+_i); if(!_b) break; if(*_b){ ++_nz; if(_first==0xFFFFFFFFu)_first=_i; } if(++_n>=0x20000u) break; } 
-          printf("[GXTSCAN] img=%08X off=%X sz=%X scanned=%u nz=%u first=%X:", _p,_off,_sz,_n,_nz,_first);
+        if(_p && _off<0x1000u && _sz && _sz<0x200000u){ uint32_t _limit=_sz; if(_limit>0x200000u)_limit=0x200000u; uint32_t _nz=0,_first=0xFFFFFFFFu,_last=0xFFFFFFFFu; uint32_t _n=0;
+          for(uint32_t _i=0;_i<_limit;++_i){ uint8_t* _b=GP(_p+_off+_i); if(!_b) break; if(*_b){ ++_nz; if(_first==0xFFFFFFFFu)_first=_i; _last=_i; } } 
+          printf("[GXTSCAN] img=%08X off=%X sz=%X scanned=%u nz=%u first=%X last=%X:", _p,_off,_sz,_limit,_nz,_first,_last);
           if(_first!=0xFFFFFFFFu) for(int _k=0;_k<8;++_k){ uint32_t _v=0; uint8_t* _q2=GP(_p+_off+_first+(uint32_t)_k*4u); if(_q2) std::memcpy(&_v,_q2,4); printf(" %08X",_v);} 
           printf("\n"); fflush(stdout);} }
       }
