@@ -28,6 +28,7 @@
 
 #include <cstdint>
 #include <cstring>
+#include <cstdlib>
 
 // M844: bridge for the guest displayQueueCallback (registered in SceGxmInitializeParams[+8], data size at +0xC).
 // The backend sceGxmDisplayQueueAddEntry is a pure STUB, so without this bridge the guest callback never runs and
@@ -1097,7 +1098,13 @@ extern "C" uint32_t gxm_abi_call_BC059AFC(uint32_t* regs, uint32_t* stack_args) 
     const uint32_t a4 = stack_args ? stack_args[0u] : 0u;   // unsigned int
     void* p0 = gxm_abi_xlate(a0);   // SceGxmContext *
     void* p3 = gxm_abi_xlate(a3);   // const void *
-    int32_t rv = sceGxmDraw(p0, (uint32_t)a1, (uint32_t)a2, (uint32_t)a4, p3);
+    // M1336: the harness owns all Vulkan drawing (bridge pipelines + CPUVP).  The backend's own
+    // sceGxmDraw drives a SEPARATE GXM state machine whose vertex streams are never set up by the
+    // harness, so it kept drawing a stale fullscreen test triangle - the "gradient triangle" that
+    // polluted every frame even when all harness content draws were skipped.  Default: no backend draw.
+    int32_t rv = 0;
+    { static int _rd = -1; if (_rd < 0) _rd = (std::getenv("P5D_ABIREAL_DRAW") != nullptr) ? 1 : 0;
+      if (_rd) rv = sceGxmDraw(p0, (uint32_t)a1, (uint32_t)a2, (uint32_t)a4, p3); }
     return (uint32_t)rv;
 }
 

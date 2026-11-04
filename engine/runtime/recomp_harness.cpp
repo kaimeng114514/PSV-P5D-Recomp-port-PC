@@ -3928,7 +3928,7 @@ static uint32_t _ufd_vert_ubo = 0, _ufd_frag_ubo = 0;   // M1251: per-stage UBO 
             // M1323: actually DRAW the content path (its gxm_draw_arrays was only inside the P5D_TPRD
             // diagnostic branch, so normal runs uploaded vertices and never drew them).
             { static int _cd=-1; if(_cd<0){ const char* _e=getenv("P5D_CPUDRAW"); _cd=(_e&&atoi(_e))?1:0; }
-              if (_cd && (!getenv("P5D_ONLYTEX") || _abi_fspv.find("0084") != std::string::npos)) {
+              if (_cd && (!getenv("P5D_ONLYTEX") || _abi_fspv.find("0084") != std::string::npos) && !getenv("P5D_SKIPALLDRAW") && !(getenv("P5D_SKIPTEXDRAW") && _abi_fspv.find("0084") != std::string::npos)) {
                 if (_isidx) {
                   // M1329: indexed draw - upload our vertex-order records plus the engine's own index buffer
                   // and submit an indexed draw so quads (icount=6 over 4 vertices) render both triangles.
