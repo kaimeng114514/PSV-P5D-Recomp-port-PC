@@ -3278,6 +3278,7 @@ static uint32_t _ufd_vert_ubo = 0, _ufd_frag_ubo = 0;   // M1251: per-stage UBO 
           if (_cur_v_ubo) { uint8_t* _s=GP(_cur_v_ubo); if(_s){ for(int _r=0;_r<32;++_r) printf("[UBODUMP2] V row%d = %.4f %.4f %.4f %.4f\n", _r, ((float*)_s)[_r*4],((float*)_s)[_r*4+1],((float*)_s)[_r*4+2],((float*)_s)[_r*4+3]); } }
           if (_cur_f_ubo) { uint8_t* _s=GP(_cur_f_ubo); if(_s){ for(int _r=0;_r<8;++_r) printf("[UBODUMP2] F row%d = %.4f %.4f %.4f %.4f\n", _r, ((float*)_s)[_r*4],((float*)_s)[_r*4+1],((float*)_s)[_r*4+2],((float*)_s)[_r*4+3]); } }
           for (int _u=0;_u<16;++_u){ if(!_frag_tex[_u][0]&&!_frag_tex[_u][1]) continue; printf("[UBODUMP2] fragtex u=%d w0=%08X w1=%08X w2=%08X w3=%08X\n", _u, ((uint32_t*)_frag_tex[_u])[0],((uint32_t*)_frag_tex[_u])[1],((uint32_t*)_frag_tex[_u])[2],((uint32_t*)_frag_tex[_u])[3]); }
+          { static int _sc=0; if(_sc++<3 && _cur_v_ubo){ uint8_t* _s=GP(_cur_v_ubo); if(_s){ int _nz=0; for(uint32_t _o=0;_o<0x4000u;_o+=4u){ float _f; std::memcpy(&_f,_s+_o,4); if(_f!=0.0f){ printf("[USSE-SCAN] off=%05X = %.4f (bits %08X)\n", _o, _f, ((uint32_t*)_s)[_o/4]); if(++_nz>=40) break; } } printf("[USSE-SCAN] done nonzero=%d\n", _nz); fflush(stdout);} } }
           fflush(stdout); } } }
       if (strncmp(_ge->name, "sceGxmDraw", 10) == 0 && strcmp(_ge->name, "sceGxmDrawPrecomputed") != 0) {
         uint32_t _icount = _stk[0];   // sceGxmDraw(ctx,prim,indexType,indexData,indexCount): indexCount = first stack arg
@@ -3573,7 +3574,9 @@ static uint32_t _ufd_vert_ubo = 0, _ufd_frag_ubo = 0;   // M1251: per-stage UBO 
       if (raw) r0 = (raw + al - 1u) & ~(al - 1u);
       if (sz > 0x100000u || g_big_n < 0) printf("[MEMALIGN] al=%08X sz=%08X raw=%08X -> %08X lr=%08X\n", al, sz, raw, r0, s->r[14]);
       break; }
-    case 0x812B2270u: {   // NODEWR-MEMCPY                                                // memcpy(dst,src,n) -> dst
+    case 0x812B2270u: {   // NODEWR-MEMCPY
+      { uint32_t _ud=s->r[0], _us=s->r[1], _un=s->r[2]; if (_ud >= 0x94700000u && _ud < 0x94740000u) { static int _um=0; if(_um++<80){ uint32_t _w0=0,_w1=0,_w2=0,_w3=0; uint8_t* _p=GP(_us); if(_p){std::memcpy(&_w0,_p,4);std::memcpy(&_w1,_p+4,4);std::memcpy(&_w2,_p+8,4);std::memcpy(&_w3,_p+12,4);} printf("[USSEMEM] memcpy dst=%08X off=%05X len=%u srcw=%08X %08X %08X %08X blk=%08X\n", _ud, _ud-0x94700000u, _un, _w0,_w1,_w2,_w3, g_cur_block); fflush(stdout);} } }
+                                                // memcpy(dst,src,n) -> dst
 
       { static int _mc=0; uint32_t _d=s->r[0], _s2=s->r[1], _n=s->r[2]; if (((_d >= 0x8F000000u && _d < 0x8F600000u && _mc++<120)) || (_d>=0x8F343000u && _d<0x8F343100u)) { uint32_t _w0=0,_w1=0,_w2=0,_w3=0; uint8_t* _p=GP(_s2); if(_p){ std::memcpy(&_w0,_p,4); std::memcpy(&_w1,_p+4,4); std::memcpy(&_w2,_p+8,4); std::memcpy(&_w3,_p+12,4);} { uint32_t _clr=0; uint8_t* _q=GP(s->r[13]+4u); if(_q) std::memcpy(&_clr,_q,4); printf("[NODEMEMCPY] dst=%08X src=%08X n=%u srcw=%08X %08X %08X %08X blk=%08X lr=%08X callerLR=%08X sp=%08X fib=%08X thr=%08X\n", _d,_s2,_n,_w0,_w1,_w2,_w3, g_cur_block, s->r[14], _clr, s->r[13], g_cur_fiber,g_cur_thr); } fflush(stdout);} }      uint32_t dst = s->r[0], src = s->r[1], n = s->r[2];
       uint8_t* d = GP(dst); uint8_t* sp = GP(src);
@@ -3581,7 +3584,9 @@ static uint32_t _ufd_vert_ubo = 0, _ufd_frag_ubo = 0;   // M1251: per-stage UBO 
       if (g_sw8_on && dst < g_stkw_hi && (uint64_t)dst + n > g_stkw_lo) printf("[STKW-HLE] memcpy dst=%08X n=%u blk=%08X fib=%08X sp=%08X lr=%08X\n", dst, n, g_cur_block, g_cur_fiber, s->r[13], s->r[14]);
       if (d && sp && n < 0x1000000u) std::memcpy(d, sp, n);
       r0 = dst; break; }
-    case 0x812B2260u: {                                                // memset(dst,c,n) -> dst
+    case 0x812B2260u: {
+      { uint32_t _ud=s->r[0], _uv=s->r[1], _un=s->r[2]; if (_ud >= 0x94700000u && _ud < 0x94740000u) { static int _um2=0; if(_um2++<40){ printf("[USSEMEM] memset dst=%08X off=%05X val=%08X len=%u blk=%08X\n", _ud, _ud-0x94700000u, _uv, _un, g_cur_block); fflush(stdout);} } }
+                                                // memset(dst,c,n) -> dst
       uint32_t dst = s->r[0], c = s->r[1], n = s->r[2];
       uint8_t* d = GP(dst);
       canhle_check(dst, n, "memset");
@@ -6999,6 +7004,8 @@ static int g_dd4bc_n = 0, g_dd4c8_n = 0;
 static int g_sched_n = 0;
 static int g_de912_n = 0, g_de9ba_n = 0;
 extern "C" void wr64_watch(uint32_t a, uint64_t v) {
+  { if (a >= 0x94700000u && a < 0x94740000u) { static int _u64=0; if(_u64++<40){ printf("[USSEW64] a=%08X off=%05X v=%016llX blk=%08X\n", a, a-0x94700000u, (unsigned long long)v, g_cur_block); fflush(stdout);} } }
+
   { static int _lw=0; if ((a == 0x816CDB8Cu || a == 0x816CDB88u || a == 0x816CDB90u) && _lw++ < 40) { printf("[REGWR64] a=%08X v=%08X%08X blk=%08X fib=%08X thr=%08X\n", a, (uint32_t)(v>>32), (uint32_t)v, g_cur_block, g_cur_fiber, g_cur_thr); fflush(stdout); } }
   { static int _ow=0; if (a >= 0x84D2AA90u && a < 0x84D2AB40u && _ow++ < 200) { printf("[OBJW64] a=%08X off=%03X v=%08X%08X blk=%08X fib=%08X thr=%08X\n", a, a-0x84D2AAA0u, (uint32_t)(v>>32), (uint32_t)v, g_cur_block, g_cur_fiber, g_cur_thr); fflush(stdout); } }
 }
@@ -7012,6 +7019,8 @@ static void stkw_note(const char* tag, uint32_t a, uint32_t v, int width) {
   fflush(stdout);
 }
 extern "C" void wr8_watch(uint32_t a, uint32_t v) {
+  { if (a >= 0x94700000u && a < 0x94740000u) { static int _u8=0; if(_u8++<40){ printf("[USSEW8] a=%08X off=%05X v=%02X blk=%08X\n", a, a-0x94700000u, v&0xFF, g_cur_block); fflush(stdout);} } }
+
   { if (a >= 0x816CC728u && a < 0x816CC750u) { static int _m8=0; if(_m8++<120){ printf("[MODE730B] wr8 a=%08X v=%02X blk=%08X fib=%08X thr=%08X\n", a, v&0xFF, g_cur_block, g_cur_fiber, g_cur_thr); fflush(stdout);} } }
 
   if (g_sw8_on && ((a >= g_stkw_lo && a < g_stkw_hi) || (a >= 0x84856500u && a < 0x848565A0u))) stkw_note("w8", a, v, 8);
@@ -7020,6 +7029,8 @@ extern "C" void wr8_watch(uint32_t a, uint32_t v) {
   { static int _all=0; if (a == 0x84D2AAA4u && _all++ < 20) { printf("[STATEW8] v=%02X blk=%08X fib=%08X thr=%08X sp=%08X\n", v, g_cur_block, g_cur_fiber, g_cur_thr, g_snap_r[13]); fflush(stdout); } }
 }
 extern "C" void wr16_watch(uint32_t a, uint32_t v) {
+  { if (a >= 0x94700000u && a < 0x94740000u) { static int _u16=0; if(_u16++<40){ printf("[USSEW16] a=%08X off=%05X v=%04X blk=%08X\n", a, a-0x94700000u, v&0xFFFF, g_cur_block); fflush(stdout);} } }
+
   { if (a >= 0x816CC728u && a < 0x816CC750u) { static int _m16=0; if(_m16++<120){ printf("[MODE730B] wr16 a=%08X v=%04X blk=%08X fib=%08X thr=%08X\n", a, v&0xFFFF, g_cur_block, g_cur_fiber, g_cur_thr); fflush(stdout);} } }
 
   if (g_sw8_on && ((a >= g_stkw_lo && a < g_stkw_hi) || (a >= 0x84856500u && a < 0x848565A0u))) stkw_note("w16", a, v, 16);
@@ -7029,6 +7040,8 @@ extern "C" void wr16_watch(uint32_t a, uint32_t v) {
       if (g_w16_n++ < 240) { printf("[W16] a=%08X off=%02X v=%04X blk=%08X fib=%08X thr=%08X\n", a, a - g_watch_task, v, g_cur_block, g_cur_fiber, g_cur_thr); fflush(stdout); } } }
 }
 extern "C" void wr32_watch(uint32_t a, uint32_t v) {
+  { if (a >= 0x94700000u && a < 0x94740000u) { static int _uw=0; if(_uw++<80){ printf("[USSEWR] a=%08X off=%05X v=%08X(%.3f) blk=%08X hle=%08X fib=%08X thr=%08X\n", a, a-0x94700000u, v, *(float*)&v, g_cur_block, g_cur_hle_stub, g_cur_fiber, g_cur_thr); fflush(stdout);} } }
+
   { if (a >= 0x8F343000u && a < 0x8F343100u) { static int _nl=0; if(_nl++<300){ printf("[NODELIFE] wr a=%08X v=%08X blk=%08X fib=%08X thr=%08X\n", a, v, g_cur_block, g_cur_fiber, g_cur_thr); fflush(stdout);} } }
 
   { if (a >= 0x816CC728u && a < 0x816CC750u) { static int _m7=0; static uint32_t _last[10]={0,0,0,0,0,0,0,0,0,0}; int _i=(int)((a-0x816CC728u)>>2); if(_i>=0&&_i<10){ if(_last[_i]!=v || _m7<12){ _last[_i]=v; if(_m7++<200){ printf("[MODE730] wr a=%08X v=%08X blk=%08X fib=%08X thr=%08X\n", a, v, g_cur_block, g_cur_fiber, g_cur_thr); fflush(stdout);} } } } }
