@@ -3273,6 +3273,12 @@ static uint32_t _ufd_vert_ubo = 0, _ufd_frag_ubo = 0;   // M1251: per-stage UBO 
       }
       // 18.4500 M955: unpack the real GXM vertex streams into the pipeline layout (128B stride, loc0..7 vec4)
       { if (strncmp(_ge->name, "sceGxmDraw", 6) == 0) { static std::map<uint32_t,long> _lrc; long& _c=_lrc[s->r[14]]; _c++; if (_c<=3 || (_c%500)==0) { printf("[DRAWLRC] lr=%08X name=%s n=%ld args=%08X %08X %08X %08X blk=%08X\n", s->r[14], _ge->name, _c, s->r[0],s->r[1],s->r[2],s->r[3], g_cur_block); fflush(stdout); } } }
+      { if (strncmp(_ge->name, "sceGxmDraw", 10) == 0 && s->r[14] != 0x811EC006u) { static int _ud=0; if (_ud++<10) {
+          printf("[UBODUMP2] draw#%d lr=%08X cur_v_ubo=%08X cur_f_ubo=%08X\n", _ud, s->r[14], _cur_v_ubo, _cur_f_ubo);
+          if (_cur_v_ubo) { uint8_t* _s=GP(_cur_v_ubo); if(_s){ for(int _r=0;_r<32;++_r) printf("[UBODUMP2] V row%d = %.4f %.4f %.4f %.4f\n", _r, ((float*)_s)[_r*4],((float*)_s)[_r*4+1],((float*)_s)[_r*4+2],((float*)_s)[_r*4+3]); } }
+          if (_cur_f_ubo) { uint8_t* _s=GP(_cur_f_ubo); if(_s){ for(int _r=0;_r<8;++_r) printf("[UBODUMP2] F row%d = %.4f %.4f %.4f %.4f\n", _r, ((float*)_s)[_r*4],((float*)_s)[_r*4+1],((float*)_s)[_r*4+2],((float*)_s)[_r*4+3]); } }
+          for (int _u=0;_u<16;++_u){ if(!_frag_tex[_u][0]&&!_frag_tex[_u][1]) continue; printf("[UBODUMP2] fragtex u=%d w0=%08X w1=%08X w2=%08X w3=%08X\n", _u, ((uint32_t*)_frag_tex[_u])[0],((uint32_t*)_frag_tex[_u])[1],((uint32_t*)_frag_tex[_u])[2],((uint32_t*)_frag_tex[_u])[3]); }
+          fflush(stdout); } } }
       if (strncmp(_ge->name, "sceGxmDraw", 10) == 0 && strcmp(_ge->name, "sceGxmDrawPrecomputed") != 0) {
         uint32_t _icount = _stk[0];   // sceGxmDraw(ctx,prim,indexType,indexData,indexCount): indexCount = first stack arg
         uint32_t _vc = _icount;
