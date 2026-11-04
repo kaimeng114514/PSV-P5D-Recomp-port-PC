@@ -6593,6 +6593,16 @@ static void guest_thread_run(uint32_t tid) {
 }
 static uint8_t* gimg_ptr() { return gp_img; }
 static int g_ind_n = 0;
+// F960DUMP: diagnose 0x44700000 (=960.0f) used as an indirect target
+static void f960_dump(uint32_t tgt, RecState* s, const char* where) {
+  static int _n=0; if (_n++>=12) return;
+  printf("[F960DUMP] %s target=%08X pc=%08X lr=%08X sp=%08X fib=%08X thr=%08X\n", where, tgt, g_cur_block, s->r[14], s->r[13], g_cur_fiber, g_cur_thr);
+  printf("[F960DUMP]   regs:"); for (int _i=0;_i<13;++_i) printf(" r%d=%08X", _i, s->r[_i]); printf("\n");
+  printf("[F960DUMP]   ring:"); for (int _k=0;_k<24;++_k) printf(" %08X", g_pc_ring[(g_pc_ring_n-24u+(uint32_t)_k)&63u]); printf("\n");
+  { uint8_t* _q=GP(g_cur_block & ~1u); if(_q){ uint32_t _a=0,_b=0; std::memcpy(&_a,_q,4); std::memcpy(&_b,_q+4,4); printf("[F960DUMP]   insn@%08X: %08X %08X\n", g_cur_block&~1u, _a, _b); } }
+  fflush(stdout);
+}
+
 extern "C" uint32_t id_reg(int idx, RecState* s) {
   uint32_t t = s->r[idx & 15] & ~1u;
   if (t == 0x81159276u || t == 0x811DACFCu || t == 0x81178F10u) {
@@ -6614,6 +6624,7 @@ extern "C" uint32_t id_reg(int idx, RecState* s) {
   if (t >= 0x811830E0u && t <= 0x81183200u && g_ind_n++ < 60) { printf("[INDR] reg%d raw=%08X t=%08X blk=%08X fib=%08X thr=%08X sp=%08X\n", idx, s->r[idx & 15], t, g_cur_block, g_cur_fiber, g_cur_thr, s->r[13]); fflush(stdout); }
   if (t >= 0x81181A00u && t <= 0x81181C60u && g_ind_n++ < 60) { printf("[INDR2] reg%d raw=%08X t=%08X blk=%08X fib=%08X thr=%08X\n", idx, s->r[idx & 15], t, g_cur_block, g_cur_fiber, g_cur_thr); fflush(stdout); }
   if (gbn(t)) return t;
+  if (t == 0x44700000u || s->r[idx & 15] == 0x44700000u) f960_dump(s->r[idx & 15], s, "id_reg");
   printf("[INDIRECT-MISS] reg%d=%08X target=%08X block=%08X\n", idx, s->r[idx & 15], t, g_cur_block);
   return 0xFFFFFFFDu;
 }
@@ -6622,6 +6633,7 @@ extern "C" uint32_t id_regv(uint32_t tgt, RecState* s) {
   if (t >= 0x811830E0u && t <= 0x81183200u && g_ind_n++ < 60) { printf("[INDV] raw=%08X t=%08X blk=%08X fib=%08X thr=%08X sp=%08X\n", tgt, t, g_cur_block, g_cur_fiber, g_cur_thr, s->r[13]); fflush(stdout); }
   if (t >= 0x81181A00u && t <= 0x81181C60u && g_ind_n++ < 60) { printf("[INDV2] raw=%08X t=%08X blk=%08X fib=%08X thr=%08X\n", tgt, t, g_cur_block, g_cur_fiber, g_cur_thr); fflush(stdout); }
   if (gbn(t)) return t;
+  if (t == 0x44700000u || tgt == 0x44700000u) f960_dump(tgt, s, "id_regv");
   printf("[INDIRECT-MISS-V] target=%08X block=%08X\n", tgt, g_cur_block);
   return 0xFFFFFFFDu;
 }
@@ -6898,6 +6910,8 @@ extern "C" void wr16_watch(uint32_t a, uint32_t v) {
       if (g_w16_n++ < 240) { printf("[W16] a=%08X off=%02X v=%04X blk=%08X fib=%08X thr=%08X\n", a, a - g_watch_task, v, g_cur_block, g_cur_fiber, g_cur_thr); fflush(stdout); } } }
 }
 extern "C" void wr32_watch(uint32_t a, uint32_t v) {
+  { static int _fw=0; if ((v==0x44700000u || v==0x44080000u) && _fw++<60) { printf("[FW960] a=%08X v=%08X blk=%08X fib=%08X thr=%08X lr=%08X sp=%08X\n", a, v, g_cur_block, g_cur_fiber, g_cur_thr, g_cur_hle_ret_lr, g_snap_r[13]); fflush(stdout); } }
+
   for (int _i = 0; _i < g_cwatch_n; ++_i) if (a == g_cwatch_va[_i]) { static int _cw=0; if (_cw++<80) { printf("[COMSEW] a=%08X v=%08X blk=%08X fib=%08X thr=%08X lr=%08X\n", a,v,g_cur_block,g_cur_fiber,g_cur_thr,g_cur_hle_ret_lr); fflush(stdout); } }
   for (int _i = 0; _i < g_qwatch_n; ++_i) if (a == g_qwatch_va[_i]) { static int _qw=0; if (_qw++<60) { printf("[QSTATEW] a=%08X v=%08X blk=%08X fib=%08X thr=%08X lr=%08X sp=%08X\n", a,v,g_cur_block,g_cur_fiber,g_cur_thr,g_cur_hle_ret_lr,g_snap_r[13]); fflush(stdout); } }
   if (g_cri_reader && a >= g_cri_reader && a < g_cri_reader + 0x120u) { static int _rs=0; if (_rs++ < 120) { printf("[READERSTAT] a=%08X off=%03X v=%08X blk=%08X fib=%08X thr=%08X lr=%08X sp=%08X\n", a, a-g_cri_reader, v, g_cur_block, g_cur_fiber, g_cur_thr, g_cur_hle_ret_lr, g_snap_r[13]); fflush(stdout); } }
