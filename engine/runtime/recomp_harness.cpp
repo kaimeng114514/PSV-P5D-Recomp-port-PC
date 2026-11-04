@@ -198,11 +198,13 @@ extern "C" const void* get_table_034(unsigned* cnt); extern "C" const void* get_
 extern "C" BlockFn find_block_034(uint32_t pc); extern "C" BlockFn find_block_035(uint32_t pc); extern "C" BlockFn find_block_036(uint32_t pc); extern "C" BlockFn find_block_037(uint32_t pc);
 extern "C" BlockFn find_gapblk_000(uint32_t pc); extern "C" BlockFn find_gapblk_001(uint32_t pc);
 extern "C" BlockFn find_gapblk_002(uint32_t pc); extern "C" BlockFn find_gapblk_003(uint32_t pc);
+extern "C" BlockFn find_gapblk_g4(uint32_t pc);   // M1279: restored handler FUN_811E44AE
 static BlockFn find_gap_block(uint32_t pc) {
   BlockFn b = find_gapblk_000(pc); if (b) return b;
   b = find_gapblk_001(pc); if (b) return b;
   b = find_gapblk_002(pc); if (b) return b;
   b = find_gapblk_003(pc); if (b) return b;
+  b = find_gapblk_g4(pc); if (b) return b;
   return nullptr;
 }
 static const uint32_t IMG_VA_BASE = 0x80600000;
