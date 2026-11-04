@@ -6147,7 +6147,17 @@ static uint32_t mb_811E649A(RecState* s) {
           uint8_t* q1 = GP(_base + 0xCu); if (q1) std::memcpy(q1, &_faken, 4);
           uint8_t* q2 = GP(_base + 0x2Cu); if (q2) std::memcpy(q2, &_faken, 4);
           static int _fgn=0; if (_fgn++<12) { printf("[FORCEGATE] frame=%u base=%08X set A=%08X n=%u\n", _frame, _base, _faken, g_main_n); fflush(stdout);} } }
-      (void)call_guest_cb2(s, fn & ~1u, _aa ? arg : (desc + 4u), 0u, 200000000);   // CB2MAX: was 4000000 (job could exceed it and be abandoned mid-way)
+      { static int _df = -1; if (_df < 0) _df = getenv("P5D_DEFERJOB") ? 1 : 0;
+        if (_df) {   // DEFERJOB: run the PREVIOUS app job now (descriptor fully written by then); enqueue-current is deferred
+          static uint32_t _df_fn = 0, _df_va = 0;
+          if (_df_fn) { static int _dn=0; if (_dn++<20) { printf("[DEFERJOB] run deferred fn=%08X argva=%08X\n", _df_fn, _df_va); fflush(stdout);} (void)call_guest_cb2(s, _df_fn, _df_va, 0u, 200000000); _df_fn = 0; }
+          if (!_df_va) _df_va = hle_malloc(0x40u);
+          if (_df_va) { uint8_t* _dst = GP(_df_va); uint8_t* _src = GP(desc + 4u); if (_dst && _src) std::memcpy(_dst, _src, 0x30); }
+          _df_fn = fn & ~1u;
+          if (s->r[0] == 2u) node_exec_frame(s);
+        } else {
+          (void)call_guest_cb2(s, fn & ~1u, _aa ? arg : (desc + 4u), 0u, 200000000);   // CB2MAX: was 4000000 (job could exceed it and be abandoned mid-way)
+        } }
       if (_fg) { static int _fe = -1; if (_fe < 0) _fe = getenv("P5D_FORCEGATE_END") ? 1 : 0;
         if (_fe) { uint32_t _fr = 0; { uint8_t* p = GP(desc + 4u); if (p) std::memcpy(&_fr, p, 4); }
           (void)call_guest_cb2(s, 0x811EC264u, _fr, 0u, 4000000);
