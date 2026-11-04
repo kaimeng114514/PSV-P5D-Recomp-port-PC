@@ -2618,7 +2618,10 @@ static void hf_fiber_thread(HFiber* f) {
           uint32_t _st=0,_fl=0,_uid=0; uint8_t* _o=GP(_obj);
           if(_o){ std::memcpy(&_st,_o,4); std::memcpy(&_fl,_o+4,4); std::memcpy(&_uid,_o+8,4); }
           printf("[LOGOFSM] call=%d obj=%08X state=%u flag4=%u plus8=%08X n=%u\n", _lf, _obj, _st, _fl, _uid, g_main_n); fflush(stdout); } }
-      else if ((pc & ~1u) == 0x8119343Au) { static int _tg=0; if(_tg++<12){ const char* _nm="?"; uint8_t* _q=GP(s->r[0]); if(_q) _nm=(const char*)_q; printf("[LOGOTGA] FUN_8119343a name=%s mem=%08X a2=%08X n=%u\n", _nm, s->r[1], s->r[2], g_main_n); fflush(stdout);} }
+      else if ((pc & ~1u) == 0x8119343Au) { static int _tg=0; if(_tg++<12){ const char* _nm="?"; uint8_t* _q=GP(s->r[0]); if(_q) _nm=(const char*)_q; printf("[LOGOTGA] FUN_8119343a name=%s mem=%08X a2=%08X n=%u\n", _nm, s->r[1], s->r[2], g_main_n);
+          { uint32_t _b0=s->r[1]; for(int _r=0;_r<2;++_r){ printf("[LOGOTGA]  +%02X:", _r*16); for(int _k=0;_k<4;++_k){ uint32_t _v=0; uint8_t* _q=GP(_b0+(_r*4+_k)*4u); if(_q) std::memcpy(&_v,_q,4); printf(" %08X",_v);} printf("\n"); } }
+          { uint32_t _b1=s->r[1]+0x28u; printf("[LOGOTGA]  +28:"); for(int _k=0;_k<4;++_k){ uint32_t _v=0; uint8_t* _q=GP(_b1+_k*4u); if(_q) std::memcpy(&_v,_q,4); printf(" %08X",_v);} printf("\n"); }
+          fflush(stdout);} }
       else if ((pc & ~1u) == 0x811610A4u) { static int _dr=0; if(_dr++<20){ printf("[LOGODRAW] FUN_811610a4 r0=%08X r1=%08X r2=%08X r3=%08X r4=%08X r5=%08X r6=%08X r7=%08X n=%u\n", s->r[0],s->r[1],s->r[2],s->r[3],s->r[4],s->r[5],s->r[6],s->r[7], g_main_n); fflush(stdout);} }
       else if ((pc & ~1u) == 0x8119351Cu) { static int _cb=0; if(_cb++<12){ printf("[LOGOCB] FUN_8119351c r0=%08X r1=%08X r2=%08X n=%u\n", s->r[0],s->r[1],s->r[2], g_main_n); fflush(stdout);} } }
     if ((pc & ~1u) == 0x811C041Cu || (pc & ~1u) == 0x811C0884u || (pc & ~1u) == 0x811C09B6u) { // NODEW0
@@ -2701,6 +2704,11 @@ static void hf_fiber_thread(HFiber* f) {
       static int _tc=0; if(_tc++<40){ printf("[TEXCASE6] %08X n=%d\n", pc & ~1u, _tc); fflush(stdout);} }
     if ((pc & ~1u) == 0x8116050Cu || (pc & ~1u) == 0x81160512u || (pc & ~1u) == 0x8116050Au) { // TEXCASE6B
       static int _td=0; if(_td++<20){ printf("[TEXCASE6B] case6 block %08X n=%d\n", pc & ~1u, _td); fflush(stdout);} }
+    if ((pc & ~1u) == 0x811934C0u) { // TGADEC: after FUN_81174dbc returns, r0 = decoded image struct
+      static int _td=0; if(_td++<8){ uint32_t _p=s->r[0]; printf("[TGADEC] #%d img=%08X:", _td, _p);
+        if(_p){ for(int _k=0;_k<8;++_k){ uint32_t _v=0; uint8_t* _q=GP(_p+(uint32_t)_k*4u); if(_q) std::memcpy(&_v,_q,4); printf(" %08X",_v);} }
+        printf("\n"); if(_p){ for(int _r=0;_r<2;++_r){ uint32_t _pp=0; uint8_t* _q=GP(_p+(_r?4u:0u)); uint32_t _off=(_r?4u:0u); if(_q){std::memcpy(&_pp,_q,4);} if(_pp){ printf("[TGADEC]  from+%u:",_off); uint8_t* _px=GP(_pp); if(_px){ for(int _k=0;_k<4;++_k){ uint32_t _v; std::memcpy(&_v,_px+_k*4,4); printf(" %08X",_v);} } printf("\n"); } } }
+        fflush(stdout);} }
     if ((pc & ~1u) == 0x811866A6u) {   // M1186: app movie-slot state machine (0x100 slots, stride 0x60, base DAT_81670B48)
       static int g_mvfast = -1; if (g_mvfast < 0) { const char* _e = getenv("P5D_MOVIEFAST"); g_mvfast = (_e && atoi(_e)) ? 1 : 0; }
       static int _mv = 0; ++_mv;
