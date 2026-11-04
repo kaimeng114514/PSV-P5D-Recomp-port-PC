@@ -2847,6 +2847,22 @@ static uint32_t _ufd_vert_ubo = 0, _ufd_frag_ubo = 0;   // M1251: per-stage UBO 
             if (std::sscanf(_ln, "%16llx %31s %255s", &_h, _st, _nm) >= 3 && _h && _nm[0]) _abi_man[_h] = std::string(_nm); }
           std::fclose(_f); }
         printf("[ABISPVDIR] dir=%s manifest=%zu\n", _abi_spvdir.c_str(), _abi_man.size()); fflush(stdout); }
+      // PRE_HLE (M1277): resolve a GXM program object to its SPIR-V file name via GXP hash/manifest
+      auto _resolve_prog_spv = [&](uint32_t _obj, bool _frag) -> void {
+        uint8_t* _q = GP(_obj); uint32_t _gxp = 0; if (_q) std::memcpy(&_gxp, _q, 4);
+        uint64_t _h = 0; uint8_t* _g = GP(_gxp);
+        if (_g) { uint32_t _mg = 0, _sz = 0; std::memcpy(&_mg, _g, 4); std::memcpy(&_sz, _g + 8, 4);
+          if (_mg == 0x00505847u && _sz >= 0x18u && _sz <= 0x40000u) { _h = 0xcbf29ce484222325ull;
+            for (uint32_t _i = 0; _i < _sz; ++_i) { _h ^= (uint64_t)_g[_i]; _h *= 1099511628211ull; } } }
+        if (_h) { auto _it = _abi_man.find(_h); if (_it != _abi_man.end()) { if (_frag) _abi_fspv = _it->second; else _abi_vspv = _it->second; } }
+      };
+      // PRE_HLE (M1277): precomputed draw / state object tables
+      struct PreDrawState { uint32_t vp=0, memBlock=0; uint32_t streams[16]={0}; uint32_t prim=0, idxType=0, idxData=0, idxCount=0; };
+      static std::map<uint32_t, PreDrawState> _preDraw;
+      struct PreObjState { uint32_t prog=0, memBlock=0; uint32_t ubos[8]={0}; };
+      static std::map<uint32_t, PreObjState> _preVertObj, _preFragObj;
+      static uint32_t _curPreVert=0, _curPreFrag=0;
+
       if (strstr(_ge->name, "SetVertexProgram") || strstr(_ge->name, "SetFragmentProgram")
           || strstr(_ge->name, "PrecomputedVertexStateInit") || strstr(_ge->name, "PrecomputedFragmentStateInit")) {
         const bool _frag = (strstr(_ge->name, "SetFragmentProgram") != nullptr) || (strstr(_ge->name, "PrecomputedFragmentStateInit") != nullptr);
@@ -2914,6 +2930,70 @@ static uint32_t _ufd_vert_ubo = 0, _ufd_frag_ubo = 0;   // M1251: per-stage UBO 
         else { static int _pn2 = 0; if (_pn2++ < 120) { printf("[ABIPIPE2] v=%s f=%s rc=%d rt=%08X dvc=%u n=%u lr=%08X\n", _abi_vspv.c_str(), _abi_fspv.c_str(), _rc, g_abi_cur_cd, (unsigned)(s->r[4]), g_main_n, s->r[14]); fflush(stdout);} } }
       uint32_t _stk[8];
       for (int _i = 0; _i < 8; ++_i) { uint32_t _v = 0; uint8_t* _q = GP(s->r[13] + (uint32_t)_i * 4u); if (_q) std::memcpy(&_v, _q, 4); _stk[_i] = _v; }
+      // PRE_HLE (M1277): precomputed draw family - record sizes/state, enable real replay
+      if (strcmp(_ge->name, "sceGxmGetPrecomputedDrawSize") == 0 || strcmp(_ge->name, "sceGxmGetPrecomputedVertexStateSize") == 0 || strcmp(_ge->name, "sceGxmGetPrecomputedFragmentStateSize") == 0) {
+        static int _pn=0; if (_pn++<12) { printf("[PREHLE] %s obj=%08X -> size=0x100\n", _ge->name, s->r[0]); fflush(stdout);} 
+        s->r[0] = 0x100u; return s->r[14]; }
+      if (strcmp(_ge->name, "sceGxmPrecomputedDrawInit") == 0) {
+        uint32_t _d=s->r[0], _vp=s->r[1], _mb=s->r[2]; PreDrawState& _s=_preDraw[_d]; _s.vp=_vp; _s.memBlock=_mb;
+        _resolve_prog_spv(_vp, false);
+        static int _pn=0; if (_pn++<12) { printf("[PREHLE] DrawInit draw=%08X vp=%08X mem=%08X\n", _d,_vp,_mb); fflush(stdout);} 
+        s->r[0]=0; return s->r[14]; }
+      if (strcmp(_ge->name, "sceGxmPrecomputedDrawSetParams") == 0) {
+        uint32_t _d=s->r[0]; PreDrawState& _s=_preDraw[_d]; _s.prim=s->r[1]; _s.idxType=s->r[2]; _s.idxData=s->r[3]; _s.idxCount=_stk[0];
+        static int _pn=0; if (_pn++<12) { printf("[PREHLE] SetParams draw=%08X prim=%08X idxType=%u idxData=%08X idxCount=%u\n", _d,_s.prim,_s.idxType,_s.idxData,_s.idxCount); fflush(stdout);} 
+        s->r[0]=0; return s->r[14]; }
+      if (strcmp(_ge->name, "sceGxmPrecomputedDrawSetVertexStream") == 0) {
+        uint32_t _d=s->r[0], _si=s->r[1], _va=s->r[2]; if(_si<16u){ _preDraw[_d].streams[_si]=_va; _stm2va[_si]=_va; }
+        static int _pn=0; if (_pn++<16) { printf("[PREHLE] SetStream draw=%08X idx=%u va=%08X\n", _d,_si,_va); fflush(stdout);} 
+        s->r[0]=0; return s->r[14]; }
+      if (strcmp(_ge->name, "sceGxmPrecomputedVertexStateInit") == 0) { _preVertObj[s->r[0]].prog=s->r[1]; _preVertObj[s->r[0]].memBlock=s->r[2]; _resolve_prog_spv(s->r[1], false); s->r[0]=0; return s->r[14]; }
+      if (strcmp(_ge->name, "sceGxmPrecomputedFragmentStateInit") == 0) { _preFragObj[s->r[0]].prog=s->r[1]; _preFragObj[s->r[0]].memBlock=s->r[2]; _resolve_prog_spv(s->r[1], true); s->r[0]=0; return s->r[14]; }
+      if (strstr(_ge->name, "PrecomputedVertexStateSetUniformBuffer")) { uint32_t _o=s->r[0], _bi=s->r[1], _b=s->r[2]; if(_bi<8u) _preVertObj[_o].ubos[_bi]=_b; _cur_v_ubo=_b; s->r[0]=0; return s->r[14]; }
+      if (strstr(_ge->name, "PrecomputedFragmentStateSetUniformBuffer")) { uint32_t _o=s->r[0], _bi=s->r[1], _b=s->r[2]; if(_bi<8u) _preFragObj[_o].ubos[_bi]=_b; _cur_f_ubo=_b; s->r[0]=0; return s->r[14]; }
+      if (strstr(_ge->name, "PrecomputedVertexStateSetDefaultUniformBuffer")) { _preVertObj[s->r[0]].ubos[0]=s->r[1]; _cur_v_ubo=s->r[1]; s->r[0]=0; return s->r[14]; }
+      if (strstr(_ge->name, "PrecomputedFragmentStateSetDefaultUniformBuffer")) { _preFragObj[s->r[0]].ubos[0]=s->r[1]; _cur_f_ubo=s->r[1]; s->r[0]=0; return s->r[14]; }
+      if (strcmp(_ge->name, "sceGxmSetPrecomputedVertexState") == 0) { _curPreVert=s->r[1]; auto _it=_preVertObj.find(s->r[1]); if(_it!=_preVertObj.end() && _it->second.prog){ _cur_vobj=_it->second.prog; _resolve_prog_spv(_it->second.prog,false); if(_it->second.ubos[0]) _cur_v_ubo=_it->second.ubos[0]; }
+        static int _pn=0; if (_pn++<8){ printf("[PREHLE] SetVState state=%08X vp=%08X vspv=%s\n", s->r[1], _cur_vobj, _abi_vspv.c_str()); fflush(stdout);} s->r[0]=0; return s->r[14]; }
+      if (strcmp(_ge->name, "sceGxmSetPrecomputedFragmentState") == 0) { _curPreFrag=s->r[1]; auto _it=_preFragObj.find(s->r[1]); if(_it!=_preFragObj.end() && _it->second.prog){ _resolve_prog_spv(_it->second.prog,true); if(_it->second.ubos[0]) _cur_f_ubo=_it->second.ubos[0]; }
+        static int _pn=0; if (_pn++<8){ printf("[PREHLE] SetFState state=%08X fspv=%s\n", s->r[1], _abi_fspv.c_str()); fflush(stdout);} s->r[0]=0; return s->r[14]; }
+      if (strcmp(_ge->name, "sceGxmDrawPrecomputed") == 0) {
+        uint32_t _d=s->r[1]; auto _it=_preDraw.find(_d);
+        if (_it!=_preDraw.end()) {
+          PreDrawState& _ps=_it->second; _resolve_prog_spv(_ps.vp,false);
+          uint32_t _itype=_ps.idxType, _idata=_ps.idxData, _icount=_ps.idxCount, _vc=0;
+          if (_icount>0u && _idata) { uint32_t _mx=0; bool _any=false;
+            for (uint32_t _k=0;_k<_icount && _k<65536u;++_k){ uint32_t _ix=0;
+              if (_itype==0u){ uint16_t _v16=0; uint8_t* _q=GP(_idata+_k*2u); if(!_q) break; std::memcpy(&_v16,_q,2); _ix=_v16; }
+              else { uint8_t* _q=GP(_idata+_k*4u); if(!_q) break; std::memcpy(&_ix,_q,4); }
+              if (_ix+1u>_mx) _mx=_ix+1u; _any=true; }
+            if (_any) _vc=_mx; }
+          auto _at=_vobj2attrs.find(_ps.vp); auto _st=_vobj2strms.find(_ps.vp);
+          static std::vector<float> _pvtx;
+          if (_at!=_vobj2attrs.end() && !_at->second.empty() && _vc>0u && _vc<=65536u) {
+            const std::vector<AbiVAttr>& _av=_at->second; _pvtx.assign((size_t)_vc*32u,0.0f); bool _ok=true;
+            for (uint32_t _i=0;_i<_av.size() && _i<8u;++_i){
+              uint32_t _stride=0;
+              if (_st!=_vobj2strms.end()) for(size_t _k=0;_k<_st->second.size();++_k) if(_st->second[_k].index==_av[_i].stream){_stride=_st->second[_k].stride;break;}
+              uint32_t _sva = (_av[_i].stream<16u)? _ps.streams[_av[_i].stream] : 0u;
+              if (!_stride || !_sva) { _ok=false; break; }
+              for (uint32_t _v=0;_v<_vc;++_v){ uint8_t* _src=GP(_sva+_v*_stride+_av[_i].offset); if(!_src){_ok=false;break;}
+                float _f[4]; abi_decode_attr(_src,_av[_i].fmt,_av[_i].comps,_f); if(_i==0u){_f[3]=1.0f;}
+                std::memcpy(&_pvtx[(size_t)_v*32u+(size_t)_i*4u],_f,16); }
+              if(!_ok) break; }
+            if (_ok) {
+              for (int _u=0;_u<16;++_u){ bool _nz=false; for(int _k=0;_k<16;++_k) if(_frag_tex[_u][_k]){_nz=true;break;} if(!_nz) continue; (void)p5d::vulkan::upload_gxm_control_resolved((unsigned)_u,_frag_tex[_u]); }
+              if (_cur_v_ubo){ uint8_t* _src=GP(_cur_v_ubo); if(_src) p5d::vulkan::update_uniform_buffer_raw(_src,0x1000u); }
+              if (_cur_f_ubo){ uint8_t* _src=GP(_cur_f_ubo); if(_src) p5d::vulkan::update_fragment_uniform_buffer_raw(_src,0x1000u); }
+              if (!_abi_vspv.empty() && !_abi_fspv.empty()) { std::string _vp=_abi_spvdir+"/"+_abi_vspv, _fp=_abi_spvdir+"/"+_abi_fspv; (void)p5d::vulkan::select_real_pipeline(_vp.c_str(),_fp.c_str()); }
+              int _rr = p5d::vulkan::upload_vertex_stream(_pvtx.data(),(unsigned)(_vc*128u),_vc);
+              p5d::vulkan::set_gxm_viewport(0.0f,960.0f,0.0f,544.0f,0.0f,1.0f); p5d::vulkan::set_gxm_viewport_enable(1);
+              p5d::vulkan::gxm_draw_arrays(_vc);
+              static int _pn=0; if (_pn++<30) { printf("[PREDRAW] #%d draw=%08X vp=%08X vc=%u ic=%u it=%u vspv=%s fspv=%s rc=%d\n", _pn,_d,_ps.vp,_vc,_icount,_itype,_abi_vspv.c_str(),_abi_fspv.c_str(),_rr); fflush(stdout);} }
+            else { static int _fn=0; if(_fn++<6){ printf("[PREDRAW] FAIL draw=%08X vp=%08X vc=%u attrs=%zu streams=%zu\n",_d,_ps.vp,_vc,(unsigned)_av.size(),(size_t)_stm2va.size()); fflush(stdout);} } }
+          else { static int _fn=0; if(_fn++<6){ printf("[PREDRAW] NOATTR draw=%08X vp=%08X vc=%u attrs=%zu\n",_d,_ps.vp,_vc,(size_t)(_at!=_vobj2attrs.end()?_at->second.size():0)); fflush(stdout);} } }
+        s->r[0]=0; return s->r[14]; }
+
       // 18.4484 M939: EndScene / DisplayQueueAddEntry -> submit + present (backend end_frame does both)
       // 18.4494 M949: real ColorSurfaceInit / DepthStencilSurfaceInit so BeginScene receives a filled surface.
       if (strncmp(_ge->name, "sceGxmColorSurfaceInit", 22) == 0) {
@@ -3190,7 +3270,7 @@ static uint32_t _ufd_vert_ubo = 0, _ufd_frag_ubo = 0;   // M1251: per-stage UBO 
         static int _vsn=0; if (_vsn++<16) { printf("[ABIVS] %s idx=%u va=%08X n=%u\n", _ge->name, _si, _va, g_main_n); fflush(stdout); }
       }
       // 18.4500 M955: unpack the real GXM vertex streams into the pipeline layout (128B stride, loc0..7 vec4)
-      if (strncmp(_ge->name, "sceGxmDraw", 10) == 0) {
+      if (strncmp(_ge->name, "sceGxmDraw", 10) == 0 && strcmp(_ge->name, "sceGxmDrawPrecomputed") != 0) {
         uint32_t _icount = _stk[0];   // sceGxmDraw(ctx,prim,indexType,indexData,indexCount): indexCount = first stack arg
         uint32_t _vc = _icount;
         {   // 18.4502 M957: indexed draw -> real vertex count = max(index)+1
