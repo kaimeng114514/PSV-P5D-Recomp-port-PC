@@ -556,7 +556,10 @@ static uint32_t g_pre_pc[8] = {0};
 static uint32_t g_pre_idx = 0;
 static int g_after_stub = 0;
 static uint32_t g_fread_n = 0, g_fread_bytes = 0;
-static bool cpk_read_any_impl(const std::string& nm, std::vector<uint8_t>& out) {
+static bool cpk_read_any_inner(const std::string& nm, std::vector<uint8_t>& out) {
+
+  static int _fn_on=-1; if(_fn_on<0){ const char* _e=getenv("P5D_FIONAMES"); _fn_on=(_e&&atoi(_e))?1:0; }
+  struct _FnGuard { const std::string& nm; bool ok=false; ~_FnGuard(){ if(_fn_on){ static int _c=0; if(_c++<300){ printf("[FIONAME] %s -> %s\n", nm.c_str(), ok?"OK":"MISS"); fflush(stdout);} } } };
   std::string k = nm; for (char& c : k) if (c == '\\') c = '/';
   static const char* pp[] = {"app0:/","app0:","host0:/","host0:","cache0:/","savedata0:/","ux0:"};
   for (const char* pre : pp) { size_t l = std::strlen(pre); if (k.size() >= l && _strnicmp(k.c_str(), pre, l) == 0) { k = k.substr(l); break; } }
@@ -591,6 +594,12 @@ static bool cpk_read_any_impl(const std::string& nm, std::vector<uint8_t>& out) 
       if (sz > 0 && sz <= (1L << 30)) { out.resize((size_t)sz); size_t got = fread(out.data(), 1, (size_t)sz, fp); fclose(fp);
         if (got == (size_t)sz) return true; } else fclose(fp); } }
   return false;
+}
+static bool cpk_read_any_impl(const std::string& nm, std::vector<uint8_t>& out) {
+  static int _on=-1; if(_on<0){ const char* _e=getenv("P5D_FIONAMES"); _on=(_e&&atoi(_e))?1:0; }
+  bool _r = cpk_read_any_inner(nm, out);
+  if (_on) { static int _c=0; if (_c++ < 300) { printf("[FIONAME] %s -> %s\n", nm.c_str(), _r ? "OK" : "MISS"); fflush(stdout); } }
+  return _r;
 }
 static void fios_ensure_cpk() {
   if (g_cpk_ready) return; g_cpk_ready = true;
@@ -2591,6 +2600,18 @@ static void hf_fiber_thread(HFiber* f) {
           for (int _k=0;_k<40;++_k) { uint32_t _v=0; uint8_t* _q=GP(s->r[13] + (uint32_t)_k*4u); if (_q) std::memcpy(&_v,_q,4); printf(" %08X", _v); }
           printf("\n"); fflush(stdout); } } }
 
+    if ((pc & ~1u) == 0x81193704u || (pc & ~1u) == 0x8119343Au || (pc & ~1u) == 0x811610A4u || (pc & ~1u) == 0x8119351Cu) { // LOGOFSM
+      static int _lf=0;
+      if ((pc & ~1u) == 0x81193704u) { ++_lf;
+        uint32_t _obj=0;
+        { uint8_t* _q=GP(s->r[0]); if(_q){ std::memcpy(&_obj,_q,4); } }
+        if (_lf<=40 || (_lf%200)==0) {
+          uint32_t _st=0,_fl=0,_uid=0; uint8_t* _o=GP(_obj);
+          if(_o){ std::memcpy(&_st,_o,4); std::memcpy(&_fl,_o+4,4); std::memcpy(&_uid,_o+8,4); }
+          printf("[LOGOFSM] call=%d obj=%08X state=%u flag4=%u plus8=%08X n=%u\n", _lf, _obj, _st, _fl, _uid, g_main_n); fflush(stdout); } }
+      else if ((pc & ~1u) == 0x8119343Au) { static int _tg=0; if(_tg++<12){ const char* _nm="?"; uint8_t* _q=GP(s->r[0]); if(_q) _nm=(const char*)_q; printf("[LOGOTGA] FUN_8119343a name=%s mem=%08X a2=%08X n=%u\n", _nm, s->r[1], s->r[2], g_main_n); fflush(stdout);} }
+      else if ((pc & ~1u) == 0x811610A4u) { static int _dr=0; if(_dr++<20){ printf("[LOGODRAW] FUN_811610a4 r0=%08X r1=%08X r2=%08X r3=%08X r4=%08X r5=%08X r6=%08X r7=%08X n=%u\n", s->r[0],s->r[1],s->r[2],s->r[3],s->r[4],s->r[5],s->r[6],s->r[7], g_main_n); fflush(stdout);} }
+      else if ((pc & ~1u) == 0x8119351Cu) { static int _cb=0; if(_cb++<12){ printf("[LOGOCB] FUN_8119351c r0=%08X r1=%08X r2=%08X n=%u\n", s->r[0],s->r[1],s->r[2], g_main_n); fflush(stdout);} } }
     if ((pc & ~1u) == 0x811866A6u) {   // M1186: app movie-slot state machine (0x100 slots, stride 0x60, base DAT_81670B48)
       static int g_mvfast = -1; if (g_mvfast < 0) { const char* _e = getenv("P5D_MOVIEFAST"); g_mvfast = (_e && atoi(_e)) ? 1 : 0; }
       static int _mv = 0; ++_mv;
@@ -3480,7 +3501,15 @@ static uint32_t _ufd_vert_ubo = 0, _ufd_frag_ubo = 0;   // M1251: per-stage UBO 
                 for(size_t _i=0;_i<_av.size() && _i<8;++_i){ printf("[VTXDUMP]  attr%zu stream=%u off=%u fmt=%u comps=%u va=%08X\n",_i,_av[_i].stream,_av[_i].offset,_av[_i].fmt,_av[_i].comps, _stm2va.count(_av[_i].stream)?_stm2va[_av[_i].stream]:0u);
                   for(unsigned _v=0;_v<_vc && _v<4;++_v){ if((size_t)_v*32u+_i*4u+4u<=_vtx.size()) printf("[VTXDUMP]    v%u=(%.3f,%.3f,%.3f,%.3f)\n",_v,_vtx[(size_t)_v*32u+_i*4u],_vtx[(size_t)_v*32u+_i*4u+1],_vtx[(size_t)_v*32u+_i*4u+2],_vtx[(size_t)_v*32u+_i*4u+3]); } }
                 fflush(stdout);} } }
-            static int _vn=0; if (_vn++<40) { printf("[ABIVTX] #%d vc=%u attrs=%u rc=%d n=%u v0=(%.3f,%.3f,%.3f,%.3f) v1=(%.3f,%.3f,%.3f,%.3f)\n", _vn,
+            { static int _ds=-1; if(_ds<0){ const char* _e=getenv("P5D_DRAWSUM"); _ds=(_e&&atoi(_e))?1:0; }
+              if(_ds && s->r[14]==0x811E45B6u){ static int _dsn=0; static std::set<std::string> _sig;
+                char _b[256]; float _x0=0,_x1=0,_y0=0,_y1=0; unsigned _tex=0;
+                if(_vtx.size()>=4){ _x0=_x1=_vtx[0]; _y0=_y1=_vtx[1];
+                  for(unsigned _v=0;_v<_vc && _v<64;++_v) for(int _a=0;_a<(int)_av.size() && _a<2;++_a){ float _fx=_vtx[(size_t)_v*32u+_a*4u], _fy=_vtx[(size_t)_v*32u+_a*4u+1]; if(_a==0){ if(_fx<_x0)_x0=_fx; if(_fx>_x1)_x1=_fx; if(_fy<_y0)_y0=_fy; if(_fy>_y1)_y1=_fy; } } }
+                for(int _u=0;_u<16;++_u){ if(_frag_tex[_u][0]||_frag_tex[_u][1]){ uint32_t _w0=0; std::memcpy(&_w0,_frag_tex[_u],4); _tex=(_tex*31u)^_w0; } }
+                std::snprintf(_b,sizeof(_b),"vc=%u aN=%u bbox=%.0f,%.0f-%.0f,%.0f c0=%.1f,%.1f,%.1f,%.1f tex=%08X", _vc,(unsigned)_av.size(),_x0,_y0,_x1,_y1, _vtx[4],_vtx[5],_vtx[6],_vtx[7], _tex);
+                if(_sig.find(_b)==_sig.end() && _sig.size()<80){ _sig.insert(_b); printf("[DRAWSUM] %s\n", _b); fflush(stdout);} }
+              }            static int _vn=0; if (_vn++<40) { printf("[ABIVTX] #%d vc=%u attrs=%u rc=%d n=%u v0=(%.3f,%.3f,%.3f,%.3f) v1=(%.3f,%.3f,%.3f,%.3f)\n", _vn,
               _vc, (unsigned)_av.size(), _rr, g_main_n, _vtx[0],_vtx[1],_vtx[2],_vtx[3], _vtx[32],_vtx[33],_vtx[34],_vtx[35]); fflush(stdout); }
           } else { static int _fn=0; if (_fn++<6) { printf("[ABIVTX] FAIL vc=%u attrs=%u cur_obj=%08X streams=%zu n=%u\n", _vc,(unsigned)_av.size(),_cur_vobj,_stm2va.size(),g_main_n); fflush(stdout); } }
         }
