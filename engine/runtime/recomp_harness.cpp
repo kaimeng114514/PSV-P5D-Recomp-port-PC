@@ -300,6 +300,7 @@ static int g_acc_n = 0, g_lkin_n = 0, g_lkout_n = 0;
 extern "C" int g_watch_on = 1;
 extern "C" int g_badmem_safe = 0;   // BADMEM_SAFE: P() returns scratch instead of abort when set
 static void crihot_hit(uint32_t pc);   // CRIHOT_FWD
+static void nodechain_hit(uint32_t pc, RecState* s);   // NODECHAIN_FWD
 static void decomp_hit(uint32_t pc, RecState* s);   // DECOMPPROBE_FWD
 static void stalldump_hit(uint32_t pc, RecState* s);   // STALLDUMP_FWD
 static void cpktrace_hit(uint32_t pc, RecState* s);   // CPKTRACE_FWD
@@ -2308,6 +2309,7 @@ static void hf_fiber_thread(HFiber* f) {
     if (!fn) { fprintf(stderr, "[HF-NOBLK] fib=%08X pc=%08X\n", f->addr, pc); break; }
     g_cur_block = pc; f->cur_pc = pc; ++f->blocks; ++g_hf_blocks;
     { static int _chh=-1; if (_chh<0) _chh = getenv("P5D_CRIHOT") ? 1 : 0; if (_chh) crihot_hit(pc); }
+    { static int _nc2=-1; if (_nc2<0) _nc2 = getenv("P5D_NODECHAIN") ? 1 : 0; if (_nc2) nodechain_hit(pc, s); }
     { static int _dp=-1; if (_dp<0) _dp = getenv("P5D_DECOMPPROBE") ? 1 : 0; if (_dp) decomp_hit(pc, s); }
     { static int _sd=-1; if (_sd<0) _sd = getenv("P5D_STALLDUMP") ? 1 : 0; if (_sd) stalldump_hit(pc, s); }
     { static int _ct=-1; if (_ct<0) _ct = getenv("P5D_CPKTRACE") ? 1 : 0; if (_ct) cpktrace_hit(pc, s); }
@@ -6326,6 +6328,16 @@ static void decomp_hit(uint32_t pc, RecState* s) {   // DECOMPPROBE: decompressi
   if (_p == 0x811E56A4u) { static int _n3=0; ++_n3; if (_n3<=20) { printf("[DECOMP] #%d 6A4 r0=%08X r1=%08X r2=%08X r3=%08X lr=%08X n=%u\n", _n3, s->r[0],s->r[1],s->r[2],s->r[3],s->r[14], g_main_n); fflush(stdout);} }
 }
 
+static void nodechain_hit(uint32_t pc, RecState* s) {   // NODECHAIN: GFD node list traversal diagnostics
+  static int _env=-1; if (_env<0) _env = getenv("P5D_NODECHAIN") ? 1 : 0; if (!_env || !s) return;
+  uint32_t _p = pc & ~1u;
+  if (_p == 0x811C08CAu) { static int _n=0; uint32_t _node=s->r[8]; uint32_t _w0=0; uint8_t* q=GP(_node); if(q) std::memcpy(&_w0,q,4);
+    if (_n++<160 && (_node < 0x8F000000u || _node >= 0x8F700000u || _w0==0x44700000u || _w0==0x44080000u))
+      { printf("[NODECHAIN] read node[0] node=%08X w0=%08X blk=%08X fib=%08X\n", _node, _w0, g_cur_block, g_cur_fiber); fflush(stdout); } }
+  if (_p == 0x811C08D6u) { static int _n2=0; uint32_t _node=s->r[8]; uint32_t _nx=0; uint8_t* q=GP(_node+0x14u); if(q) std::memcpy(&_nx,q,4);
+    if (_n2++<200) { printf("[NODECHAIN] next node=%08X next=%08X\n", _node, _nx); fflush(stdout); } }
+}
+
 static void crihot_dump() {
   printf("[CRIHOT] unique=%d\n",(int)g_cri_hits.size());
   const uint32_t _keys[8] = {0x811CA85Au,0x811CA6B6u,0x811641D2u,0x811CB0D8u,0x811CB0D9u,0x811632BAu,0x8116332Au,0x811CA7ACu};
@@ -6400,6 +6412,7 @@ static uint32_t call_guest_cb2(RecState* s, uint32_t entry, uint32_t a0, uint32_
       printf("[REGCB] pc=%08X name=%s r0=%08X r1=%08X r2=%08X r3=%08X lr=%08X sp=%08X fib=%08X thr=%08X\n", pc, _nm, s->r[0], s->r[1], s->r[2], s->r[3], s->r[14], s->r[13], g_cur_fiber, g_cur_thr); fflush(stdout); }
     uint32_t q = pc & ~1u;
     { static int _chh2=-1; if (_chh2<0) _chh2 = getenv("P5D_CRIHOT") ? 1 : 0; if (_chh2) crihot_hit(pc); }
+    { static int _nc3=-1; if (_nc3<0) _nc3 = getenv("P5D_NODECHAIN") ? 1 : 0; if (_nc3) nodechain_hit(pc, s); }
     { static int _dp2=-1; if (_dp2<0) _dp2 = getenv("P5D_DECOMPPROBE") ? 1 : 0; if (_dp2) decomp_hit(pc, s); }
     { static int _ct2=-1; if (_ct2<0) _ct2 = getenv("P5D_CPKTRACE") ? 1 : 0; if (_ct2) cpktrace_hit(pc, s); }
     { static int _chx2=-1; if (_chx2<0) _chx2 = getenv("P5D_CPKHDR") ? 1 : 0; if (_chx2) cpkhdr_hit(pc, s); }
