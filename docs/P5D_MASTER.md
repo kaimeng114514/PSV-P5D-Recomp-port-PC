@@ -1371,6 +1371,8 @@
 | M1356 | §18.4897: **RD32/guest 内存基址实现定位（继续 M1355）。** runtime/core/main.c 中与 RD32/guest 基址相关实现行：[(308, 'for (int i = 0; i < nwatch; i++) v[i] = RD32(watch_at[i]);'), (312, 'uint32_t now = RD32(watch_at[i]); if (now == v[i]) continue;'), (343, 'FILE *sf = addr >= 0x81000000u && addr < 0xa0000000u ? fopen(sp ? sp : "missed_functions.txt", "a") : 0;   /* (a call th'), (520, '#define PROF_BASE 0x81000000u')]。下一轮：按该实现测量 RD32(0) 的实际返回值，并在 HLE 侧提供地址 0 哨兵或修正 fn_812962ee 语义，使 movie stream 创建通过。|
 | M1357 | §18.4898: **下一决定性实测已排定（地址 0 哨兵）。** 探针方案：p5d_earlychk 记录 RD32(0) 与 RD32(arg0)，运行 TEST_FRAMES=6900 FORCEMOVIE=1 确认 fn_812962ee 返回值来源；若 RD32(0)==0 则在 HLE 给地址 0 提供 CriMana 初始化哨兵（或按真机语义修正），使 fn_81296e4a 早退通过、movie stream 创建成功（device[+8]≠0 → 状态 4 playing → titleDraw 门打开）。|
 | M1358 | §18.4899: ★★★★★ **重大纠错：movie stream 创建其实是成功的（handle≠0），状态 7 不是 NULL 句柄。** 新探针（IHOOK 0x811542aa 记录真正写入 device[+8] 的返回值；HOOK 0x8129b1f4/0x8129b784/0x8127a3e0/0x8129631e 记录成功路径子调用；EARLYCHK 增加 RD32(0)）实测：frame 6843/6854 movie 创建时 `[EARLYCHK] arg0=0 val0=0x3e6e8080`（非 0，早退通过）→ 成功路径全部执行（`[SUB2]→[SUB1]→[SUB1]→[SUB3]→[SUB4]→[SUB2]→[SUB1]→[SUB1]→[SUB3]`）→ `[HWND] frame 6843/6854 handle=0x112e05d8 dev8=0x112e05d8` ⇒ **device[+8] = 0x112e05d8（有效句柄）**。重新解读 `fn_81297100` 完整代码：handle==0 时返回 7 只是 NULL 保护分支；**handle!=0 时** `r1=[handle+0x84]; cmp r1,#1; r0=[handle+0x30]; bne 0x81297128` —— 若 `[handle+0x84]==1` 则**直接返回 7**（状态 7 = 该标志=1），否则进入 `fn_8129d0a8` + `tbb [pc,r0]` 映射表返回 0..6（1/6/5/3/4/0/2）。⇒ 之前 M1349-M1357 "状态 7 = 句柄 NULL" 的链条作废（仅对空句柄成立）；真正故障是 **stream 创建成功后 [handle+0x84] 被置 1（错误/结束标志）**，以及底层数据供给（无文件读取）。下轮：hook `fn_81297100` 记录 handle/[handle+0x84]/[handle+0x30]/返回值；读 `fn_8129d0a8` 与 `[handle+0x84]` 的写入者，找出谁把流置为错误态。 |
+| M1359 | §18.4900: ★★★★★ **状态 7 的精确来源找到：`fn_81297100` → v84==0 走正常路径 → `bl fn_8129d0a8(0x816c567c)` → 返回值 >6 → `bhi 0x81297160` → `movs r0,#7`（兜底状态）。** 实测（新探针 MST2 记录入口 handle/[handle+0x84]/[handle+0x30]；STST 记录 0x81154356 处写入 device[+0xc] 的返回状态）：frame 6843/6853 创建成功后 handle=0x112e05d8、v84=0、v30=0x112e0ec0；frame 6858 `[STST] st=0x7 devC=0x7`（随后 frame 6859 st=0 设备回到空闲）⇒ 7 = "fn_8129d0a8 返回 >6" 的兜底码，不是空句柄、也不是 [handle+0x84]==1。反编译确认 `L_81297160: movs r0,#7` 正是 tbb 映射 0..6 之外的默认分支。另发现：IHOOK 挂在 `pop {r4,pc}` 之后是死代码（recompiled 代码 `return;` 之前插入）——以后钩返回需选非 pop 路径。下轮：读 `fn_8129d0a8` 与全局 `0x816c567c`，确认它返回 >6 的原因（CriMana/Sofdec 全局初始化或 player 状态缺失）。 |
+| §18.4900 | The precise source of state 7 is found: fn_81297100 -> v84==0 takes the normal path -> bl fn_8129d0a8(0x816c567c) -> its return value is >6 -> bhi 0x81297160 -> movs r0,#7 (the fallback status). Measurements (new probes MST2 logging handle/[handle+0x84]/[handle+0x30] at entry, STST logging the status stored into device[+0xc] at 0x81154356): at frames 6843/6853 creation succeeds with handle=0x112e05d8, v84=0, v30=0x112e0ec0; at frame 6858 [STST] st=0x7 devC=0x7 (then frame 6859 st=0 and the device goes idle). So 7 = the fallback code for "fn_8129d0a8 returned >6", not a null handle and not [handle+0x84]==1. The decompiled L_81297160: movs r0,#7 is exactly the default branch outside the tbb mapping 0..6. Also found: an IHOOK placed after pop {r4,pc} is dead code (inserted after return;), so return-value hooks must use a non-pop path. Next: read fn_8129d0a8 and global 0x816c567c to find why it returns >6 (missing CriMana/Sofdec global init or player state). |
 | §18.4899 | MAJOR CORRECTION: movie stream creation actually SUCCEEDS (handle != 0), and state 7 is not a NULL handle. New probes (IHOOK 0x811542aa logging the value truly stored into device[+8]; HOOKs on the success-path subcalls 0x8129b1f4/0x8129b784/0x8127a3e0/0x8129631e; EARLYCHK logging RD32(0)) show: at frames 6843/6854 [EARLYCHK] arg0=0 val0=0x3e6e8080 (nonzero, early exit passes) -> all success-path subcalls run ([SUB2]->[SUB1]->[SUB1]->[SUB3]->[SUB4]->[SUB2]->[SUB1]->[SUB1]->[SUB3]) -> [HWND] frame 6843/6854 handle=0x112e05d8 dev8=0x112e05d8, so device[+8] = 0x112e05d8 (a valid handle). Re-reading the full fn_81297100: handle==0 returning 7 is only the NULL guard; with handle!=0 it does r1=[handle+0x84]; cmp r1,#1; r0=[handle+0x30]; bne 0x81297128 - if [handle+0x84]==1 it directly returns 7 (state 7 = that flag == 1); otherwise it calls fn_8129d0a8 plus a tbb [pc,r0] mapping table returning 0..6 (1/6/5/3/4/0/2). So the M1349-M1357 chain "state 7 = NULL handle" is void (true only for a null handle); the real fault is that after successful stream creation [handle+0x84] becomes 1 (error/end flag) and no data is supplied (no file reads). Next: hook fn_81297100 to log handle/[handle+0x84]/[handle+0x30]/return; read fn_8129d0a8 and the writers of [handle+0x84] to find who puts the stream into the error state. |
 | §18.4898 | The next decisive measurement is set up (address-0 sentinel): log RD32(0) and RD32(arg0) inside p5d_earlychk, run TEST_FRAMES=6900 with FORCEMOVIE=1 and confirm where fn_812962ee's return value comes from; if RD32(0)==0, provide a CriMana initialization sentinel at address 0 in the HLE (or fix it per real-hardware semantics) so fn_81296e4a's early exit passes and movie stream creation succeeds. |
 | §18.4897 | RD32/guest-memory base implementation located (continuing M1355): runtime/core/main.c lines related to RD32/guest base: [(308, 'for (int i = 0; i < nwatch; i++) v[i] = RD32(watch_at[i]);'), (312, 'uint32_t now = RD32(watch_at[i]); if (now == v[i]) continue;'), (343, 'FILE *sf = addr >= 0x81000000u && addr < 0xa0000000u ? fopen(sp ? sp : "missed_functions.txt", "a") : 0;   /* (a call th'), (520, '#define PROF_BASE 0x81000000u')]. Next: measure the actual RD32(0) return with that implementation, then provide an address-0 sentinel in the HLE or fix fn_812962ee's semantics so movie stream creation succeeds. |
@@ -513083,3 +513085,42 @@ C) 结合"无文件读取"事实（§18.4889）确认数据供给链断裂点
 ANTI-FORGETTING ENTRY. Keywords: M1358 major correction movie stream creation succeeds handle 0x112e05d8 device[+8] nonzero, probes IHOOK 0x811542aa p5d_hwnd HOOK 0x8129b1f4 0x8129b784 0x8127a3e0 0x8129631e EARLYCHK RD32(0) arg0=0 val0=0x3e6e8080 nonzero early exit passes success path subcalls SUB2 SUB1 SUB1 SUB3 SUB4 SUB2 SUB1 SUB1 SUB3 frames 6843 6854, fn_81297100 full: handle==0 return 7 null guard only, handle!=0 r1=[handle+0x84] cmp 1 r0=[handle+0x30] if flag==1 return 7 else fn_8129d0a8 tbb mapping 1 6 5 3 4 0 2, state 7 = [handle+0x84]==1 error/end flag not null handle, M1349-M1357 chain void, next hook fn_81297100 log handle flag [handle+0x84] [handle+0x30] return, read fn_8129d0a8 find writers of [handle+0x84]=1 error state, no file reads data supply chain. Verification: hooks.c pack.toml test.log EARLYCHK SUB HWND.
 
 LOOKUP: M1358 corrected the movie failure chain - the stream creation actually succeeds with handle 0x112e05d8 and state 7 comes from the stream's [handle+0x84]==1 error/end flag, not from a NULL handle -> 18.4890 [relevant: state 7], 18.4889 [relevant: movies only in vita.cpk], 18.4886 [relevant: S1_TITLE]
+### 18.4900 PORT M1359: 状态 7 = `fn_8129d0a8` 返回 >6 的兜底码
+
+1) 探针数据（FORCEMOVIE=1, TEST_FRAMES=6900）
+```
+frame 6843/6853  [STREAMMK]/[STREAMIN]/[EARLYCHK val0=0x3e6e8080] 创建成功
+[HWND]  handle=0x112e05d8 dev8=0x112e05d8
+[MST2]  frame 6843-6858: h=0x112e05d8 v84=0 v30=0x112e0ec0   <- 每帧多次
+[MSTATUS] frame 6845 state=1 / 6847 state=2 / 6848 state=7 / 6849 state=0
+[STST]  frame 6848 st=0 devC=0
+[STST]  frame 6858 st=0x7 devC=0x7    <- ← 状态 7 落定
+[STST]  frame 6859 st=0 devC=0
+```
+2) fn_81297100 完整分支（反编译 game_part14.c）
+```
+if (handle==0) return 7;                     // 空句柄
+r1=[handle+0x84]; r0=[handle+0x30];
+if (r1==1) return 7;                         // flag==1
+bl fn_8129d0a8(0x816c567c);                  // 全局 0x816c567c 的状态查询
+if (r0>6) goto L_81297160;                   // >6 -> 兜底
+tbb [pc,r0] -> 1/6/5/3/4/0/2
+L_81297160: movs r0,#7                       // ← 兜底 = 7
+```
+⇒ 状态 7 = `fn_8129d0a8(0x816c567c)` 返回 >6。
+3) 附带发现
+```
+IHOOK 挂在 pop {r4,pc} 之后是死代码（recompiled 代码在 return; 之后插入）
+=> 记录函数返回值务必选非 pop 的路径（或改 HOOK+手工读）
+```
+4) 下轮
+```
+A) 读 fn_8129d0a8（返回值语义、它读的全局/对象）
+B) 确认全局 0x816c567c 是什么（CriMana/Sofdec 全局 player/状态）
+C) 找出为何它返回 >6（全局未初始化？player 未创建？缺数据？）
+```
+验证：hooks.c/pack.toml（M1359 探针）、test.log（[MST2]/[STST]）、game_part14.c（fn_81297100 @41376）、本文件。
+
+ANTI-FORGETTING ENTRY. Keywords: M1359 state 7 precise source fn_81297100 v84==0 normal path bl fn_8129d0a8 global 0x816c567c return >6 bhi 0x81297160 movs r0 7 fallback code, probes MST2 handle [handle+0x84] [handle+0x30] STST 0x81154356 status device+0xc, frames 6843 6853 handle=0x112e05d8 v84=0 v30=0x112e0ec0 frame 6858 STST st=7 devC=7 frame 6859 st=0 idle, L_81297160 movs r0 7 default branch outside tbb 0..6, IHOOK after pop pc dead code recompiled return after, next read fn_8129d0a8 global 0x816c567c why returns >6 CriMana Sofdec global init player state. Verification: hooks.c pack.toml test.log game_part14.c fn_81297100 41376.
+
+LOOKUP: M1359 found state 7 is the fallback branch of fn_81297100 (movs r0,#7) taken when the underlying fn_8129d0a8(0x816c567c) returns more than 6, with runtime probes showing v84=0 and store 7 at frame 6858; next is fn_8129d0a8 and the global 0x816c567c -> 18.4899 [relevant: major correction], 18.4890 [relevant: state 7], 18.4886 [relevant: S1_TITLE]
