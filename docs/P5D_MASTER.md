@@ -1418,6 +1418,10 @@
 | M1403 | §18.4944: **线程表槽位回收修复（打歌卡死/DLC 线程风暴的根因修复）：`runtime/core/kernel.c` 的 `threads[MAX_THREADS]` 原先只增不减（`nthreads++` 永不复用），P5D 在菜单里为每个缺失的 DLC（`addcont0:/ADDCONTDLCD00044/DLCD00044.cpk` 等，dump 里不存在）反复挂载并创建数千个 `addContMountThread`，把 1024 槽位撑满（日志 `thread table full (1024)`），之后打歌环节的 job 线程无法创建 → 卡死。** 修复：a) `thread_alloc_locked()` 复用已结束线程的槽位——`deleted` 线程 0.2s 后、普通退出线程 5s 后（宽限期内 `WaitThreadEnd` 仍可读到状态）；b) uid 改为单调计数器 `next_tuid`（不复用旧 uid，`thread_of` 不会误认）；c) `MAX_THREADS` 1024→4096（一次性突发兜底）；d) 复用槽位时 `free(t->cpu)`。已构建 `game_host_new.exe`（含 M1401 音频修复 + 本修复）；SDL3.dll 拷贝因游戏运行中被占用而失败但 exe 链接成功。**注意**：Windows 上 kernel_test 编译失败（posix `sys/mman.h` 依赖），本修复的运行时验证需等用户关窗后 swap 新 exe 再跑（DLC storm 出现在菜单/打歌路径，headless 脚本路径暂未覆盖）。 |
 | M1404 | §18.4945: ★★★★★★★ **DLC 线程风暴根因修复 + 验证：`runtime/core/apputil.c h_drm_open()` 原先对任何 add-on 都返回 0（"every add-on licensed"），P5D 因此枚举上千个 DLC id 并逐个尝试挂载（`addcont0:/ADDCONTDLCD00044/DLCD00044.cpk` not found，每次失败新开 addContMountThread），用户 dump 无 DLC ⇒ 线程表被撑满。修复：`fs/addcont0` 目录不存在时返回 `0x80100605`（SCE_APPUTIL_ERROR_NOT_FOUND），游戏按"无 DLC 主机"跳过挂载。** 验证（headless 8200 帧，M1403 新 exe）：日志中 `np: add-cont data absent (no fs/addcont0): add-ons reported not licensed` 出现 1 次、**`addContMountThread` 0 次**（修复前数千次）、`thread table: reusing finished thread slots (first: uid 0x4001013a, name 'savedata_sub_thr')` 出现（M1403 槽位复用生效）、8200 帧 ts=0 无回归；VIDEO_LOG 显示 `movie/c_p5d000`（frame 341）/`c_p5d001`（frame 419）创建且 `AU 0` 立即解码。另说明：本 agent 会话内无法直接验证窗口模式（SDL 窗口创建失败导致 run 在首帧前正常退出、rc=0），窗口相关（声音/影片首帧）需用户重跑确认；用户澄清 102s 是影片第一帧真实卡住（可跳过），下一步在新 exe 上复测：若仍卡，用 VIDEO_LOG/PICS+stall 分析首帧等待点（可能关联音频/AV 同步）。 |
 | M1405 | §18.4946: **新增 Windows 版 stall profiler（此前 stallprof.c 仅 macOS 实现，Windows 上是空函数，启动卡顿/打歌卡死没有任何线程级诊断）：`RECOMP_STALL_PROF` 超时无 present 时，暂停每个宿主线程、读 RIP/帧链、解析模块名（game_host/ntdll/nvoglv64/SDL3…）并打印；同时 `kernel_stall_report()` 打印 guest 线程表（名字/uid/优先级/wait_type/是否结束），`stallprof_arm()` 在 module_start 前启动监控（首帧前的启动卡顿也能抓到）。** 首次抓到的现象（窗口模式 120s，游戏停在 frame 2 之后、frame 3 之前）：**28 个 guest 线程全部处于等待**（FiosIO wait 11、job 线程 wait 3、jobqueue wait 4、thSeqSndAdx2/CRI Atom AudioOut wait 0…），**所有宿主线程 RIP 都在 ntdll/win32u 等待**（ntdll+0x161dd4/0x165a24/0x1628a4/0x1659c4、win32u+0x1364）——典型的"全部阻塞、无人推进"死锁/等待，且可变时长（12.8s~102s 或永不返回）；headless test 路径不出现 ⇒ 与窗口/初始化路径相关。下一步：给 game 主线程打标记（main.c 的 game 线程不是 kernel Thread）、在 stall 报告里附上每线程"最后 import 调用"（复用崩溃汇总用的记录），定位死锁的等待对象与持锁者。 |
+| M1406 | §18.4947: **砍掉 nativ 外壳："最小可运行 exe"构建（`build PCSH10109 minimal` → `game_host_min.exe`）：新增 `runtime/ui/overlay_min.cpp` 用 no-op 桩替代 `overlay.cpp`（不再编译 Dear ImGui/prompts.png），`runtime/build.py` 增 `MINIMAL=1` 分支（独立对象目录 `obj_win_min` 避免与 dev 构建混链）、`-DRECOMP_MINIMAL`；`window.c` 在 minimal 下不再刷新 metrics 标题栏 HUD、不响应 F1/F2/F4/F5/F6/F7/F8/F9 调试键；窗口标题=游戏名（不再显示 "vitarecomp - xx fps"）。** 结果：minimal exe 46,268,311 B（dev 47,798,088 B，-1.53 MB）；二进制中 `ImGui` 字符串 1689→0、`imgui` 54→0；桌面窗口标题 "Persona 5 Dancing in Starlight"。**启动即进游戏，无启动器/设置界面/overlay/toast。** 用法：`py -3 pipeline\vitarecomp.py build PCSH10109 minimal`；当前 `game_host.exe` 已是 minimal 版，dev 版保存为 `game_host_dev.exe`。 |
+| M1407 | §18.4948: ★★★★★★★ **无声 + 开场动画第一帧卡死 的根因修复：P5D 需要的 3 个 NGS voice definition 是空桩（`sceNgsVoiceDefGetTemplate1` / `sceNgsVoiceDefGetAtrac9Voice` / `sceNgsVoiceDefGetMixerBuss`，import 日志 "not implemented -- returns 0"）→ 游戏所有 NGS rack 变成 "definition 4"(DEF_OTHER) → 混音输出全 0（RMS 0.0）→ CRI/USM 影片的 A/V 同步等不到音频时钟，开场动画停在第一帧（可跳过）。** 修复 `runtime/audio/ngs.c`：新增 `DEF_MIXER=9`（PASS_BUS 处理）并把三个 getter 映射到 Template1→DEF_SIMPLE(2)、Atrac9Voice→DEF_SCREAM_AT9(6)、MixerBuss→DEF_MIXER(9)，注册进 `hle_ngs[]`。**验证（minimal 窗口版 240s）：rack 定义变为 2/6/9；`audio port 0: buffer 400 rms 1396.6`（此前全 0.0）；开场动画 `movie/c_p5d000`（frame 331）**解码 3084 AU → 3084 pictures 完整播完**，`c_p5d001`(frame 4208) 458 AU；**全程 0 条 hitch 日志**（此前 frame 2 卡 12.8~102s）；游戏到 frame 7157（约 238s，30fps）。** 声音数据已非静音（用户仍需用新 exe 确认实际出声）。 |
+| §18.4947 | Stripping the nativ shell: a "minimal runnable exe" build (build <title> minimal -> game_host_min.exe). Added runtime/ui/overlay_min.cpp, no-op stubs for overlay.h that replace overlay.cpp (Dear ImGui and prompts.png are no longer compiled); runtime/build.py gained a MINIMAL=1 branch (its own object dir obj_win_min so it does not link a dev build's stale overlay.o) and -DRECOMP_MINIMAL; in a minimal build window.c no longer refreshes the metrics title HUD and ignores the F1/F2/F4/F5/F6/F7/F8/F9 debug keys, and the window title is the game's name (not 'vitarecomp - xx fps'). Result: the minimal exe is 46,268,311 B (dev: 47,798,088 B, -1.53 MB); the 'ImGui' string count in the binary went from 1689 to 0 and 'imgui' from 54 to 0; the window title is 'Persona 5 Dancing in Starlight'. It starts straight into the game, with no launcher, settings UI, overlay or toasts. Usage: py -3 pipeline\vitarecomp.py build PCSH10109 minimal; game_host.exe is currently the minimal build and the dev one is kept as game_host_dev.exe. |
+| §18.4948 | Fixing the root cause of both the silence and the opening animation's frozen first frame: the three NGS voice definitions P5D asks for (sceNgsVoiceDefGetTemplate1 / sceNgsVoiceDefGetAtrac9Voice / sceNgsVoiceDefGetMixerBuss) were empty stubs (import log: 'not implemented -- returns 0'), so every NGS rack the game made became 'definition 4' (DEF_OTHER), its mixer output was all zeros (RMS 0.0) and the CRI/USM movie's A/V sync waited for an audio clock that never advanced - the opening animation stayed on its first frame (skippable). Fixed runtime/audio/ngs.c: added DEF_MIXER=9 (handled as a pass bus) and mapped the three getters to Template1->DEF_SIMPLE(2), Atrac9Voice->DEF_SCREAM_AT9(6), MixerBuss->DEF_MIXER(9), registered in hle_ngs[]. Verification (minimal windowed build, 240 s): rack definitions are now 2/6/9; 'audio port 0: buffer 400 rms 1396.6' (previously every buffer 0.0); the opening animation movie/c_p5d000 (frame 331) decoded 3084 access units -> 3084 pictures and finished, c_p5d001 (frame 4208) 458 access units; zero hitch log lines all run (before: frame 2 stalls of 12.8-102 s); the game reached frame 7157 (~238 s at 30 fps). The sound data is no longer silent (the player still has to confirm it is audible on the new exe). |
 | §18.4946 | Added a Windows stall profiler (stallprof.c previously had only a macOS implementation and was a no-op on Windows, so the boot freeze and the dance-scene freeze had no thread-level diagnosis): when RECOMP_STALL_PROF ms pass without a present it suspends every host thread, reads its RIP and frame chain, resolves the module name (game_host/ntdll/nvoglv64/SDL3...) and prints them; kernel_stall_report() prints the guest thread table (name/uid/priority/wait_type/done), and stallprof_arm() starts the monitor before module_start so a boot freeze before the first present is caught too. First capture (windowed, 120 s; the game stopped after frame 2 and before frame 3): all 28 guest threads are waiting (FiosIO wait 11, job threads wait 3, jobqueue wait 4, thSeqSndAdx2/CRI Atom AudioOut wait 0...), and every host thread's RIP is in an ntdll/win32u wait (ntdll+0x161dd4/0x165a24/0x1628a4/0x1659c4, win32u+0x1364) - a classic all-blocked deadlock/wait, with a variable duration (12.8 s to 102 s, or never); the headless test path does not show it, so it is in the window/init path. Next: label the game main thread (main.c's game thread is not a kernel Thread) and attach each thread's last import call (reuse the crash summary's record) to the stall report to find the wait object and the lock holder. |
 | §18.4945 | Root-cause fix and verification of the DLC thread storm: runtime/core/apputil.c's h_drm_open() returned 0 ("every add-on licensed") for any add-on, so P5D enumerated thousands of DLC ids and tried to mount each one (addcont0:/ADDCONTDLCD00044/DLCD00044.cpk not found, a new addContMountThread per failure); the player's dump has no DLC, so the thread table filled up. Fix: when the fs/addcont0 directory does not exist, return 0x80100605 (SCE_APPUTIL_ERROR_NOT_FOUND) so the game skips add-ons the way it does on a console without them. Verification (headless 8200 frames on the M1403 exe): the log shows 'np: add-cont data absent (no fs/addcont0): add-ons reported not licensed' once, addContMountThread 0 times (thousands before the fix), 'thread table: reusing finished thread slots (first: uid 0x4001013a, name savedata_sub_thr)' appears (M1403 slot reuse active), and 8200 frames complete with ts=0 and no regression; VIDEO_LOG shows movie/c_p5d000 (frame 341) / c_p5d001 (frame 419) created and AU 0 decoded immediately. Note: windowed mode cannot be verified from this agent session (SDL window creation fails, so run exits cleanly before the first frame with rc=0); sound and the opening-movie first-frame behaviour need the player's rerun. The player clarified that the 102 s freeze is a real movie first-frame stall (skippable); next: retest on the new exe, and if it persists analyse the first-frame wait with VIDEO_LOG/PICS + stall profiler (possibly audio/AV-sync related). |
 | §18.4944 | Fixing thread-slot reclamation (the root fix for the gameplay freeze / DLC thread storm): runtime/core/kernel.c's threads[MAX_THREADS] table only ever grew (nthreads++ was never reused). P5D, at the menu, repeatedly tries to mount every missing DLC (addcont0:/ADDCONTDLCD00044/DLCD00044.cpk etc., absent from the dump) and creates thousands of addContMountThread threads, filling all 1024 slots (log: 'thread table full (1024)'); afterwards the dance scene's job threads cannot be created, hence the freeze. Fix: (a) thread_alloc_locked() reuses a finished thread's slot - 0.2 s after deletion, 5 s after a plain exit (so WaitThreadEnd can still read the status in the grace period); (b) uids come from a monotonic next_tuid counter (an old uid is never answered by a reused slot, so thread_of cannot confuse them); (c) MAX_THREADS 1024 -> 4096 (a burst allowance); (d) free(t->cpu) when a slot is reused. Built game_host_new.exe (M1401's audio fix plus this fix); the SDL3.dll copy failed because the running game holds it, but the exe linked successfully. Note: kernel_test cannot be compiled on Windows (it needs posix sys/mman.h), so runtime verification of this fix waits until the player closes the window and the watcher swaps the new exe (the DLC storm appears on the menu/gameplay path, which the headless scripted path does not cover yet). |
@@ -514791,3 +514795,67 @@ C) 修复后窗口版验证: 开局不卡、声音、打歌
 
 ANTI-FORGETTING ENTRY. Keywords: M1405 Windows stall profiler stallprof.c mac only no-op on Windows, RECOMP_STALL_PROF timeout suspend threads GetThreadContext RIP frame chain module name game_host ntdll nvoglv64 SDL3, kernel_stall_report guest thread table name uid priority wait_type done, stallprof_arm before module_start catches boot freeze before first present, first capture windowed 120s stopped after frame 2 before frame 3 all 28 guest threads waiting FiosIO wait 11 job threads wait 3 jobqueue wait 4 CRI FS wait 4 thSeqSndAdx2 CRI Atom AudioOut wait 0, all host thread RIPs ntdll win32u waits 0x161dd4 0x165a24 0x1628a4 0x1659c4 win32u 0x1364, all-blocked deadlock variable duration 12.8s to 102s or never, headless test path no hang window init path, next label game main thread GAME not kernel Thread, attach last import call per thread find wait object lock holder, fix then verify boot sound gameplay. Verification: session.log stall report guest threads waiting host RIPs ntdll.
 LOOKUP: M1405 added the missing Windows stall profiler (thread RIPs with module names plus the guest thread table) and used it to capture the windowed boot freeze as an all-threads-blocked deadlock, with the next step being to label the game main thread and attach each thread's last import call to find the wait object and lock holder -> 18.4945 [relevant: DLC fix], 18.4944 [relevant: thread reuse], 18.4942 [relevant: audio fix]
+### 18.4947 PORT M1406: 砍掉 nativ 外壳 —— minimal 可运行 exe
+
+1) 目标
+```
+只保留"让游戏正常运行"的代码: 启动器/设置界面/overlay 菜单/ImGui/toast/调试 HUD 全部去掉
+```
+2) 实现
+```
++ runtime/ui/overlay_min.cpp: overlay.h 全部入口 no-op 桩
++ runtime/build.py: MINIMAL=1 → 不编译 overlay.cpp/imgui/prompts.png，改链 overlay_min.cpp；
+  独立对象目录 obj_win_min（避免与 dev 构建的 overlay.o 混链）
++ -DRECOMP_MINIMAL: window.c 不刷新 metrics 标题 HUD、不响应 F1/F2/F4..F9 调试键
++ 窗口标题 = 游戏名 (RECOMP_GAME_NAME)，不再是 "vitarecomp - N fps"
++ pipeline: `build <title> minimal` → game_host_min.exe
+```
+3) 验证
+```
+minimal exe: 46,268,311 B (dev 47,798,088 B, -1.53 MB)
+"ImGui" 字符串: 1689 → 0; "imgui": 54 → 0
+窗口标题: "Persona 5 Dancing in Starlight"
+启动即进游戏，无启动器/设置/overlay/toast
+当前 game_host.exe = minimal；dev 版保留为 game_host_dev.exe
+```
+验证：二进制字符串统计 + 窗口标题实测。
+
+### 18.4948 PORT M1407: NGS voice definition 缺失 → 无声 + 开场动画卡首帧（根因修复）
+
+1) 根因
+```
+P5D 需要的 3 个 NGS voice definition getter 是空桩 (returns 0):
+  sceNgsVoiceDefGetTemplate1 / GetAtrac9Voice / GetMixerBuss
+→ 所有 rack 变 "definition 4" (DEF_OTHER) → 混音输出全 0 (RMS 0.0)
+→ CRI/USM 影片 A/V 同步等不到音频时钟 → 开场动画停在第一帧(可跳过)
+```
+2) 修复 runtime/audio/ngs.c
+```
++ enum DEF_MIXER = 9; PASS_BUS 包含 DEF_MIXER
++ Template1   -> DEF_SIMPLE(2)      (PCM/ADPCM voice)
++ Atrac9Voice -> DEF_SCREAM_AT9(6)  (ATRAC9 player)
++ MixerBuss   -> DEF_MIXER(9)       (pass-through bus)
++ 注册进 hle_ngs[]
+```
+3) 验证（minimal 窗口版 240s）
+```
+rack 定义: 2 / 6 / 9 (此前全 4)
+audio port 0: buffer 400 rms 1396.6   (此前 0.0)
+movie/c_p5d000 (frame 331): 解码 3084 AU → 3084 pictures 完整播完
+movie/c_p5d001 (frame 4208): 458 AU
+hitch 日志: 0 条 (此前 frame 2 卡 12.8~102s)
+到 frame 7157 (~238s, 30fps)
+⇒ 声音数据非静音；开场动画正常推进（用户需在新 exe 上确认实际出声）
+```
+4) 下轮
+```
+用户确认: 声音是否可听、开场动画是否还卡、打歌是否还卡
+若仍有卡顿: 用 Windows stall profiler + game 主线程标记定位
+```
+验证：session.log（rack 定义 2/6/9、rms 1396.6、c_p5d000 3084 pictures、0 hitch）。
+
+ANTI-FORGETTING ENTRY. Keywords: M1406 M1407 minimal exe strip nativ shell overlay_min.cpp no-op stubs build.py MINIMAL obj_win_min, no ImGui prompts.png compiled, -DRECOMP_MINIMAL window.c no metrics title HUD no F1 F2 F4-F9 debug keys window title game name Persona 5 Dancing in Starlight, minimal exe 46268311 bytes dev 47798088 -1.53MB ImGui strings 1689->0, game_host.exe minimal game_host_dev.exe dev, NGS voice definition stubs sceNgsVoiceDefGetTemplate1 sceNgsVoiceDefGetAtrac9Voice sceNgsVoiceDefGetMixerBuss not implemented returns 0 racks definition 4 DEF_OTHER silence RMS 0.0 CRI USM A/V sync audio clock opening animation frozen first frame skippable, fix ngs.c DEF_MIXER 9 PASS_BUS Template1 DEF_SIMPLE 2 Atrac9Voice DEF_SCREAM_AT9 6 MixerBuss DEF_MIXER 9 register hle_ngs, verification 240s racks 2/6/9 audio port buffer 400 rms 1396.6 c_p5d000 frame 331 3084 AU 3084 pictures finished c_p5d001 frame 4208 458 AU zero hitch lines frame 7157 238s 30fps, next user confirms sound opening animation gameplay. Verification: binary string counts window title session.log rack definitions rms 1396.6 c_p5d000 3084 pictures zero hitch.
+LOOKUP: M1406 stripped the nativ shell from the build (overlay_min.cpp replaces overlay.cpp/ImGui; metrics title HUD and debug keys off in RECOMP_MINIMAL) producing a 46.3 MB minimal game_host.exe whose window title is the game's name and which starts straight into the game -> 18.4946 [relevant: stall profiler], 18.4944 [relevant: thread fix]
+
+LOOKUP: M1407 fixed the three missing NGS voice definitions so P5D's racks are no longer DEF_OTHER: sound buffers now carry non-zero RMS (1396.6) and the opening animation movie c_p5d000 decoded and played all 3084 pictures with zero hitches, which also removes the wait on the audio clock that froze its first frame -> 18.4946 [relevant: boot stall], 18.4942 [relevant: audio device fix]
+
