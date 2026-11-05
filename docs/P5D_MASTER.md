@@ -1399,6 +1399,8 @@
 | M1384 | §18.4925: **新增 `RECOMP_YUV_SOFT=1`（采样 YUV 影片纹理的 draw 走软件路径，软件按 texel 正确解 YUV 颜色）并做 A/B：结果不理想——skip 棋盘格 + YUV 软件路径时帧 7240 统计 R67.6/G65.4/B65.4（redfrac 1%），且整跑超时（"no frame 7290"，软路径全屏 draw+目标同步太慢）⇒ 软件 fallback 不是可行修复路线。** 结论：应在 GPU 路径内正确处理 YUV 采样（例如：对"采样 YUV 纹理的 libgxm blit 程序"用简单 copy 管线直接采样我们已解码的 RGBA 纹理，绕过原程序里的 YUV 数学），而不是退回软件渲染。下轮实现 GPU 侧 YUV blit 特判。 |
 | M1385 | §18.4926: **新增 `RECOMP_YUV_DRAW_DUMP=path` 探针（影片 YUV draw 之后立即 batch_flush + 下载当前 RT），首轮抓到 4 个样本：RT 内容为纯白(235) 或 纯黑(0)，无任何图像结构。** 解释：抓取的是整跑前 4 个 YUV draw（影片开头 ~6908-6920），该时段影片帧本身就是白笔刷/黑底 logo 动画，且 RT 尚未被后续 UI 合成 —— 因此还不能据此判定"影片 draw 无输出"；需要在帧窗口（~7180-7300，红天段）再抓。另注意：加探针后整跑变慢（~0.33 s/帧，7245 帧接近 3600s 上限）。下轮：把 YUV_DRAW_DUMP 加帧窗口限制（RECOMP_YUV_DRAW_DUMP_FROM/TO），在 7200 附近抓"影片 draw 单独输出"，直接判定影片 blit 是否输出全彩画面；同时清理诊断探针开销。 |
 | M1386 | §18.4927: ★★★★★★★ **决定性判定：在红天段（帧 7180-7300）抓"影片 YUV draw 之后立即 dump 的 RT"→ 4 个样本全部是均匀纯灰 R=G=B≈55.5（redfrac=0%，无城市/彩带结构）⇒ libgxm 影片 YUV blit（fprog=0x1102c4f4）的翻译输出是"整屏常数灰"，影片内容根本没被采样/输出。** 这解释了为什么屏幕上只有 UI 的棋盘格/粒子/logo；之前 skip 棋盘格后看到的"城市/彩带"来自 UI 自身图层，不是影片。⇒ 修复方向明确：分析 libgxm 该 blit 程序的 USSE 反汇编（vprog/fprog、varyings/UV 计算、SMP 依赖采样器）与我们的 SPIR-V 翻译差异，修好后 RT dump 应出现红天/城市/彩带。下轮：反汇编 0x1102c4f4 及配套顶点程序，定位常量灰的成因（UV/varying 丢失 or 指令翻译错误）。 |
+| M1387 | §18.4928: **反汇编工具与影片 blit 程序结构已拿到。** ① 用 mingw 编译出离线 `usse_dis.exe`（`-I runtime -I runtime/gfx -I runtime/core -I runtime/platform -I recompiler`，源 `runtime/debug/usse_dis.c` + `runtime/gfx/usse.c`）；② 用 `RECOMP_DUMP_GXP=<dir>` 在 7150 帧运行中 dump 出 **4331 个 GXP 程序**，含影片 blit `1102c4f4.gxp`；③ 反汇编 1102c4f4（fragment, size=297, 5 primary instructions）：`NOP / VNMAD / VPCK / NOP / SOP2`，参数 `colorMap cat2 type0 comps4`，iterators: `colour type 0 comps 4 O at 0 FRAGCOLOR_USED`, `pa0 semantic10 comps4`, `pa2 texture unit 0 coord src 0 proj 1 result_fmt 2`；④ 相关 UI 程序 1102c884 = `NOP / VNMAD`（iterators: colour type5 comps4 PA）。⇒ 影片 blit = 采样纹理 + VNMAD（格式缩放/矩阵）+ VPCK（打包）+ SOP2（与 framebuffer 颜色混合，FRAGCOLOR_USED）⇒ 输出均匀灰说明 VNMAD/VPCK/SOP2 之一（最可能 SOP2 混合或 FRAGCOLOR fetch 路径）在 GPU 翻译中错误。下轮：给 usse_dis 加操作数打印（UOp 的 dst/s0/s1/s2/sub/args/mask），逐条对照 usse_spirv 的 emit_vnmad/emit_vpck/emit_sop2 找出错误。 |
+| §18.4928 | The disassembly tool and the movie blit program structure are now available. (1) Built the offline usse_dis.exe with mingw (include paths runtime, runtime/gfx, runtime/core, runtime/platform, recompiler; sources runtime/debug/usse_dis.c + runtime/gfx/usse.c). (2) RECOMP_DUMP_GXP=<dir> dumped 4331 GXP programs during a 7150-frame run, including the movie blit 1102c4f4.gxp. (3) Disassembling 1102c4f4 (fragment, size 297, 5 primary instructions): NOP / VNMAD / VPCK / NOP / SOP2, parameter colorMap cat2 type0 comps4, iterators: colour type 0 comps 4 O at 0 FRAGCOLOR_USED, pa0 semantic10 comps4, pa2 texture unit 0 coord src 0 proj 1 result_fmt 2. (4) The related UI program 1102c884 = NOP / VNMAD (iterators: colour type5 comps4 PA). So the movie blit = sample texture + VNMAD (format scale/matrix) + VPCK (pack) + SOP2 (blend with framebuffer colour, FRAGCOLOR_USED); the uniform gray output means one of VNMAD/VPCK/SOP2 (most likely SOP2's blending or the FRAGCOLOR fetch path) is mistranslated on the GPU. Next: add operand printing to usse_dis (UOp dst/s0/s1/s2/sub/args/mask) and compare each instruction against usse_spirv's emit_vnmad/emit_vpck/emit_sop2 to find the error. |
 | §18.4927 | Decisive finding: in the red-sky section (frames 7180-7300) the render target dumped immediately after the movie YUV draw is a uniform flat gray R=G=B~55.5 in all 4 samples (red fraction 0%, no city/confetti structure), so the libgxm movie YUV blit (fprog=0x1102c4f4) translates to a full-screen constant gray and the movie content is never sampled/output. This explains why only the UI checkerboard/particles/logo appear; the "city/confetti" seen after skipping the checkerboard came from the UI's own layers, not the movie. The fix direction is clear: disassemble the libgxm blit program (vprog/fprog, varyings/UV computation, dependent samplers) and compare against our SPIR-V translation; after fixing, the RT dump should show the red sky/city/confetti. Next: disassemble 0x1102c4f4 and its vertex program to find the constant-gray cause (lost UV/varyings or a mistranslated instruction). |
 | §18.4926 | Added the RECOMP_YUV_DRAW_DUMP=path probe (right after a YUV movie draw: batch_flush + download the current RT). The first run captured 4 samples whose content is pure white (235) or pure black (0) with no image structure. Explanation: they are the first 4 YUV draws of the whole run (movie start ~6908-6920), when the movie frames themselves are the white-brush/dark-logo intro and the RT has not yet been composited by the UI, so this does not yet prove the movie draw produces nothing; the capture must be windowed around frames ~7180-7300 (the red-sky section). Note the probes make runs slow (~0.33 s/frame; 7245 frames approaches the 3600 s cap). Next: add a frame window (RECOMP_YUV_DRAW_DUMP_FROM/TO) and capture the movie draw's own output near frame 7200 to decide directly whether the movie blit produces a full-colour image, and trim the diagnostic overhead. |
 | §18.4925 | Added RECOMP_YUV_SOFT=1 (draws sampling YUV movie textures go through the software path, which decodes YUV per texel with colour) and ran the A/B: the result is not good - with the checkerboard skipped plus the YUV software path, frame 7240 gives R67.6/G65.4/B65.4 (red fraction 1%) and the whole run times out ("no frame 7290"; the full-screen software draw plus target sync is too slow), so the software fallback is not a viable fix. Conclusion: handle YUV sampling correctly inside the GPU path instead (e.g., for the libgxm blit programs that sample YUV textures, use a simple copy pipeline that samples the already-decoded RGBA texture, bypassing the YUV math in the original program) rather than falling back to software rendering. Next: implement the GPU-side YUV blit special case. |
@@ -514101,3 +514103,40 @@ D) 修复后 RT dump 应出现红天/城市/彩带
 
 ANTI-FORGETTING ENTRY. Keywords: M1386 decisive red sky section frames 7180-7300 RT dumped immediately after movie YUV draw uniform flat gray R=G=B 55.5 all 4 samples red fraction 0 percent no city confetti structure, libgxm movie YUV blit fprog=0x1102c4f4 translates to full-screen constant gray movie content never sampled output, explains screen only UI checkerboard particles logo, earlier city/confetti after skipping checkerboard came from UI own layers not movie, fix direction disassemble libgxm blit vprog fprog varyings UV computation dependent samplers compare SPIR-V translation, next disassemble 0x1102c4f4 and vertex program find constant gray cause lost UV varyings or mistranslated instruction, after fix RT dump should show red sky city confetti. Verification: yuvdraw_1-4 rgba stats yuvdraw png ts110 log.
 LOOKUP: M1386 proved with a frame-windowed RT dump that the libgxm movie YUV blit outputs a uniform flat gray (R=G=B~55.5) in the red-sky section, so the movie content is never sampled and the next step is disassembling that blit program (0x1102c4f4 plus its vertex program) to find the constant-gray cause -> 18.4926 [relevant: dump probe], 18.4924 [relevant: checkerboard covers movie], 18.4923 [relevant: draw trace]
+### 18.4928 PORT M1387: 影片 blit 程序反汇编（NOP/VNMAD/VPCK/NOP/SOP2 + FRAGCOLOR）
+
+1) 工具
+```
+minGW: gcc -O1 -I runtime -I runtime/gfx -I runtime/core -I runtime/platform -I recompiler \
+       -o usse_dis.exe runtime/debug/usse_dis.c runtime/gfx/usse.c
+运行: usse_dis <file.gxp>
+GXP dump: RECOMP_DUMP_GXP=<dir>（gxm_sony.c:601）→ 7150 帧跑出 4331 个程序
+```
+2) 影片 blit（1102c4f4.gxp）
+```
+GXP fragment size=297 params=1 primary_instr=5
+ 0 NOP
+ 1 VNMAD
+ 2 VPCK
+ 3 NOP
+ 4 SOP2
+parameters: colorMap cat2 type0 comps4 container0
+iterators (2): colour type 0 comps 4 O at 0  FRAGCOLOR_USED (O0 = framebuffer colour)
+  pa0 semantic 10 comps 4 storage 1
+  pa2 texture unit 0 coord src 0 proj 1 result_fmt 2
+```
+3) 相关 UI 程序
+```
+1102c884.gxp: fragment size=269, 2 instructions: NOP / VNMAD
+iterators: colour type 5 comps 4 PA; pa2 texture unit 0 ...
+```
+4) 结论/下轮
+```
+影片 blit = 采样 YUV 纹理 → VNMAD(缩放/矩阵) → VPCK(打包) → SOP2(与 FRAGCOLOR 混合)
+输出均匀灰 ⇒ VNMAD/VPCK/SOP2 之一（最可能 SOP2 混合或 FRAGCOLOR fetch）GPU 翻译错误
+下轮: usse_dis 加操作数打印 → 对照 emit_vnmad / emit_vpck / emit_sop2
+```
+验证：usse_dis 输出、4331 个 .gxp、1102c4f4.gxp 反汇编、ts111 日志。
+
+ANTI-FORGETTING ENTRY. Keywords: M1387 built offline usse_dis.exe mingw include paths runtime runtime/gfx runtime/core runtime/platform recompiler sources usse_dis.c usse.c, RECOMP_DUMP_GXP dir 7150 frames dumped 4331 GXP programs including movie blit 1102c4f4.gxp, disassembly 1102c4f4 fragment size 297 5 primary instructions NOP VNMAD VPCK NOP SOP2, parameters colorMap cat2 type0 comps4, iterators colour type 0 comps 4 O at 0 FRAGCOLOR_USED pa0 semantic10 comps4 pa2 texture unit 0 coord src 0 proj 1 result_fmt 2, related UI program 1102c884 NOP VNMAD iterators colour type5 comps4 PA, movie blit sample YUV texture VNMAD scale matrix VPCK pack SOP2 blend framebuffer colour FRAGCOLOR_USED, uniform gray output means VNMAD VPCK SOP2 mistranslated GPU most likely SOP2 blending or FRAGCOLOR fetch path, next add operand printing to usse_dis UOp dst s0 s1 s2 sub args mask compare emit_vnmad emit_vpck emit_sop2. Verification: usse_dis output 4331 gxp 1102c4f4.gxp ts111 log.
+LOOKUP: M1387 built the offline USSE disassembler and dumped 4331 GXP programs, finding the movie blit 1102c4f4 to be NOP/VNMAD/VPCK/NOP/SOP2 with FRAGCOLOR_USED and a projective texture iterator, so the next step is operand-level disassembly to compare against emit_vnmad/emit_vpck/emit_sop2 -> 18.4927 [relevant: constant gray output], 18.4926 [relevant: RT dump probe], 18.4924 [relevant: movie hidden]
