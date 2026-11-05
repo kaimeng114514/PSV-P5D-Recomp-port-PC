@@ -60,9 +60,11 @@
    不是窗口截图，没有 UI overlay，也没有把任何图片 blit 到画面上。
 3. **host 不含游戏内容**：`game_host.exe` 中 `PRESS ANY BUTTON` / `PressAny` / `PERSONA5` / `DANCING` /
    `ATLUS` / `title.spr` / `title_bg` / `NewGame` 出现次数**全为 0**；`packs/PCSH10109/hooks.c`、`pack.toml` 同样没有。
-4. **画面元素来自游戏资源**：玩家数据解包出的 `title/P5/title.spr6` 含 sprite 名
-   `title`/`title02`/`logo`/`press`；`title/title.spr4` 含 `PressAny_off/on`、`NewGame_off/on`、
-   `LoadGame_off/on`、`title_bg` —— 标题 UI 就是这些游戏 sprite 经游戏自己的 GXM 管线画出来的。
+4. **画面元素来自游戏资源（已做像素级提取验证）**：从玩家数据 `title/P5/title.spr6` 中解析出 2 张内嵌
+   color-mapped TGA：`title`（512×512，P5D 霓虹 logo）+ `title02`（256×64，`PRESS ANY BUTTON` 白字），
+   与屏幕上的 logo/按钮**完全一致**（本地提取对比，原始资源不入库）；另 `title/title.spr4` 含
+   `PressAny_off/on`、`NewGame_off/on`、`LoadGame_off/on`、`title_bg` —— 标题 UI 就是这些游戏 sprite
+   经游戏自己的 GXM 管线画出来的。
 5. **实时游戏状态机驱动**：hook 探针挂在 **guest 函数** `0x81198172`（title sequence）、
    `0x81193fbe`（titleDraw）、`0x81193a90`（title 异步任务）上，观察到状态
    `0→1→3→4→…→7` 与标题出现同帧对齐；标题出现后逐帧出现元素，frame 6910 出现镜头形变过渡，
