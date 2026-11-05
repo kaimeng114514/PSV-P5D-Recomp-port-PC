@@ -1397,6 +1397,8 @@
 | M1382 | §18.4923: **帧 7240 每个 draw 的完整 blend 字段已拿到并核对语义：UI 精灵 draws 的 blend[pres=1 mask=15 cf=1 af=1 cs=4 cd=5 as=1 ad=0] 按 SceGxm 编码 = ADD/SRC_ALPHA/ONE_MINUS_SRC_ALPHA（标准 alpha 混合，gfx_gpu 的 conv_blendop/conv_factor 映射正确）；影片 draw #281951 tex0=YUV 纹理、全程无 fallback、无深度测试也不再改变结果 ⇒ 混合状态不是原因。** 现在关键分歧：① 影片 blit（libgxm fprog=0x1102c4f4）实际输出（可能翻译错误产生棋盘格图案）还是 ② 棋盘格是真实 UI 精灵（P8 纹理 0x207c0680/0x20808c80/0x2080d180）不透明覆盖影片。下轮：dump 这些 P8 纹理内容（RECOMP_GPU_DUMP_TEX）并做"跳过 UI 精灵 draw"的 A/B，即可判定。 |
 | M1383 | §18.4924: ★★★★★★★ **A/B 决定性结果：跳过棋盘格精灵（P8 纹理 0x207c0680）的 draw 后，城市天际线+彩带+logo+PRESS ANY BUTTON 全部出现 ⇒ 此前影片层被这张棋盘格精灵覆盖；同时确认影片（红天/城市）在屏幕上呈**灰度**（红天变浅灰），与用户反馈"彩带没颜色、全黑白"完全一致。** 新探针 `RECOMP_GPU_DUMP_TEX_MULTI`（staging 上传路径多地址 dump）+ `RECOMP_SKIP_TEX=addr`（A/B 跳过采样指定纹理的 draw）。dump 结果：`0x207c0680`=1024x512 精灵（BW 占比 94.7% = 棋盘格）；`0x207ca700`=512x512 红色精灵（R=228）；`0x2080ac00`/`0x2080f100`=256x64 白色文字精灵。A/B 统计：跳过前 R71.7/G62.3/B62.4 → 跳过后 R178.3/G169.5/B168.9（画面变亮、城市/彩带出现）。下轮两件事：① 棋盘格精灵为何不透明覆盖影片（GXM blend/alpha 或本来应作为 wipe mask）；② 影片 blit（libgxm fprog=0x1102c4f4，采样 YUV 纹理）为何输出灰度——查 usse_spirv emit_smp 对 YUV 纹理/依赖采样器的处理，需让 YUV→RGB 保留颜色。 |
 | M1384 | §18.4925: **新增 `RECOMP_YUV_SOFT=1`（采样 YUV 影片纹理的 draw 走软件路径，软件按 texel 正确解 YUV 颜色）并做 A/B：结果不理想——skip 棋盘格 + YUV 软件路径时帧 7240 统计 R67.6/G65.4/B65.4（redfrac 1%），且整跑超时（"no frame 7290"，软路径全屏 draw+目标同步太慢）⇒ 软件 fallback 不是可行修复路线。** 结论：应在 GPU 路径内正确处理 YUV 采样（例如：对"采样 YUV 纹理的 libgxm blit 程序"用简单 copy 管线直接采样我们已解码的 RGBA 纹理，绕过原程序里的 YUV 数学），而不是退回软件渲染。下轮实现 GPU 侧 YUV blit 特判。 |
+| M1385 | §18.4926: **新增 `RECOMP_YUV_DRAW_DUMP=path` 探针（影片 YUV draw 之后立即 batch_flush + 下载当前 RT），首轮抓到 4 个样本：RT 内容为纯白(235) 或 纯黑(0)，无任何图像结构。** 解释：抓取的是整跑前 4 个 YUV draw（影片开头 ~6908-6920），该时段影片帧本身就是白笔刷/黑底 logo 动画，且 RT 尚未被后续 UI 合成 —— 因此还不能据此判定"影片 draw 无输出"；需要在帧窗口（~7180-7300，红天段）再抓。另注意：加探针后整跑变慢（~0.33 s/帧，7245 帧接近 3600s 上限）。下轮：把 YUV_DRAW_DUMP 加帧窗口限制（RECOMP_YUV_DRAW_DUMP_FROM/TO），在 7200 附近抓"影片 draw 单独输出"，直接判定影片 blit 是否输出全彩画面；同时清理诊断探针开销。 |
+| §18.4926 | Added the RECOMP_YUV_DRAW_DUMP=path probe (right after a YUV movie draw: batch_flush + download the current RT). The first run captured 4 samples whose content is pure white (235) or pure black (0) with no image structure. Explanation: they are the first 4 YUV draws of the whole run (movie start ~6908-6920), when the movie frames themselves are the white-brush/dark-logo intro and the RT has not yet been composited by the UI, so this does not yet prove the movie draw produces nothing; the capture must be windowed around frames ~7180-7300 (the red-sky section). Note the probes make runs slow (~0.33 s/frame; 7245 frames approaches the 3600 s cap). Next: add a frame window (RECOMP_YUV_DRAW_DUMP_FROM/TO) and capture the movie draw's own output near frame 7200 to decide directly whether the movie blit produces a full-colour image, and trim the diagnostic overhead. |
 | §18.4925 | Added RECOMP_YUV_SOFT=1 (draws sampling YUV movie textures go through the software path, which decodes YUV per texel with colour) and ran the A/B: the result is not good - with the checkerboard skipped plus the YUV software path, frame 7240 gives R67.6/G65.4/B65.4 (red fraction 1%) and the whole run times out ("no frame 7290"; the full-screen software draw plus target sync is too slow), so the software fallback is not a viable fix. Conclusion: handle YUV sampling correctly inside the GPU path instead (e.g., for the libgxm blit programs that sample YUV textures, use a simple copy pipeline that samples the already-decoded RGBA texture, bypassing the YUV math in the original program) rather than falling back to software rendering. Next: implement the GPU-side YUV blit special case. |
 | §18.4924 | Decisive A/B result: skipping the draws that sample the checkerboard sprite (P8 texture 0x207c0680) makes the city skyline, confetti, logo and PRESS ANY BUTTON all appear, so the movie layer was being covered by that checkerboard sprite; it also confirms the movie (red sky/city) appears GRAYSCALE on screen (the red sky turns light gray), exactly matching the user's report that the confetti has no colour and everything is black/white. New probes: RECOMP_GPU_DUMP_TEX_MULTI (multi-address dump on the staging upload path) and RECOMP_SKIP_TEX=addr (A/B dropping draws that sample a given texture). Dump results: 0x207c0680 = 1024x512 sprite (94.7% black/white = the checkerboard); 0x207ca700 = 512x512 red sprite (R=228); 0x2080ac00 / 0x2080f100 = 256x64 white text sprites. A/B stats: before skip R71.7/G62.3/B62.4, after skip R178.3/G169.5/B168.9 (image brightens, city/confetti appear). Two things next: (1) why the checkerboard sprite covers the movie opaquely (GXM blend/alpha, or it is meant as a wipe mask); (2) why the movie blit (libgxm fprog=0x1102c4f4 sampling the YUV texture) outputs grayscale - inspect usse_spirv emit_smp's handling of YUV textures / dependent samplers so YUV->RGB keeps colour. |
 | §18.4923 | Full per-draw blend fields for frame 7240 are now available and verified: the UI sprite draws use blend[pres=1 mask=15 cf=1 af=1 cs=4 cd=5 as=1 ad=0], which in SceGxm encoding is ADD / SRC_ALPHA / ONE_MINUS_SRC_ALPHA (standard alpha blending, and gfx_gpu's conv_blendop/conv_factor mapping is correct); the movie draw #281951 samples the YUV texture with no fallback, and disabling its depth test changes nothing, so blend state is not the cause. The remaining fork is: (1) the movie blit (libgxm fprog=0x1102c4f4) actually outputs a broken (checkerboard-like) image from mistranslation, or (2) the checkerboard is a real opaque UI sprite (P8 textures 0x207c0680/0x20808c80/0x2080d180) covering the movie. Next: dump those P8 textures (RECOMP_GPU_DUMP_TEX) and run an A/B that skips the UI sprite draws to decide. |
@@ -514027,3 +514029,41 @@ C) 验证标题画面出现全彩影片（红天/彩带/城市）
 
 ANTI-FORGETTING ENTRY. Keywords: M1384 RECOMP_YUV_SOFT=1 draws sampling YUV movie textures software path decodes YUV per texel with colour A/B, skip checkerboard 0x207c0680 plus yuv software path frame 7240 stats R67.6 G65.4 B65.4 redfrac 1 percent no red, whole run timeout no frame 7290 full-screen software draw target sync too slow, software fallback not viable fix, conclusion handle YUV sampling correctly in GPU path, use simple copy pipeline for libgxm blit programs sampling YUV textures bypass YUV math sample already-decoded RGBA texture, next identify libgxm blit program set 0x1102c4f4 0x1102c884 0x1102bac4 replace with built-in copy fragment shader verify title full-color movie red sky confetti city. Verification: ts107 log timeout A/B stats M1383 skip image.
 LOOKUP: M1384 tried routing YUV movie draws through the software path and the A/B showed it is not viable (no red, run times out), so the next step is to handle YUV sampling inside the GPU path with a simple copy pipeline for the libgxm blit programs that sample YUV textures -> 18.4924 [relevant: checkerboard covers movie], 18.4923 [relevant: blend check], 18.4922 [relevant: draw trace]
+### 18.4926 PORT M1385: YUV draw 后 RT dump 探针（首批样本白/黑，需窗口限定）
+
+1) 探针
+```
+RECOMP_YUV_DRAW_DUMP=path
+  gfx_gpu_draw 末尾：若本 draw 采样 YUV 纹理 → batch_flush("yuv draw probe")
+  → target_download_to_buffer(scene_entry) → 写 path_N.rgba（1024x544 RGBA）
+  最多 4 次
+```
+2) 首轮样本（yuvdraw_1..4.rgba）
+```
+1: R=G=B=235.1（纯白）
+2: 0,0,0（纯黑）
+3: 0,0,0（纯黑）
+4: R=G=B=235.1（纯白）
+均无图像结构/颜色
+```
+3) 解释
+```
+抓的是整跑前 4 个 YUV draw（影片开头 ~6908-6920）
+该时段影片帧 = 白笔刷/黑底 logo 动画；RT 尚未被 UI 合成
+⇒ 不能据此判定影片 draw 无输出；需窗口限定帧 7180-7300 再抓
+```
+4) 其他
+```
+探针使整跑变慢（~0.33 s/帧；7245 帧接近 3600s 上限）
+下轮应减少探针数量/清理
+```
+5) 下轮
+```
+A) RECOMP_YUV_DRAW_DUMP_FROM/TO 帧窗口
+B) 7200 附近抓影片 draw 单独输出 → 判定 blit 是否全彩
+C) 清理诊断探针开销
+```
+验证：yuvdraw_1-4.rgba 统计、ts109 日志。
+
+ANTI-FORGETTING ENTRY. Keywords: M1385 RECOMP_YUV_DRAW_DUMP=path probe after YUV movie draw batch_flush download RT 4 samples, yuvdraw_1..4 RGBA content pure white 235 or pure black 0 no image structure colour, captured first 4 YUV draws movie start 6908-6920 white brush dark logo intro RT not composited yet, cannot conclude movie draw no output, need window frames 7180-7300 red sky section, probes make runs slow 0.33 s/frame 7245 frames near 3600s cap, next RECOMP_YUV_DRAW_DUMP_FROM TO frame window capture movie draw own output near 7200 decide blit full colour, trim diagnostic overhead. Verification: yuvdraw_1-4 rgba stats ts109 log.
+LOOKUP: M1385 added a YUV-draw RT dump probe whose first four samples are uniformly white/black because they landed at the movie intro, so the next step is a frame-windowed capture around frame 7200 to decide directly whether the movie blit outputs a full-colour image -> 18.4925 [relevant: software path not viable], 18.4924 [relevant: checkerboard covers movie], 18.4923 [relevant: blend verified]
