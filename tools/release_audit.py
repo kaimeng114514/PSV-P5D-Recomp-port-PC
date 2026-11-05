@@ -44,6 +44,10 @@ BAD_MAGIC = [
 ]
 # 大文件阈值：超过则警告（游戏数据通常很大；引擎一般 < 200 MB）
 LARGE_WARN_BYTES = 200 * 1024 * 1024
+# 文档允许清单：docs/screenshots/ 只存放**我们移植运行时由原版游戏代码渲染出的进度截图**，
+# 用于说明开发进展/验证；不是游戏原始资源文件，不能用于重建游戏资源。版权归 ATLUS/SEGA。
+# 见 docs/RELEASE_COMPLIANCE.md "进度截图" 一节。--allow 仍可追加其他临时豁免。
+BUILT_IN_ALLOW = ["docs/screenshots/*.png"]
 
 
 def scan(root):
@@ -97,7 +101,7 @@ def main(argv):
         print("release_audit: not a directory: %s" % args.release_dir)
         return 2
     total, violations, warnings = scan(args.release_dir)
-    allow = [a.lower() for a in args.allow]
+    allow = [a.lower() for a in args.allow] + BUILT_IN_ALLOW
     violations = [(p, why) for (p, why) in violations
                   if not any(fnmatch.fnmatch(p.lower(), a) for a in allow)]
     print("release_audit: scanned %d files under %s" % (total, args.release_dir))

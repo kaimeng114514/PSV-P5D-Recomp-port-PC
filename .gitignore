@@ -69,3 +69,7 @@ err*.txt
 .idea/
 Thumbs.db
 desktop.ini
+
+# 进度截图（docs/screenshots/ 下的 PNG 由本项目运行时输出，用于文档；见 docs/RELEASE_COMPLIANCE.md §7）
+!docs/screenshots/
+!docs/screenshots/*.png
