@@ -1394,6 +1394,8 @@
 | M1379 | §18.4920: **present 缓冲 = 0x1dfc0000（960x544 pitch=0x400 fmt=0，即 3 个影片 YUV draw 的目标之一）；三个 RT（0x1e2c/0x1dcc/0x1dfc）dump 内容几乎相同（R≈68 G≈58 B≈58）= title UI 合成画面（白底+浅灰棋盘格+logo+彩带点+PRESS ANY BUTTON）。** 这与截图里的"高对比黑白棋盘格"不同 ⇒ **GPU 端 RT 内容（浅灰 UI 合成）与 guest 显示内存/截图（黑白）不一致**，颜色/对比差异出现在 present 下载或截图读取路径。下轮：(a) 对比 target_download_to_guest 与 target_download_to_buffer 两条路径；(b) 确认 UI 覆盖影片的 draw 顺序（影片先画、UI 后画不透明覆盖）；(c) 修正后让标题背景显示全彩红天/彩带/城市。 |
 | M1380 | §18.4921: ★★★★★ **纠错 + 关键量化：截图与 GPU target 内容逐像素完全一致（mean diff=0.00, max=0）⇒ present 下载/截图路径正确；真正问题在合成内容本身——GPU target alpha 均值=65.2（半透明层），彩色像素仅 10%（主要是 logo），**没有红天/城市的大面积红色**。** 之前 M1379 的"GPU RT 与截图不一致"是 PNG 查看器把 RGBA 的 alpha 当背景合成造成的视觉假象（dump 是 RGBA，截图是 RGB）。结论修正：**影片层（红天/彩带/城市）没有进入最终合成的 RT**——该 RT 内容是"title UI 半透明层（棋盘格+logo+press+少量粒子）"，影片要么被 UI/clear 覆盖、要么画到别的 RT。下轮：按帧 7240 的 draw 顺序（含 scene begin/clear）追踪影片 YUV draw 与 UI draw 的目标与覆盖关系，找出影片层丢失点。 |
 | M1381 | §18.4922: **帧 7240 全量 draw 追踪：影片 draw 确实在 GPU 上执行（18 draws on GPU、0 software fallback、0 skipped），目标 0x1e2c0000，且 draw 顺序为"影片 YUV 全屏 quad 先画（blend=0, depth=3/dw=1）→ 之后 UI 精灵（P8 纹理 0x207ca700/0x2080ac00/0x2080f100）以 blend=00000001/0x0401010f 叠加"。新增 `RECOMP_TRACE_FRAME=<n>` 探针（scene BEGIN/END/DRAW：target/fprog/count/blend/depth/tex0/tex1）。结合 M1380（最终 RT 无红色面积、alpha 均值 65），判断：**UI 精灵的 blend 处理错误**（透明像素被写成黑色，覆盖影片）导致标题背景变成高对比黑白棋盘格、影片层看不见；下轮检查 GfxBlend 结构 → SDL blend 翻译（gfx_gpu 管线创建）与 GXM blend factor 语义，修复 UI 叠加。另：影片 draw 关深度测试的 A/B 实验（RECOMP_YUV_NO_DEPTH=1）画面几乎不变（R71.0/G62.3/B62.1 vs 71.7/62.3/62.4）⇒ 深度测试不是原因。 |
+| M1382 | §18.4923: **帧 7240 每个 draw 的完整 blend 字段已拿到并核对语义：UI 精灵 draws 的 blend[pres=1 mask=15 cf=1 af=1 cs=4 cd=5 as=1 ad=0] 按 SceGxm 编码 = ADD/SRC_ALPHA/ONE_MINUS_SRC_ALPHA（标准 alpha 混合，gfx_gpu 的 conv_blendop/conv_factor 映射正确）；影片 draw #281951 tex0=YUV 纹理、全程无 fallback、无深度测试也不再改变结果 ⇒ 混合状态不是原因。** 现在关键分歧：① 影片 blit（libgxm fprog=0x1102c4f4）实际输出（可能翻译错误产生棋盘格图案）还是 ② 棋盘格是真实 UI 精灵（P8 纹理 0x207c0680/0x20808c80/0x2080d180）不透明覆盖影片。下轮：dump 这些 P8 纹理内容（RECOMP_GPU_DUMP_TEX）并做"跳过 UI 精灵 draw"的 A/B，即可判定。 |
+| §18.4923 | Full per-draw blend fields for frame 7240 are now available and verified: the UI sprite draws use blend[pres=1 mask=15 cf=1 af=1 cs=4 cd=5 as=1 ad=0], which in SceGxm encoding is ADD / SRC_ALPHA / ONE_MINUS_SRC_ALPHA (standard alpha blending, and gfx_gpu's conv_blendop/conv_factor mapping is correct); the movie draw #281951 samples the YUV texture with no fallback, and disabling its depth test changes nothing, so blend state is not the cause. The remaining fork is: (1) the movie blit (libgxm fprog=0x1102c4f4) actually outputs a broken (checkerboard-like) image from mistranslation, or (2) the checkerboard is a real opaque UI sprite (P8 textures 0x207c0680/0x20808c80/0x2080d180) covering the movie. Next: dump those P8 textures (RECOMP_GPU_DUMP_TEX) and run an A/B that skips the UI sprite draws to decide. |
 | §18.4922 | Full draw trace of frame 7240: the movie draw really runs on the GPU (18 draws on the GPU, 0 software fallback, 0 skipped), target 0x1e2c0000, and the order is "movie YUV full-screen quad first (blend=0, depth=3/dw=1), then UI sprites (P8 textures 0x207ca700/0x2080ac00/0x2080f100) composited with blend=00000001/0x0401010f". Added the RECOMP_TRACE_FRAME=<n> probe (scene BEGIN/END/DRAW with target/fprog/count/blend/depth/tex0/tex1). Combined with M1380 (no red area in the final RT, alpha mean 65), the likely cause is the UI sprites' blend handling (transparent pixels written as black, covering the movie), which turns the title background into a high-contrast black/white checkerboard and hides the movie; next round: check the GfxBlend struct -> SDL blend translation (gfx_gpu pipeline creation) against GXM blend-factor semantics and fix the UI compositing. Also the A/B experiment disabling depth test on movie draws (RECOMP_YUV_NO_DEPTH=1) leaves the image nearly unchanged (R71.0/G62.3/B62.1 vs 71.7/62.3/62.4), so depth testing is not the cause. |
 | §18.4921 | Correction and key measurement: the screenshots and the GPU target content are pixel-identical (mean diff=0.00, max=0), so the present download/screenshot path is correct; the real problem is the composited content itself - the GPU target's alpha mean is 65.2 (a semi-transparent layer) and only 10% of pixels are coloured (mostly the logo), with NO large red area from the red sky/city. M1379's "GPU RT differs from the screenshot" was a visual artifact of the PNG viewer compositing the RGBA alpha over a background (the dump is RGBA, the screenshot is RGB). Corrected conclusion: the movie layer (red sky/confetti/city) never reaches the final composited RT - that RT holds the semi-transparent title UI layer (checkerboard+logo+press+a few particles); the movie is either overwritten by the UI/clear or drawn to another RT. Next: trace the frame-7240 draw order (including scene begin/clear) for the movie YUV draws and the UI draws, and find where the movie layer is lost. |
 | §18.4920 | The present buffer is 0x1dfc0000 (960x544, pitch 0x400, fmt 0 - one of the three movie-YUV-draw targets), and the three RTs (0x1e2c/0x1dcc/0x1dfc) dump almost identical content (R~68 G~58 B~58) = the title UI composite (white background, light-gray checkerboard, logo, confetti dots, PRESS ANY BUTTON). That differs from the high-contrast black/white checkerboard in the screenshots, so the GPU-side RT content (light-gray UI composite) and the guest display memory/screenshot (black/white) disagree - the colour/contrast difference appears in the present download or screenshot capture path. Next: (a) compare target_download_to_guest against target_download_to_buffer; (b) confirm the draw order where the UI covers the movie (movie first, opaque UI after); (c) after fixing, the title background should show the full-colour red sky/confetti/city. |
@@ -513921,3 +513923,38 @@ C) 修正后影片层应显示（红天/彩带/城市）
 
 ANTI-FORGETTING ENTRY. Keywords: M1381 frame 7240 full draw trace movie draw runs on GPU 18 draws 0 software fallback 0 skipped target 0x1e2c0000 order movie YUV fullscreen quad first blend 0 depth 3 dw 1 then UI sprites P8 textures 0x207ca700 0x2080ac00 0x2080f100 blend 00000001 0x0401010f, RECOMP_TRACE_FRAME probe scene BEGIN END DRAW target fprog count blend depth tex0 tex1, UI sprite blend handling wrong transparent pixels written black covering movie title background high-contrast black white checkerboard movie invisible, next check GfxBlend struct SDL blend translation gfx_gpu pipeline creation GXM blend factor semantics fix UI compositing, A/B RECOMP_YUV_NO_DEPTH depth test not cause R71.0 G62.3 B62.1 vs 71.7 62.3 62.4. Verification: TRACE output GPU stats frame 7240 nodepth_7240.
 LOOKUP: M1381 traced frame 7240 completely - the movie YUV full-screen quad is drawn first on the GPU (18 draws, 0 fallback) and then UI P8 sprites composite over it with blend enabled, so the next suspect is the UI blend translation (GfxBlend to SDL) hiding the movie, and the depth-test A/B ruled depth out -> 18.4921 [relevant: movie not in final RT], 18.4920 [relevant: present target], 18.4919 [relevant: colour lost]
+### 18.4923 PORT M1382: 帧 7240 blend 字段核对——混合状态正确，剩两个怀疑方向
+
+1) 完整 draw 清单（18 draws，帧 7240，target 0x1e2c0000）
+```
+#281939  fprog=0x8153985c count=3  blend off  tex0=0x2080d180 P8
+#281940  fprog=0x1102bac4 count=6  blend[pres=1 mask=15 cf=1 af=1 cs=4 cd=5 as=1 ad=0]
+#281941  同上 depth dw=1
+#281942  fprog=0x114c7ca8 count=1200 blend off tex0=0x20800b80 U8（粒子/场景）
+#281943-48 224x68/224x68 小 RT 中转（fprog=0x8153adfc/0x8153a9bc，tex0=0x1e2c0000）
+#281949  fprog=0x8153b200 count=4 tex0=0x1e2c0000（自读取）
+#281950  fprog=0x1102bac4 count=6 tex0=0x1e2c0000 blend 标准 alpha
+#281951  fprog=0x1102c4f4 count=4 tex0=0x2607dc00 fmt=0x90001000 (YUV 影片) blend off depth=3 dw=1
+#281952-56 UI 精灵 P8（0x207c0680/0x20808c80/0x2080d180）blend 标准 alpha
+```
+2) blend 语义核对
+```
+SceGxm: cf/af=1 → BLEND_FUNC_ADD；cs=4 → SRC_ALPHA；cd=5 → ONE_MINUS_SRC_ALPHA
+gfx_gpu conv_blendop / conv_factor 映射一致 ⇒ 标准 alpha 混合，实现正确
+```
+3) 已排除
+```
+- 影片 draw 确实执行（0 fallback）
+- 深度测试（RECOMP_YUV_NO_DEPTH=1 画面不变）
+- blend 状态错误（上面核对）
+```
+4) 两个剩余怀疑
+```
+A) libgxm 影片 blit 着色器翻译错误 → 输出棋盘格状图案
+B) 棋盘格是真实 UI 精灵（P8 纹理）不透明覆盖影片
+下轮: dump P8 纹理 (0x207c0680/0x20808c80/0x2080d180) + A/B 跳过 UI 精灵 draw
+```
+验证：TRACE DRAW 18 条、blend 字段、gfx_gpu conv_blendop。
+
+ANTI-FORGETTING ENTRY. Keywords: M1382 frame 7240 per-draw blend fields verified UI sprite draws blend pres=1 mask=15 cf=1 af=1 cs=4 cd=5 as=1 ad=0 SceGxm ADD SRC_ALPHA ONE_MINUS_SRC_ALPHA standard alpha blending gfx_gpu conv_blendop conv_factor mapping correct, movie draw 281951 tex0 YUV texture no fallback disabling depth test no change blend not cause, two remaining suspects libgxm movie blit fprog 0x1102c4f4 translation error checkerboard-like output OR real opaque UI sprite P8 textures 0x207c0680 0x20808c80 0x2080d180 covering movie, draw list 18 draws 281939 8153985c 1102bac4 114c7ca8 1200 8153adfc 8153a9bc 8153b200 1102c4f4 YUV 960x544, next dump P8 textures RECOMP_GPU_DUMP_TEX A/B skip UI sprite draws determine. Verification: TRACE DRAW 18 lines blend fields conv_blendop.
+LOOKUP: M1382 verified the frame-7240 draw blends are standard SceGxm alpha blending and gfx_gpu's factor mapping is correct, ruling out blend state and depth as the movie's disappearance, so the remaining two suspects are a mistranslated libgxm movie blit or an opaque UI sprite covering it, and next is dumping the P8 sprite textures and an A/B skipping the UI sprite draws -> 18.4922 [relevant: draw trace], 18.4921 [relevant: movie in final RT], 18.4920 [relevant: present target]
