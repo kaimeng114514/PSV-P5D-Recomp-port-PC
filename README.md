@@ -31,6 +31,18 @@
 全部是游戏自己的 sprite/UI 系统经 GXM 管线绘制（对应游戏数据 `title/P5/title.spr6` 中的
 `title`/`title02`/`logo`/`press` sprite）。
 
+### S1_TITLE：USM 标题影片背景（原版解码 + 原版 libgxm blit 程序绘制）
+
+![S1_TITLE USM 影片背景](docs/screenshots/09_s1_title_usm_video.png)
+
+标题背景 = 原版 `movie/c_p5d001.usm` 影片：红天、彩色三角彩带、城市天际线、光束，
+全部由**原版代码**渲染：HLE 的 FFmpeg 解码 USM（AVC）→ 解码帧写入游戏自己的 NV12 缓冲
+→ 游戏的 libgxm 影片 blit 程序（fragment `0x1102c4f4`）经 GXM→Vulkan 动态翻译绘制到屏幕；
+上层 logo / `PRESS ANY BUTTON` / 面板是游戏自己的 sprite/UI 系统（`title.spr6`/`title.spr4`）绘制。
+
+> 该截图**不需要任何强制开关**：输入脚本只做正常按键推进，`RECOMP_P5D_FORCEMOVIE` 未设置；
+> 帧 7240 的像素统计 R=44.3/G=22.9/B=22.3（红色主导），与离线影片真值帧（红天/彩带/城市）构图一致。
+
 ### 标题 → 剧情 的实时过渡动画
 
 ![标题到剧情的镜头形变过渡](docs/screenshots/05_s1_title_transition.png)
@@ -72,21 +84,24 @@
 6. **渲染数据全部为 guest 数据**：Vulkan 绘制使用的 GXM shader 位于 guest 地址
    （如 `0x8153…`、libgxm `0x1102b…`），纹理是 guest 内存里的游戏纹理
    （如 P8 `0x95001000` 调色板纹理 @ `0x2069b280`）；host 只做翻译/执行。
-7. **与历史参考对比**：S0 三个 logo 的像素统计与参考帧一致（§18.4883：ATLUS nz=`35915`、
+7. **标题影片截图 = 自然运行**：截图 run 的 env 只有截图窗口 `RECOMP_SHOT_FROM/TO`；
+   `RECOMP_P5D_FORCEMOVIE` 未设置（日志无 `[FORCEMOVIE]` 行），输入脚本为普通按键序列；
+   帧缓冲比对：标题帧像素统计与离线 USM 真值帧一致（R 主导、约 28-35% 红色像素）。
+8. **与历史参考对比**：S0 三个 logo 的像素统计与参考帧一致（§18.4883：ATLUS nz=`35915`、
    CRIWARE nz=`57122` 完全相同，包围盒相同）。
 
 ### 诚实说明：当前限制
 
-- **标题/剧情截图启用了诊断开关 `RECOMP_P5D_FORCEMOVIE=1`（默认关闭）**：title 背景影片
-  `movie/c_p5d001.usm` 的 USM/CRI 解码路径尚未修好，游戏会卡在“等影片就绪”的门上；强制该门后
-  **UI/文字/动画仍全部由游戏自己绘制**，但影片背景（红天/城市/彩带）还缺失，所以画面尚未 100% 与原版一致。
-  这是下一步工作，不是“假画面”。
-- S0_LOGO 截图**不需要任何强制开关**，是正常流程原样渲染的。
+- **标题 USM 影片已打通（不需要任何强制开关）**：HLE 的 FFmpeg 解码 + 原版 libgxm 影片 blit 程序
+  经 GXM→Vulkan 翻译绘制；期间修复了 USSE→SPIR-V 翻译的两个 bug：`SOP2` 指令按 32 位字/u8_unpack
+  读取（M1392）、`FRAGCOLOR_USED` 预载 alpha（M1395）。S0/S1 截图都是正常流程原样渲染。
+- **当前阻塞**：从标题按确认进入下一场景时，某个 shader 触发 `usse_spirv: internal error: zero id`
+  崩溃（正在修）。因此 S2_MENU 及后续流程截图尚待下一个里程碑。
 - 目前标题/剧情阶段帧耗时异常（约 1.4 s/帧），待优化。
 
 ---
 
-## 当前状态（2026-11-05，里程碑 M1345 / round 1315）
+## 当前状态（2026-11-05，里程碑 M1396 / round 1364）
 
 | 模块 | 状态 | 说明 |
 |---|---|---|
@@ -95,9 +110,9 @@
 | Sony 用户库重编译（libgxm/libc/libfios2…） | ✅ | 按 nativ 架构从玩家固件重编译，替代手写 GXM HLE |
 | GXM → Vulkan 渲染 | ✅ | 原版 shader/纹理/绘制状态动态翻译；S0/S1/剧情画面正常 |
 | **S0_LOGO** | ✅ | ATLUS → P-STUDIO → CRIWARE，与参考图定量一致 |
-| **S1_TITLE** | ✅（影片背景待补） | 标题画面/UI/动画由原版代码绘制；USM 背景影片解码仍缺 |
-| 开场剧情对话 | ✅（背景待补） | 原版文本/UI/输入推进正常 |
-| 影片解码（USM/CRI） | ❌ | `movie/c_p5d001.usm` 设备状态停在 7，USM 数据/解码路径待打通 |
+| **S1_TITLE** | ✅ | 标题画面/UI/动画 + **USM 影片背景（红天/彩带/城市）** 均由原版代码绘制 |
+| 开场剧情对话 | 部分 | 原版文本/UI 正常；进入下一场景时 shader 翻译崩溃（待修） |
+| 影片解码（USM/CRI） | ✅ | HLE FFmpeg 解码 USM/AVC → NV12 → 原版 libgxm blit 绘制（标题影片已验证） |
 | S2_MENU → S3_SELECT → S4_GAME → RESULT | 未达 | 下一步推进 |
 | 性能 | 部分 | 标题/剧情阶段存在 ~1.4 s/帧 异常，待查 |
 
