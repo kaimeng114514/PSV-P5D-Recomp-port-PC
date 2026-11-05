@@ -1364,6 +1364,8 @@
 | M1349 | §18.4890: **movie 设备状态 7 的语义查明：7 = "stream 句柄为 NULL" 错误码。** 反编译 `fn_81297100`（Sofdec2 状态查询）入口：`cbnz r0, 0x8129711a` —— 若传入 r0（stream handle）为 0，则 `movs r0,#0; bl 0x81279176`（断言）后 **`movs r0,#7; return 7`**。而设备 update 路径 `0x81154350: ldr r0,[r6,#8]; bl 0x81297100; str r0,[r6,#0xc]` 正是用 `device[+8]`（movie stream 句柄）查询状态；`device[+8]==0` ⇒ 状态被写成 7 ⇒ `fn_81153fd2`（要求 ==4 playing）永远失败、title movie 永不播放。⇒ 根因不是解码器、也不是视频文件缺失，而是 **movie stream 句柄从未被创建**（`device[+8]` 保持 0）：创建/打开段（文件打开→CRI FS 读取 `vita.cpk` 内 `movie/c_p5d001.usm`→decoder 初始化）在更前面失败。下轮定位 `device[+8]` 的写入者与创建失败点（`fn_8115423c` open 路径、`fn_812965xx`/`fn_81296cd4` 等 CRI FS/stream 创建函数），并验证 CRI FS 是否收到 movie 路径的 open。 |
 | M1350 | §18.4891: **movie stream 句柄创建点定位：`device[+8] = fn_812970f2(0, 0)`（0x811542a6），返回 0 即状态 7。** 在 `fn_8115423c`（movie 设备 open 路径）中：`0x811542a2: movs r0,#0; 0x811542a4: movs r1,#0; 0x811542a6: bl 0x812970f2; 0x811542aa: str r0,[r6,#8]` —— stream 句柄由 `fn_812970f2(0,0)` 创建并写入 `device[+8]`；随后 `0x81154302: bl 0x81297100; str r0,[r6,#0xc]` 用它查询状态。关闭路径 `0x81154374: bl 0x81296cd4; str r4,[r6,#8]`（r4=0）销毁。⇒ 观察到的状态 7 = `fn_812970f2` 返回 0（stream 创建失败）。下一步：hook `fn_812970f2` 捕获返回值，并读它的函数体定位失败条件（Sofdec2/CriMana 初始化状态、内存分配、回调注册等）。 |
 | M1351 | §18.4892: **stream 创建调用链查明：`fn_812970f2(a0,a1)` 是薄封装 → `fn_81296e4a(0, a0, a1)`。** `fn_812970f2` 仅做 `r1=arg0; r2=arg1; r0=0; bl fn_81296e4a`（0x812970f2-0x812970fe），真正创建在 `fn_81296e4a`：入口先 `bl fn_8129xxxx` 取全局状态，`bl fn_812962ee` 后 `cmp r0,#0` 早退检查，失败路径用 `movs r0,#0; bl fn_81278f96`（解锁/清理）并返回 0；成功路径依次 `fn_8129b1f4`（两处）、`fn_8127a3e0`、`fn_8129631e`。⇒ 标题影片 `fn_812970f2(0,0)` 返回 0 的失败点就在 `fn_81296e4a` 的早退检查/子调用之一。下轮：hook `fn_812970f2`/`fn_81296e4a` 返回值 + `fn_812962ee` 结果，确定失败子调用；或补该路径所需的 HLE 语义（内存池/对象表/回调）。 |
+| M1352 | §18.4893: **运行时抓到 movie stream 创建失败点：`fn_81296e4a` 的早期检查 `fn_812962ee` 被调用后创建即中止（成功路径子调用未发生）⇒ 返回 0 来自该早退检查。** 新增 hooks：HOOK `0x812970f2:p5d_streammk`、`0x81296e4a:p5d_streaminner`、`0x812962ee:p5d_earlychk`，IHOOK `0x812970fe:p5d_streamret`。运行（FORCEMOVIE=1, TEST_FRAMES=6900）日志：frame 6843（boot 影片）与 frame 6854（title 影片）各出现 `[STREAMMK] a0=0 a1=0 lr=0x811542ab` → `[STREAMIN] r0=0 r1=0 r2=0 lr=0x812970ff` → `[EARLYCHK] lr=0x81296e67`，随后**没有**任何成功路径子调用日志 ⇒ 失败发生在 `fn_81296e4a` 早退检查（`bl fn_812962ee; cmp r0,#0`）。⇒ 下一个决定性检查点 = `fn_812962ee` 的返回值语义（它检查什么全局状态/初始化标志）。下轮：读 `fn_812962ee` 函数体 + hook 其返回/内部读取的全局变量，找出缺失的初始化并补 HLE 语义。 |
+| §18.4893 | The runtime caught the movie stream creation failure point: after fn_81296e4a's early check fn_812962ee is called the creation aborts (the success-path subcalls never happen), so the 0 return comes from that early-exit check. New hooks: HOOK 0x812970f2:p5d_streammk, 0x81296e4a:p5d_streaminner, 0x812962ee:p5d_earlychk and IHOOK 0x812970fe:p5d_streamret. Run log (FORCEMOVIE=1, TEST_FRAMES=6900): frame 6843 (boot movie) and frame 6854 (title movie) each show [STREAMMK] a0=0 a1=0 lr=0x811542ab -> [STREAMIN] r0=0 r1=0 r2=0 lr=0x812970ff -> [EARLYCHK] lr=0x81296e67, and then NO success-path subcall logs, so the failure is in fn_81296e4a's early-exit check (bl fn_812962ee; cmp r0,#0). Next decisive checkpoint = the meaning of fn_812962ee's return value (which global state/initialization flag does it check?). Next: read fn_812962ee's body and hook its return/the globals it reads to find the missing initialization, then supply the HLE semantics. |
 | §18.4892 | The stream-creation call chain is pinned down: fn_812970f2(a0,a1) is a thin wrapper around fn_81296e4a(0, a0, a1). fn_812970f2 only does r1=arg0; r2=arg1; r0=0; bl fn_81296e4a (0x812970f2-0x812970fe), and the real creation lives in fn_81296e4a: its prologue calls fn_8129xxxx for global state, then bl fn_812962ee followed by an early-exit cmp r0,#0, whose failure paths do movs r0,#0; bl fn_81278f96 (unlock/cleanup) and return 0; the success path calls fn_8129b1f4 (twice), fn_8127a3e0 and fn_8129631e. So the 0 returned by the title movie's fn_812970f2(0,0) comes from one of fn_81296e4a's early checks/subcalls. Next: hook the fn_812970f2/fn_81296e4a return values and fn_812962ee's result to find the failing subcall, or supply the HLE semantics that path needs (memory pool, object table, callback). |
 | §18.4891 | The movie-stream creation point is located: device[+8] = fn_812970f2(0, 0) at 0x811542a6, and a 0 return is what becomes state 7. In fn_8115423c (the movie device open path): 0x811542a2 movs r0,#0; 0x811542a4 movs r1,#0; 0x811542a6 bl 0x812970f2; 0x811542aa str r0,[r6,#8] - the stream handle is created by fn_812970f2(0,0) and stored into device[+8]; then 0x81154302 bl 0x81297100; str r0,[r6,#0xc] queries its state. The close path 0x81154374 bl 0x81296cd4; str r4,[r6,#8] (r4=0) destroys it. So the observed state 7 means fn_812970f2 returned 0 (stream creation failed). Next: hook fn_812970f2 to capture its return value and read its body to find the failure condition (Sofdec2/CriMana init state, memory allocation, callback registration). |
 | §18.4890 | The meaning of movie device state 7 is pinned down: 7 = "stream handle is NULL" error code. The decompiled entry of fn_81297100 (Sofdec2 status query) begins with `cbnz r0, 0x8129711a`; if the incoming r0 (stream handle) is 0 it does `movs r0,#0; bl 0x81279176` (an assert) and then moves 7 into r0 and returns it. The device update path `0x81154350: ldr r0,[r6,#8]; bl 0x81297100; str r0,[r6,#0xc]` queries the status with device[+8] (the movie stream handle); device[+8]==0 therefore writes state 7, so fn_81153fd2 (which needs state==4 playing) always fails and the title movie never plays. The root cause is not the decoder or a missing video file: the movie stream handle was never created (device[+8] stays 0), so the failure is earlier in the create/open stage (file open -> CRI FS reading movie/c_p5d001.usm inside vita.cpk -> decoder init). Next: find the writers of device[+8] and where creation fails (the fn_8115423c open path, the stream-create functions fn_812965xx/fn_81296cd4) and verify whether CRI FS receives the open for the movie path. |
@@ -512937,3 +512939,36 @@ fn_81296e4a:
 ANTI-FORGETTING ENTRY. Keywords: M1351 stream creation chain fn_812970f2 wrapper fn_81296e4a(0,a0,a1) r0=0 r1=arg0 r2=arg1 real create prologue global state bl fn_812962ee cmp r0 0 early exit failure movs r0 0 bl fn_81278f96 unlock cleanup return 0 success path fn_8129bbaa fn_8129b784 fn_8129b1f4 x2 fn_8127a3e0 fn_8129631e, state 7 failure point one of early checks, next hook returns fn_812970f2 fn_81296e4a fn_812962ee result identify failing subcall HLE semantics memory pool object table callback. Verification: game_part14.c fn_812970f2 41341 fn_81296e4a 40361.
 
 LOOKUP: M1351 traced the stream creation chain (fn_812970f2 is a wrapper that calls fn_81296e4a(0,a0,a1)) and its success/failure paths, so the 0 that becomes state 7 comes from fn_81296e4a's early checks/subcalls -> 18.4891 [relevant: stream create point], 18.4890 [relevant: state 7], 18.4889 [relevant: movies only in vita.cpk]
+### 18.4893 PORT M1352: 抓到 stream 创建失败点 = fn_81296e4a 的早期检查
+
+1) 新增 hooks（packs/PCSH10109/hooks.c + pack.toml）
+```
+HOOKS : 0x812970f2:p5d_streammk    (stream 创建入口, 记录 a0/a1)
+        0x81296e4a:p5d_streaminner (真正创建入口, 记录 r0/r1/r2)
+        0x812962ee:p5d_earlychk    (早期检查入口)
+IHOOKS: 0x812970fe:p5d_streamret   (封装返回处)
+```
+2) 运行日志（EXTRA_ENV=RECOMP_P5D_FORCEMOVIE=1, TEST_FRAMES=6900）
+```
+frame 6843  [STREAMMK] a0=0 a1=0 lr=0x811542ab   <- boot 影片
+            [STREAMIN] r0=0 r1=0 r2=0 lr=0x812970ff
+            [EARLYCHK] lr=0x81296e67
+            (之后无任何成功路径子调用日志)
+frame 6854  [STREAMMK] a0=0 a1=0 lr=0x811542ab   <- title 影片
+            [STREAMIN] r0=0 r1=0 r2=0 lr=0x812970ff
+            [EARLYCHK] lr=0x81296e67
+            (同上，创建中止)
+```
+⇒ `fn_81296e4a` 在 `bl fn_812962ee; cmp r0,#0` 早退检查处返回 0
+⇒ 状态 7 的最终根因收敛到 **`fn_812962ee` 检查的全局状态/初始化标志**
+3) 下轮
+```
+A) 读 fn_812962ee 函数体（检查哪个全局/初始化标志）
+B) hook 其返回值与内部读取的全局变量，找出缺失的初始化
+C) 补对应 HLE 语义，让 stream 创建通过
+```
+验证：hooks.c / pack.toml、test.log（[STREAMMK]/[STREAMIN]/[EARLYCHK]）、本文件。
+
+ANTI-FORGETTING ENTRY. Keywords: M1352 runtime caught movie stream creation failure point fn_81296e4a early check fn_812962ee called then abort success path subcalls never happen return 0 from early exit, hooks 0x812970f2 p5d_streammk 0x81296e4a p5d_streaminner 0x812962ee p5d_earlychk IHOOK 0x812970fe p5d_streamret, frames 6843 boot movie 6854 title movie STREAMMK a0=0 a1=0 lr=0x811542ab STREAMIN r0=0 r1=0 r2=0 lr=0x812970ff EARLYCHK lr=0x81296e67 no success subcalls, state 7 root cause converges to global state/init flag checked by fn_812962ee, next read fn_812962ee body hook return globals missing initialization HLE semantics. Verification: hooks.c pack.toml test.log.
+
+LOOKUP: M1352 proved at run time that the movie stream creation aborts at fn_81296e4a's early check fn_812962ee (called at frames 6843/6854, then no success-path subcalls), so the 0 that becomes state 7 comes from that early-exit check and the next step is fn_812962ee's global-state semantics -> 18.4892 [relevant: stream chain], 18.4891 [relevant: stream create point], 18.4890 [relevant: state 7]
