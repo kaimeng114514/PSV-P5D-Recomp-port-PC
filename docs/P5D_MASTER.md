@@ -1372,6 +1372,8 @@
 | M1357 | §18.4898: **下一决定性实测已排定（地址 0 哨兵）。** 探针方案：p5d_earlychk 记录 RD32(0) 与 RD32(arg0)，运行 TEST_FRAMES=6900 FORCEMOVIE=1 确认 fn_812962ee 返回值来源；若 RD32(0)==0 则在 HLE 给地址 0 提供 CriMana 初始化哨兵（或按真机语义修正），使 fn_81296e4a 早退通过、movie stream 创建成功（device[+8]≠0 → 状态 4 playing → titleDraw 门打开）。|
 | M1358 | §18.4899: ★★★★★ **重大纠错：movie stream 创建其实是成功的（handle≠0），状态 7 不是 NULL 句柄。** 新探针（IHOOK 0x811542aa 记录真正写入 device[+8] 的返回值；HOOK 0x8129b1f4/0x8129b784/0x8127a3e0/0x8129631e 记录成功路径子调用；EARLYCHK 增加 RD32(0)）实测：frame 6843/6854 movie 创建时 `[EARLYCHK] arg0=0 val0=0x3e6e8080`（非 0，早退通过）→ 成功路径全部执行（`[SUB2]→[SUB1]→[SUB1]→[SUB3]→[SUB4]→[SUB2]→[SUB1]→[SUB1]→[SUB3]`）→ `[HWND] frame 6843/6854 handle=0x112e05d8 dev8=0x112e05d8` ⇒ **device[+8] = 0x112e05d8（有效句柄）**。重新解读 `fn_81297100` 完整代码：handle==0 时返回 7 只是 NULL 保护分支；**handle!=0 时** `r1=[handle+0x84]; cmp r1,#1; r0=[handle+0x30]; bne 0x81297128` —— 若 `[handle+0x84]==1` 则**直接返回 7**（状态 7 = 该标志=1），否则进入 `fn_8129d0a8` + `tbb [pc,r0]` 映射表返回 0..6（1/6/5/3/4/0/2）。⇒ 之前 M1349-M1357 "状态 7 = 句柄 NULL" 的链条作废（仅对空句柄成立）；真正故障是 **stream 创建成功后 [handle+0x84] 被置 1（错误/结束标志）**，以及底层数据供给（无文件读取）。下轮：hook `fn_81297100` 记录 handle/[handle+0x84]/[handle+0x30]/返回值；读 `fn_8129d0a8` 与 `[handle+0x84]` 的写入者，找出谁把流置为错误态。 |
 | M1359 | §18.4900: ★★★★★ **状态 7 的精确来源找到：`fn_81297100` → v84==0 走正常路径 → `bl fn_8129d0a8(0x816c567c)` → 返回值 >6 → `bhi 0x81297160` → `movs r0,#7`（兜底状态）。** 实测（新探针 MST2 记录入口 handle/[handle+0x84]/[handle+0x30]；STST 记录 0x81154356 处写入 device[+0xc] 的返回状态）：frame 6843/6853 创建成功后 handle=0x112e05d8、v84=0、v30=0x112e0ec0；frame 6858 `[STST] st=0x7 devC=0x7`（随后 frame 6859 st=0 设备回到空闲）⇒ 7 = "fn_8129d0a8 返回 >6" 的兜底码，不是空句柄、也不是 [handle+0x84]==1。反编译确认 `L_81297160: movs r0,#7` 正是 tbb 映射 0..6 之外的默认分支。另发现：IHOOK 挂在 `pop {r4,pc}` 之后是死代码（recompiled 代码 `return;` 之前插入）——以后钩返回需选非 pop 路径。下轮：读 `fn_8129d0a8` 与全局 `0x816c567c`，确认它返回 >6 的原因（CriMana/Sofdec 全局初始化或 player 状态缺失）。 |
+| M1360 | §18.4901: ★★★★★★★★★ **movie 失败的确切错误信息抓到：`E10052101M: Failed criMvPly_AllocateWorkBufferWithWork().`（rodata 0x8131e818）——即 movie player 的 work buffer 分配失败。** 运行轨迹：frame 6846 `[ERR1] fn_8129d4d4` 被调用（r1=0x8131e818=错误消息指针）→ 错误处理函数把 `[stream_obj+0x770]=1`；此后每帧 `fn_8129d0a8(stream_obj, 0x816c567c)` 因 `[obj+0x770]==1` 返回 7（其内部 `if ([r4+0x770]==1) return 7`，obj=[handle+0x30]=0x113c8990）→ `fn_81297100` 返回 7 → `[STST] st=7 devC=7`（frame 6848/6858）→ 设备状态 7 → 永不播放。失败调用链：`fn_8129ddbe` 内 `L_8129de88: bl fn_812a42a2`（= criMvPly work-buffer 分配）→ `L_8129de8c: cmp r0,#1; beq ok` → 返回 !=1 → `L_8129de90` 加载错误消息 0x8131e818 并调用 `fn_8129d4d4` 置错误标志。⇒ 根因 = **`fn_812a42a2` 分配 work buffer 失败（返回 != 1）**。下轮：读 `fn_812a42a2`（分配大小/返回码/memblock 来源），hook 其入参与返回值，确认是尺寸过大、堆不足还是 HLE 内存语义问题。 |
+| §18.4901 | The exact movie failure message is captured: "E10052101M: Failed criMvPly_AllocateWorkBufferWithWork()." (rodata 0x8131e818) - the movie player's work-buffer allocation failed. Runtime trace: at frame 6846 [ERR1] fn_8129d4d4 is called (r1=0x8131e818 = the error message pointer) and the error handler sets [stream_obj+0x770]=1; from then on every frame fn_8129d0a8(stream_obj, 0x816c567c) returns 7 because [obj+0x770]==1 (its body: if ([r4+0x770]==1) return 7, obj=[handle+0x30]=0x113c8990) -> fn_81297100 returns 7 -> [STST] st=7 devC=7 (frames 6848/6858) -> device state 7 -> playback never starts. Failure call chain: inside fn_8129ddbe, L_8129de88 bl fn_812a42a2 (the criMvPly work-buffer allocator) -> L_8129de8c cmp r0,#1; beq ok -> a return other than 1 -> L_8129de90 loads the error message 0x8131e818 and calls fn_8129d4d4 to set the error flag. So the root cause = fn_812a42a2 failing to allocate the work buffer (return != 1). Next: read fn_812a42a2 (allocation size/return codes/memblock source), hook its inputs and return value, and find whether the size is too large, the heap is short, or the HLE memory semantics are wrong. |
 | §18.4900 | The precise source of state 7 is found: fn_81297100 -> v84==0 takes the normal path -> bl fn_8129d0a8(0x816c567c) -> its return value is >6 -> bhi 0x81297160 -> movs r0,#7 (the fallback status). Measurements (new probes MST2 logging handle/[handle+0x84]/[handle+0x30] at entry, STST logging the status stored into device[+0xc] at 0x81154356): at frames 6843/6853 creation succeeds with handle=0x112e05d8, v84=0, v30=0x112e0ec0; at frame 6858 [STST] st=0x7 devC=0x7 (then frame 6859 st=0 and the device goes idle). So 7 = the fallback code for "fn_8129d0a8 returned >6", not a null handle and not [handle+0x84]==1. The decompiled L_81297160: movs r0,#7 is exactly the default branch outside the tbb mapping 0..6. Also found: an IHOOK placed after pop {r4,pc} is dead code (inserted after return;), so return-value hooks must use a non-pop path. Next: read fn_8129d0a8 and global 0x816c567c to find why it returns >6 (missing CriMana/Sofdec global init or player state). |
 | §18.4899 | MAJOR CORRECTION: movie stream creation actually SUCCEEDS (handle != 0), and state 7 is not a NULL handle. New probes (IHOOK 0x811542aa logging the value truly stored into device[+8]; HOOKs on the success-path subcalls 0x8129b1f4/0x8129b784/0x8127a3e0/0x8129631e; EARLYCHK logging RD32(0)) show: at frames 6843/6854 [EARLYCHK] arg0=0 val0=0x3e6e8080 (nonzero, early exit passes) -> all success-path subcalls run ([SUB2]->[SUB1]->[SUB1]->[SUB3]->[SUB4]->[SUB2]->[SUB1]->[SUB1]->[SUB3]) -> [HWND] frame 6843/6854 handle=0x112e05d8 dev8=0x112e05d8, so device[+8] = 0x112e05d8 (a valid handle). Re-reading the full fn_81297100: handle==0 returning 7 is only the NULL guard; with handle!=0 it does r1=[handle+0x84]; cmp r1,#1; r0=[handle+0x30]; bne 0x81297128 - if [handle+0x84]==1 it directly returns 7 (state 7 = that flag == 1); otherwise it calls fn_8129d0a8 plus a tbb [pc,r0] mapping table returning 0..6 (1/6/5/3/4/0/2). So the M1349-M1357 chain "state 7 = NULL handle" is void (true only for a null handle); the real fault is that after successful stream creation [handle+0x84] becomes 1 (error/end flag) and no data is supplied (no file reads). Next: hook fn_81297100 to log handle/[handle+0x84]/[handle+0x30]/return; read fn_8129d0a8 and the writers of [handle+0x84] to find who puts the stream into the error state. |
 | §18.4898 | The next decisive measurement is set up (address-0 sentinel): log RD32(0) and RD32(arg0) inside p5d_earlychk, run TEST_FRAMES=6900 with FORCEMOVIE=1 and confirm where fn_812962ee's return value comes from; if RD32(0)==0, provide a CriMana initialization sentinel at address 0 in the HLE (or fix it per real-hardware semantics) so fn_81296e4a's early exit passes and movie stream creation succeeds. |
@@ -513124,3 +513126,43 @@ C) 找出为何它返回 >6（全局未初始化？player 未创建？缺数据�
 ANTI-FORGETTING ENTRY. Keywords: M1359 state 7 precise source fn_81297100 v84==0 normal path bl fn_8129d0a8 global 0x816c567c return >6 bhi 0x81297160 movs r0 7 fallback code, probes MST2 handle [handle+0x84] [handle+0x30] STST 0x81154356 status device+0xc, frames 6843 6853 handle=0x112e05d8 v84=0 v30=0x112e0ec0 frame 6858 STST st=7 devC=7 frame 6859 st=0 idle, L_81297160 movs r0 7 default branch outside tbb 0..6, IHOOK after pop pc dead code recompiled return after, next read fn_8129d0a8 global 0x816c567c why returns >6 CriMana Sofdec global init player state. Verification: hooks.c pack.toml test.log game_part14.c fn_81297100 41376.
 
 LOOKUP: M1359 found state 7 is the fallback branch of fn_81297100 (movs r0,#7) taken when the underlying fn_8129d0a8(0x816c567c) returns more than 6, with runtime probes showing v84=0 and store 7 at frame 6858; next is fn_8129d0a8 and the global 0x816c567c -> 18.4899 [relevant: major correction], 18.4890 [relevant: state 7], 18.4886 [relevant: S1_TITLE]
+### 18.4901 PORT M1360: movie 失败信息 = `Failed criMvPly_AllocateWorkBufferWithWork()`（work buffer 分配失败）
+
+1) 错误字符串（eboot rodata）
+```
+0x8131e818 = "E10052101M: Failed criMvPly_AllocateWorkBufferWithWork()."
+```
+2) 运行轨迹（FORCEMOVIE=1, TEST_FRAMES=6900 探针）
+```
+frame 6846  [ERR1] fn_8129d4d4 o=0x113c8990 r1=0x8131e818 v770=0
+            -> 错误处理把 [stream_obj+0x770] 置 1
+frame 6847  [ERR2] o=0x113c8990 v770=0x1        <- 标志已置位
+frame 6847  [MST2] h=0x113c80a8 v30=0x113c8990
+frame 6848  [STST] st=0  ->  [STST] frame 6848 st=0x7 devC=0x7
+frame 6858  [STST] st=0x7 devC=0x7（title 影片重建后同样失败）
+frame 6859  [STST] st=0 devC=0
+```
+3) 原因链（反编译 game_part14.c）
+```
+fn_8129d0a8: r4=obj; r0=[r4+4]; bl fn_812a4398; r1=[r4+0x770];
+             if (r1==1) return 7;        <- 错误标志 -> 状态 7
+             r0 = r0-1; if (r0>9) return 0; tbb -> 1..6
+fn_81297100: if v84==0 -> bl fn_8129d0a8([handle+0x30], 0x816c567c) -> 7
+fn_8129ddbe:
+  L_8129de88: bl fn_812a42a2        <- work buffer 分配
+  L_8129de8c: cmp r0,#1; beq ok     <- 必须 ==1
+  L_8129de90: r1=0x8131e818; bl fn_8129d4d4   <- 失败: 报错 + 置错误标志
+```
+⇒ 根因：**`fn_812a42a2` 返回 != 1（work buffer 分配失败）**。
+4) 下轮
+```
+A) 读 fn_812a42a2：分配大小、memblock/heap 来源、返回码含义
+B) hook 其入参/返回值（work buffer size、指针、结果），确认失败原因：
+   尺寸过大 / heap 不足 / HLE 内存语义问题
+C) 修复后 movie 播放状态应到 4(playing)
+```
+验证：hooks.c/pack.toml（M1360 探针）、test.log（[ERR1]/[ERR2]/[STST]）、game_part14.c（fn_8129ddbe @?、fn_8129d0a8 @78467）、本文件。
+
+ANTI-FORGETTING ENTRY. Keywords: M1360 movie failure exact message E10052101M Failed criMvPly_AllocateWorkBufferWithWork rodata 0x8131e818, runtime trace frame 6846 ERR1 fn_8129d4d4 r1=0x8131e818 sets stream_obj+0x770=1 frame 6847 ERR2 v770=1, fn_8129d0a8 obj=[handle+0x30]=0x113c8990 if [r4+0x770]==1 return 7, fn_81297100 v84=0 normal path returns 7, STST st=7 devC=7 frames 6848 6858, call chain fn_8129ddbe L_8129de88 bl fn_812a42a2 work buffer allocate cmp r0,#1 beq ok L_8129de90 error message fn_8129d4d4 set flag, root cause fn_812a42a2 returns !=1 allocation failed, next read fn_812a42a2 allocation size memblock heap return codes hook args return why too large heap insufficient HLE memory semantics. Verification: hooks.c pack.toml test.log game_part14.c fn_8129ddbe fn_8129d0a8 78467.
+
+LOOKUP: M1360 captured the exact CRI movie error message "Failed criMvPly_AllocateWorkBufferWithWork()" and traced it from fn_8129ddbe's call to fn_812a42a2 (work-buffer allocator returning != 1) which sets the stream error flag and hence device state 7 -> 18.4899 [relevant: major correction], 18.4890 [relevant: state 7], 18.4886 [relevant: S1_TITLE]
