@@ -1370,6 +1370,8 @@
 | M1355 | §18.4896: **下一步切入点：地址 0 读取语义由 runtime 的 RD32/guest 内存层决定。** 已确认调用链检查的是 `*(u32*)0`（M1354）。本轮开始定位 nativ runtime 的 guest 内存访问实现（`runtime/core/mem.c` 不存在，实际文件为：['runtime\\core\\main.c', 'runtime\\debug\\verify.c', 'runtime\\gfx\\gfx_soft.c']），下一轮在该层测量 RD32(0) 并在必要时为地址 0 提供非零哨兵值（或在 fn_812962ee 返回处理上补 HLE 语义），使 stream 创建通过。|
 | M1356 | §18.4897: **RD32/guest 内存基址实现定位（继续 M1355）。** runtime/core/main.c 中与 RD32/guest 基址相关实现行：[(308, 'for (int i = 0; i < nwatch; i++) v[i] = RD32(watch_at[i]);'), (312, 'uint32_t now = RD32(watch_at[i]); if (now == v[i]) continue;'), (343, 'FILE *sf = addr >= 0x81000000u && addr < 0xa0000000u ? fopen(sp ? sp : "missed_functions.txt", "a") : 0;   /* (a call th'), (520, '#define PROF_BASE 0x81000000u')]。下一轮：按该实现测量 RD32(0) 的实际返回值，并在 HLE 侧提供地址 0 哨兵或修正 fn_812962ee 语义，使 movie stream 创建通过。|
 | M1357 | §18.4898: **下一决定性实测已排定（地址 0 哨兵）。** 探针方案：p5d_earlychk 记录 RD32(0) 与 RD32(arg0)，运行 TEST_FRAMES=6900 FORCEMOVIE=1 确认 fn_812962ee 返回值来源；若 RD32(0)==0 则在 HLE 给地址 0 提供 CriMana 初始化哨兵（或按真机语义修正），使 fn_81296e4a 早退通过、movie stream 创建成功（device[+8]≠0 → 状态 4 playing → titleDraw 门打开）。|
+| M1358 | §18.4899: ★★★★★ **重大纠错：movie stream 创建其实是成功的（handle≠0），状态 7 不是 NULL 句柄。** 新探针（IHOOK 0x811542aa 记录真正写入 device[+8] 的返回值；HOOK 0x8129b1f4/0x8129b784/0x8127a3e0/0x8129631e 记录成功路径子调用；EARLYCHK 增加 RD32(0)）实测：frame 6843/6854 movie 创建时 `[EARLYCHK] arg0=0 val0=0x3e6e8080`（非 0，早退通过）→ 成功路径全部执行（`[SUB2]→[SUB1]→[SUB1]→[SUB3]→[SUB4]→[SUB2]→[SUB1]→[SUB1]→[SUB3]`）→ `[HWND] frame 6843/6854 handle=0x112e05d8 dev8=0x112e05d8` ⇒ **device[+8] = 0x112e05d8（有效句柄）**。重新解读 `fn_81297100` 完整代码：handle==0 时返回 7 只是 NULL 保护分支；**handle!=0 时** `r1=[handle+0x84]; cmp r1,#1; r0=[handle+0x30]; bne 0x81297128` —— 若 `[handle+0x84]==1` 则**直接返回 7**（状态 7 = 该标志=1），否则进入 `fn_8129d0a8` + `tbb [pc,r0]` 映射表返回 0..6（1/6/5/3/4/0/2）。⇒ 之前 M1349-M1357 "状态 7 = 句柄 NULL" 的链条作废（仅对空句柄成立）；真正故障是 **stream 创建成功后 [handle+0x84] 被置 1（错误/结束标志）**，以及底层数据供给（无文件读取）。下轮：hook `fn_81297100` 记录 handle/[handle+0x84]/[handle+0x30]/返回值；读 `fn_8129d0a8` 与 `[handle+0x84]` 的写入者，找出谁把流置为错误态。 |
+| §18.4899 | MAJOR CORRECTION: movie stream creation actually SUCCEEDS (handle != 0), and state 7 is not a NULL handle. New probes (IHOOK 0x811542aa logging the value truly stored into device[+8]; HOOKs on the success-path subcalls 0x8129b1f4/0x8129b784/0x8127a3e0/0x8129631e; EARLYCHK logging RD32(0)) show: at frames 6843/6854 [EARLYCHK] arg0=0 val0=0x3e6e8080 (nonzero, early exit passes) -> all success-path subcalls run ([SUB2]->[SUB1]->[SUB1]->[SUB3]->[SUB4]->[SUB2]->[SUB1]->[SUB1]->[SUB3]) -> [HWND] frame 6843/6854 handle=0x112e05d8 dev8=0x112e05d8, so device[+8] = 0x112e05d8 (a valid handle). Re-reading the full fn_81297100: handle==0 returning 7 is only the NULL guard; with handle!=0 it does r1=[handle+0x84]; cmp r1,#1; r0=[handle+0x30]; bne 0x81297128 - if [handle+0x84]==1 it directly returns 7 (state 7 = that flag == 1); otherwise it calls fn_8129d0a8 plus a tbb [pc,r0] mapping table returning 0..6 (1/6/5/3/4/0/2). So the M1349-M1357 chain "state 7 = NULL handle" is void (true only for a null handle); the real fault is that after successful stream creation [handle+0x84] becomes 1 (error/end flag) and no data is supplied (no file reads). Next: hook fn_81297100 to log handle/[handle+0x84]/[handle+0x30]/return; read fn_8129d0a8 and the writers of [handle+0x84] to find who puts the stream into the error state. |
 | §18.4898 | The next decisive measurement is set up (address-0 sentinel): log RD32(0) and RD32(arg0) inside p5d_earlychk, run TEST_FRAMES=6900 with FORCEMOVIE=1 and confirm where fn_812962ee's return value comes from; if RD32(0)==0, provide a CriMana initialization sentinel at address 0 in the HLE (or fix it per real-hardware semantics) so fn_81296e4a's early exit passes and movie stream creation succeeds. |
 | §18.4897 | RD32/guest-memory base implementation located (continuing M1355): runtime/core/main.c lines related to RD32/guest base: [(308, 'for (int i = 0; i < nwatch; i++) v[i] = RD32(watch_at[i]);'), (312, 'uint32_t now = RD32(watch_at[i]); if (now == v[i]) continue;'), (343, 'FILE *sf = addr >= 0x81000000u && addr < 0xa0000000u ? fopen(sp ? sp : "missed_functions.txt", "a") : 0;   /* (a call th'), (520, '#define PROF_BASE 0x81000000u')]. Next: measure the actual RD32(0) return with that implementation, then provide an address-0 sentinel in the HLE or fix fn_812962ee's semantics so movie stream creation succeeds. |
 | §18.4896 | The next entry point is the semantics of reading guest address 0: it is produced by the runtime's RD32/guest-memory layer (the chain checks *(u32*)0 per M1354). This round starts locating the nativ guest-memory implementation (runtime/core/mem.c does not exist; actual files: ['runtime\\core\\main.c', 'runtime\\debug\\verify.c', 'runtime\\gfx\\gfx_soft.c']); next round will measure RD32(0) there and, if needed, provide a nonzero sentinel at address 0 (or handle fn_812962ee's return in the HLE) so stream creation can proceed. |
@@ -513039,3 +513041,45 @@ LOOKUP: M1356 located the RD32/guest-base implementation lines in runtime/core/m
 ANTI-FORGETTING ENTRY. Keywords: M1357 address 0 sentinel measurement plan p5d_earlychk log RD32(0) RD32(arg0) TEST_FRAMES=6900 FORCEMOVIE=1 confirm fn_812962ee return source if zero provide CriMana init sentinel address 0 HLE or fix semantics fn_81296e4a early exit pass movie stream creation device+8 nonzero state 4 playing titleDraw gate opens.
 
 LOOKUP: M1357 set up the decisive address-0 sentinel measurement -> 18.4897 [relevant: RD32 implementation], 18.4896 [relevant: address 0 next step], 18.4895 [relevant: address 0 check]
+### 18.4899 PORT M1358: 重大纠错 —— stream 创建成功（handle=0x112e05d8），状态 7 = [handle+0x84]==1
+
+1) 新探针
+```
+IHOOK 0x811542aa:p5d_hwnd    <- str r0,[r6,#8] 之后记录真实写入的句柄
+HOOK  0x8129b1f4:p5d_sub1    <- 成功路径子调用
+HOOK  0x8129b784:p5d_sub2
+HOOK  0x8127a3e0:p5d_sub3
+HOOK  0x8129631e:p5d_sub4
+EARLYCHK 增加 RD32(0)（arg0 的读取内容）
+```
+2) 实测日志（FORCEMOVIE=1, TEST_FRAMES=6900）
+```
+frame 6843 (boot movie) / 6854 (title movie):
+  [STREAMMK] a0=0 a1=0 lr=0x811542ab
+  [STREAMIN] r0=0 r1=0 r2=0 lr=0x812970ff
+  [EARLYCHK] arg0=0 val0=0x3e6e8080 lr=0x81296e67   <- 非 0，早退通过
+  [SUB2][SUB1][SUB1][SUB3][SUB4][SUB2][SUB1][SUB1][SUB3]  <- 成功路径全部执行
+  [HWND] handle=0x112e05d8 dev8=0x112e05d8          <- device[+8] 有效!
+```
+⇒ **stream 创建成功**，之前"句柄从未创建"的结论作废。
+3) 重新解读 `fn_81297100`（完整）
+```
+if (handle == 0) { assert; return 7; }        <- 仅空句柄
+r1 = [handle+0x84]; r0 = [handle+0x30];
+if (r1 == 1) return 7;                        <- 状态 7 = [handle+0x84]==1
+fn_8129d0a8(0x816c567c);
+if (r0 > 6) goto 0x81297160;
+tbb [pc,r0] -> 1 / 6 / 5 / 3 / 4 / 0 / 2     <- 真实状态码 0..6
+```
+⇒ 状态 7 = `[handle+0x84]==1`（错误/结束标志）；不是"句柄空"。
+4) 下轮
+```
+A) hook fn_81297100：记录 handle、[handle+0x84]、[handle+0x30]、返回值
+B) 读 fn_8129d0a8；找 [handle+0x84]=1 的写入者（谁把流置错误）
+C) 结合"无文件读取"事实（§18.4889）确认数据供给链断裂点
+```
+验证：hooks.c/pack.toml（M1358 探针）、test.log（[EARLYCHK]/[SUB*]/[HWND]）、本文件。
+
+ANTI-FORGETTING ENTRY. Keywords: M1358 major correction movie stream creation succeeds handle 0x112e05d8 device[+8] nonzero, probes IHOOK 0x811542aa p5d_hwnd HOOK 0x8129b1f4 0x8129b784 0x8127a3e0 0x8129631e EARLYCHK RD32(0) arg0=0 val0=0x3e6e8080 nonzero early exit passes success path subcalls SUB2 SUB1 SUB1 SUB3 SUB4 SUB2 SUB1 SUB1 SUB3 frames 6843 6854, fn_81297100 full: handle==0 return 7 null guard only, handle!=0 r1=[handle+0x84] cmp 1 r0=[handle+0x30] if flag==1 return 7 else fn_8129d0a8 tbb mapping 1 6 5 3 4 0 2, state 7 = [handle+0x84]==1 error/end flag not null handle, M1349-M1357 chain void, next hook fn_81297100 log handle flag [handle+0x84] [handle+0x30] return, read fn_8129d0a8 find writers of [handle+0x84]=1 error state, no file reads data supply chain. Verification: hooks.c pack.toml test.log EARLYCHK SUB HWND.
+
+LOOKUP: M1358 corrected the movie failure chain - the stream creation actually succeeds with handle 0x112e05d8 and state 7 comes from the stream's [handle+0x84]==1 error/end flag, not from a NULL handle -> 18.4890 [relevant: state 7], 18.4889 [relevant: movies only in vita.cpk], 18.4886 [relevant: S1_TITLE]
