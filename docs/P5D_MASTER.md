@@ -1425,6 +1425,10 @@
 | M1410 | §18.4951: ★★★★★★★ **全流程打通：S0_LOGO → S1_TITLE → S2_MENU → S3_SELECT（选曲）→ S4_GAME（打歌）→ RESULT（结算）全部由原版代码正常绘制并运行，无卡死。** 内部输入回放（`RECOMP_INPUT=2380-2390:8` 过标题，之后每 400 帧 Cross）驱动到 story→选曲→打歌→RESULT，帧缓冲截图证据：`13_song_select.png`（歌单：Wake Up, Get Up, Get Out There / Tokyo Daylight / Rivers In The Desert / The Whims of Fate，難度/ BPM 127）、`14_dance_gameplay.png`（涉谷街景、Joker、环形音符 Up/Left/Triangle/Circle/X/Star、SCORE 200、生命条）、`15_result.png`（MAX COMBO / PERFECT 0 / GREAT 0 / GOOD 0 / MISS 10 / HIGH SCORE / SCORE / NOT CLEAR + 重試/自訂遊玩/放棄/觀看重播 菜单）。运行 330 秒到 frame 9800+：0 crash、hitch 仅场景切换 53~117ms、stall profiler 仅一次 151ms、`[MST2]` hook 持续输出 ⇒ 之前 DLC 线程风暴/线程表耗尽导致的打歌卡死已不再出现（M1403/M1404 修复生效）。注：脚本没有输入音符判定，故 MISS 10/SCORE 0，属预期；人工用键盘/手柄可正常游玩（用户已确认手柄正常）。 |
 | M1411 | §18.4952: ★★★★★★★ **键鼠适配（不改游戏逻辑，全部在 HLE 输入层完成）：新增可配置键鼠映射 `input.ini`（游戏目录，首次运行自动生成，F11 热重载）：`[buttons]` 把 PC 键名（SDL 名，逗号分隔多键）映射到 Vita 按键 up/down/left/right/triangle/circle/cross/square/start/select/l/r/l2/r2；`[mouse]` 左键=Cross(确认/推进)、右键=Circle(取消/返回)，菜单/剧情可用鼠标点选。默认 P5D 布局：WASD=D-pad(音符方向)、IJKL=面键(I△ J□ K× L○)、Space/K=Cross、Esc/L=Circle、Return=Start、Tab=Select、Q/E=L/R、方向键与 WASD 并存。** 实现于 `runtime/ui/window.c`：`p5d_load()/p5d_key_event()/p5d_recompute()`，`window_input()` 把 `p5d_bits`/`p5d_mouse_bits` 并入 SceCtrl 读数；游戏二进制与游戏逻辑完全未改（仍是一字不改的原版回放，只是宿主把键鼠翻译成 Vita 手柄数据）。验证：运行日志 `input: 18 keyboard bindings from input.ini; mouse menu clicks on (left = confirm, right = cancel)`。 |
 | M1412 | §18.4953: **鼠标直接操作游戏内 UI（主菜单）：帧缓冲菜单识别 + 点击导航。** `runtime/gfx/display.c` 新增 `display_last_frame()` 暴露游戏刚设置的帧缓冲；`runtime/ui/window.c` 新增 `p5d_menu_read()`（主菜单 6 行固定布局，960x544 行 y=219/257/292/327/362/398；选中行=左端 x72..140 纯红高亮条像素数 >100）+ `p5d_menu_row_at()`（点击 y → 行号）+ 闭环导航 `p5d_menu_tick()`：**第一次点击某行只发送一次 D-pad 上/下，然后重新读取画面高亮位置，未到目标再发下一次（到达即停，不会冲过头），再次点击同一高亮行才发送一次 **Circle** 进入（P5D 用日式布局：Circle=确认/选择、Cross=返回）；右键=Cross 返回上一级。点击若遇到过渡帧（画面高亮暂时读不到）会在 500ms 内重试，不会变成盲确认；另加真正 PC 语义的**悬停高亮**：鼠标移到哪一行，游戏高亮就闭环走到哪一行（不点击），点击已高亮行才确认，标题界面（主菜单出现前）左键=Cross|Start 以兼容 `PRESS ANY BUTTON`。minimal 构建里鼠标不再被相对捕获（`want=0`）且 `SDL_ShowCursor()`，光标正常显示。** 验证：鼠标测试日志 `mouse: picture 156,388 menu row click=5 selected=0`（识别到选中行 0=DANCING!，点击行 5=SYSTEM，宏已排队）；自动化点击坐标受 DPI 影响需用户实测校准。 |
+| M1413 | §18.4954: ★★★★★★★ **PC 交互层（不是按键映射）：通用"UI 识别 + 命中测试 + 悬停/点击"框架，扩展到选曲界面。** `runtime/ui/window.c` 新增 `p5d_ui_scan()`（帧缓冲识别两种界面：主菜单 6 行左侧列表，选中行=左端纯红高亮条；选曲界面 4 行右侧列表，选中行=浅灰高亮条 >800 像素）+ `p5d_ui`/`p5d_ui_y[]` 几何 + `p5d_menu_row_at()` 按当前界面命中测试（主菜单 x20..280，选曲 x430..950）；鼠标移动=悬停→闭环 D-pad 把游戏高亮移到指针所在行；点击已高亮行=Circle 确认，点其它行=先高亮；右键/Esc=Cross 返回；标题界面（主菜单出现前）左键=Cross|Start 以兼容 PRESS ANY BUTTON。另交付**一键启动**：`C:\dev\P5D_Play.bat` + 桌面快捷方式 `Persona 5 Dancing (PC)`（实测启动成功）。** 验证：鼠标测试日志 `mouse: window 526,377 (960x544) picture 526,377 row=3 selected=1`（选曲界面识别成功：已选行 1，指针下行 3）；launcher 实测 `game_host RUNNING: Persona 5 Dancing in Starlight`。 |
+| M1414 | §18.4955: ★★★★★★★ **PC 交互层实时自观测（不再靠人工看截图）：三层工具 + 状态模型。**(1) `runtime/ui/window.c` 窗口线程每 10 帧输出 `[UI] f=帧 scr=屏幕 cur=高亮行 rows=行数 hover= target= enter= pending= saw= tpl=模板:分数`（`RECOMP_UI_LOG=0` 关闭）——实时知道"游戏在哪个界面/哪一行"；(2) `RECOMP_UI_TEST="frame:action,..."`：`h<row>` 悬停、`c` 点击、`b` 返回，直接驱动交互层，无需系统鼠标/截图即可回归菜单逻辑；(3) **屏幕状态由"真正呈现的 GPU 纹理"回读识别**（window_present_gpu 每 6 帧 SDL_DownloadFromGPUTexture + 扫描；guest 帧缓冲在 windowed GPU 路径下是旧帧，之前据此识别导致误判）——标题/结算用 `runtime/ui/ui_templates.h` 模板匹配（从真实截图裁剪的静态 UI 补丁，支持 BGRA/RGBA 通道序与 render-scale 缩放；模板 0=标题 PRESS ANY BUTTON 牌、3=RESULT MAX COMBO），主菜单/选曲用行启发式（6 行白字+左端红条；选曲浅灰长条≥280px）。** 实测：`[UI] f=3550 scr=TITLE tpl=title:0.92`（标题识别成功）、`f=3700 scr=MAIN cur=3`（主菜单识别）、悬停闭环日志 `nav tap DOWN from 0 to 4`/`nav reached row 4` 全部可在日志中验证。** 已知问题：启动 Logo/过场帧仍偶尔误判为 MAIN/SONG（正在收紧阈值/加稳定窗口）。 |
+| §18.4955 | Real-time self-observation for the PC interaction layer, so the port no longer depends on a human looking at screenshots: (1) window.c prints '[UI] f=frame scr=screen cur=highlighted-row rows=... hover= target= enter= pending= saw= tpl=template:score' every ten frames (RECOMP_UI_LOG=0 disables), so the host knows, live, which screen the game is on and which row is highlighted; (2) RECOMP_UI_TEST='frame:action,...' drives the interaction layer itself (h<row> hover, c click, b back), so menu logic is regression-tested without an OS mouse or screenshots; (3) the screen state is recognised from the GPU texture actually being presented (window_present_gpu downloads it via SDL_DownloadFromGPUTexture and scans it every sixth present; the guest frame buffer holds an old frame in the windowed GPU path, which caused the earlier misjudgements). Title and RESULT use the ui_templates.h templates (static UI patches cut from real screenshots, matched with BGRA/RGBA order and render-scale awareness; template 0 = the title's PRESS ANY BUTTON plate, 3 = RESULT's MAX COMBO label), while the main menu and song select use row heuristics (six white-text rows plus a red bar at the left edge; a light-grey run of at least 280 px for song select). Verified live: '[UI] f=3550 scr=TITLE tpl=title:0.92' (title recognised), 'f=3700 scr=MAIN cur=3' (main menu recognised), and hover closed-loop lines 'nav tap DOWN from 0 to 4' / 'nav reached row 4'. Known issue: boot logos/cutscene frames are still occasionally misread as MAIN/SONG; thresholds and a stability window are being tightened. |
+| §18.4954 | The PC interaction layer (not button mapping): a generic UI-recognition + hit-test + hover/click framework, extended to the song select screen. runtime/ui/window.c gained p5d_ui_scan() (it recognises two screens from the guest frame buffer: the main menu's six-row left list, whose selected row has the pure-red highlight bar, and song select's four-row right list, whose selected row has a light-grey bar of more than 800 pixels), the p5d_ui/p5d_ui_y[] geometry and p5d_menu_row_at() hit-testing per screen (main menu x 20..280, song select x 430..950). Moving the pointer hovers: a closed loop walks the game's highlight to the row under it; a click on the highlighted row confirms with Circle and a click on another row first highlights it; the right button/Escape is Cross (back); before the main menu appears a left click is Cross|Start so the title's PRESS ANY BUTTON accepts it. A one-click launcher was also delivered: C:\dev\P5D_Play.bat plus the desktop shortcut 'Persona 5 Dancing (PC)' (launch verified). Verification: the mouse log shows 'mouse: window 526,377 (960x544) picture 526,377 row=3 selected=1' (song select recognised: highlighted row 1, pointer over row 3), and the launcher test showed 'game_host RUNNING: Persona 5 Dancing in Starlight'. |
 | §18.4953 | Direct mouse operation of the game's in-game UI (main menu): frame-buffer menu recognition plus click navigation. runtime/gfx/display.c gained display_last_frame() exposing the buffer the game just set; runtime/ui/window.c gained p5d_menu_read() (the main menu's fixed six rows at 960x544, y=219/257/292/327/362/398; the selected row is the one whose left red highlight bar, x 72..140, has more than 100 pure-red pixels), p5d_menu_row_at() (click y -> row) and an input macro p5d_macro_bits(): the first click on a row sends one D-pad up/down tap, re-reads the highlight from the guest frame and taps again only until the clicked row is highlighted (closed loop: it cannot overshoot), and a second click on the already-highlighted row sends exactly one Circle to enter it (P5D uses the Japanese layout: Circle = confirm/select, Cross = back); the right button is Cross (back). A click during a transition frame (highlight temporarily unreadable) is retried for 500 ms instead of becoming a blind confirm; real PC hover was added too: moving the pointer over a row walks the game's highlight there without clicking, a click on the highlighted row confirms, and before the main menu appears a left click sends Cross|Start so the title's PRESS ANY BUTTON accepts it. In the minimal build the mouse is no longer captured relatively (want=0) and SDL_ShowCursor() keeps the pointer visible. Verification: the mouse test log shows 'mouse: picture 156,388 menu row click=5 selected=0' (highlighted row 0=DANCING! recognised; clicked row 5=SYSTEM queued), while the automated click coordinates are affected by display DPI and need the player's own calibration test. |
 | §18.4952 | Keyboard and mouse adaptation, entirely in the HLE input layer with no change to the game's logic: a configurable map input.ini (game directory, generated on first run, F11 hot-reloads). [buttons] maps PC key names (SDL names, comma separated for several keys) to the Vita buttons up/down/left/right/triangle/circle/cross/square/start/select/l/r/l2/r2; [mouse] makes left click Cross (confirm/advance) and right click Circle (cancel/back), so menus and story can be driven with the mouse. Default P5D layout: WASD = D-pad (the note directions), IJKL = face buttons (I triangle, J square, K cross, L circle), Space/K = Cross, Escape/L = Circle, Return = Start, Tab = Select, Q/E = L/R, arrow keys alongside WASD. Implemented in runtime/ui/window.c (p5d_load(), p5d_key_event(), p5d_recompute()), with window_input() merging p5d_bits/p5d_mouse_bits into the SceCtrl read. The original binary and its logic are untouched: the host only translates keyboard/mouse into the same Vita pad data the game would get from a controller. Verification: the run log prints 'input: 18 keyboard bindings from input.ini; mouse menu clicks on (left = confirm, right = cancel)'. |
 | §18.4951 | The full flow works end to end: S0_LOGO -> S1_TITLE -> S2_MENU -> S3_SELECT (song select) -> S4_GAME (dance gameplay) -> RESULT (results) are all drawn and driven by the original game code with no freeze. Input replay (RECOMP_INPUT=2380-2390:8 to pass the title, then Cross every 400 frames) drove story -> song select -> dance -> RESULT; framebuffer evidence: 13_song_select.png (song list Wake Up Get Up Get Out There / Tokyo Daylight / Rivers In The Desert / The Whims of Fate, difficulty, BPM 127), 14_dance_gameplay.png (Shibuya street, Joker, ring notes Up/Left/Triangle/Circle/X/Star, SCORE 200, life bar), 15_result.png (MAX COMBO / PERFECT 0 / GREAT 0 / GOOD 0 / MISS 10 / HIGH SCORE / SCORE / NOT CLEAR plus the retry/custom/quit/replay menu). A 330 s run reached frame 9800+: 0 crashes, only scene-transition hitches of 53-117 ms, one 151 ms stall report, and the [MST2] hook kept firing, so the dance-scene freeze caused by the DLC thread storm / thread-table exhaustion (M1403/M1404) no longer occurs. Note: the script sent no note inputs, so MISS 10 / SCORE 0 is expected; a human with keyboard or pad plays normally (the player confirmed the pad works). |
@@ -515056,3 +515060,73 @@ minimal 构建: 鼠标不被相对捕获 (want=0) + SDL_ShowCursor() 光标可�
 
 ANTI-FORGETTING ENTRY. Keywords: M1412 mouse click in-game UI main menu frame buffer recognition display_last_frame window.c p5d_menu_read six rows 960x544 y 219 257 292 327 362 398 selected row left red highlight bar x72-140 >100 red pixels, p5d_menu_row_at click y row, p5d_menu_tick closed loop one dpad tap re-read highlight until target reached cannot overshoot second click same highlighted row Cross enter, right click Circle back, minimal build mouse not captured want=0 SDL_ShowCursor visible, verification log mouse picture 156,388 menu row click=5 selected=0 recognized selected 0 DANCING clicked row 5 SYSTEM macro queued, automated click coords DPI dependent user must test. Verification: session.log mouse log framebuffer screenshots.
 LOOKUP: M1412 adds direct mouse operation of the main menu: the host recognises the highlighted row from the guest frame buffer, a first click moves the highlight there and a second click enters it, while the right button goes back and the pointer stays visible -> 18.4952 [relevant: keyboard/mouse map], 18.4951 [relevant: full flow], 18.4950 [relevant: controller]
+### 18.4954 PORT M1413: PC 交互层（UI 识别+命中测试+悬停/点击）扩展选曲界面 + 一键启动
+
+1) 目标
+```
+真正的 PC 键鼠操作逻辑（不是把手柄按键映射到键盘）:
+  宿主读取游戏渲染帧 → 识别 UI 元素 → 鼠标悬停/点击直接操作
+```
+2) 实现 runtime/ui/window.c
+```
+p5d_ui_scan(): 识别两种界面 (读 display_last_frame() 的 guest 帧缓冲)
+  P5D_UI_MAIN: 主菜单 6 行 (左 x70..250), 选中行=左端纯红高亮条像素>80
+  P5D_UI_SONG: 选曲 4 行 (右 x440..930, 行 y=118/198/278/358)
+               选中行=浅灰高亮条像素>800; 每行文字(grey+white)>80
+p5d_ui/p5d_ui_y[] 几何 + p5d_menu_row_at() 命中测试
+  (主菜单 x20..280 容差 26; 选曲 x430..950 容差 34)
+悬停: 鼠标移动到某行 → 闭环 D-pad 把游戏高亮走到该行
+点击: 已高亮行=Circle 确认; 其它行=先高亮
+右键/Esc=Cross 返回; 主菜单出现前左键=Cross|Start (兼容 PRESS ANY BUTTON)
+```
+3) 一键启动
+```
+C:\dev\P5D_Play.bat  (设置 PYTHONPATH/ATIV_DUMP/工具链, cd nativ_src, py -3 pipeline\vitarecomp.py run PCSH10109)
+桌面快捷方式 "Persona 5 Dancing (PC)"
+实测: game_host RUNNING: Persona 5 Dancing in Starlight
+```
+4) 验证
+```
+mouse: window 526,377 (960x544) picture 526,377 row=3 selected=1
+  => 选曲界面被识别 (选中行 1), 指针所在行 3, 命中测试工作
+```
+5) 下轮
+```
+扩展难度选择/结算界面命中测试; 用户实测反馈校准
+```
+验证：session.log mouse 日志 + launcher 实测。
+
+ANTI-FORGETTING ENTRY. Keywords: M1413 PC interaction layer not button mapping generic UI recognition hit test hover click framework song select extension window.c p5d_ui_scan two screens main menu six rows left red bar, song select four rows right light grey bar >800 pixels row y 118 198 278 358, p5d_ui p5d_ui_y geometry p5d_menu_row_at hit test main x20-280 song x430-950 tolerance 26/34, mouse hover closed loop dpad moves highlight to pointer row, click highlighted row Circle confirm other row highlights first, right button Escape Cross back, before main menu left click Cross|Start for PRESS ANY BUTTON, one-click launcher C:\dev\P5D_Play.bat desktop shortcut Persona 5 Dancing (PC) verified running, evidence mouse log picture 526,377 row=3 selected=1 song select recognised, next difficulty/result hit testing user feedback calibration. Verification: session.log mouse log launcher run.
+LOOKUP: M1413 generalises the PC interaction layer from button mapping to a real host-side UI framework (frame-buffer recognition, per-screen hit-testing, hover and click) and adds song select plus a verified one-click launcher -> 18.4953 [relevant: main menu mouse], 18.4952 [relevant: keyboard/mouse map], 18.4951 [relevant: full flow]
+### 18.4955 PORT M1414: PC 交互层实时自观测（[UI] 状态日志 + UI_TEST + 呈现纹理回读 + 屏幕模板）
+
+1) 背景（之前错在哪）
+```
+之前屏幕识别读的是 guest 帧缓冲 —— windowed GPU 路径下 guest 内存是"旧帧"
+（gfx_gpu: via_gpu 时帧留在 GPU，guest 内存不更新）
+⇒ 识别结果时灵时不灵/误判；错误只能靠人工截图发现，效率极低
+```
+2) 实现（runtime/ui/window.c + runtime/gfx/gfx_gpu.c + runtime/ui/ui_templates.h）
+```
++ window_present_gpu 每 6 帧 SDL_DownloadFromGPUTexture 真正呈现的纹理 → p5d_ui_scan_pixels
++ 标题/RESULT: 模板匹配 ui_templates.h (静态 UI 补丁; 兼容 BGRA/RGBA 与 render-scale)
++ 主菜单: 6 行白字 + 左端红条;  选曲: 右列表浅灰长条>=280px
++ [UI] 日志每 10 帧: f/scr/cur/rows/hover/target/enter/pending/saw/tpl:score
++ RECOMP_UI_TEST="frame:h<row>|c|b,...": 直接驱动交互层做回归
+```
+3) 实测日志
+```
+[UI] f=3550 scr=TITLE ... tpl=title:0.92        (标题识别)
+[UI] f=3700 scr=MAIN  cur=3 ...                 (主菜单识别)
+[UI] nav tap DOWN from 0 to 4 / nav reached row 4  (悬停闭环)
+```
+4) 已知问题/下轮
+```
+启动 Logo/过场帧偶尔被误判 MAIN/SONG → 加紧阈值 + 连续稳定窗口
+然后按屏幕状态路由: TITLE=Cross|Start, MAIN/SONG/RESULT=Circle 确认, 右键=Cross 返回
+逐步扩展到 选曲/难度/结算 的命中测试
+```
+验证：session.log 的 [UI] 日志序列。
+
+ANTI-FORGETTING ENTRY. Keywords: M1414 PC interaction layer real-time self-observation UI log every 10 frames scr cur rows hover target enter pending saw tpl score RECOMP_UI_LOG RECOMP_UI_TEST frame action h hover c click b back drives layer without OS mouse screenshots, screen state from presented GPU texture window_present_gpu SDL_DownloadFromGPUTexture every sixth present guest frame buffer stale old frame in windowed GPU path earlier misjudgement, ui_templates.h static UI patches from screenshots title PRESS ANY BUTTON plate template 0 RESULT MAX COMBO template 3 BGRA RGBA order and render scale, main menu six white rows red bar left edge song select light grey run 280 px, verified f=3550 scr=TITLE tpl=title:0.92 f=3700 scr=MAIN cur=3 nav tap DOWN 0 to 4 nav reached row 4, known issue boot logos cutscenes occasionally misread MAIN SONG tightening thresholds stability window, next route clicks by screen TITLE Cross|Start MAIN SONG RESULT Circle confirm right button Cross back extend hit testing song select difficulty result. Verification: session.log [UI] sequence.
+LOOKUP: M1414 gives the PC interaction layer real-time self-observation (a [UI] state log, an internal hover/click/back test driver, and screen recognition from the actually presented GPU texture with title/result templates and list-row heuristics) so the port is debugged from logs rather than manual screenshots -> 18.4954 [relevant: PC UI layer], 18.4953 [relevant: main menu mouse], 18.4952 [relevant: keyboard/mouse map]
