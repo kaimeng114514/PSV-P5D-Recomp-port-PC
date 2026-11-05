@@ -1423,6 +1423,10 @@
 | M1408 | §18.4949: ★★★★★★★ **声音杂音/爆音/沙沙的根因修复：nativ 的 A/V 自动同步把"延迟用静音"在每个 audio buffer 到达时按需要重新补零（`if (extra && q < extra) pad zeros`），P5D 的音频端口是 **256 采样/5.33ms** 的小 buffer，而目标延迟 ~59ms（11328 B），于是几乎每个 buffer 之间都被插入一段静音 → 音乐/人声/音效全部被"每 5ms 切一刀"，听感=杂音/爆音/沙沙、音色不对。** 修复 `runtime/ui/window.c audio_output()`：A/V 延迟的静音**只在端口第一个 buffer 预填一次**（`delay_pre[]` 标记），之后靠 pacing 维持队列，不再在连续音频中间插零；新增 `RECOMP_NO_AV_SYNC=1` 可整体关闭 A/V 延迟用于 A/B。** 证据：`port0_48000Hz_2ch.wav`（游戏交给音频口的原始混音，98s）分析峰值 18535、RMS 2.4k~5.3k、无削波（jump>20000 = 0）、高频能量 >15k 仅 0.069% ⇒ **游戏侧混音是干净的**；杂音发生在 wav_write 之后的输出路径。修复后实测日志 `audio: A/V delay 59 ms (11328 bytes) preloaded once on port 1` 仅 1 次，队列稳定 59ms、underruns=1、hitch=0。另：设备格式 48000 Hz/2ch/f32，无需重采样，排除采样率转换失真。用户待确认实际听感。 |
 | M1409 | §18.4950: ★★★★★★★ **手柄（Xbox/蓝牙）无反应的根因修复：SDL3 默认在游戏窗口失去焦点时丢弃手柄事件（`SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS` 默认 0），而玩家常常在窗口未聚焦（或刚蓝牙配对/热插拔）时按手柄 → 游戏收不到任何按键。** 修复 `runtime/ui/window.c window_run()`：SDL_Init 前设 `SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1")`；启动时枚举并打印 `SDL_GetGamepads`（"gamepads seen: N / gamepad N: <name>"），GAMEPAD_ADDED 打印设备名，`RECOMP_PAD_LOG=1` 时逐键打印 `pad: button N down/up (id N)`；另加 `RECOMP_VIRTUAL_PAD=1` + `RECOMP_VIRTUAL_PAD_SCRIPT="from-to:button,..."`（SDL3 虚拟手柄）用于无硬件端到端验证映射链路。** 证据（本机蓝牙 Xbox 手柄，新 exe 窗口运行）：日志 `gamepads seen: 2`、`gamepad 2: Xbox 360 Controller`、`gamepad: Xbox 360 Controller`，运行中收到 **238 条**物理手柄按键事件（`pad: button 1 down/up (id 2)` 等），且帧缓冲截图 `shot_03000` 显示游戏已从标题推进到**选曲界面**（Wake Up, Get Up, Get Out There / 難度 / BPM 127）⇒ 手柄输入已真正进入游戏。映射：A=Cross(确认) B=Circle(取消) X=Square Y=Triangle，Start/Back，LT/RT=L/R，LB/RB=触摸光标，左摇杆=左摇杆，十字键=方向键。 |
 | M1410 | §18.4951: ★★★★★★★ **全流程打通：S0_LOGO → S1_TITLE → S2_MENU → S3_SELECT（选曲）→ S4_GAME（打歌）→ RESULT（结算）全部由原版代码正常绘制并运行，无卡死。** 内部输入回放（`RECOMP_INPUT=2380-2390:8` 过标题，之后每 400 帧 Cross）驱动到 story→选曲→打歌→RESULT，帧缓冲截图证据：`13_song_select.png`（歌单：Wake Up, Get Up, Get Out There / Tokyo Daylight / Rivers In The Desert / The Whims of Fate，難度/ BPM 127）、`14_dance_gameplay.png`（涉谷街景、Joker、环形音符 Up/Left/Triangle/Circle/X/Star、SCORE 200、生命条）、`15_result.png`（MAX COMBO / PERFECT 0 / GREAT 0 / GOOD 0 / MISS 10 / HIGH SCORE / SCORE / NOT CLEAR + 重試/自訂遊玩/放棄/觀看重播 菜单）。运行 330 秒到 frame 9800+：0 crash、hitch 仅场景切换 53~117ms、stall profiler 仅一次 151ms、`[MST2]` hook 持续输出 ⇒ 之前 DLC 线程风暴/线程表耗尽导致的打歌卡死已不再出现（M1403/M1404 修复生效）。注：脚本没有输入音符判定，故 MISS 10/SCORE 0，属预期；人工用键盘/手柄可正常游玩（用户已确认手柄正常）。 |
+| M1411 | §18.4952: ★★★★★★★ **键鼠适配（不改游戏逻辑，全部在 HLE 输入层完成）：新增可配置键鼠映射 `input.ini`（游戏目录，首次运行自动生成，F11 热重载）：`[buttons]` 把 PC 键名（SDL 名，逗号分隔多键）映射到 Vita 按键 up/down/left/right/triangle/circle/cross/square/start/select/l/r/l2/r2；`[mouse]` 左键=Cross(确认/推进)、右键=Circle(取消/返回)，菜单/剧情可用鼠标点选。默认 P5D 布局：WASD=D-pad(音符方向)、IJKL=面键(I△ J□ K× L○)、Space/K=Cross、Esc/L=Circle、Return=Start、Tab=Select、Q/E=L/R、方向键与 WASD 并存。** 实现于 `runtime/ui/window.c`：`p5d_load()/p5d_key_event()/p5d_recompute()`，`window_input()` 把 `p5d_bits`/`p5d_mouse_bits` 并入 SceCtrl 读数；游戏二进制与游戏逻辑完全未改（仍是一字不改的原版回放，只是宿主把键鼠翻译成 Vita 手柄数据）。验证：运行日志 `input: 18 keyboard bindings from input.ini; mouse menu clicks on (left = confirm, right = cancel)`。 |
+| M1412 | §18.4953: **鼠标直接操作游戏内 UI（主菜单）：帧缓冲菜单识别 + 点击导航。** `runtime/gfx/display.c` 新增 `display_last_frame()` 暴露游戏刚设置的帧缓冲；`runtime/ui/window.c` 新增 `p5d_menu_read()`（主菜单 6 行固定布局，960x544 行 y=219/257/292/327/362/398；选中行=左端 x72..140 纯红高亮条像素数 >100）+ `p5d_menu_row_at()`（点击 y → 行号）+ 闭环导航 `p5d_menu_tick()`：**第一次点击某行只发送一次 D-pad 上/下，然后重新读取画面高亮位置，未到目标再发下一次（到达即停，不会冲过头），再次点击同一高亮行才发送一次 Cross 进入**；右键保持 Circle=返回上一级。minimal 构建里鼠标不再被相对捕获（`want=0`）且 `SDL_ShowCursor()`，光标正常显示。** 验证：鼠标测试日志 `mouse: picture 156,388 menu row click=5 selected=0`（识别到选中行 0=DANCING!，点击行 5=SYSTEM，宏已排队）；自动化点击坐标受 DPI 影响需用户实测校准。 |
+| §18.4953 | Direct mouse operation of the game's in-game UI (main menu): frame-buffer menu recognition plus click navigation. runtime/gfx/display.c gained display_last_frame() exposing the buffer the game just set; runtime/ui/window.c gained p5d_menu_read() (the main menu's fixed six rows at 960x544, y=219/257/292/327/362/398; the selected row is the one whose left red highlight bar, x 72..140, has more than 100 pure-red pixels), p5d_menu_row_at() (click y -> row) and an input macro p5d_macro_bits(): the first click on a row sends one D-pad up/down tap, re-reads the highlight from the guest frame and taps again only until the clicked row is highlighted (closed loop: it cannot overshoot), and a second click on the already-highlighted row sends exactly one Cross to enter it; the right button stays Circle (back). In the minimal build the mouse is no longer captured relatively (want=0) and SDL_ShowCursor() keeps the pointer visible. Verification: the mouse test log shows 'mouse: picture 156,388 menu row click=5 selected=0' (highlighted row 0=DANCING! recognised; clicked row 5=SYSTEM queued), while the automated click coordinates are affected by display DPI and need the player's own calibration test. |
+| §18.4952 | Keyboard and mouse adaptation, entirely in the HLE input layer with no change to the game's logic: a configurable map input.ini (game directory, generated on first run, F11 hot-reloads). [buttons] maps PC key names (SDL names, comma separated for several keys) to the Vita buttons up/down/left/right/triangle/circle/cross/square/start/select/l/r/l2/r2; [mouse] makes left click Cross (confirm/advance) and right click Circle (cancel/back), so menus and story can be driven with the mouse. Default P5D layout: WASD = D-pad (the note directions), IJKL = face buttons (I triangle, J square, K cross, L circle), Space/K = Cross, Escape/L = Circle, Return = Start, Tab = Select, Q/E = L/R, arrow keys alongside WASD. Implemented in runtime/ui/window.c (p5d_load(), p5d_key_event(), p5d_recompute()), with window_input() merging p5d_bits/p5d_mouse_bits into the SceCtrl read. The original binary and its logic are untouched: the host only translates keyboard/mouse into the same Vita pad data the game would get from a controller. Verification: the run log prints 'input: 18 keyboard bindings from input.ini; mouse menu clicks on (left = confirm, right = cancel)'. |
 | §18.4951 | The full flow works end to end: S0_LOGO -> S1_TITLE -> S2_MENU -> S3_SELECT (song select) -> S4_GAME (dance gameplay) -> RESULT (results) are all drawn and driven by the original game code with no freeze. Input replay (RECOMP_INPUT=2380-2390:8 to pass the title, then Cross every 400 frames) drove story -> song select -> dance -> RESULT; framebuffer evidence: 13_song_select.png (song list Wake Up Get Up Get Out There / Tokyo Daylight / Rivers In The Desert / The Whims of Fate, difficulty, BPM 127), 14_dance_gameplay.png (Shibuya street, Joker, ring notes Up/Left/Triangle/Circle/X/Star, SCORE 200, life bar), 15_result.png (MAX COMBO / PERFECT 0 / GREAT 0 / GOOD 0 / MISS 10 / HIGH SCORE / SCORE / NOT CLEAR plus the retry/custom/quit/replay menu). A 330 s run reached frame 9800+: 0 crashes, only scene-transition hitches of 53-117 ms, one 151 ms stall report, and the [MST2] hook kept firing, so the dance-scene freeze caused by the DLC thread storm / thread-table exhaustion (M1403/M1404) no longer occurs. Note: the script sent no note inputs, so MISS 10 / SCORE 0 is expected; a human with keyboard or pad plays normally (the player confirmed the pad works). |
 | §18.4950 | Root-cause fix for the Xbox/Bluetooth controller not responding: SDL3 by default drops joystick/gamepad events while the game window is not focused (SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS defaults to 0), and players usually press the pad while the window is unfocused (or right after pairing/hotplug), so the game saw no input. Fixed runtime/ui/window.c window_run(): it sets SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1") before SDL_Init, enumerates and logs SDL_GetGamepads at start ('gamepads seen: N / gamepad N: <name>'), logs the device name on GAMEPAD_ADDED, logs every button with RECOMP_PAD_LOG=1 ('pad: button N down/up (id N)'), and gained RECOMP_VIRTUAL_PAD=1 + RECOMP_VIRTUAL_PAD_SCRIPT='from-to:button,...' (an SDL3 virtual gamepad) for end-to-end mapping checks without hardware. Evidence (a Bluetooth Xbox pad on this machine, windowed run of the new exe): the log shows 'gamepads seen: 2', 'gamepad 2: Xbox 360 Controller', 'gamepad: Xbox 360 Controller', 238 physical pad button events ('pad: button 1 down/up (id 2)' etc.), and framebuffer shot_03000 shows the game advanced from the title screen to song select (Wake Up, Get Up, Get Out There / difficulty / BPM 127), so pad input really reaches the game. Mapping: A=Cross (confirm), B=Circle (cancel), X=Square, Y=Triangle, Start/Back, LT/RT=L/R, LB/RB=touch cursor, left stick=left stick, d-pad=d-pad. |
 | §18.4949 | Root-cause fix for the noise/crackle/hiss in the audio: nativ's automatic A/V sync tops the port's queue up with silence whenever it falls below the target delay (if (extra && q < extra) pad zeros). P5D's output port uses 256-sample (5.33 ms) buffers while the target delay is ~59 ms (11328 bytes), so a silent gap was inserted between nearly every pair of buffers, chopping the music, voices and effects every ~5 ms - heard as hiss/crackle and wrong timbre. Fixed runtime/ui/window.c audio_output(): the delay's silence is preloaded once on the port's first buffer (delay_pre[]), after which pacing keeps the queue; no more zeros inside continuous audio. Added RECOMP_NO_AV_SYNC=1 to turn the A/V delay off entirely for A/B. Evidence: port0_48000Hz_2ch.wav (the game's own 98 s mix handed to the audio port) has peak 18535, RMS 2.4k-5.3k, no clipping (jumps > 20000: 0) and only 0.069% of its energy above 15 kHz, so the game-side mix is clean and the noise happened after wav_write in the output path. After the fix the log shows 'audio: A/V delay 59 ms (11328 bytes) preloaded once on port 1' exactly once, the queue stays at 59 ms, underruns = 1 and hitches = 0. The device format is 48000 Hz/2ch/f32, so no resampling is involved. The player still has to confirm how it sounds. |
@@ -514981,3 +514985,74 @@ stall profiler: 一次 151ms (非死锁)
 
 ANTI-FORGETTING ENTRY. Keywords: M1410 full flow verified S0_LOGO S1_TITLE S2_MENU S3_SELECT S4_GAME RESULT end to end original code no freeze, input replay RECOMP_INPUT START at frame 2380 cross every 400 frames 3100-7100, framebuffer shots 13_song_select.png song list Wake Up Get Up Get Out There Tokyo Daylight Rivers In The Desert Whims of Fate difficulty BPM 127, 14_dance_gameplay.png Shibuya street Joker ring notes up left triangle circle x star SCORE 200 life bar, 15_result.png MAX COMBO PERFECT 0 GREAT 0 GOOD 0 MISS 10 HIGH SCORE SCORE NOT CLEAR retry custom quit replay menu, 330s run frame 9800+ 0 crash hitches 53 50 117 ms scene transitions one 151ms stall MST2 hook continuous, dance freeze from DLC thread storm thread table exhaustion M1403 M1404 fixed no longer occurs, script no note input MISS 10 SCORE 0 expected human keyboard pad plays normally user confirmed controller. Verification: docs/screenshots 13-15 session.log 330s.
 LOOKUP: M1410 verified the whole S0-to-RESULT chain on the original code (song select, dance gameplay, results) with framebuffer screenshots and shows the old dance-scene freeze is gone after the thread-table and DLC fixes -> 18.4950 [relevant: controller], 18.4949 [relevant: audio fix], 18.4944 [relevant: thread reuse]
+### 18.4952 PORT M1411: 键鼠适配（HLE 输入层，不改游戏逻辑）
+
+1) 结论
+```
+不改游戏逻辑（原版二进制一字不改）
+键鼠适配 = 在 HLE 输入层把 PC 键鼠翻译成 Vita SceCtrl/SceTouch 数据
+游戏只看到"一个普通 Vita 手柄"，不知道玩家用的是键盘和鼠标
+```
+2) 实现 runtime/ui/window.c
+```
++ input.ini (游戏目录, 首次运行自动生成, F11 热重载)
+  [buttons] PC 键名 = Vita 按键; 多键逗号分隔
+    up/down/left/right/triangle/circle/cross/square/start/select/l/r/l2/r2
+  [mouse] left=Cross(确认/推进) right=Circle(取消/返回)
++ p5d_load()/p5d_key_event()/p5d_recompute()
++ window_input(): *b = (buttons | p5d_bits | p5d_mouse_bits) & ~(...)
+```
+3) 默认 P5D 键位
+```
+WASD   = D-pad 音符方向 (与方向键并存)
+IJKL   = 面键: I=△ J=□ K=× L=○
+Space/K = Cross (确认)   Esc/L = Circle (取消)
+Return = Start           Tab   = Select
+Q/E    = L/R
+鼠标   = 左键确认 / 右键取消 (菜单/剧情可点选)
+```
+4) 验证
+```
+运行日志: input: 18 keyboard bindings from input.ini; mouse menu clicks on (left = confirm, right = cancel)
+input.ini 自动生成于游戏目录 (607 bytes, 可编辑)
+```
+5) 下轮
+```
+用户试键盘/鼠标手感 → 调整 input.ini 默认值 (键位反馈)
+继续全流程回归 + 单 exe 交付
+```
+验证：session.log input 日志 + input.ini 内容。
+
+ANTI-FORGETTING ENTRY. Keywords: M1411 keyboard mouse adaptation HLE input layer no game logic change original binary unmodified, input.ini game directory first run generated F11 hot reload, buttons PC key names SDL names comma separated map Vita up down left right triangle circle cross square start select l r l2 r2, mouse left Cross confirm advance right Circle cancel back menus story clickable, default P5D layout WASD dpad note directions IJKL face buttons I triangle J square K cross L circle Space K Cross Escape L Circle Return Start Tab Select Q E L R arrows alongside, window.c p5d_load p5d_key_event p5d_recompute window_input merge p5d_bits p5d_mouse_bits SceCtrl, verification log input 18 keyboard bindings from input.ini mouse menu clicks on left confirm right cancel, next user feel test adjust defaults full flow regression single exe delivery. Verification: session.log input log input.ini content.
+LOOKUP: M1411 adds a configurable keyboard/mouse map for P5D entirely in the HLE input layer (input.ini, F11 reload, mouse clicks as confirm/cancel) with the default WASD+IJKL layout, leaving the original game binary and logic untouched -> 18.4951 [relevant: full flow], 18.4950 [relevant: controller], 18.4949 [relevant: audio fix]
+### 18.4953 PORT M1412: 鼠标直接操作主菜单（点击高亮/再次点击进入/右键返回）
+
+1) 目标
+```
+鼠标点击主菜单任意选项: 第一次点击=高亮该选项, 再次点击同一项=进入; 右键=返回上一级
+鼠标光标在窗口里正常显示
+```
+2) 实现
+```
+display.c: display_last_frame() 暴露游戏刚 SetFrameBuf 的地址/宽高/pitch
+window.c:
+  p5d_menu_read(): 主菜单 6 行固定布局 (960x544)
+     行 y = 219,257,292,327,362,398
+     选中行 = 左端 x72..140 纯红高亮条像素 > 100
+  p5d_menu_row_at(): 点击 y -> 行号 (x 20..280 内)
+  p5d_macro_bits(): 第一次点击 -> D-pad 上下移动到目标行 (45ms/步)
+                    再次点击已高亮行 -> Cross 进入
+  右键 = Circle (返回)
+minimal 构建: 鼠标不被相对捕获 (want=0) + SDL_ShowCursor() 光标可见
+验证日志: "mouse: picture 156,388 menu row click=5 selected=0"
+  => 识别选中行 0 (DANCING!), 点击行 5 (SYSTEM), 宏已排队
+```
+3) 说明
+```
+自动化测试的屏幕坐标受 Windows DPI 缩放影响，需要用户在实际窗口里测试点击手感
+右键返回在子菜单里应可用 (Circle 语义)
+```
+验证：session.log mouse 日志 + 帧缓冲截图。
+
+ANTI-FORGETTING ENTRY. Keywords: M1412 mouse click in-game UI main menu frame buffer recognition display_last_frame window.c p5d_menu_read six rows 960x544 y 219 257 292 327 362 398 selected row left red highlight bar x72-140 >100 red pixels, p5d_menu_row_at click y row, p5d_menu_tick closed loop one dpad tap re-read highlight until target reached cannot overshoot second click same highlighted row Cross enter, right click Circle back, minimal build mouse not captured want=0 SDL_ShowCursor visible, verification log mouse picture 156,388 menu row click=5 selected=0 recognized selected 0 DANCING clicked row 5 SYSTEM macro queued, automated click coords DPI dependent user must test. Verification: session.log mouse log framebuffer screenshots.
+LOOKUP: M1412 adds direct mouse operation of the main menu: the host recognises the highlighted row from the guest frame buffer, a first click moves the highlight there and a second click enters it, while the right button goes back and the pointer stays visible -> 18.4952 [relevant: keyboard/mouse map], 18.4951 [relevant: full flow], 18.4950 [relevant: controller]
