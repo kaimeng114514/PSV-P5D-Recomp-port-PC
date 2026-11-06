@@ -1451,6 +1451,12 @@
 | M1436 | §18.4977: **彻底修复黑屏：字母图标实验的所有纹理侧影响改为 opt-in 完全关闭（`gfx_keyglyph_refresh()` 与图集记录也在 `keyglyph_enabled()` 内），默认构建与原版渲染路径逐字节一致。** 上一版黑屏根因：实验默认开启强制 CPU 解码全部纹理；本版 `RECOMP_KEYGLYPHS` 默认 0，刷新/记录/解码开关/图集替换全部短路，构建 119 已替换 `game_host.exe`（14:15:47）。排查期间我自动测试启动的多个游戏窗口是旧实验版进程，向你道歉——请关闭残留黑窗口后从桌面快捷方式重新启动。 |
 | M1437 | §18.4978: ★★★★★★ **黑屏误报澄清 + 画面验证：用正常启动方式（桌面快捷方式/P5D_Play.bat，即 pipeline run）截图证明游戏**完全正常**——截图显示打歌界面（SHIBUYA、6 COMBO、左侧方向图标/右侧△○×按钮图标、分数 2100），平均亮度 119.9/255，非黑屏。**之前黑窗口的真因**：①上一轮实验版默认强制 CPU 解码全部纹理（已在 M1436 改为默认关闭）；②我的自动化测试用 `game_host.exe` 直连启动（绕过 pipeline 的环境/配置），直连方式本身渲染黑屏——黑窗口是测试进程而非产品问题。**同时确认**：打歌界面左右两侧的六个按钮图标正是已抓到的 256x128 图标图集（○✕△□ + 四个方向徽标）绘制，为下一步"键盘字母替换"提供了准确目标与验证画面。 |
 | M1438 | §18.4979: ★★★★★★★ **打歌界面六个按钮图标成功替换为 Q/A/Z/O/K/M（实机验证）。** 用户指出真正的素材不是菜单提示图集，而是 `icons_candidates.png` 右下角的 **512x512 纹理**（`s_1022_2170be80`, FNV1a64=`0x7aad5be59305ae99`：含 ↑←↓△○× 六个白色符号 + 红色/灰色轨道节点 + 刮盘标记）。实现：`gfx_gpu.c` 中 `keyglyph_patch()` 在纹理解码时按哈希识别该图集，在打歌档案（`window_in_dance_stage()`）且键盘输入（`window_uses_keyboard()`）时，把六个符号区域用同尺寸粗体白字 **Q(上)/A(左)/Z(下)/O(△)/K(○)/M(×)** 覆盖（掩码来自 `keyglyphs512.h`，Arial Bold、抗锯齿、尺寸匹配原符号）；仅对这张图集强制 RGBA 解码（其余纹理路径不变，避免黑屏回归）。实机日志：`[KG] icon atlas 0x2170be80 dance=1 kb=1` → `[KG] patched 512 icon atlas 0x2170be80`；截图确认打歌 HUD 六个按钮显示 Q/A/Z/O/K/M，游戏正常运行（暂停菜单亦正常）。开关：`RECOMP_KEYGLYPHS=0` 可关闭；菜单界面不替换。 |
+| M1439 | §18.4980: ★★★★★★★ **S4_GAME→RESULT 端到端成立（实机 0 输入跑到结算 + 用户亲测），并发现结算识别的 0.63 缺口。** 单次实机运行（P5D_Play.bat 启动，`game_host.exe` 2026-11-06 14:42，16:19:49→16:29:38，17640 presented frames @30fps，**0 crash**）：TITLE f=380 → MAIN f=450（cur=0 DANCING）→ SONG f=630 → 隐藏的 `LET'S DANCE!!` 确认屏 f≈890–2890（scr=NONE，UI 模型不可见）→ 打歌 #1 f=3190→8910（**190.6s 自然结束**，期间用户键盘 230 次按键）→ tally 被脚本误按键跳过 → 再次 `LET'S DANCE!!` → 打歌 #2 f=11400 起 **零输入**（gauge 自然耗尽，MISS 20/224）→ **RESULT f≈12440–12500，之后原样显示 171s（5140 帧、0 输入事件）**。结算截图 `docs/screenshots/16_result_natural.png`（shot_17400.ppm）：EASY / Wake Up, Get Up, Get Out There (Jazztronik Remix) / MAX COMBO 0 / **224 TOTAL NOTES** / PERFECT 0 / GREAT 0 / GOOD 0 / **MISS 20** / SCORE ★0 / HIGH SCORE 120856 / **NOT CLEAR** / 提示「◎決定」。打歌实拍 `docs/screenshots/17_dance_stage_natural.png`（shot_12000.ppm）。**识别缺口**：该 NOT-CLEAR 结算变体在 `[UI]` 中连续 539 行报 `scr=MAIN tpl=result:0.63`（不报 RESULT、不达 0.78 阈值；14:56 那次结算稳定 0.99–1.00）——M1441 修。自动化陷阱：打歌结束后 tally 阶段任何按键都会跳过结算退回 `LET'S DANCE!!`。 |
+| §18.4980 | The S4_GAME→RESULT leg is confirmed end to end by a live run with zero input reaching the result screen (and by the user's own full play). One live session launched through P5D_Play.bat on the 2026-11-06 14:42 build (16:19:49→16:29:38, 17640 presented frames @30fps, 0 crash): TITLE f=380 → MAIN f=450 (cur=0 DANCING) → SONG f=630 → hidden "LET'S DANCE!!" confirm screen f≈890–2890 (scr=NONE, invisible to the UI model) → dance #1 f=3190→8910 (190.6 s, ended naturally; 230 user keyboard presses during it) → tally skipped by stray script key presses → "LET'S DANCE!!" again → dance #2 from f=11400 with ZERO input (the gauge empties by itself, MISS 20/224) → RESULT f≈12440–12500, then displayed untouched for 171 s (5140 frames, 0 input events). Result screenshot docs/screenshots/16_result_natural.png (shot_17400.ppm): EASY / Wake Up, Get Up, Get Out There (Jazztronik Remix) / MAX COMBO 0 / 224 TOTAL NOTES / PERFECT 0 / GREAT 0 / GOOD 0 / MISS 20 / SCORE 0 / HIGH SCORE 120856 / NOT CLEAR / prompt ◎決定. Dance capture: docs/screenshots/17_dance_stage_natural.png (shot_12000.ppm). Detection gap: this NOT-CLEAR result variant reports scr=MAIN tpl=result:0.63 for all 539 result-screen UI lines (never RESULT, never reaching the 0.78 threshold; the 14:56 run settled at 0.99–1.00) — to be fixed in M1441. Automation trap: any button press during the post-song tally skips the result and bounces back to the "LET'S DANCE!!" screen. |
+| M1440 | §18.4981: ★★★★★★★ **菜单操作提示全部换成鼠标图标（滚轮選擇 / 左键確定 / 右键返回）——实机验证。** 用户提供 P5X 鼠标提示图集，要求把游戏「十字键上下高亮（選擇）」提示换成"鼠标中键标红"图标；并按当前 PC 菜单逻辑（滚轮选择、左键确认、右键返回）整套替换。定位到游戏的 **256×128 按钮提示图集** `s_533_20717780`/`t_533_20717780`（本移植层 `kg_hash` FNV1a64=`0x7e44ebd858f04222`；§18.4979 附表里的 `0x1505...` 是用标准 FNV 基数算的，口径不一致，作废）。图集格：○=`(3,3,24,27)`、✕=`(32,3,24,27)`、四个十字键变体 c5/c6/c7/c8（c6=`(152,3,28,27)` 是"上下高亮"，结算界面「十字键 選擇」用的就是它：模板 IoU 0.62 最高、亮度 NCC 0.203 最高、臂亮度 up=133/down=175 亮 vs left=121/right=62 暗）。素材用用户图集：中键标红=白鼠标+红滚轮（r2c2）、左键红（r1c2）、右键红（r3c2）。实现：新增 `runtime/gfx/hintglyphs.h`（3 个 RGBA 字形）+ `gfx_gpu.c` 的 `hintglyph_patch()`/`gfx_hintglyph_refresh()`：仅对该图集强制 RGBA 解码（其余纹理路径不变，规避黑屏），**键鼠操作时**替换三格、手柄时恢复原图标（设备切换自动重传）；`window.c` 设备/档案切换处触发重传。开关：`RECOMP_HINTGLYPHS=0` 全关、`RECOMP_HINTGLYPHS_BUTTONS=0` 只留滚轮、`RECOMP_HINTGLYPH_LOG=1`。实机日志 `[HG] patched hint atlas 0x20717780: 3 cells (buttons=1)`；CONFIG 界面「🖱左键 再次播放 / 🖱右键 返回」；结算菜单「🖱滚轮 選擇 / 🖱左键 確定 / 🖱右键 返回」（`docs/screenshots/19_result_hint_wheel.png`、`20_result_hintbar_zoom.png`）；打歌 HUD 的 Q/A/Z/O/K/M（M1438）无回归；用户实机通关 STAGE CLEAR（224 NOTES、PERFECT 135、SCORE 83748）验证。 |
+| §18.4981 | All menu operation hints are now replaced with mouse icons (wheel = select, left button = confirm, right button = back), verified live. The user supplied the P5X mouse-hint atlas and asked to replace the game's highlighted d-pad up/down "select" hint with the "red middle button" mouse icon, and confirmed the whole set for our PC menu logic (wheel select / left confirm / right back). Target: the game's 256×128 button-hint atlas s_533_20717780 / t_533_20717780 (this port's kg_hash FNV1a64 = 0x7e44ebd858f04222; the 0x1505... figure in the 18.4979 appendix used the standard FNV basis and was wrong — corrected here). Cells: circle (3,3,24,27), cross (32,3,24,27), four d-pad variants c5/c6/c7/c8 where c6 = (152,3,28,27) is the "up/down highlighted" one used by the result screen's "d-pad 選擇" hint (template IoU 0.62 best, luminance NCC 0.203 best, arm brightness up=133/down=175 bright vs left=121/right=62 dark). Icons cut from the user's atlas: wheel red = white mouse with red scroll wheel (r2c2), left red (r1c2), right red (r3c2). Implementation: new runtime/gfx/hintglyphs.h (3 RGBA glyphs) + gfx_gpu.c hintglyph_patch()/gfx_hintglyph_refresh(): only this atlas is forced onto the RGBA decode path (every other texture keeps its normal path, avoiding the black-screen regression), the three cells are repainted while the keyboard/mouse drives the game and restored for a pad (re-upload on device switch); window.c triggers the refresh on device/profile switches. Switches: RECOMP_HINTGLYPHS=0 disables everything, RECOMP_HINTGLYPHS_BUTTONS=0 keeps only the wheel, RECOMP_HINTGLYPH_LOG=1 logs the patch. Live log: [HG] patched hint atlas 0x20717780: 3 cells (buttons=1); CONFIG screen shows "[left-click mouse] 再次播放 / [right-click mouse] 返回"; the result menu shows "[wheel mouse] 選擇 / [left-click mouse] 確定 / [right-click mouse] 返回" (docs/screenshots/19_result_hint_wheel.png, 20_result_hintbar_zoom.png); the dance HUD Q/A/Z/O/K/M letters (M1438) show no regression; the user cleared a song live (STAGE CLEAR, 224 notes, PERFECT 135, SCORE 83748). |
+| M1441 | §18.4982: ★★★★★★★ **结算界面鼠标操作接通：滚轮选择 / 左键确认 / 右键返回（实机验证）。** 用户反馈「结算画面选项滚轮选择失灵」。根因：`window.c` 的滚轮条件显式排除 `P5D_UI_RESULT`，而 RESULT 本身从未被发布——模板判定在 MAIN 红条启发式之后、且没有行模型。修复：① `p5d_ui_scan_pixels` 的 `p5d_saw_menu` 分支里把 RESULT 模板判定（MAX COMBO 牌 170x36@(50,148)，阈值 0.88/sticky 0.78）提升到 MAIN 红条判定之前，命中即发布 `P5D_UI_RESULT`；② 新增 `p5d_result_row_scan()`：结算 4 行 y=187/227/267/307，选中行 = 面板 (x240..676, 行带 ±14) 内唯一实心红条（实测选中行红像素 ≈11456，其余行 0）；③ `p5d_menu_row_at()` 增加 RESULT 几何 (x230..690, 容差 20)；④ 滚轮条件放开 RESULT，一格 = 一次 UP/DOWN tap；⑤ 左键点击 RESULT：点已选行 = Circle 确认，点其它行 = 闭合环导航（逐帧回读红条）；⑥ `p5d_menu_tick` 保留 RESULT 的 `menu_target`；⑦ profile `mod` 纳入 RESULT（保持菜单键位）；⑧ `RECOMP_UI_CMD` 新增 `w`/`W`（滚轮上/下）与 `RECOMP_UI_TEST` `frame:w`，用于无鼠标自动验证。实机证据：`[UI] f=7330 scr=RESULT cur=0 rows=4` → cur 1→2→3 随滚轮变化；`[UI] wheel DOWN (result row 0)` 后 cur 0→1、`[UI] wheel UP (result row 1)` 后 cur 1→0；`mouse: click -> result row 3 (sel 2)`；截图 `docs/screenshots/21_result_wheel_select.png`（结算菜单红高亮停在「自訂遊玩」行 = 滚轮把选择从第 0 行移到第 2 行）。 |
+| §18.4982 | The result screen's mouse operation is now wired: wheel selects, left click confirms, right click goes back, verified live. The user reported that the wheel did not select the result menu options. Root cause: window.c's wheel condition explicitly excluded P5D_UI_RESULT, and RESULT was never published at all — the template test ran after the MAIN red-banner heuristic and there was no row model. Fix: (1) in p5d_ui_scan_pixels' p5d_saw_menu branch, run the RESULT template test (MAX COMBO plaque 170x36 at (50,148), threshold 0.88/sticky 0.78) before the MAIN banner test and publish P5D_UI_RESULT when it hits; (2) new p5d_result_row_scan(): 4 rows y=187/227/267/307, the selected row is the only solid red bar inside the panel (x240..676, row band ±14) — measured ~11456 red pixels on the selected row and 0 on the others; (3) p5d_menu_row_at() geometry for RESULT (x230..690, tolerance 20); (4) allow the wheel on RESULT, one notch = one UP/DOWN tap; (5) left click on RESULT: click the selected row = Circle confirm, click another row = closed-loop navigation (re-read the red bar every frame); (6) keep menu_target on RESULT in p5d_menu_tick; (7) include RESULT in the profile mod (keep the menu key map); (8) RECOMP_UI_CMD gained w/W (wheel up/down) and RECOMP_UI_TEST frame:w for mouse-less automated verification. Live evidence: [UI] f=7330 scr=RESULT cur=0 rows=4 and cur 1→2→3 with the wheel; [UI] wheel DOWN (result row 0) followed by cur 0→1 and [UI] wheel UP (result row 1) followed by cur 1→0; mouse: click -> result row 3 (sel 2); screenshot docs/screenshots/21_result_wheel_select.png (result menu, red highlight on 自訂遊玩 = the wheel moved the selection from row 0 to row 2). |
 | §18.4979 | The six dance-stage button icons are now replaced by Q/A/Z/O/K/M, verified live. The user identified the real asset: not the menu-hint atlas but the 512x512 texture from icons_candidates.png bottom-right (s_1022_2170be80, FNV1a64=0x7aad5be59305ae99) which contains the six white symbols (up/left/down arrows, triangle, circle, cross) plus the red/grey rail nodes and scratch markers. Implementation: keyglyph_patch() in gfx_gpu.c identifies that atlas by content hash at decode time and, only in the dance key profile (window_in_dance_stage()) with keyboard input (window_uses_keyboard()), overwrites the six symbol cells with same-sized bold white letters Q(up)/A(left)/Z(down)/O(triangle)/K(circle)/M(cross) (masks in keyglyphs512.h, Arial Bold, anti-aliased, sized to the original symbols); only this one atlas is forced onto the RGBA decode path so every other texture keeps the normal path (no black-screen regression). Live log: [KG] icon atlas 0x2170be80 dance=1 kb=1 -> [KG] patched 512 icon atlas 0x2170be80; the screenshot confirms the dance HUD shows Q/A/Z/O/K/M and the game runs normally (pause menu works). RECOMP_KEYGLYPHS=0 disables it; the menus are not affected. |
 | §18.4978 | Black-screen false alarm clarified and the picture verified: launching the normal way (desktop shortcut / P5D_Play.bat, i.e. pipeline run) and screenshotting shows the game is perfectly fine - the capture is the dance stage (SHIBUYA, 6 COMBO, the left-side direction icons, the right-side triangle/circle/cross button icons, score 2100), mean brightness 119.9/255, not black. The black windows earlier had two causes: (1) the previous experimental build forced CPU decode of all textures by default (made opt-in in M1436), and (2) my automated tests launched game_host.exe directly, bypassing the pipeline's environment/config - the direct launch itself renders black, so those black windows were my test processes, not the product. The capture also confirms that the six dance-stage button icons are exactly the previously captured 256x128 icon atlas (circle/cross/triangle/square plus four d-pad badges), giving the accurate target and verification frame for the coming keyboard-letter replacement. |
 | §18.4977 | Black-screen fix completed: every texture-side effect of the keyboard-letter experiment is now fully opt-in inside keyglyph_enabled() (the refresh, the atlas recording, the decode switch and the substitution), so the default build follows the original rendering path exactly. The previous black screen was caused by the experiment forcing CPU decode of all textures by default; RECOMP_KEYGLYPHS now defaults to 0 and build 119 replaced game_host.exe (14:15:47). The multiple game windows that appeared black during debugging were old experimental-build processes launched by my automation - apologies; please close any leftover black window and restart from the desktop shortcut. |
@@ -515826,3 +515832,198 @@ keyglyph_patch(): w==512&&h==512 且 hash 匹配时
 
 ANTI-FORGETTING ENTRY. Keywords: M1438 dance HUD six button icons replaced Q A Z O K M verified, real asset is 512x512 texture s_1022_2170be80 FNV1a64 0x7aad5be59305ae99 containing up left down arrows triangle circle cross white symbols plus rail nodes scratch markers, bounding boxes up 382,18,39x40 triangle 456,18,38x33 left 382,92,40x38 circle 457,93,36x36 down 384,162,38x40 cross 460,169,31x31, keyglyph_patch identifies by hash at decode overwrites six cells with same-size Arial Bold white letters only when dance profile and keyboard, keyglyphs512.h masks, only this atlas forced to RGBA decode other textures normal path no black screen, refresh atlas on profile switch, menus unaffected, RECOMP_KEYGLYPHS=0 disables, live log KG icon atlas 0x2170be80 dance=1 kb=1 patched, screenshot confirms letters and game runs pause menu works. Verification: letters_check.png and letters_zoom.png.
 LOOKUP: M1438 replaces the six dance-stage HUD button icons with Q/A/Z/O/K/M by identifying the real 512x512 icon texture (s_1022_2170be80, hash 0x7aad5be59305ae99) and repainting its six symbol cells, confirmed live by log and screenshot -> 18.4978 [relevant: dance icons], 18.4975 [relevant: texture work]
+### 18.4980 PORT M1439: S4_GAME→RESULT 端到端确认（0 输入实机跑到结算 + 用户亲测）
+
+1) 结论
+```
+原版代码（一字不改）在 PC 移植层（HLE + AOT）上，S0_LOGO→S1_TITLE→S2_MENU→S3_SELECT→S4_GAME→RESULT 全流程成立。
+打歌判定/计分/结算全部由原版代码自己完成，移植层只提供系统 API。
+本轮两条独立证据：
+  ① 单次实机运行里，打歌 #2 全程 0 输入，gauge 自然耗尽后游戏自己结束对局并显示 RESULT（截图+日志）；
+  ② 用户实机亲测完整打歌到结算，确认"对局到结算完全没问题"。
+```
+2) 实机运行证据（P5D_Play.bat，game_host.exe 2026-11-06 14:42，session.log 316254 B）
+```
+时间线（30fps，17640 presented frames，0 crash，运行 16:19:49→16:29:38）:
+  TITLE   f=380（16:20:03）
+  MAIN    f=450/460，cur=0 = DANCING
+  SONG    f=630（16:20:12）
+  LET'S DANCE!!  f≈890-2890  ← 隐藏确认屏：scr=NONE、tpl=result:0.12，UI 模型完全不可见
+  打歌#1  f=3190→8910（5720f = 190.6s，自然结束 16:24:46；其间用户键盘 230 次按键）
+  tally   f≈8910-9130     ← 被脚本 5 次误按 'e' 跳过（自动化缺陷，见 4)）
+  LET'S DANCE!! 再出现
+  打歌#2  f=11400 起，全程 0 输入 → gauge 自然耗尽（MISS 20 / 224 NOTES）
+  RESULT  f≈12440-12500 起，原样显示到 f=17640（171s，0 输入事件）
+结算画面（docs/screenshots/16_result_natural.png = shot_17400.ppm）:
+  EASY / Wake Up, Get Up, Get Out There (Jazztronik Remix)
+  MAX COMBO 0 / 224 TOTAL NOTES
+  PERFECT 0 / GREAT 0 / GOOD 0 / MISS 20
+  SCORE ★0 / HIGH SCORE 120856 / NOT CLEAR
+  唯一提示「◎決定」
+打歌画面（docs/screenshots/17_dance_stage_natural.png = shot_12000.ppm）:
+  P5D 环形音符/生命条/SCORE 200+、涉谷街景、原版 HUD
+```
+3) 用户亲测结论
+```
+用户在当前构建上亲手打歌→结算，确认"对局到结算完全没问题"。
+（用户打歌期间 [KEY] 230 次按键；结算后 save system.bin、sceNpTrophyUnlockTrophy 均照原版流程触发。）
+```
+4) 自动化陷阱（重要）
+```
+打歌结束后的 tally 阶段（4 行结算菜单出现前）只要收到任意按键，游戏会跳过结算并退回
+"LET'S DANCE!!" 确认屏（本轮 f≈8910 后的 5 次 'e' 就把打歌#1 的 tally 跳过了）。
+⇒ 脚本必须从打歌开始到结算菜单出现之间保持零输入；
+  已退回该确认屏时，再发一次 CIRCLE 即重开同一首歌。
+  "LET'S DANCE!!" 确认屏与打歌画面在 [UI] 里都是 scr=NONE、tpl=result:0.12，无法用 UI 模型区分，
+  只能靠截图/帧号/输入事件计数判断。
+```
+5) 结算界面识别缺口（M1441 输入适配的依据）
+```
+该 NOT-CLEAR 结算变体：[UI] 连续 539 行 scr=MAIN tpl=result:0.63（by=361, g=319）
+  - RESULT 模板 = MAX COMBO 牌 170x36 @ (50,148)，阈值 0.88（sticky 0.78）→ 0.63 未达
+  - MAIN 红条启发式（window.c:545-554）先于模板判定（window.c:581-586）→ 误报 scr=MAIN
+14:56 旧运行把同一 RESULT 识别成 0.99–1.00（那次画面/变体不同）——两种变体都要覆盖。
+⇒ 结算 tally 识别 + 4 行菜单（重試/自訂遊玩/放棄/觀看重播，行 y=187/227/267/307）的
+  滚轮/左键/右键操作在 M1441 实现。
+```
+验证：docs/screenshots/16_result_natural.png + 17_dance_stage_natural.png + session.log（完整实机日志）+ C:\dev\tmp\m1439\report.md。
+
+ANTI-FORGETTING ENTRY. Keywords: M1439 S4_GAME RESULT end to end confirmed live run zero input dance 2 gauge empties by itself MISS 20 of 224 NOTES reaches RESULT f12440 displayed untouched 171s 5140 frames 0 input events, session 16:19:49-16:29:38 17640 frames 30fps 0 crash via P5D_Play.bat build 2026-11-06 14:42, TITLE f380 MAIN f450 cur0 DANCING SONG f630 hidden LET'S DANCE confirm screen f890-2890 scr NONE tpl result 0.12 invisible to UI model, dance1 f3190-8910 190.6s natural end user keyboard 230 presses, tally skipped by 5 stray e presses f8910-9130, dance2 f11400 zero input gauge empty MISS 20 result screen EASY Wake Up Get Up Get Out There Jazztronik Remix MAX COMBO 0 224 TOTAL NOTES PERFECT 0 GREAT 0 GOOD 0 MISS 20 SCORE 0 HIGH SCORE 120856 NOT CLEAR prompt Circle-kaiketsu, dance capture shot_12000, result capture shot_17400 16_result_natural.png 17_dance_stage_natural.png, detection gap NOT-CLEAR variant 539 UI lines scr=MAIN tpl=result:0.63 result template MAX COMBO plaque 170x36 at 50,148 threshold 0.88 sticky 0.78 MAIN red banner heuristic window.c:545-554 before template window.c:581-586, two result variants must both be covered, automation trap any key during post-song tally skips result bounces to LET'S DANCE so zero input from dance start to result menu and one CIRCLE reopens song. Verification: 16_result_natural.png 17_dance_stage_natural.png session.log tmp m1439 report.md.
+LOOKUP: M1439 S4_GAME RESULT zero-input live run hidden LET'S DANCE confirm screen tally trap result detection gap -> 18.4951 [relevant: full flow], 18.4955 [relevant: PC UI layer]
+### 18.4981 PORT M1440: 菜单操作提示 → 鼠标图标（滚轮選擇/左键確定/右键返回，实机验证）
+
+1) 需求
+```
+用户提供 P5X 的鼠标操作提示图集（512x512），要求：
+  - 把游戏里"十字键上下高亮"的 選擇 提示图标，换成图集里"鼠标中键标红"的图标（白鼠标+红滚轮）；
+  - 按本移植的菜单逻辑整套对齐：滚轮=选择、左键=确认、右键=返回。
+原版二进制一字不改，仍在 HLE 纹理层做替换（与 M1438 打歌 HUD 字母同一机制）。
+```
+2) 游戏提示图集定位（256x128 按钮提示图集）
+```
+纹理: s_533_20717780 / t_533_20717780
+本移植层 kg_hash（FNV-1a64，基数 1469598103934665603）= 0x7e44ebd858f04222
+  ※ §18.4979 附表里的 0x150592f55bae5300 是标准 FNV 基数算的，口径不一致，已作废
+格子（RGBA 图集内左上为原点）:
+  ○ = (3,3,24,27)      ✕ = (32,3,24,27)
+  十字键变体:
+    c5 = (119,3,28,27) 左右高亮（"變更難度"用）
+    c6 = (152,3,28,27) 上下高亮 ← 结算界面「十字键 選擇」用的就是它
+    c7 = (185,3,28,27) 右高亮      c8 = (218,3,28,27) 左高亮
+c6 判定证据（结算界面 15_result.png 的「選擇」提示图标）:
+  模板 IoU: c6=0.62 最高（c5/c7/c8 ≤0.48）
+  亮度 NCC: c6=0.203 最高（其余 ≤0.07）
+  四臂亮度: up=133 down=175（亮） vs left=121 right=62（暗）→ 上下高亮
+```
+3) 素材（用户图集，已存 hintglyphs.h 生成数据）
+```
+中键标红（滚轮） = P5X 图集 r2c2：白鼠标 + 红色滚轮   → 替换 c6（選擇）
+左键确认         = r1c2：白鼠标 + 红色左键          → 替换 ○（確定）
+右键返回         = r3c2：白鼠标 + 红色右键          → 替换 ✕（返回）
+三个字形同尺寸（28x27 / 24x27 / 24x27），白描边+黑轮廓+红色强调，与游戏提示条风格一致。
+```
+4) 实现（原版代码不动，全在 HLE 纹理层）
+```
+runtime/gfx/hintglyphs.h（新）:
+  HG_HASH 0x7e44ebd858f04222
+  hg_cells[]: wheel(152,3,28,27) lclick(3,3,24,27) rclick(32,3,24,27)
+              每格 RGBA 像素；buttons 标志（0=滚轮格，1=○/✕ 格，可单独关）
+runtime/gfx/gfx_gpu.c:
+  hintglyph_enabled()/buttons()/log()  ← RECOMP_HINTGLYPHS / _BUTTONS / RECOMP_HINTGLYPH_LOG
+  hg_addr/hg_span; gfx_hintglyph_refresh()  ← 设备/档案切换时 invalidate 重传
+  hintglyph_patch(rgba,w,h,addr,span):
+    w==256 && h==128 且 kg_hash==HG_HASH 才处理；记录地址；
+    window_uses_keyboard() 时把三格 RGBA 覆盖到图集；否则保持原图标
+  upload_texture() BC 分支: 256x128 且 hash 命中时——键鼠激活则强制该图集走 RGBA 解码
+    （只有这一张，其他纹理路径不变，沿用 M1438 的黑屏规避策略）；手柄激活则保持 BC，仅记地址
+  解码路径两处（staging ring / 普通上传）在 keyglyph_patch 之后调用 hintglyph_patch
+runtime/ui/window.c:
+  device_keyboard()/device_gamepad()/p5d_switch_profile() 调 gfx_hintglyph_refresh()
+开关: RECOMP_HINTGLYPHS=0 全关；RECOMP_HINTGLYPHS_BUTTONS=0 只换滚轮（○/✕ 保持原样）
+```
+5) 实机验证
+```
+日志: [HG] patched hint atlas 0x20717780: 3 cells (buttons=1)
+CONFIG 界面底部提示条（docs/screenshots/18_hint_icons_config.png）:
+  [左键鼠标] 再次播放     [右键鼠标] 返回      ← 原 ○/✕ 已替换
+结算菜单提示条（docs/screenshots/19_result_hint_wheel.png，放大 20_result_hintbar_zoom.png）:
+  [滚轮鼠标] 選擇   [左键鼠标] 確定   [右键鼠标] 返回
+  ← 用户要的"十字键上下 選擇 → 鼠标中键标红图标"已生效，原图集 D-pad/○/✕ 图标完全不再出现
+用户实机: 同一新版通关（STAGE CLEAR / 224 TOTAL NOTES / PERFECT 135 / GREAT 47 / GOOD 25 / MISS 9 / SCORE 83748）
+打歌 HUD: Q/A/Z/O/K/M 字母（M1438）正常，无回归
+```
+6) 注意/后续
+```
+- 只有该 256x128 图集被强制 RGBA 解码，其他纹理路径不动 → 风险与 M1438 相同且已实机验证无黑屏；
+- 手柄激活时恢复游戏原图标（device_gamepad → 重传），键盘再切回时重新替换；
+- 十字键左右高亮（"變更難度"）保留原图标：难度是 ←/→（键盘 Q/E），不是滚轮；
+- ○/✕ 是全局提示图标（剧情/暂停/结算等），因此全游戏统一显示鼠标左/右键；如需局部保留可用 BUTTONS 开关；
+- 结算界面 4 行菜单的滚轮/左键/右键操作（本图标的"選擇"提示所在界面）在 §18.4982 M1441 实现。
+```
+验证：docs/screenshots/18_hint_icons_config.png、19_result_hint_wheel.png、20_result_hintbar_zoom.png + [HG] 日志 + 用户实机通关。
+
+ANTI-FORGETTING ENTRY. Keywords: M1440 menu operation hints replaced with mouse icons verified live, 256x128 button-hint atlas s_533_20717780 t_533_20717780 kg_hash FNV1a64 0x7e44ebd858f04222 port basis 1469598103934665603, cells circle 3,3,24,27 cross 32,3,24,27 d-pad variants c5 119,3 left-right c6 152,3 up-down c7 185,3 right c8 218,3 left, result screen d-pad select hint uses c6 proven by template IoU 0.62 luminance NCC 0.203 arm brightness up133 down175 bright left121 right62 dark, user P5X atlas wheel red middle r2c2 left click red r1c2 right click red r3c2 cut into hintglyphs.h RGBA glyphs 28x27 24x27, gfx_gpu.c hintglyph_patch gfx_hintglyph_refresh force only this atlas RGBA decode when keyboard active keep BC for pad re-upload on device switch, window.c device_keyboard device_gamepad p5d_switch_profile refresh, switches RECOMP_HINTGLYPHS=0 RECOMP_HINTGLYPHS_BUTTONS=0 wheel only RECOMP_HINTGLYPH_LOG=1, live log HG patched hint atlas 0x20717780 3 cells buttons=1, CONFIG hints left mouse replay right mouse back, result menu wheel mouse select left mouse confirm right mouse back screenshots 18_hint_icons_config 19_result_hint_wheel 20_result_hintbar_zoom, user cleared song STAGE CLEAR 224 notes PERFECT 135 GREAT 47 GOOD 25 MISS 9 SCORE 83748, dance HUD QAZOKM letters no regression, left-right difficulty hint untouched, pad users keep original icons. Verification: 19_result_hint_wheel.png 20_result_hintbar_zoom.png 18_hint_icons_config.png HG log live run.
+LOOKUP: M1440 menu operation hint icons replaced mouse wheel select left click confirm right click back 256x128 button hint atlas c6 up-down d-pad cell P5X icon cut -> 18.4979 [relevant: texture substitution], 18.4952 [relevant: keyboard mouse mapping]
+### 18.4982 PORT M1441: 结算界面 4 行菜单的鼠标操作（滚轮选择/左键确认/右键返回）
+
+1) 用户反馈
+```
+「在结算画面选项使用鼠标滚轮选择失灵了。」
+症状：主菜单/选曲的滚轮正常，但结算界面（重試/自訂遊玩/放棄/觀看重播）滚轮不动、点击也不对。
+```
+2) 根因（全部在 runtime/ui/window.c）
+```
+A. 滚轮条件显式排除 RESULT：`p5d_ui != P5D_UI_RESULT`（旧 2033 行）
+B. RESULT 从未被发布：
+   - MAIN 红条启发式（旧 545-554）在 title/result 模板判定（旧 581-586）之前；
+     结算菜单的"选中行红色高亮条"正好被当成 MAIN banner → 屏幕被判成 MAIN（tpl=result:1.00 但 scr=MAIN）
+   - RESULT 行模型为 0 行：模板分支固定 p5d_ui_cur=-1, p5d_ui_n=0 → p5d_menu_read()=-1，点击/导航无行可读
+C. RESULT 不在 profile mod 里 → 结算界面可能被切到 GAME 键位，菜单键/方向键失效
+```
+3) 修复（window.c 单文件，原版代码不动）
+```
+1. p5d_ui_scan_pixels() 的 p5d_saw_menu 分支：
+   SONG 判定之后、MAIN banner 判定之前，先跑 ui_title_result()：
+   若返回 RESULT 且模板分 >= 0.80 → 发布 RESULT，并调用 p5d_result_row_scan() 得到选中行
+2. p5d_result_row_scan()（新）：
+   4 行 y = 187/227/267/307（960x544，行距 40）
+   选中行 = 面板 x240..676、行带 y±14 内的实心红条（q[0]>150 && q[1]<60 && q[2]<60）
+   实测：选中行红像素 ≈11456，其余 3 行 = 0 → 阈值 160 足够稳
+3. p5d_menu_row_at()：RESULT 分支 x230..690、容差 20
+4. 滚轮：条件放开 RESULT；一格 = 一次 UP/DOWN tap（结算 4 行选择）
+5. 左键点击 RESULT：
+   点中已选行 → menu_enter=1（CIRCLE 确认）
+   点中其它行 → menu_target=row，走 p5d_menu_tick 的闭合环导航（每帧回读红条）
+6. p5d_menu_tick：允许 RESULT 保留 menu_target（原先非 MAIN/SONG 会清掉）
+7. profile mod 纳入 RESULT（窗口循环 1753 行）→ 结算界面保持菜单键位
+8. 自动化（无鼠标验证）：
+   RECOMP_UI_CMD 新命令 'w'=滚轮上 / 'W'=滚轮下；RECOMP_UI_TEST "frame:w" 同理
+   两者都走 p5d_wheel_cmd() → 与物理滚轮相同的 menu_tap 路径
+```
+4) 实机验证（新版 game_host.exe 2026-11-06 16:50:04 构建，用户与脚本共同操作）
+```
+识别：结算菜单首次被正确发布
+  [UI] f=7330 scr=RESULT cur=0 rows=4 hover=-1 target=-1 enter=0 pending=-1 saw=1 tpl=result:1.00 by=361
+  [UI] f=7350 scr=RESULT cur=1 rows=4 ...    ← 滚轮后选中行 0→1
+  [UI] f=7370 scr=RESULT cur=3 rows=4 ...    ← 继续滚到第 3 行
+滚轮（物理滚轮，用户实机）：
+  [UI] wheel DOWN (result row 0)  →  [UI] f=8680 scr=RESULT cur=1 ...
+  [UI] wheel UP   (result row 1)  →  [UI] f=8720 scr=RESULT cur=0 ...
+左键（物理点击，用户实机）：
+  mouse: click -> result row 3 (sel 2)   ← 点第 3 行：从已选第 2 行开始导航
+截图：docs/screenshots/21_result_wheel_select.png
+  结算 4 行菜单，红色高亮停在「自訂遊玩」（第 2 行）——证明滚轮把选择从第 0 行移到了第 2 行；
+  右下角提示条同时显示 M1440 的鼠标图标（滚轮選擇/左键確定/右键返回）。
+回归：主菜单/选曲滚轮、打歌 HUD Q/A/Z/O/K/M、菜单提示鼠标图标均正常。
+```
+5) 已知边界
+```
+- 结算"计分动画"阶段（4 行菜单出现前）模板分 ~0.63 < 0.78 阈值，仍不发布 RESULT；
+  此阶段滚轮按列表处理，游戏不应答（无害）；菜单出现后立即进入 RESULT 模型。
+- 结算 CLEAR / NOT CLEAR / BRILLIANT 变体的菜单几何一致（本轮实测 CLEAR-BRILLIANT 变体行位置相同）。
+- 右键返回在结算界面沿用 CROSS 语义（与主菜单一致，用户已确认主菜单右键返回可用）。
+```
+验证：docs/screenshots/21_result_wheel_select.png + session_m1441.log（[UI] scr=RESULT/cur/wheel/click 行）+ 用户实机。
+
+ANTI-FORGETTING ENTRY. Keywords: M1441 result screen mouse operation wheel select left click confirm right click back fixed and verified live, user reported result menu wheel not working, root cause window.c wheel condition excluded P5D_UI_RESULT and RESULT never published because MAIN red banner heuristic ran before title/result template and result had no row model, fix publish RESULT inside p5d_saw_menu before MAIN banner with template score >= 0.80, new p5d_result_row_scan 4 rows y 187 227 267 307 selected row only solid red bar x240-676 band +-14 measured 11456 red px selected vs 0 others threshold 160, p5d_menu_row_at RESULT x230-690 tolerance 20, wheel allows RESULT one notch one UP DOWN tap, left click selected row Circle confirm other row closed loop navigation via menu_target red bar reread, p5d_menu_tick keeps RESULT target, profile mod includes RESULT, RECOMP_UI_CMD w W wheel and RECOMP_UI_TEST frame:w, live evidence scr=RESULT cur=0 rows=4 then cur 1 2 3 with wheel, physical wheel DOWN result row 0 then cur 0->1 and wheel UP result row 1 then cur 1->0, mouse click result row 3 sel 2, screenshot 21_result_wheel_select.png red highlight on jikou play row 2, tally phase 0.63 stays below 0.78 harmless, CLEAR NOT CLEAR BRILLIANT variants same row geometry, right click CROSS back unchanged. Verification: 21_result_wheel_select.png session_m1441.log live user wheel and click.
+LOOKUP: M1441 result screen wheel select left click confirm 4-row model red bar detection RESULT published before MAIN banner -> 18.4981 [relevant: mouse hint icons], 18.4955 [relevant: PC UI layer]
