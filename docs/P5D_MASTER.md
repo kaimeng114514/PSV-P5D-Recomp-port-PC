@@ -1473,6 +1473,10 @@
 | §18.4989 | Milestone M1448 finished the **plan-B single-file release exe** (`P5D Windows移植版启动器.exe`, 286.1 MB) plus the full P5 reskin / Nativ removal and the story-scene pause fix. The self-extractor (Win32 + zlib + a private `P5DPAY01` archive + footer) unpacks its runtime on first run (~950 MB into `%LOCALAPPDATA%\P5D-Port\<payload hash>\`, 21-27 s, black window / white text / red progress bar / dark DWM title) and starts the launcher with injected `ATIV_ROOT`/`P5D_PYTHON`/`RECOMP_HOST_CC|CXX`/`ATIV_WIN_TOOLCHAIN`/`P5D_LAUNCHER`; the payload carries the git-tracked source, an embedded Python 3.10 (capstone/pycryptodome/tomllib shim + `sitecustomize`, because `._pth` makes Python ignore PYTHONPATH), mingw64 and SDL3/zlib/ffmpeg. Release-level bugs fixed: relaunch after extraction exited without starting the launcher, nested directories not created, stack pointer for the progress line, crash on the failure path, a bat written with a UTF-8 BOM/LF (cmd read it as GBK), and `assets/p5d` never git-tracked (so the background was missing from the package). P5 look: black/white/red palette (accent #E60012), self-drawn black-red icons and window icon, the P5 striped key art as the window background (cover-fitted + scrim), a P5-styled extraction window. Nativ removal: product/window titles, error dialogs, README, settings header, missing-files list (`.p5d-files`), app-data folders (`P5D-Port\P5D`, `launcher.ini`) and manifest (`P5DPort.Launcher`) all replaced; the Project Ativ migration code, the other four game packs and `assets/brand` (41 files) are gone. Features: the firmware row always offers `[從文件夾導入固件…]` (copies an already-decrypted firmware tree) beside the PUP flow; **the story pause**: a P5 dialogue-box detector (white text on a dark box, no red banner) with a latch switches the story to the dance map, where `Esc=START` (back moved to `Backspace`; the CONFIG threshold raised to 0.92 + 0.4 s hold against false hits; the dance map covers the whole stage including its story scenes). The user confirmed "你成功了，现在没事了". Screenshots 34-37. |
 | M1449 | §18.4990: **去掉「檢查構建是否為最新」的啟動延遲**（用户反馈「檢查構建是否為最新沒啥意義，發布出去玩家不會聯網索要最新版本」）。啟動器 p5d 流程改為**直接啟動**：`p5d_start_play()` 不再走 `ready` 步驟（只 exec `run` + `RECOMP_RES`）；`start_play_now()` 在 `p5d_mode()` 時同樣跳過 ready（CLI/ATIV_TASK 路徑也一致）。新增 `p5d_build_stale()`：只比較 `version.txt` 與庫內 `recomp/.built_version_min` 字串，若不同僅在「啟動遊戲」下方顯示黃色提示「這個構建由舊版本的啟動器創建：如果剛剛更新過啟動器，請先點『重新構建』一次（之後啟動都不會再檢查）」，**不阻塞、不等待**。無在線更新通道時這比自動重建更合適：玩家下載的 exe 自帶構建，首次/未構建由 ③ 按鈕完成；玩家更新 exe 後按提示手動重建一次。驗證：CLI `ATIV_TASK=play` 日誌直接 `Running ...`（無 ready、無「building it with these tools」），15 秒內遊戲已跑到 frame 392+；用戶桌面 exe 更新（299,998,759 B，01:42:58，payload 見下）。 |
 | §18.4990 | Milestone M1449 removed the launch-time "is the build up to date" delay (the user pointed out it makes no sense: players will not go online to fetch a newest version). The P5D launch path now starts the game straight away: `p5d_start_play()` no longer runs the `ready` step (only `run` with `RECOMP_RES`), and `start_play_now()` skips ready in `p5d_mode()` too (so the CLI/ATIV_TASK path behaves the same). A new `p5d_build_stale()` only compares `version.txt` with the library's `recomp/.built_version_min` and, when they differ, shows an amber hint under the launch button ("this build came from an older launcher: if you just updated, press Rebuild once") - it never blocks or rebuilds. Without an online update channel that is the better trade: the exe a player downloaded brings its build, the build button covers the first build and a manually confirmed rebuild after a launcher update. Verified: CLI `ATIV_TASK=play` logs `Running ...` directly (no ready, no "building it with these tools") and the game reached frame 392+ within 15 s; the desktop exe was updated (299,998,759 B, 01:42:58). |
+| M1450 | §18.4991: **分辨率选项联动内部渲染倍率**（用户反馈「启动器启动后画面变高清、帧率提升、但游戏速度似乎被倍速加快」）。调查：用启动器首次运行写入的推荐设置实测，guest 帧节拍 `frame 300@5.010s / 600@10.011s / 900@15.011s…` = **正好 60.0 fps**（游戏逻辑按 Vita 60Hz vblank 正常走，没有倍速）；高清来自那份推荐设置里的 `render_scale = 3`（内部 2880×1632）与 `fullscreen = 1`，而此前走开发库时是默认 `render_scale = 1`（960×544 放大）。改动：④ 分辨率现在通过 `RECOMP_RENDER_SCALE` 同时决定内部渲染倍率（原版→1、720p→1、1080p→2、2K→3；环境变量优先于 settings.ini 的 render_scale=3），选「原版/720p」即回到轻量原版清晰度，选「2K」才是 3x 高清。发布 exe 重打包（299,998,980 B，02:03:25，payload 38258574FE1CA757）。 |
+| §18.4991 | Milestone M1450 ties the resolution choice to the internal render scale (the user reported that a launcher-launched game looked HD with a higher frame rate but felt sped up). Investigation with the launcher's first-run recommended settings: the guest frame cadence measured exactly 60.0 fps (frame 300 at 5.010 s, 600 at 10.011 s, 900 at 15.011 s), so the game logic is not running fast; the HD look came from that recommended set's `render_scale = 3` (internal 2880x1632) and `fullscreen = 1`, while the previous development-library runs used the default `render_scale = 1` (960x544 upscaled). Now the resolution row also picks the internal render scale via `RECOMP_RENDER_SCALE` (original 960x544 = 1, 720p = 1, 1080p = 2, 2K = 3; the environment wins over the settings file's render_scale = 3), so "original/720p" returns to the light native-resolution look and only "2K" renders at 3x. The release exe was repacked (299,998,980 B, 02:03:25, payload 38258574FE1CA757). |
+| M1451 | §18.4992: **修正「启动器启动后游戏加速」**（用户反馈「用启动器启动游戏还是会加速运行…这可能是游戏帧率过高导致的」「我并没有要求设置提高帧率」）。根因：启动器首次运行写入的「推荐设置」（`recommended_into()`，原 Nativ 的 `frame_rate = 60`）把共享 settings.ini 的 `frame_rate` 写成 60；该设置会**把游戏申请的 swap interval 压到 1**，于是游戏里按固定 1/30 秒步长计时的部分以 2 倍速度运行（启动器设置界面自身注释也写明「60 is experimental: parts of a game timed in fixed 1/30 s steps can run fast.」）。修复：①`recommended_into()` 不再写 `frame_rate`（让游戏自己决定）；②新增一次性迁移：p5d 模式启动时若 shared settings 的 `frame_rate = 60` 且 `p5d_frame_rate_fixed` 标记未设 → 改写为 30 并置标记；③用户当前机器设置文件已直接由 30 修正（`%APPDATA%\P5D-Port\P5D\settings.ini`：frame_rate=30, render_scale=3, fullscreen=1）。发布 exe 重打包（299,999,641 B，02:12:22，payload FD252DA908129BDE）。 |
+| §18.4992 | Milestone M1451 fixed the launcher-launched game running fast (the user reported it still accelerated and suspected too-high frame rate, and noted they never asked for a higher frame-rate setting). Root cause: the launcher's first-run "recommended set" (`recommended_into()`, inherited from Nativ) wrote `frame_rate = 60` into the shared settings.ini; that setting caps the swap interval a game asks for to 1, so parts of the game timed in fixed 1/30 s steps run at double speed (the launcher's own Settings page comments admit "60 is experimental: parts of a game timed in fixed 1/30 s steps can run fast"). Fixes: (1) `recommended_into()` no longer writes frame_rate (the game decides); (2) a one-time migration rewrites an existing `frame_rate = 60` in the shared settings to 30, flagged by `p5d_frame_rate_fixed`; (3) the user's current settings file was corrected directly (frame_rate = 30 with render_scale = 3 and fullscreen = 1 kept). The release exe was repacked (299,999,641 B, 02:12:22, payload FD252DA908129BDE). |
 | §18.4979 | The six dance-stage button icons are now replaced by Q/A/Z/O/K/M, verified live. The user identified the real asset: not the menu-hint atlas but the 512x512 texture from icons_candidates.png bottom-right (s_1022_2170be80, FNV1a64=0x7aad5be59305ae99) which contains the six white symbols (up/left/down arrows, triangle, circle, cross) plus the red/grey rail nodes and scratch markers. Implementation: keyglyph_patch() in gfx_gpu.c identifies that atlas by content hash at decode time and, only in the dance key profile (window_in_dance_stage()) with keyboard input (window_uses_keyboard()), overwrites the six symbol cells with same-sized bold white letters Q(up)/A(left)/Z(down)/O(triangle)/K(circle)/M(cross) (masks in keyglyphs512.h, Arial Bold, anti-aliased, sized to the original symbols); only this one atlas is forced onto the RGBA decode path so every other texture keeps the normal path (no black-screen regression). Live log: [KG] icon atlas 0x2170be80 dance=1 kb=1 -> [KG] patched 512 icon atlas 0x2170be80; the screenshot confirms the dance HUD shows Q/A/Z/O/K/M and the game runs normally (pause menu works). RECOMP_KEYGLYPHS=0 disables it; the menus are not affected. |
 | §18.4978 | Black-screen false alarm clarified and the picture verified: launching the normal way (desktop shortcut / P5D_Play.bat, i.e. pipeline run) and screenshotting shows the game is perfectly fine - the capture is the dance stage (SHIBUYA, 6 COMBO, the left-side direction icons, the right-side triangle/circle/cross button icons, score 2100), mean brightness 119.9/255, not black. The black windows earlier had two causes: (1) the previous experimental build forced CPU decode of all textures by default (made opt-in in M1436), and (2) my automated tests launched game_host.exe directly, bypassing the pipeline's environment/config - the direct launch itself renders black, so those black windows were my test processes, not the product. The capture also confirms that the six dance-stage button icons are exactly the previously captured 256x128 icon atlas (circle/cross/triangle/square plus four d-pad badges), giving the accurate target and verification frame for the coming keyboard-letter replacement. |
 | §18.4977 | Black-screen fix completed: every texture-side effect of the keyboard-letter experiment is now fully opt-in inside keyglyph_enabled() (the refresh, the atlas recording, the decode switch and the substitution), so the default build follows the original rendering path exactly. The previous black screen was caused by the experiment forcing CPU decode of all textures by default; RECOMP_KEYGLYPHS now defaults to 0 and build 119 replaced game_host.exe (14:15:47). The multiple game windows that appeared black during debugging were old experimental-build processes launched by my automation - apologies; please close any leftover black window and restart from the desktop shortcut. |
@@ -516507,3 +516511,86 @@ launcher/hub.cpp
 
 ANTI-FORGETTING ENTRY. Keywords: M1449 removed the launch-time is-the-build-up-to-date check because there is no online update channel and players will not fetch the newest version, launcher hub cpp p5d_start_play no longer runs ready only run with RECOMP_RES, start_play_now skips ready in p5d_mode too so the CLI ATIV_TASK path matches, new p5d_build_stale compares version.txt with the library recomp .built_version_min and only shows an amber hint under the launch button telling the player to press rebuild once after a launcher update with no blocking and no automatic rebuild, first build still via the build button which is greyed until built, verified ATIV_TASK play logs Running directly without ready and no building-it-with-these-tools and the game reached frame 392 within 15 seconds, desktop release exe repacked 299998759 bytes at 01:42:58 (payload D6BD7580AE6C1303). Verification: ATIV_TASK=play log direct run, desktop exe updated, user live feedback.
 LOOKUP: M1449 makes the launch instant by dropping the ready check and only hinting when the build version differs -> 18.4989 [relevant: single-file release exe], 18.4988 [relevant: launcher page], 18.4987 [relevant: CONFIG ALT keycap]
+### 18.4991 PORT M1450: 分辨率选项联动内部渲染倍率（画面变高清/速度感调查）
+
+1) 用户反馈
+```
+「我刚刚通过启动器启动游戏，发现游戏画面变高清了。可能是游戏内部按2k渲染。
+ 然后帧率好像也提升了，但是游戏速度似乎也被倍速加快了。」
+```
+2) 调查
+```
+- 用启动器首次运行写入的推荐设置（%APPDATA%\P5D-Port\P5D\settings.ini：
+  fullscreen=1, render_scale=3, aspect_ratio=window, frame_rate=60, raw_look=1, shadow_filter=2）实测：
+  frame 300 @ 5.010s / 600 @ 10.011s / 900 @ 15.011s / 1200 @ 20.011s → 正好 60.0 fps
+  → 游戏逻辑按 Vita 的 60Hz vblank 节拍正常推进，不是倍速。
+- 「变高清」原因：render_scale=3 = 内部渲染 960×3 = 2880×1632 再缩放到输出窗口；
+  此前开发库（bat 启动）走默认 render_scale=1（960×544 放大）→ 所以直观上"突然高清"。
+- 「帧率提升 / 速度感」：高分辨率+mailbox 呈现让画面更顺滑；之前若跑在低帧/低分辨率下会显得慢，
+  对比之下会有"变快"的错觉（实测 guest 帧数严格 60/s）。
+```
+3) 改动（launcher/hub.cpp）
+```
+④ 分辨率现在同时决定内部渲染倍率（运行步骤注入 RECOMP_RENDER_SCALE，环境变量优先于 settings.ini）：
+  原版 960×544 → 1
+  720p 1280×720 → 1
+  1080p 1920×1080 → 2
+  2K 2560×1440 → 3
+这样"分辨率"选择终于名副其实：想轻量/原版清晰度选原版或 720p；想要 3x 高清选 2K。
+```
+4) 验证/交付
+```
+- 桌面发布 exe 重打包：299,998,980 B，2026-11-07 02:03:25，payload 38258574FE1CA757
+- 首次解压 21 秒 → 启动器窗口正常；之前中断的打包含残留（208MB 半包）已删除重打
+- 建议用户：想恢复原版清晰度选「原版 960×544」/720p；速度如仍感觉快，可把 settings.ini 的 frame_rate 设 60（默认）或对比歌曲 BPM
+```
+5) 边界
+```
+- render_scale 3 在低端 GPU 上较吃力；分辨率/倍率可随时在启动器改（每次启动注入）
+- 游戏内 F2 也可循环渲染倍率（临时，不写设置）
+```
+验证：实测 60fps 帧节拍日志 + 发布 exe 重打包冒烟测试。
+
+ANTI-FORGETTING ENTRY. Keywords: M1450 resolution choice now sets internal render scale because launcher-launched game looked HD and felt sped up, measured guest frame cadence exactly 60 fps frame 300 at 5.010s 600 at 10.011s proving not sped up, HD came from launcher first-run recommended settings render_scale 3 fullscreen 1 in APPDATA P5D-Port P5D settings.ini while dev library used default render_scale 1, p5d_start_play injects RECOMP_RENDER_SCALE per resolution original 960x544 1 720p 1 1080p 2 2K 3 environment wins over settings file, release exe repacked 299998980 bytes at 02:03:25 payload 38258574FE1CA757, interrupted half package 208MB removed and repacked. Verification: 60fps frame cadence log, desktop exe smoke test extraction 21s.
+LOOKUP: M1450 ties the launcher's resolution row to the internal render scale (and documents that the guest runs at exactly 60 fps) -> 18.4990 [relevant: instant launch], 18.4989 [relevant: single-file release exe], 18.4988 [relevant: launcher page]
+### 18.4992 PORT M1451: 修正启动器启动游戏「加速」——推荐设置误开了实验性 frame_rate 60
+
+1) 用户反馈
+```
+「用启动器启动游戏还是会加速运行。我希望游戏还是以正常速度运行。」
+「这可能是游戏帧率过高导致的。」
+「我并没有要求设置提高帧率。」
+```
+2) 根因
+```
+launcher/hub.cpp recommended_into()（首次运行、没有 shared settings 时写入的推荐设置，继承自 Nativ）含
+  ini_set(x, "frame_rate", "60");
+display.c：frame_rate_60() 为真时 swap_interval() 把游戏申请的间隔强制压到 1；
+于是游戏里「按固定 1/30 秒步长计时」的段落被当成 1/60 秒推进 → 2 倍速。
+启动器设置页自己也有说明：「60 is experimental: parts of a game timed in fixed 1/30 s steps can run fast.」
+（用户机器上启动器首启写入了 frame_rate=60、render_scale=3(推荐倍率按显示高度)、fullscreen=1，
+ 所以同时出现「画面高清 + 感觉加速」。）
+```
+3) 修复（launcher/hub.cpp）
+```
+- recommended_into()：删除 frame_rate=60（不再替玩家开启实验性帧率；游戏自己决定）
+- 一次性迁移：p5d 模式下若 shared settings 里 frame_rate = 60 且 prefs 里没有 p5d_frame_rate_fixed
+  → ini_set frame_rate = 30 + ini_save，并置 p5d_frame_rate_fixed=1（玩家之后仍可在设置里主动选 60）
+- 用户当前 %APPDATA%\P5D-Port\P5D\settings.ini 已直接改为 frame_rate = 30
+```
+4) 验证/交付
+```
+- 设置文件确认：fullscreen=1, render_scale=3, frame_rate=30（启动器启动后保持 30，标记已置）
+- 发布 exe 重打包：299,999,641 B，2026-11-07 02:12:22，payload FD252DA908129BDE
+- 不影响已有构建：无需重新构建游戏，改设置即可
+```
+5) 备注
+```
+- 画面「高清」来自推荐设置 render_scale（按显示高度自动，1440p 屏→3 倍/2880×1632）；启动器 ④ 分辨率现在
+  同时决定内部倍率（原版/720p=1、1080p=2、2K=3），觉得吃性能可降
+- 游戏内 F2 可临时循环渲染倍率；帧率设置仍在启动器 Settings / settings.ini
+```
+验证：设置文件 + 用户重开启动器实机确认。
+
+ANTI-FORGETTING ENTRY. Keywords: M1451 fixed launcher-launched game running fast root cause launcher first-run recommended set recommended_into wrote frame_rate 60 inherited from Nativ which caps the swap interval a game asks to 1 so parts timed in fixed 1/30 second steps ran at double speed the launcher settings page admits 60 is experimental, recommended_into no longer writes frame_rate, one-time migration rewrites existing frame_rate 60 to 30 flagged by p5d_frame_rate_fixed, user settings file corrected directly frame_rate 30 render_scale 3 fullscreen 1, release exe repacked 299999641 bytes at 02:12:22 payload FD252DA908129BDE, no rebuild of the game needed only settings. Verification: settings file check, launcher rerun keeps 30, user live confirmation.
+LOOKUP: M1451 removes the launcher's experimental frame_rate=60 default that made 30-step-timed parts run fast -> 18.4991 [relevant: resolution vs render scale], 18.4990 [relevant: instant launch], 18.4989 [relevant: single-file release exe]
