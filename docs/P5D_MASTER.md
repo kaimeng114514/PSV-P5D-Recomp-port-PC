@@ -1457,6 +1457,10 @@
 | §18.4981 | All menu operation hints are now replaced with mouse icons (wheel = select, left button = confirm, right button = back), verified live. The user supplied the P5X mouse-hint atlas and asked to replace the game's highlighted d-pad up/down "select" hint with the "red middle button" mouse icon, and confirmed the whole set for our PC menu logic (wheel select / left confirm / right back). Target: the game's 256×128 button-hint atlas s_533_20717780 / t_533_20717780 (this port's kg_hash FNV1a64 = 0x7e44ebd858f04222; the 0x1505... figure in the 18.4979 appendix used the standard FNV basis and was wrong — corrected here). Cells: circle (3,3,24,27), cross (32,3,24,27), four d-pad variants c5/c6/c7/c8 where c6 = (152,3,28,27) is the "up/down highlighted" one used by the result screen's "d-pad 選擇" hint (template IoU 0.62 best, luminance NCC 0.203 best, arm brightness up=133/down=175 bright vs left=121/right=62 dark). Icons cut from the user's atlas: wheel red = white mouse with red scroll wheel (r2c2), left red (r1c2), right red (r3c2). Implementation: new runtime/gfx/hintglyphs.h (3 RGBA glyphs) + gfx_gpu.c hintglyph_patch()/gfx_hintglyph_refresh(): only this atlas is forced onto the RGBA decode path (every other texture keeps its normal path, avoiding the black-screen regression), the three cells are repainted while the keyboard/mouse drives the game and restored for a pad (re-upload on device switch); window.c triggers the refresh on device/profile switches. Switches: RECOMP_HINTGLYPHS=0 disables everything, RECOMP_HINTGLYPHS_BUTTONS=0 keeps only the wheel, RECOMP_HINTGLYPH_LOG=1 logs the patch. Live log: [HG] patched hint atlas 0x20717780: 3 cells (buttons=1); CONFIG screen shows "[left-click mouse] 再次播放 / [right-click mouse] 返回"; the result menu shows "[wheel mouse] 選擇 / [left-click mouse] 確定 / [right-click mouse] 返回" (docs/screenshots/19_result_hint_wheel.png, 20_result_hintbar_zoom.png); the dance HUD Q/A/Z/O/K/M letters (M1438) show no regression; the user cleared a song live (STAGE CLEAR, 224 notes, PERFECT 135, SCORE 83748). |
 | M1441 | §18.4982: ★★★★★★★ **结算界面鼠标操作接通：滚轮选择 / 左键确认 / 右键返回（实机验证）。** 用户反馈「结算画面选项滚轮选择失灵」。根因：`window.c` 的滚轮条件显式排除 `P5D_UI_RESULT`，而 RESULT 本身从未被发布——模板判定在 MAIN 红条启发式之后、且没有行模型。修复：① `p5d_ui_scan_pixels` 的 `p5d_saw_menu` 分支里把 RESULT 模板判定（MAX COMBO 牌 170x36@(50,148)，阈值 0.88/sticky 0.78）提升到 MAIN 红条判定之前，命中即发布 `P5D_UI_RESULT`；② 新增 `p5d_result_row_scan()`：结算 4 行 y=187/227/267/307，选中行 = 面板 (x240..676, 行带 ±14) 内唯一实心红条（实测选中行红像素 ≈11456，其余行 0）；③ `p5d_menu_row_at()` 增加 RESULT 几何 (x230..690, 容差 20)；④ 滚轮条件放开 RESULT，一格 = 一次 UP/DOWN tap；⑤ 左键点击 RESULT：点已选行 = Circle 确认，点其它行 = 闭合环导航（逐帧回读红条）；⑥ `p5d_menu_tick` 保留 RESULT 的 `menu_target`；⑦ profile `mod` 纳入 RESULT（保持菜单键位）；⑧ `RECOMP_UI_CMD` 新增 `w`/`W`（滚轮上/下）与 `RECOMP_UI_TEST` `frame:w`，用于无鼠标自动验证。实机证据：`[UI] f=7330 scr=RESULT cur=0 rows=4` → cur 1→2→3 随滚轮变化；`[UI] wheel DOWN (result row 0)` 后 cur 0→1、`[UI] wheel UP (result row 1)` 后 cur 1→0；`mouse: click -> result row 3 (sel 2)`；截图 `docs/screenshots/21_result_wheel_select.png`（结算菜单红高亮停在「自訂遊玩」行 = 滚轮把选择从第 0 行移到第 2 行）。 |
 | §18.4982 | The result screen's mouse operation is now wired: wheel selects, left click confirms, right click goes back, verified live. The user reported that the wheel did not select the result menu options. Root cause: window.c's wheel condition explicitly excluded P5D_UI_RESULT, and RESULT was never published at all — the template test ran after the MAIN red-banner heuristic and there was no row model. Fix: (1) in p5d_ui_scan_pixels' p5d_saw_menu branch, run the RESULT template test (MAX COMBO plaque 170x36 at (50,148), threshold 0.88/sticky 0.78) before the MAIN banner test and publish P5D_UI_RESULT when it hits; (2) new p5d_result_row_scan(): 4 rows y=187/227/267/307, the selected row is the only solid red bar inside the panel (x240..676, row band ±14) — measured ~11456 red pixels on the selected row and 0 on the others; (3) p5d_menu_row_at() geometry for RESULT (x230..690, tolerance 20); (4) allow the wheel on RESULT, one notch = one UP/DOWN tap; (5) left click on RESULT: click the selected row = Circle confirm, click another row = closed-loop navigation (re-read the red bar every frame); (6) keep menu_target on RESULT in p5d_menu_tick; (7) include RESULT in the profile mod (keep the menu key map); (8) RECOMP_UI_CMD gained w/W (wheel up/down) and RECOMP_UI_TEST frame:w for mouse-less automated verification. Live evidence: [UI] f=7330 scr=RESULT cur=0 rows=4 and cur 1→2→3 with the wheel; [UI] wheel DOWN (result row 0) followed by cur 0→1 and [UI] wheel UP (result row 1) followed by cur 1→0; mouse: click -> result row 3 (sel 2); screenshot docs/screenshots/21_result_wheel_select.png (result menu, red highlight on 自訂遊玩 = the wheel moved the selection from row 0 to row 2). |
+| M1442 | §18.4983: 选曲提示图标键帽化：底部「變更難度」左侧的十字键左右图标换成 Q/E 键帽、「排序」左侧方框换成 Tab 键帽，顶部气泡徽章「□ 排序」和「⊕ 變更難度」的烘焙精灵也同步替换（实机验证，用户确认）。素材取自 P5R HD UI 键盘按键资源风格 + P5X 鼠标图集 + Arial Bold。图集一：256x128 提示图集（0x20717780，hash 0x7e44ebd858f04222），c5=(119,3,28,27) LR d-pad→Q/E 两个 13x13 键帽、c4=(90,3,24,27) 方框→24x27 Tab 键帽；图集二：2048x1024 选曲界面图集（0x2106a600/2106c580，hash 0x5c4ede3b449e3179）里顶部气泡徽章是烘焙精灵，把「⊕ 變更難度」emblem (1615,802,27,28) 改 Q/E、「□ 排序」glyph (1715,801,24,27) 改 Tab（第一版 34x30/30x32 盖到排序文字框左边框，用户报遮挡后缩小到 24x27/27x28）。hintglyphs.h 改为多图集表 hg_atlases[]（HintAtlas{name,hash,w,h,cells,n}），gfx_gpu.c 的 hintglyph_patch 按图集循环 hash/size 匹配、hg_addr/hg_span 每图集一份、gfx_hintglyph_refresh 遍历全部图集。键位：input.ini [buttons]/[buttons_game] 的 square 改为 "J, Tab"（Tab=方框=排序）、select 从 Tab 移到 Backspace，p5d_default_ini 模板同步；新增 RECOMP_KEY_LOG=1 菜单键日志。实机证据：[HG] patched buttons atlas 0x20717780: 5 cells、[HG] atlas ... 2048x1024 hash=0x5c4ede3b449e3179 expect=same、[HG] patched songhint atlas ... 2 cells、物理 Tab 触发 [KEY] menu key Tab ×3；截图 docs/screenshots/22_song_hint_qe_tab.png、23_sort_burst_tab.png。边界：c5 同格也用于 CONFIG「變更」提示，CONFIG 会显示 Q/E 键帽（Q/E 子菜单映射留待后续）。 |
+| §18.4983 | The song-select hint icons are now keyboard keycaps: the d-pad left/right badge of the bottom hint bar's 變更難度 hint became Q/E keycaps, the square badge of 排序 became a Tab keycap, and the same two emblems in the song list's baked burst-badge sprites in the 2048x1024 song-select atlas were repainted too. Assets: a 256x128 hint atlas (s_533/t_533 0x20717780, FNV1a64 0x7e44ebd858f04222) with c5=(119,3,28,27) left/right d-pad -> two 13x13 P5R-style keycaps Q/E (28x27 cell) and c4=(90,3,24,27) square -> a 24x27 Tab keycap (Arial Bold lettering: the P5 glyphs were too thin at 24 px); and the 2048x1024 song-list atlas (0x2106a600, FNV1a64 0x5c4ede3b449e3179) whose baked burst-badge sprites carry the same emblems: 變更難度 emblem (1615,802,27,28) -> Q/E keycaps, 排序 glyph (1715,801,24,27) -> Tab keycap. The first attempt used 34x30 / 30x32 cells and covered the 排序 text box's left border; the user reported the Tab keycap overlapping the 排序 UI, so both cells were shrunk to the original glyph footprints. hintglyphs.h became a multi-atlas table (HintAtlas{name,hash,w,h,cells,n}; hg_atlases[2]) and gfx_gpu.c's hintglyph_patch loops over atlases matching size then content hash, hg_addr/hg_span are per-atlas, gfx_hintglyph_refresh walks all atlases. Key bindings: input.ini [buttons] and [buttons_game] square = "J, Tab" (Tab = the Square button = sort, J kept), select moved from Tab to Backspace, the built-in p5d_default_ini template matches, and RECOMP_KEY_LOG=1 logs menu-profile key presses for scripted verification. Live evidence: [HG] patched buttons atlas 0x20717780: 5 cells, [HG] atlas 0x2106c580 2048x1024 hash=0x5c4ede3b449e3179 expect=0x5c4ede3b449e3179 followed by [HG] patched songhint atlas 0x2106c580: 2 cells, three physical Tab presses logged as [KEY] menu key Tab; screenshots docs/screenshots/22_song_hint_qe_tab.png and 23_sort_burst_tab.png. Known edge: c5 is also the CONFIG screen's 變更 hint cell, so CONFIG shows Q/E keycaps there while Q/E are not yet mapped in submenus. |
+| M1443 | §18.4984: 打歌 HUD 的 Q/A/Z/O/K/M 字母图标丢失修复（用户报「打歌环节 qazokm 按键图标更换没了」；修复后用户又报「进打歌画面刚开始会变回原来的 PS ui，一两秒后才变键盘 UI，要一开始就显示」）。根因 A：512x512 打歌图标图集（0x21416480，FNV1a64=0x7aad5be59305ae99）在菜单阶段就已上传（[KG] icon atlas ... dance=0 只有这一次），切到 dance profile 后 gfx_keyglyph_refresh() 用 textures_invalidate() 只把纹理缓存标 stale；get_texture() 重检发现 guest 内存字节没变 → 直接复用旧（未打补丁）GPU 纹理、不再走 decode → keyglyph_patch 不执行 → 字母补丁丢失、原版 PS 图标回来。根因 B：keyglyph_patch 带 `!window_in_dance_stage()` 门槛，打歌画面出现后要等自动 profile 切换（约 1-2 秒）才会被强制重上传打补丁，所以先看到原版图标。修复 A：TexEntry 增加 force 标志 + 新 textures_force_upload(lo,hi)（stale/full/checked_frame=0 + force=1）；get_texture() 未变化分支改为 `if (!changed && !e->force)`，force 时照常 upload_texture() → decode → keyglyph_patch；gfx_keyglyph_refresh()/gfx_hintglyph_refresh() 改用 textures_force_upload()。修复 B：keyglyph_patch 去掉 dance profile 门槛（键盘驱动即打补丁，图集只在打歌/暂停等界面出现）。实机证据：[KG] icon atlas 0x21416480 dance=0 → 随后 dance=1 → [KG] patched 512 icon atlas 0x21416480；截图 docs/screenshots/24_dance_letters.png（打歌两侧导轨圆圈内 Q/A 字母）；用户实测确认进打歌一开始即键盘 UI。 |
+| §18.4984 | The dance HUD's Q/A/Z/O/K/M letter icons disappeared after entering the dance stage (the user reported the six key icons reverted to the original PS ones), then after the first fix the user reported the original PS UI still showing for one or two seconds before the keyboard letters appeared, and asked for the keyboard UI from the very first frame. Root cause A: the 512x512 dance icon atlas (0x21416480, FNV1a64 0x7aad5be59305ae99) is uploaded while the profile is still the menu one ([KG] icon atlas ... dance=0, the only upload), and gfx_keyglyph_refresh() on the profile switch only called textures_invalidate(), which marks the texture cache entry stale; get_texture()'s re-check then finds the guest bytes unchanged and returns the cached (unpatched) GPU texture, so upload_texture()/keyglyph_patch never run again and the letters are lost. Root cause B: keyglyph_patch was gated on window_in_dance_stage(), so even the forced re-upload happened only after the automatic menu->dance profile switch 1-2 s into the play area, letting the original icons show first. Fix A: a force flag on TexEntry plus textures_force_upload(lo,hi) (stale/full/checked_frame = 0, force = 1); get_texture()'s unchanged branch is now `if (!changed && !e->force)`, so a forced entry goes through upload_texture() again (decode + keyglyph_patch); gfx_keyglyph_refresh() and gfx_hintglyph_refresh() use textures_force_upload(). Fix B: drop the dance-profile gate from keyglyph_patch (the letters are patched whenever the keyboard drives the game; the atlas only appears in dance/pause UI). Live evidence: [KG] icon atlas 0x21416480 dance=0, then [KG] icon atlas 0x21416480 dance=1, then [KG] patched 512 icon atlas 0x21416480; screenshot docs/screenshots/24_dance_letters.png shows Q/A letters inside the dance stage's rail circles; the user confirmed the keyboard UI now appears from the first frame. |
 | §18.4979 | The six dance-stage button icons are now replaced by Q/A/Z/O/K/M, verified live. The user identified the real asset: not the menu-hint atlas but the 512x512 texture from icons_candidates.png bottom-right (s_1022_2170be80, FNV1a64=0x7aad5be59305ae99) which contains the six white symbols (up/left/down arrows, triangle, circle, cross) plus the red/grey rail nodes and scratch markers. Implementation: keyglyph_patch() in gfx_gpu.c identifies that atlas by content hash at decode time and, only in the dance key profile (window_in_dance_stage()) with keyboard input (window_uses_keyboard()), overwrites the six symbol cells with same-sized bold white letters Q(up)/A(left)/Z(down)/O(triangle)/K(circle)/M(cross) (masks in keyglyphs512.h, Arial Bold, anti-aliased, sized to the original symbols); only this one atlas is forced onto the RGBA decode path so every other texture keeps the normal path (no black-screen regression). Live log: [KG] icon atlas 0x2170be80 dance=1 kb=1 -> [KG] patched 512 icon atlas 0x2170be80; the screenshot confirms the dance HUD shows Q/A/Z/O/K/M and the game runs normally (pause menu works). RECOMP_KEYGLYPHS=0 disables it; the menus are not affected. |
 | §18.4978 | Black-screen false alarm clarified and the picture verified: launching the normal way (desktop shortcut / P5D_Play.bat, i.e. pipeline run) and screenshotting shows the game is perfectly fine - the capture is the dance stage (SHIBUYA, 6 COMBO, the left-side direction icons, the right-side triangle/circle/cross button icons, score 2100), mean brightness 119.9/255, not black. The black windows earlier had two causes: (1) the previous experimental build forced CPU decode of all textures by default (made opt-in in M1436), and (2) my automated tests launched game_host.exe directly, bypassing the pipeline's environment/config - the direct launch itself renders black, so those black windows were my test processes, not the product. The capture also confirms that the six dance-stage button icons are exactly the previously captured 256x128 icon atlas (circle/cross/triangle/square plus four d-pad badges), giving the accurate target and verification frame for the coming keyboard-letter replacement. |
 | §18.4977 | Black-screen fix completed: every texture-side effect of the keyboard-letter experiment is now fully opt-in inside keyglyph_enabled() (the refresh, the atlas recording, the decode switch and the substitution), so the default build follows the original rendering path exactly. The previous black screen was caused by the experiment forcing CPU decode of all textures by default; RECOMP_KEYGLYPHS now defaults to 0 and build 119 replaced game_host.exe (14:15:47). The multiple game windows that appeared black during debugging were old experimental-build processes launched by my automation - apologies; please close any leftover black window and restart from the desktop shortcut. |
@@ -516027,3 +516031,124 @@ C. RESULT 不在 profile mod 里 → 结算界面可能被切到 GAME 键位，�
 
 ANTI-FORGETTING ENTRY. Keywords: M1441 result screen mouse operation wheel select left click confirm right click back fixed and verified live, user reported result menu wheel not working, root cause window.c wheel condition excluded P5D_UI_RESULT and RESULT never published because MAIN red banner heuristic ran before title/result template and result had no row model, fix publish RESULT inside p5d_saw_menu before MAIN banner with template score >= 0.80, new p5d_result_row_scan 4 rows y 187 227 267 307 selected row only solid red bar x240-676 band +-14 measured 11456 red px selected vs 0 others threshold 160, p5d_menu_row_at RESULT x230-690 tolerance 20, wheel allows RESULT one notch one UP DOWN tap, left click selected row Circle confirm other row closed loop navigation via menu_target red bar reread, p5d_menu_tick keeps RESULT target, profile mod includes RESULT, RECOMP_UI_CMD w W wheel and RECOMP_UI_TEST frame:w, live evidence scr=RESULT cur=0 rows=4 then cur 1 2 3 with wheel, physical wheel DOWN result row 0 then cur 0->1 and wheel UP result row 1 then cur 1->0, mouse click result row 3 sel 2, screenshot 21_result_wheel_select.png red highlight on jikou play row 2, tally phase 0.63 stays below 0.78 harmless, CLEAR NOT CLEAR BRILLIANT variants same row geometry, right click CROSS back unchanged. Verification: 21_result_wheel_select.png session_m1441.log live user wheel and click.
 LOOKUP: M1441 result screen wheel select left click confirm 4-row model red bar detection RESULT published before MAIN banner -> 18.4981 [relevant: mouse hint icons], 18.4955 [relevant: PC UI layer]
+### 18.4983 PORT M1442: 选曲提示图标键帽化（Q/E 变更难度 / Tab 排序 + 顶部气泡徽章）
+
+1) 用户需求（本轮原话）
+```
+(1)「把移植版变更难度左边的左右十字键高亮UI换成E和q的键帽UI」
+(2)「把排序旁边的方框按键替换成tap键键帽」（Tab）
+(3)「选歌界面上面的方框键没有替换成tab」（顶部气泡徽章里的方框）
+(4)「上面的tab图标有点遮挡旁边的排序Ui了」（第一版键帽盖到排序文字框）
+```
+2) 素材与图集（两处）
+```
+素材：P5R HD UI 键盘按键资源（P5R BASE.CPK→BUTTON/BUTTON_KEYBOARD.PAK 的黑底白框键帽 + 白字风格）、
+     P5X 鼠标图集（用户提供）、P5R KEYTOP HD 字体；Tab 文字用 Arial Bold（24px 下比 P5 字体清晰）
+图集一 256x128 提示图集 s_533/t_533（0x20717780，FNV1a64=0x7e44ebd858f04222）：
+  c5=(119,3,28,27) 左右高亮 d-pad → Q/E 两个 13x13 键帽（整格 28x27）
+  c4=(90,3,24,27)  方框        → Tab 键帽 24x27（黑底白框白字）
+  其余格不变（wheel=c6、鼠标左/右键=c1/c2、三角=c3 等）
+图集二 2048x1024 选曲界面图集 s_604_2106a600（0x2106a600，FNV1a64=0x5c4ede3b449e3179）：
+  顶部气泡提示徽章是「烘焙精灵」（不是图集格），同一张图里还有 EASY/NORMAL/HARD 标签等：
+  「⊕ 變更難度」徽章 emblem (1615,802,27,28) → Q/E 键帽
+  「□ 排序」徽章 glyph (1715,801,24,27) → Tab 键帽
+  第一版取 (1614,801,34,30)/(1713,800,30,32) —— 盖住「排序」文字框左边框（用户报遮挡）→ 缩到原图标尺寸
+```
+3) 实现
+```
+runtime/gfx/hintglyphs.h：改为多图集表
+  typedef struct { const char *name; unsigned long long hash; int w,h; const HintGlyph *cells; int n_cells; } HintAtlas;
+  hg_atlases[] = { {"buttons",0x7e44...,256,128,hg_cells,5}, {"songhint",0x5c4e...,2048,1024,hg_song_cells,2} }
+runtime/gfx/gfx_gpu.c：
+  hintglyph_patch() 按 hg_atlases[] 循环：先比 w/h，再算 kg_hash 与图集 hash 比对；
+  hg_addr/hg_span 改为 [HG_ATLASES] 数组；gfx_hintglyph_refresh() 遍历全部图集；
+  BC 路径里强制 RGBA 解码的判据改用 hg_atlases[0].hash
+runtime/ui/window.c + 运行目录 input.ini：
+  [buttons]/[buttons_game] square = "J, Tab"（Tab 触发 SQUARE=排序；J 保留）
+  select 从 Tab 移到 Backspace（避免 Tab 双触发 square+select）
+  p5d_default_ini 模板同步（首次运行/旧文件升级都会写新模板）
+  新增 RECOMP_KEY_LOG=1：菜单 profile 的按键打印 [KEY] menu key <name>（脚本验证 Tab→SQUARE 用）
+```
+4) 实机验证（新 game_host.exe，2026-11-06 18:40 构建）
+```
+[HG] patched buttons atlas 0x20717780: 5 cells (buttons=1)
+[HG] atlas 0x2106c580 2048x1024 hash=0x5c4ede3b449e3179 expect=0x5c4ede3b449e3179
+[HG] patched songhint atlas 0x2106c580: 2 cells (buttons=1)
+物理按 Tab 3 次 → [KEY] menu key Tab ×3（Tab 已映射到 SQUARE，排序生效）
+截图：docs/screenshots/22_song_hint_qe_tab.png
+      底部提示条显示 [Q][E] 變更難度 [Tab] 排序 [鼠标右键] 返回（键帽清晰、无遮挡）
+      docs/screenshots/23_sort_burst_tab.png
+      顶部气泡徽章 [Tab] 排序：Tab 键帽与「排序」文字框之间留有间隙，不再遮挡
+用户实测确认：Tab 没问题（选曲界面顶部与底部均显示键盘 UI）
+```
+5) 已知边界
+```
+- c5 是 CONFIG 界面「變更」提示用的同一图集格 → CONFIG 会显示 Q/E 键帽；
+  Q/E 在子菜单（CONFIG 等）尚未映射，留待后续里程碑（提示与实际操作暂时不一致）
+- 其它烘焙徽章（⊕ 選擇舞者 / ⊕ 切換樂曲）保持原样，本轮未改
+- Tab 键帽在 24x27 格内用 Arial Bold 才能看清；再小会糊
+```
+验证：docs/screenshots/22_song_hint_qe_tab.png + 23_sort_burst_tab.png + session_m1442.log（[HG]/[KEY] 行）+ 用户实机确认。
+
+ANTI-FORGETTING ENTRY. Keywords: M1442 song-select hint icons replaced by keyboard keycaps Q/E change difficulty and Tab sort plus the song list atlas baked burst badges, user asked change the left-right d-pad highlight left of change difficulty into E and Q keycap UI then replace the square button next to sort with a Tab keycap then reported the top burst badge square not replaced and then the Tab keycap overlapping the sort UI, assets P5R HD UI keyboard button resources BUTTON_KEYBOARD.PAK black keycap white border style plus P5X mouse atlas plus Arial Bold for the Tab label, atlas one 256x128 0x20717780 hash 0x7e44ebd858f04222 c5 119,3,28,27 left-right d-pad to two 13x13 Q/E keycaps and c4 90,3,24,27 square to a 24x27 Tab keycap, atlas two 2048x1024 0x2106a600 hash 0x5c4ede3b449e3179 baked burst badge sprites change difficulty emblem 1615,802,27,28 to Q/E and sort glyph 1715,801,24,27 to Tab, first cells 34x30 and 30x32 covered the sort text box border and were shrunk after the user reported overlap, hintglyphs.h became multi-atlas HintAtlas table hg_atlases with two groups, gfx_gpu.c hintglyph_patch loops atlases by size then content hash hg_addr per atlas refresh walks all, input.ini square now J and Tab select moved to Backspace defaults template updated, RECOMP_KEY_LOG menu key logging, evidence HG patched buttons 5 cells HG atlas hash match HG patched songhint 2 cells three KEY menu key Tab lines, screenshots 22_song_hint_qe_tab and 23_sort_burst_tab, known edge c5 also used by CONFIG change hint and Q/E not yet mapped in submenus, other burst badges dancer select and switch song untouched, Tab keycap needs Arial Bold at 24x27. Verification: 22_song_hint_qe_tab.png 23_sort_burst_tab.png session_m1442.log user confirmed Tab fine live.
+LOOKUP: M1442 replaces song-select hint badges with Q/E and Tab keycaps in both the 256x128 hint atlas and the 2048x1024 song-list baked burst-badge atlas -> 18.4982 [relevant: hint atlas mouse icons], 18.4972 [relevant: song-select difficulty Q/E], 18.4925 [relevant: key binding map]
+### 18.4984 PORT M1443: 打歌按键字母图标丢失 + 进入打歌立即生效（纹理强制重上传）
+
+1) 用户反馈（本轮原话）
+```
+(1)「现在tab没什么问题了。但我发现打歌环节qazokm按键图标更换没了。」
+(2)「我测试一下，进入打歌画面。刚开始会变回原来的PSui但经过一两秒就会变成键盘UI。
+    我要一开始就显示键盘UI。」
+```
+2) 根因（runtime/gfx/gfx_gpu.c）
+```
+A. 纹理缓存复用旧图：
+   打歌 512x512 图标图集（0x21416480，KG512_HASH=0x7aad5be59305ae99）在菜单/加载阶段就已上传：
+     [KG] icon atlas 0x21416480 dance=0 kb=1       ← 只有这一次真正 decode
+   进入打歌时 profile 切到 GAME → gfx_keyglyph_refresh() 调用 textures_invalidate()：
+     只把缓存项标 stale/full/checked_frame=0，下次 bind 会“重检”；
+   但 get_texture() 重检时发现 guest 内存字节没变（补丁只改 decode 后的副本，不写 guest 内存）：
+     if (!changed) { e->stale = 0; return e; }   ← 直接复用旧（未打补丁）GPU 纹理
+   → upload_texture() 不再调用 → keyglyph_patch 不执行 → Q/A/Z/O/K/M 字母补丁丢失、原版 PS 图标回来
+B. 打歌开始 1-2 秒先显示原版图标：
+   keyglyph_patch 里 `if (!window_uses_keyboard() || !window_in_dance_stage()) return;`
+   → 打歌画面已经出现、但自动 profile 切换（菜单消失 2.5 秒后才切 GAME）还没发生时，
+     纹理上传不会打补丁；等切到 GAME 触发 refresh 才补上 → 先 PS UI 后键盘 UI
+```
+3) 修复（runtime/gfx/gfx_gpu.c）
+```
+A. TexEntry 增加 force 字段；新增：
+   static void textures_force_upload(uint32_t lo, uint32_t hi) {
+     for (...) if (addr 在范围内) { stale=1; full=1; checked_frame=0; force=1; } }
+   get_texture() 未变化分支：
+     if (!changed && !e->force) { e->stale = 0; return e; }   // force 时继续走重上传
+     重上传后清 force（e->force = 0），layout/extent 重建分支也清
+   gfx_keyglyph_refresh() / gfx_hintglyph_refresh()：textures_invalidate → textures_force_upload
+   （这样设备切换/进打歌时补丁一定重画，提示图集切换设备也能立即刷新）
+B. keyglyph_patch 去掉 dance profile 门槛：
+     if (!window_uses_keyboard()) return;   // 键盘驱动即打字母补丁
+   图集只在打歌 HUD/暂停等打歌界面出现，菜单用的是 256x128 提示图集，不受影响
+```
+4) 实机验证（新 game_host.exe，2026-11-06 18:51 / 18:58 构建）
+```
+[KG] icon atlas 0x21416480 dance=0 kb=1
+[KG] icon atlas 0x21416480 dance=1 kb=1        ← profile 切换 → 强制重上传 → 补丁生效
+[KG] patched 512 icon atlas 0x21416480
+截图：docs/screenshots/24_dance_letters.png
+      打歌画面两侧导轨圆圈内显示 Q / A 等字母（原版为箭头/三角/圆圈/叉图标）
+用户实测：
+  - 修复 A 后：进打歌 1-2 秒内字母图标恢复（tab 也已正常）
+  - 修复 B 后：进入打歌画面从一开始就是键盘 UI，无原版 PS 图标闪现
+回归：[HG] buttons/songhint 两个图集仍正常 patched；菜单提示图标（鼠标/滚轮/QE/Tab）正常
+```
+5) 已知边界
+```
+- 强制重上传只作用于被记录的图集地址（keyglyph 512 图集 + 两个 hint 图集），其它纹理仍走字节比较缓存，
+  无额外每帧开销；只在设备切换 / profile 切换时发生
+- 打歌图集若被游戏换地址重新上传，keyglyph_patch 在新地址上传时按内容 hash 再认一次并打补丁
+- Q/A/Z/O/K/M 字母内容来自 keyglyphs512.h（M1438），本轮未改字母绘制本身
+```
+验证：docs/screenshots/24_dance_letters.png + kg_log_dance.txt（[KG] dance=0→dance=1→patched 行）+ 用户实机确认。
+
+ANTI-FORGETTING ENTRY. Keywords: M1443 dance stage HUD Q A Z O K M letter icons disappeared fixed plus keyboard UI from the first frame, user reported the qazokm key icons reverted to the original PS icons then that the original PS UI flashes for one or two seconds before the keyboard UI and asked for keyboard UI from the start, root cause A the 512x512 dance icon atlas 0x21416480 hash 0x7aad5be59305ae99 was uploaded while still in the menu profile KG icon atlas dance=0 and the profile switch refresh only marked the texture cache stale so get_texture re-check saw unchanged guest bytes and reused the cached unpatched texture so upload_texture and keyglyph_patch never ran again, root cause B keyglyph_patch gated on window_in_dance_stage so the patch landed only after the automatic menu to dance profile switch 1-2 seconds in, fix A TexEntry force flag and textures_force_upload stale full checked_frame zero force one and get_texture unchanged branch if not changed and not force and force cleared after upload and both refresh functions use textures_force_upload, fix B remove the dance profile gate from keyglyph_patch patch whenever the keyboard drives the game since the atlas only appears in dance and pause UI, evidence KG icon atlas dance=0 then dance=1 then KG patched 512 icon atlas, screenshot 24_dance_letters.png Q and A letters in the dance rail circles, user confirmed keyboard UI from the first frame. Verification: 24_dance_letters.png kg_log_dance.txt user live check.
+LOOKUP: M1443 makes the patched dance-stage key-letter atlas survive the texture cache and show from the first dance frame (forced re-upload on profile/device switch, no dance-profile gate) -> 18.4983 [relevant: keycap hint icons], 18.4972 [relevant: song-select Q/E and key map], 18.4944 [relevant: dance HUD letters M1438]
