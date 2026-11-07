@@ -1,9 +1,9 @@
 # P5D-PC — PS Vita『Persona 5: Dancing in Starlight』(PCSH10109) PC 原生移植
 
-> **目标**：把玩家自备的 PS Vita 版 P5D（PCSH10109, 1.00）**原版游戏二进制一字不改**地在 PC（后续扩展到手机）上运行：
+> **目标**：把玩家自备的 PS Vita 版 P5D（PCSH10109, 1.00）**原版游戏二进制一字不改**地在 PC 上运行：
 > CPU 用 **AOT 静态重编译**（原版 ARM/Thumb → x86-64 原生执行，解释器 fallback），系统 API 由本地兼容层（HLE）
-> 接管，图形按 [nativ](https://github.com/TheLostPantheon/nativ) 架构用 **Sony 自己的 libgxm/libgpu_es4**（从玩家固件 AOT 重编译）
-> 输出到 **Vulkan**，最终串联 `S0_LOGO → S1_TITLE → S2_MENU → S3_SELECT → S4_GAME → RESULT` 全流程，
+> 接管（文件/存档、内存、线程、GXM→Vulkan、音频、输入、视频解码），最终串联
+> `S0_LOGO → S1_TITLE → S2_MENU → S3_SELECT → S4_GAME → RESULT` 全流程，
 > **画面/布局/数值由原版游戏代码自己绘制**。
 
 > 仓库：<https://github.com/kaimeng114514/PSV-P5D-Recomp-port-PC> · 许可：GPL-2（见 [LICENSE](LICENSE) / [NOTICE.md](NOTICE.md)）
@@ -12,58 +12,85 @@
 
 ---
 
-## 🔥 截图：全部由原版 P5D 代码在本项目的移植运行时里绘制
+## 🚀 快速开始（单文件启动器）
 
-> 截图取自游戏自己的帧缓冲（见下文“验证链”），不是渲染示意图，也不是窗口截图。
+下载/拿到 **`P5D Windows移植版启动器.exe`**（约 300 MB，自解压）后：
+
+1. **双击运行**。首次会解包运行时（~1 分钟，黑底进度条），然后出现启动器。
+2. **游戏 ROM**：选择自己的游戏文件夹（包含 `eboot.bin` 与 `data/`；MaiDump 格式也可）。
+3. **系统固件**：选择 `PSVUPDAT.PUP` 3.74，或已解密的固件文件夹（`version.txt`、`os0/`、`vs0/`）。
+4. **开始构建**：依次解密 → 分析 → 重编译 → 编译（**首次 10–30 分钟**，启动器显示真实百分比进度；之后启动秒进）。
+5. **分辨率**：原版 960×544 / 720p / 1080p / 2K 2560×1440。选择会同时决定**内部渲染倍率**（2K=3x、1080p=2x），
+   原版 960×544 的布局/数值不变，只是按倍率提升渲染精度。
+6. **启动游戏**。
+
+所有构建都在你自己的电脑上完成，不上传任何数据。游戏数据与存档保存在
+`%LOCALAPPDATA%\P5D-Port\P5D\library`；共享设置（分辨率倍率/全屏/帧率等）在
+`%APPDATA%\P5D-Port\P5D\settings.ini`。
+
+> **更新启动器后**：启动器会自动发现构建过期并在下次启动时**重建一次**（会显示进度条），之后恢复秒进。
+
+### 键盘操作
+
+| 场景 | 按键 |
+|---|---|
+| 菜单通用 | 方向键移动，滚轮=列表上下，左键=确认，右键=返回；Enter/空格=确认，Backspace=返回，Esc=暂停 |
+| 社群界面（角色列表/剧情列表） | **Q/E = L/R 肩键**（切换角色等） |
+| 选歌界面 / 设置页 | **Q/E = 十字键左右**（切难度/改数值） |
+| 舞池 | **Q/A/Z** = 上/左/下，**D** = 右；**O/K/M** = △/○/×，**J** = □；**Space** = 刮盘；**Esc** = 暂停 |
+| 辅助 | **F1** 显示状态；**F11** 重新加载 `input.ini`；**F3** 切换 Q/E 模式（见下） |
+
+> **Q/E 兜底**：如果某个界面 Q/E 映射不符合预期，按 **F3** 循环切换 Q/E 模式
+> （`自动` → `L/R 肩键` → `D-pad 左右`），屏幕会提示并记住选择。
+
+**手柄**：即插即用；使用手柄时游戏内提示图标会恢复原版手柄键帽。
+
+---
+
+## 🖼️ 截图：全部由原版 P5D 代码在本项目的移植运行时里绘制
+
+> 截图取自游戏自己的帧缓冲（见下文"验证链"），不是渲染示意图，也不是窗口截图（启动器截图除外）。
 > 游戏画面版权归 **ATLUS / SEGA**，此处仅作逆向工程/移植进度说明。
 
-### S0_LOGO：原版开场 logo 序列（ATLUS → P-STUDIO → CRIWARE）
+### S0_LOGO：原版开场 logo 序列
 
 | ATLUS | P-STUDIO | CRIWARE |
 |---|---|---|
 | ![ATLUS](docs/screenshots/01_s0_atlus.png) | ![P-STUDIO](docs/screenshots/02_s0_pstudio.png) | ![CRIWARE](docs/screenshots/03_s0_criware.png) |
 
-### S1_TITLE：标题画面（原版代码绘制）
+### S1_TITLE：标题画面 + USM 影片背景
 
-![S1_TITLE 标题画面](docs/screenshots/04_s1_title.png)
+| 标题画面 | USM 影片背景 | 标题→剧情过渡 |
+|---|---|---|
+| ![标题](docs/screenshots/04_s1_title.png) | ![USM 影片](docs/screenshots/09_s1_title_usm_video.png) | ![过渡](docs/screenshots/05_s1_title_transition.png) |
 
-`PERSONA5 DANCING STAR NIGHT` 霓虹 logo、`PRESS ANY BUTTON`、`©ATLUS ©SEGA All rights reserved.`
-全部是游戏自己的 sprite/UI 系统经 GXM 管线绘制（对应游戏数据 `title/P5/title.spr6` 中的
-`title`/`title02`/`logo`/`press` sprite）。
+### S2_MENU / S3_SELECT：主菜单与选歌
 
-### S1_TITLE：USM 标题影片背景（原版解码 + 原版 libgxm blit 程序绘制）
-
-![S1_TITLE USM 影片背景](docs/screenshots/09_s1_title_usm_video.png)
-
-标题背景 = 原版 `movie/c_p5d001.usm` 影片：红天、彩色三角彩带、城市天际线、光束，
-全部由**原版代码**渲染：HLE 的 FFmpeg 解码 USM（AVC）→ 解码帧写入游戏自己的 NV12 缓冲
-→ 游戏的 libgxm 影片 blit 程序（fragment `0x1102c4f4`）经 GXM→Vulkan 动态翻译绘制到屏幕；
-上层 logo / `PRESS ANY BUTTON` / 面板是游戏自己的 sprite/UI 系统（`title.spr6`/`title.spr4`）绘制。
-
-> 该截图**不需要任何强制开关**：输入脚本只做正常按键推进，`RECOMP_P5D_FORCEMOVIE` 未设置；
-> 帧 7240 的像素统计 R=44.3/G=22.9/B=22.3（红色主导），与离线影片真值帧（红天/彩带/城市）构图一致。
-
-### 标题 → 剧情 的实时过渡动画
-
-![标题到剧情的镜头形变过渡](docs/screenshots/05_s1_title_transition.png)
-
-标题界面在按下确认后播放镜头形变/拉远过渡（frame 6910），随后进入开场剧情——逐帧动画证明是实时游戏渲染。
-
-### 开场剧情对话（原版文本/UI 系统）
-
-| 佐倉 双葉 | 高卷 杏 |
+| 主菜单（角色列表/社群） | 选歌界面 |
 |---|---|
-| ![佐倉双葉剧情](docs/screenshots/06_story_futaba.png) | ![高卷杏剧情](docs/screenshots/07_story_ann.png) |
+| ![社群](docs/screenshots/25_commu_lr_qe.png) | ![选歌](docs/screenshots/13_song_select.png) |
 
-白色描边对话框、红色名牌、中文文本、鼠标光标均由游戏自己的 UI/字体系统绘制。
+### S4_GAME：舞池
 
-### 更早的进度：DLC 服装通知（游戏自绘；我们修复 P8/P4 调色板纹理后）
+| 舞池舞台 | 键位图标 + 判定 | 六键字母 |
+|---|---|---|
+| ![舞池](docs/screenshots/38_dance_stage_m1485.png) | ![判定](docs/screenshots/26_dance_keys_gauge.png) | ![键位](docs/screenshots/24_dance_letters.png) |
 
-![DLC 服装通知界面](docs/screenshots/08_dlc_costume_dialog.png)
+### RESULT：结算
+
+| 记分动画（tally） | 4 行结果菜单 |
+|---|---|
+| ![结算 tally](docs/screenshots/39_result_tally_m1485.png) | ![结果菜单](docs/screenshots/41_result_menu_after_tally.png) |
+
+### 启动器
+
+| 启动器主界面 | P5 主题 |
+|---|---|
+| ![启动器](docs/screenshots/32_launcher_p5d.png) | ![主题](docs/screenshots/34_launcher_p5_theme.png) |
 
 ---
 
-## 如何确认“画面是游戏自己画的”？——路线自检（2026-11-05）
+## 如何确认"画面是游戏自己画的"？——路线自检
 
 1. **原版二进制未改**：`app0/eboot.bin.elf` 的 SHA-256 = `f823faaeab2b7234e3f47392ba83728b6340aa30f291f70b5b46b617b4ddeb23`（6,279,728 B），
    与 pack `[versions."1.00"] sha256` 一致、构建时校验；AOT 重编译产物只在本机生成，仓库不含。
@@ -82,39 +109,33 @@
    `0→1→3→4→…→7` 与标题出现同帧对齐；标题出现后逐帧出现元素，frame 6910 出现镜头形变过渡，
    之后按输入进入剧情对话（双叶→杏）——不是静态注入图。
 6. **渲染数据全部为 guest 数据**：Vulkan 绘制使用的 GXM shader 位于 guest 地址
-   （如 `0x8153…`、libgxm `0x1102b…`），纹理是 guest 内存里的游戏纹理
-   （如 P8 `0x95001000` 调色板纹理 @ `0x2069b280`）；host 只做翻译/执行。
-7. **标题影片截图 = 自然运行**：截图 run 的 env 只有截图窗口 `RECOMP_SHOT_FROM/TO`；
-   `RECOMP_P5D_FORCEMOVIE` 未设置（日志无 `[FORCEMOVIE]` 行），输入脚本为普通按键序列；
-   帧缓冲比对：标题帧像素统计与离线 USM 真值帧一致（R 主导、约 28-35% 红色像素）。
-8. **与历史参考对比**：S0 三个 logo 的像素统计与参考帧一致（§18.4883：ATLUS nz=`35915`、
-   CRIWARE nz=`57122` 完全相同，包围盒相同）。
-
-### 诚实说明：当前限制
-
-- **标题 USM 影片已打通（不需要任何强制开关）**：HLE 的 FFmpeg 解码 + 原版 libgxm 影片 blit 程序
-  经 GXM→Vulkan 翻译绘制；期间修复了 USSE→SPIR-V 翻译的两个 bug：`SOP2` 指令按 32 位字/u8_unpack
-  读取（M1392）、`FRAGCOLOR_USED` 预载 alpha（M1395）。S0/S1 截图都是正常流程原样渲染。
-- **当前阻塞**：从标题按确认进入下一场景时，某个 shader 触发 `usse_spirv: internal error: zero id`
-  崩溃（正在修）。因此 S2_MENU 及后续流程截图尚待下一个里程碑。
-- 目前标题/剧情阶段帧耗时异常（约 1.4 s/帧），待优化。
+   （如 `0x8153…`、libgxm `0x1102b…`），纹理是 guest 内存里的游戏纹理；host 只做翻译/执行。
+7. **S4_GAME→RESULT 全流程实测（M1485/M1486/M1494）**：标题→主菜单→选歌→服装→舞池→结算的真实输入序列，
+   截图 `38_dance_stage_m1485.png`（舞池）与 `39_result_tally_m1485.png`（结算）；
+   结算 tally→4 行菜单→重试的交互链也有截图（`41_result_menu_after_tally.png`）。
 
 ---
 
-## 当前状态（2026-11-05，里程碑 M1396 / round 1364）
+## 当前状态（2026-11-08，里程碑 M1497）
 
 | 模块 | 状态 | 说明 |
 |---|---|---|
-| 原版 eboot/SELF 原样加载 | ✅ | `eboot_origin.bin.elf`（无 MaiDump 依赖）SHA-256 校验通过 |
-| AOT 静态重编译（ARM/Thumb→x86-64） | ✅ | 原版 14,929 个函数重编译；未支持指令补齐中 |
-| Sony 用户库重编译（libgxm/libc/libfios2…） | ✅ | 按 nativ 架构从玩家固件重编译，替代手写 GXM HLE |
-| GXM → Vulkan 渲染 | ✅ | 原版 shader/纹理/绘制状态动态翻译；S0/S1/剧情画面正常 |
-| **S0_LOGO** | ✅ | ATLUS → P-STUDIO → CRIWARE，与参考图定量一致 |
-| **S1_TITLE** | ✅ | 标题画面/UI/动画 + **USM 影片背景（红天/彩带/城市）** 均由原版代码绘制 |
-| 开场剧情对话 | 部分 | 原版文本/UI 正常；进入下一场景时 shader 翻译崩溃（待修） |
-| 影片解码（USM/CRI） | ✅ | HLE FFmpeg 解码 USM/AVC → NV12 → 原版 libgxm blit 绘制（标题影片已验证） |
-| S2_MENU → S3_SELECT → S4_GAME → RESULT | 未达 | 下一步推进 |
-| 性能 | 部分 | 标题/剧情阶段存在 ~1.4 s/帧 异常，待查 |
+| 原版 eboot/SELF 原样加载 | ✅ | `eboot.bin.elf` SHA-256 校验通过，不修改二进制 |
+| AOT 静态重编译（ARM/Thumb→x86-64）+解释器 fallback | ✅ | 原版函数全量重编译，未支持指令走 fallback |
+| Sony 用户库重编译（libgxm/libc/libfios2…） | ✅ | 按 nativ 架构从玩家固件重编译 |
+| GXM → Vulkan 渲染 | ✅ | 原版 shader/纹理/绘制状态动态翻译 |
+| 影片解码（USM/CRI） | ✅ | HLE FFmpeg 解码 → NV12 → 原版 libgxm blit 绘制 |
+| **S0_LOGO** | ✅ | ATLUS → P-STUDIO → CRIWARE，与参考帧定量一致 |
+| **S1_TITLE** | ✅ | 标题画面/UI/动画 + USM 影片背景 |
+| **S2_MENU** | ✅ | 主菜单/社群/COLLECTION/CONFIG/SYSTEM 子菜单 |
+| **S3_SELECT** | ✅ | 选歌列表（难度选项卡/排序/滚轮）、服装界面 |
+| **S4_GAME** | ✅ | 舞池六键/刮盘/暂停/剧情对话 |
+| **RESULT** | ✅ | 记分动画（tally）与 4 行结果菜单（滚轮/点击/重试） |
+| 分辨率 | ✅ | 960×544 / 720p / 1080p / 2K；内部倍率 1x–3x，原版布局不变 |
+| 输入映射 | ✅ | 菜单/选歌/社群/设置按界面切换 Q/E 语义（F3 兜底）；手柄即插即用 |
+| 构建体验 | ✅ | 启动器真实构建进度百分比 + 首次构建时长提示 |
+| 手柄模式实测 | ⏳ | 需要实物手柄做插拔/键帽/结算回归（待玩家反馈） |
+| 性能 | 部分 | 已可完整游玩；长时间舞蹈/结算的帧率优化仍在进行 |
 
 更完整、可复现的证据链见 **[docs/P5D_MASTER.md](docs/P5D_MASTER.md)**（权威开发日志，含每个里程碑的
 ANTI-FORGETTING 记录、命令、日志与截图路径）。
@@ -145,15 +166,23 @@ ANTI-FORGETTING 记录、命令、日志与截图路径）。
 > 当前工程基于 GPL-2 的 [nativ](https://github.com/TheLostPantheon/nativ) 架构与部分 GPL-2 参考
 > （Vita3K 等）。归属说明见 [NOTICE.md](NOTICE.md) / [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 
-## 开发期运行（需要玩家自备游戏与固件）
+## 开发期运行（从源码构建）
 
-> 目前仍是**开发/验证形态**（`game_host.exe` + 玩家数据），一键发布版/手机移植在后续里程碑完成。
+> 发布版用户用上面的**单文件启动器**即可；以下是开发/验证形态。
 
 1. 自备 PS Vita 3.74 固件（从自己的设备提取），解密到 nativ 工具链的 `firmware/3.74`。
 2. 自备合法持有的 P5D（PCSH10109 1.00）数据：`eboot_origin.bin`、`data.cpk`、`vita.cpk` 等。
 3. 使用 nativ 流水线：`add → import → analyze → recompile → build → test`（细节与命令见
    [docs/NATIV_REFERENCE.md](docs/NATIV_REFERENCE.md) 与 [docs/P5D_MASTER.md](docs/P5D_MASTER.md)）。
-4. 标题/剧情阶段（影片背景未修好前）需要 `RECOMP_P5D_FORCEMOVIE=1` 诊断开关才能越过 USM 门。
+4. 发布打包：`dev/make_p5d_release.py`（单文件自解压 exe + 启动器 + 内置 Python/mingw）。
+
+## 故障排查
+
+- **某界面 Q/E 不对**：按 **F3** 切换 Q/E 模式（自动 / L/R / D-pad），屏幕有提示，选择会被记住。
+- **启动后要求重新构建**：更新过启动器属于正常现象；进度条结束会自动开始游戏，之后启动秒进。
+- **构建失败**：打开启动器的"显示日志"查看完整输出；日志也会写到
+  `%APPDATA%\P5D-Port\P5D\launcher.log`。请附上 `session.log`（游戏中）一起反馈。
+- **分辨率/全屏**：启动器选择分辨率；内部倍率随分辨率自动设定。全屏可在游戏内设置，或用 `RECOMP_FULLSCREEN=1`。
 
 ## 发布合规与版权
 
