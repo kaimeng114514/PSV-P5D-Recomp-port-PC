@@ -1513,6 +1513,8 @@
 | §18.5009 | Milestone M1468 fixed "COMMU works, then the song list after it loses Q/E" (the user's test: Q/E worked entering the COMMUNITY pages, then the song list's Q/E failed). Root cause: the Q/E priority put the leftover COMMU flow flag (commu_mode) ahead of the modelled song list; leaving the COMMU pages through the pause menu did not clear the flag (only a main-menu confirmation or Backspace did), so the song list kept taking the COMMU branch and Q/E became shoulders. Fix: the priority is now (1) settings/pause, (2) the live COMMU keycaps (the strongest and most reliable COMMU signal), (3) the modelled song list / song flow, (4) the leftover COMMU flow flag, (5) the dance stage, (6) the shoulder fallback. The live keycaps only appear on the COMMU pages, so the song list can no longer be hijacked by a stale flag while the COMMU pages still get L/R from the live detection. The guard's priority chain was updated (settings < live COMMU < song list < stale flag < shoulder) and passes: COMMU_QE_GUARD_PASS (16 checks) and ALL_REGRESSIONS_PASS. Release exe repacked (payload FBC52CA4CE3676E4, desktop updated). |
 | M1469 | §18.5010: **按键时实时重算场景（进入/退出自动撤销旧键位）**（用户建议「识别场景选键位，退出场景自动撤销上一选项的键位」）。重构 Q/E 决策：**每次按键按当前场景重新计算**，不再依赖任何跨场景状态；并且**彻底移除设置页模板参与判定**（社群列表与设置模板相似，模板曾把社群页误判为设置页 → Q/E 变十字键 → 社群失效）。新判定顺序：①暂停状态（代码级）→设置页十字键；②实时社群键帽（只在社群页绘制）→L/R；③选歌画面/选歌档案→十字键；④设置页档案→十字键；⑤残留社群流程标志（仅兜底）→L/R；⑥打歌（未建模+打歌档案）→键位表；⑦其余→L/R。同一次游戏内实测：先进社群按 Q → 角色头像变化（0,0,307,397）；返回主菜单进选歌按 Q → 难度切换（0,0,624,87），两段都通过。保护程序同步更新（守卫 16 项 + 优先级链），COMMU_QE_GUARD_PASS。发布 exe 重打包（payload 182F203E635996C8），桌面已更新。 |
 | §18.5010 | Milestone M1469 recomputes the Q/E scene at every press (the user's proposal: pick the key map from the identified scene, and leaving a scene must automatically drop the previous choice). The decision no longer keeps any cross-scene state, and the settings-page template was removed from it entirely: the COMMU lists resemble that template, and the template used to misclassify the COMMU pages as settings, turning Q/E into the D-pad and breaking the COMMUNITY keys. New order: (1) the code-level pause state -> settings D-pad, (2) the live COMMU keycaps (drawn only on the COMMU pages) -> L/R, (3) the modelled song list / song profile -> D-pad, (4) the modelled settings page -> D-pad, (5) a leftover COMMU flow flag (fallback only) -> L/R, (6) the dance stage (unmodelled + dance profile) -> the key map, (7) everything else -> L/R. Verified inside one session: Q on a COMMU page changes the character portrait (diff 0,0,307,397), then back to the main menu and into the song list Q changes the difficulty (diff 0,0,624,87) - both pass. The static guard was updated (16 checks and the priority chain) and passes as COMMU_QE_GUARD_PASS. Release exe repacked (payload 182F203E635996C8, desktop updated). |
+| M1470 | §18.5011: **场景状态机落地（单一真源）+ 静态分析路线确认**（用户要求「一次做完、别再一轮轮启动验证」）。落地：`window.c` 新增 `p5d_scene` 状态机（BOOT/TITLE/MAIN/COMMU/SONG/DANCE/PAUSE/RESULT）：①**输入意图直接置场景**（主菜单确认 DANCING 行→SONG、COMMU 行→COMMU、选歌确认→DANCE、ESC→PAUSE 压栈/恢复）——不等画面识别，消灭「刚进选歌 Q 就失效」的时序漏洞；②**证据纠正**（暂停/标题/结算/社群键帽/主菜单/选歌/打歌）每帧只做纠错；③Q/E **每次按键只查场景表**（COMMU→L/R；SONG/PAUSE→十字键；DANCE→打歌表；其余→L/R），不再有跨场景键位状态、不再有画面模板参与判定；④`[SCENE]` 日志记录每次切换来源。实测（dev 路径）：直接进选歌按 Q → 难度切换 (0,0,624,87)；先进社群 Q → 头像变化 (0,0,307,397)，返回再进选歌 Q → 难度切换 (49,0,571,87)，两序列均通过。静态分析已开工：`find_va_ref.py` 在 eboot 内定位 UI 计数器 0x8153f9b4 仅两处代码引用（0x812584D2 / 0x8125968A，正是我们布钩子的位置），反汇编确认其为 UI 事件初始化/计数路径；下一步静态目标=游戏**模块管理器/update 表**（子场景 ID 的真正来源），不再靠启动游戏试错。守卫已改为场景状态机检查（16 项）：COMMU_QE_GUARD_PASS + ALL_REGRESSIONS_PASS。发布 exe 重打包（payload 9E074852EA5E6F26）。 |
+| §18.5011 | Milestone M1470 lands the scene state machine as the single source of truth (the user asked to do it in one pass instead of endless launch-and-check rounds). window.c now has a p5d_scene state (BOOT/TITLE/MAIN/COMMU/SONG/DANCE/PAUSE/RESULT): (1) the input intent sets the scene at once - confirming the DANCING row on the main menu sets SONG, the COMMU row sets COMMU, confirming a song sets DANCE, Esc pushes PAUSE and restores on close - so no picture recognition delay can leave a freshly opened screen on the old map; (2) evidence only corrects the scene each frame (pause/title/result/COMMU keycaps/main/song/dance); (3) every Q/E press maps from the scene table alone (COMMU -> L/R; SONG/PAUSE -> D-pad; DANCE -> the dance key map; everything else -> L/R), with no per-screen key state and no picture template in the decision; (4) a [SCENE] log records every transition and its reason. Verified (dev path): direct song entry Q changes the difficulty (0,0,624,87); COMMU Q changes the portrait (0,0,307,397), then back and into the song list Q changes the difficulty (49,0,571,87) - both sequences pass. Static analysis has started: find_va_ref.py locates only two code references to the UI counter 0x8153f9b4 (0x812584D2 / 0x8125968A, exactly where our hooks sit) and the disassembly confirms the UI event init/count path; the next static target is the game's module manager / update table (the real source of the sub-scene id), replacing launch-and-check loops. The guard now checks the scene state machine (16 checks): COMMU_QE_GUARD_PASS and ALL_REGRESSIONS_PASS. Release exe repacked (payload 9E074852EA5E6F26). |
 | §18.4979 | The six dance-stage button icons are now replaced by Q/A/Z/O/K/M, verified live. The user identified the real asset: not the menu-hint atlas but the 512x512 texture from icons_candidates.png bottom-right (s_1022_2170be80, FNV1a64=0x7aad5be59305ae99) which contains the six white symbols (up/left/down arrows, triangle, circle, cross) plus the red/grey rail nodes and scratch markers. Implementation: keyglyph_patch() in gfx_gpu.c identifies that atlas by content hash at decode time and, only in the dance key profile (window_in_dance_stage()) with keyboard input (window_uses_keyboard()), overwrites the six symbol cells with same-sized bold white letters Q(up)/A(left)/Z(down)/O(triangle)/K(circle)/M(cross) (masks in keyglyphs512.h, Arial Bold, anti-aliased, sized to the original symbols); only this one atlas is forced onto the RGBA decode path so every other texture keeps the normal path (no black-screen regression). Live log: [KG] icon atlas 0x2170be80 dance=1 kb=1 -> [KG] patched 512 icon atlas 0x2170be80; the screenshot confirms the dance HUD shows Q/A/Z/O/K/M and the game runs normally (pause menu works). RECOMP_KEYGLYPHS=0 disables it; the menus are not affected. |
 | §18.4978 | Black-screen false alarm clarified and the picture verified: launching the normal way (desktop shortcut / P5D_Play.bat, i.e. pipeline run) and screenshotting shows the game is perfectly fine - the capture is the dance stage (SHIBUYA, 6 COMBO, the left-side direction icons, the right-side triangle/circle/cross button icons, score 2100), mean brightness 119.9/255, not black. The black windows earlier had two causes: (1) the previous experimental build forced CPU decode of all textures by default (made opt-in in M1436), and (2) my automated tests launched game_host.exe directly, bypassing the pipeline's environment/config - the direct launch itself renders black, so those black windows were my test processes, not the product. The capture also confirms that the six dance-stage button icons are exactly the previously captured 256x128 icon atlas (circle/cross/triangle/square plus four d-pad badges), giving the accurate target and verification frame for the coming keyboard-letter replacement. |
 | §18.4977 | Black-screen fix completed: every texture-side effect of the keyboard-letter experiment is now fully opt-in inside keyglyph_enabled() (the refresh, the atlas recording, the decode switch and the substitution), so the default build follows the original rendering path exactly. The previous black screen was caused by the experiment forcing CPU decode of all textures by default; RECOMP_KEYGLYPHS now defaults to 0 and build 119 replaced game_host.exe (14:15:47). The multiple game windows that appeared black during debugging were old experimental-build processes launched by my automation - apologies; please close any leftover black window and restart from the desktop shortcut. |
@@ -517382,3 +517384,51 @@ tools/regress_commu_qe.py 16 项：优先级链 = pause < live COMMU < song < co
 
 ANTI-FORGETTING ENTRY. Keywords: M1469 Q/E scene recomputed at every press with no cross-scene key state, settings page template removed from the decision because the COMMU lists resemble it and the template misclassified COMMU as settings turning Q/E into the D-pad, new order pause(code-level) -> live COMMU keycaps -> modelled song list/song profile -> modelled settings page -> leftover COMMU flow flag -> dance stage key map -> everything else L/R, verified inside one session COMMU Q changes portrait diff 0,0,307,397 then song list Q changes difficulty diff 0,0,624,87, guard priority chain pause < live COMMU < song < config page < stale flag < shoulder with 16 checks COMMU_QE_GUARD_PASS, release exe payload 182F203E635996C8. Verification: same-session two-scene diffs, static guard.
 LOOKUP: M1469 recomputes the scene at every press and drops the settings template from the decision, so leaving any screen automatically restores the right Q/E mapping -> 18.5009 [relevant: priority order], 18.5008 [relevant: real-time scene], 18.5006 [relevant: protection]
+### 18.5011 PORT M1470: 场景状态机（单一真源）
+
+1) 设计落地
+```
+enum P5D_SCENE_{BOOT,TITLE,MAIN,COMMU,SONG,DANCE,PAUSE,RESULT}
+输入意图立即置位（乐观）：
+  主菜单 DANCING 行确认 -> SONG      （不等画面识别，直接进选歌也不会漏键）
+  主菜单 COMMU  行确认 -> COMMU
+  选歌列表确认         -> DANCE
+  ESC/Return          -> push PAUSE（关闭恢复上一场景）
+证据每帧只做纠错：
+  pause状态 / TITLE / RESULT / 社群键帽 / 主菜单 / 选歌 / 打歌
+Q/E 每次按键只查场景表：
+  COMMU          -> L/R 肩键
+  SONG, PAUSE    -> 十字键左右
+  DANCE          -> 打歌键位表（Q=上等）
+  其它           -> L/R（无害默认）
+无跨场景键位状态；画面模板不参与 Q/E 判定。
+日志：[SCENE] old -> new (reason)
+```
+2) 实测（dev 路径，两次独立会话）
+```
+A 直接进选歌：Q -> 难度切换 (0,0,624,87) ✓
+B 先社群再选歌：社群 Q -> 头像 (0,0,307,397) ✓；返回进选歌 Q -> 难度 (49,0,571,87) ✓
+日志： [KEY] Q/E -> scene=song left (dpad table) 等
+```
+3) 静态分析进展（为最终代码级场景 ID）
+```
+tools/find_va_ref.py 8153F9B4 -> eboot 内仅 2 处引用：
+  0x812584D2 / 0x8125968A（正是 UIINC/UIREAD 钩子位置）
+p5d_dis_va.py 反汇编：该函数是 UI 事件对象初始化 + 计数器自增路径
+=> 计数器不是场景 ID；下一步静态目标 = 游戏模块管理器/update 表（子场景 ID 真源）
+   工具链已备：find_va_ref / p5d_dis_va / xref / p5d_find_global
+```
+4) 保护程序
+```
+tools/regress_commu_qe.py：改为场景状态机不变量（enum、输入意图置位、暂停压栈、
+证据纠正、按键查表、无模板参与、handler 在 keymap 前）16 项 => COMMU_QE_GUARD_PASS
+run_all_regressions: ALL_REGRESSIONS_PASS
+```
+5) 交付
+```
+发布 exe：payload 9E074852EA5E6F26，桌面已更新；开发库 host/game_host.exe 同步
+```
+验证：两序列实测 + 守卫/回归。
+
+ANTI-FORGETTING ENTRY. Keywords: M1470 scene state machine single source of truth in window.c p5d_scene enum BOOT TITLE MAIN COMMU SONG DANCE PAUSE RESULT, input intent sets the scene optimistically (DANCING row confirm SONG, COMMU row COMMU, song confirm DANCE, Esc pushes PAUSE and restores) so recognition delay cannot leave a new screen on the old map, evidence corrects the scene each frame, every Q/E press maps from the scene table alone with no per-screen key state and no picture template (COMMU L/R, SONG and PAUSE dpad, DANCE dance key map, else L/R), [SCENE] transition log, verified dev path direct song entry Q 0,0,624,87 and COMMU then song portrait 0,0,307,397 plus tab 49,0,571,87, static analysis started find_va_ref shows only two refs to the UI counter 0x8153f9b4 at 0x812584D2 and 0x8125968A the hook sites, next static target the module manager/update table for the real sub-scene id, guard now checks the scene machine with 16 checks, COMMU_QE_GUARD_PASS ALL_REGRESSIONS_PASS, release exe payload 9E074852EA5E6F26. Verification: two dev-path runs with pixel diffs and scene logs, guard and regressions.
+LOOKUP: M1470 replaces the ad-hoc scene flags with a single p5d_scene state machine fed by input intent and corrected by evidence, so every Q/E press follows the current screen - the direct-song-entry and COMMU-then-song regressions both pass -> 18.5010 [relevant: per-press recompute], 18.5009 [relevant: priority], 18.5008 [relevant: real-time scene]
