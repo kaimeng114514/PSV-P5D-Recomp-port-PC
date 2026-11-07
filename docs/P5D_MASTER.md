@@ -1503,6 +1503,8 @@
 | §18.5004 | Milestone M1463 found the real cause of the COMMU Q/E failure: the PS TV pad read path (window_input_pad2) derived its L1/R1 only from `buttons` (physical pad/bound-key held bits) and never merged the key map's bits (`p5d_bits`) or the injected taps (`menu_tap_bits`); the COMMU page's input goes through that read path, so the key map's Q/E = L/R shoulders never reached the game - no detection or profile scheme could work there. Fix: `v = buttons | p5d_bits | p5d_macro_bits(now)`. Q/E are also handled as navigation-mode event taps now: confirming the COMMU row on the main menu sets commu_mode (Q/E tap L/R), the DANCING row sets song_mode (Q/E tap D-pad left/right), cleared on the dance stage/result/title; the pixel keycap scan is removed (no longer needed, and it cost frame time). Verified through the real launcher path: COMMU Q switches the character, song-list Q changes the difficulty; the user confirmed success. Release exe repacked (300,013,759 B, 14:52:17, payload 191C6E7D24924914, desktop updated), development library host rebuilt. |
 | M1464 | §18.5005: **Q/E 导航 tap 改用「自己的暂停状态」挂起（不再看 CONFIG 档案）**——修复「社群剧情→暂停→设置页 Q/E 失效」与「社群角色选择页又失效」两个连锁问题（用户报告）。根因：上一版为让设置页 Q/E 作十字键，在 Q/E tap 前加了 `p5d_profile == P5D_CONFIG` 条件；但画面模型会在离开暂停页后把 CONFIG 档案残留到社群页，于是社群角色选择页的 Q/E 也被跳过 tap。修复（代码级）：①Q/E tap 仅由 `p5d_pause_latch`（我们在 dance/story/commu 场景按 ESC/Return 时置位）挂起，设置页保持 CONFIG 键位表（Q/E=十字键左右）；②暂停关闭（再按 ESC，或游戏自带返回 Backspace）立即释放暂停状态 → 社群页恢复 Q/E=L/R；③暂停画面 3 秒未再建模设置页时自动释放，防止用游戏内其它方式关暂停导致状态卡死。说明：自动导航脚本进入的页面与预期设置页不符（社群行/CONFIG 行模型索引偏差），本轮以逻辑路径验证 + 用户实测为准；已重新打包（payload D961151DE8257FCC）。 |
 | §18.5005 | Milestone M1464 fixed the chain of regressions around the pause/settings page: the Q/E navigation taps are now suspended by our own pause state (p5d_pause_latch, set when Esc/Return pauses a dance/story/COMMU scene) instead of by the CONFIG profile. The CONFIG profile can linger on the COMMU pages after the pause page closes (the picture model misjudges), which had silently disabled the taps on the COMMU character-select page. Now: the settings page keeps the CONFIG map (Q/E = D-pad left/right), closing the pause page (Esc again, or the game's own Backspace back) releases the pause state immediately so the COMMU pages get Q/E = L/R again, and the state auto-releases after 3 s if the pause picture never re-models. The automated navigation script could not reliably reach the settings page (the row model's index drifts between the COMMU and CONFIG rows), so the round is validated by the logical path plus the user's own testing. Release exe repacked (payload D961151DE8257FCC), development library host rebuilt and game_host.exe updated. |
+| M1465 | §18.5006: **Q/E 键位的保护程序（社群=L/R、设置/歌单=十字键，防回归）**。用户确认社群与设置界面 Q/E 均已正常，要求加保护防止后续改键位再失效。新增两道防线：①**静态守卫** `tools/regress_commu_qe.py`（14 项不变量：`window_input_pad2` 必须合并 `p5d_bits`/`p5d_macro_bits`（M1463 根因）、Q/E 显式决策块必须在 keymap 之前、设置/暂停/歌单分支必须用 LEFT/RIGHT、非打歌其余界面必须用 LTRIG/RTRIG、打歌必须回落 keymap、菜单键位表 l=Q/r=E、像素键帽检测不得回归）——已接入 `tools/run_all_regressions.ps1` 第(9)条，每次回归必跑；②**运行时门禁** `tools/test_commu_qe_runtime.ps1`（真实自解压→启动器路径：进社群按 Q 断言头像像素变化、进打歌暂停→设置页按 Q 断言数值变化），以 `RECOMP_RUNTIME_GATE=1` 启用为回归第(10)条，**打包发布前必须跑**。同时加固设置页：暂停状态改为粘滞（去掉 3 秒自动释放，它会在设置页停留时清掉暂停态导致 Q/E 变肩键），并用设置页模板的最近时间戳（`p5d_config_us/hi_us`，900ms）作为键位分支兜底。发布 exe 重打包（payload 7B1EDFE022D59019），桌面已更新。 |
+| §18.5006 | Milestone M1465 pins the Q/E key mapping with two protections after the user confirmed that the COMMUNITY pages (L/R shoulders) and the settings page (D-pad left/right) both work. (1) A static guard, tools/regress_commu_qe.py, checks 14 invariants: window_input_pad2() must merge p5d_bits and p5d_macro_bits (the M1463 root cause where Q/E never reached the PS-TV read), the explicit Q/E decision block must precede the key-map dispatch, the settings/pause/song branches must tap LEFT/RIGHT while the other non-dance screens tap LTRIG/RTRIG, the dance stage must fall through to the key map, the menu map keeps l=Q/r=E, and the pixel keycap detector must not come back; it is wired as step (9) of tools/run_all_regressions.ps1. (2) A runtime gate, tools/test_commu_qe_runtime.ps1, drives the real self-extractor -> launcher path: entering the COMMU pages and pressing Q must change the character portrait, and the dance pause -> settings page must change a value with Q; it runs as step (10) when RECOMP_RUNTIME_GATE=1 and is required before packaging a release. The settings branch is also hardened: the pause state is sticky (the 3 s auto-release was removed because it cleared the pause while the settings page sat open, turning Q/E back into shoulders) and the settings template's recent timestamps (p5d_config_us/hi_us, 900 ms) back the branch up. Release exe repacked (payload 7B1EDFE022D59019, desktop updated). |
 | §18.4979 | The six dance-stage button icons are now replaced by Q/A/Z/O/K/M, verified live. The user identified the real asset: not the menu-hint atlas but the 512x512 texture from icons_candidates.png bottom-right (s_1022_2170be80, FNV1a64=0x7aad5be59305ae99) which contains the six white symbols (up/left/down arrows, triangle, circle, cross) plus the red/grey rail nodes and scratch markers. Implementation: keyglyph_patch() in gfx_gpu.c identifies that atlas by content hash at decode time and, only in the dance key profile (window_in_dance_stage()) with keyboard input (window_uses_keyboard()), overwrites the six symbol cells with same-sized bold white letters Q(up)/A(left)/Z(down)/O(triangle)/K(circle)/M(cross) (masks in keyglyphs512.h, Arial Bold, anti-aliased, sized to the original symbols); only this one atlas is forced onto the RGBA decode path so every other texture keeps the normal path (no black-screen regression). Live log: [KG] icon atlas 0x2170be80 dance=1 kb=1 -> [KG] patched 512 icon atlas 0x2170be80; the screenshot confirms the dance HUD shows Q/A/Z/O/K/M and the game runs normally (pause menu works). RECOMP_KEYGLYPHS=0 disables it; the menus are not affected. |
 | §18.4978 | Black-screen false alarm clarified and the picture verified: launching the normal way (desktop shortcut / P5D_Play.bat, i.e. pipeline run) and screenshotting shows the game is perfectly fine - the capture is the dance stage (SHIBUYA, 6 COMBO, the left-side direction icons, the right-side triangle/circle/cross button icons, score 2100), mean brightness 119.9/255, not black. The black windows earlier had two causes: (1) the previous experimental build forced CPU decode of all textures by default (made opt-in in M1436), and (2) my automated tests launched game_host.exe directly, bypassing the pipeline's environment/config - the direct launch itself renders black, so those black windows were my test processes, not the product. The capture also confirms that the six dance-stage button icons are exactly the previously captured 256x128 icon atlas (circle/cross/triangle/square plus four d-pad badges), giving the accurate target and verification frame for the coming keyboard-letter replacement. |
 | §18.4977 | Black-screen fix completed: every texture-side effect of the keyboard-letter experiment is now fully opt-in inside keyglyph_enabled() (the refresh, the atlas recording, the decode switch and the substitution), so the default build follows the original rendering path exactly. The previous black screen was caused by the experiment forcing CPU decode of all textures by default; RECOMP_KEYGLYPHS now defaults to 0 and build 119 replaced game_host.exe (14:15:47). The multiple game windows that appeared black during debugging were old experimental-build processes launched by my automation - apologies; please close any leftover black window and restart from the desktop shortcut. |
@@ -517154,3 +517156,52 @@ runtime/ui/window.c
 
 ANTI-FORGETTING ENTRY. Keywords: M1464 Q/E navigation taps suspended by our own pause state p5d_pause_latch instead of the CONFIG profile because the CONFIG profile lingers on the COMMU pages after the pause page closes and had silently disabled the taps on the COMMU character-select page, settings page keeps CONFIG map Q/E dpad left right, closing the pause page with Esc again or the game's Backspace back releases the state immediately, auto-release after 3 s when the pause picture never re-models, automated navigation could not reliably reach the settings page because the row model index drifts between the COMMU and CONFIG rows so validated logically plus user testing, release exe payload D961151DE8257FCC, dev host and game_host.exe updated. Verification: logical path of pause state, user testing.
 LOOKUP: M1464 decouples the pause/settings Q/E D-pad behaviour from the lingering CONFIG profile by using our own pause latch, restoring both the settings page and the COMMU pages -> 18.5004 [relevant: PS-TV pad L/R bits], 18.5003 [relevant: launcher-path state leaks], 18.5002 [relevant: modelled screen clearing]
+### 18.5006 PORT M1465: Q/E 键位保护程序（静态守卫 + 运行时门禁）
+
+1) 背景
+```
+Q/E 键位需求（用户确认已生效）：
+  社群界面          Q = L, E = R（原版肩键，切换角色）
+  设置界面（含暂停）  Q = 十字键左, E = 十字键右
+  选歌界面          Q = 十字键左, E = 十字键右（难度）
+  打歌界面          Q = 上（打歌键位表，不受影响）
+这些约束在多轮修改中被间接破坏过多次，且不跑游戏看不出来。
+```
+2) 代码级决策（window.c 事件循环，先于键位表分发）
+```
+if Q/E 按下:
+    if pause_latch || profile==CONFIG || 设置页模板 900ms 内出现 -> menu_tap(LEFT/RIGHT)   // 设置/暂停页
+    elif profile==SONG || song_mode                          -> menu_tap(LEFT/RIGHT)   // 歌单
+    elif profile!=GAME                                       -> menu_tap(LTRIG/RTRIG)  // 社群等：肩键
+    else                                                     -> 交键位表（打歌 Q=上）
+根因前提：window_input_pad2() 的 PS-TV 读必须合并 p5d_bits | menu_tap_bits（M1463）
+```
+3) 保护程序（新增）
+```
+① 静态守卫 tools/regress_commu_qe.py —— 14 项不变量，全部 PASS 才算过：
+    - window_input_pad2 合并 p5d_bits / menu_tap_bits / buttons
+    - Q/E 决策块存在且在 keymap 分发之前
+    - 设置/暂停分支 = LEFT/RIGHT；歌单分支 = LEFT/RIGHT
+    - 非打歌其余界面 = LTRIG/RTRIG；打歌回落 keymap
+    - 菜单键位表 l=Q, r=E
+    - 像素键帽检测不得回归（历史包袱：掉帧且不可靠）
+   → 接入 tools/run_all_regressions.ps1 第(9)条，每次必跑
+② 运行时门禁 tools/test_commu_qe_runtime.ps1 —— 真实自解压→启动器→游戏：
+    - 主菜单→COMMU→按 Q→断言左侧角色头像像素变化（否则 FAIL）
+    - 回主菜单→DANCING→选曲→ESC 暂停→设定页→按 Q→断言数值变化（否则 FAIL）
+   → 回归第(10)条，RECOMP_RUNTIME_GATE=1 时启用；**打包发布前必须跑**
+```
+4) 设置页加固
+```
+- 暂停状态改为粘滞：删除「3 秒自动释放」（它会在设置页停留时清掉暂停态，Q/E 退回肩键）
+- 设置页分支增加模板时间戳兜底：p5d_config_us / p5d_config_hi_us 900ms 内命中即按十字键
+```
+5) 打包
+```
+- 发布 exe：payload 7B1EDFE022D59019，桌面已更新
+- 开发库 host / game_host.exe 已同步
+```
+验证：COMMU_QE_GUARD_PASS（14 项）+ ALL_REGRESSIONS_PASS；运行时门禁脚本已就绪（RECOMP_RUNTIME_GATE=1）。
+
+ANTI-FORGETTING ENTRY. Keywords: M1465 Q/E key mapping protection program, static guard tools/regress_commu_qe.py with 14 invariants wired as step 9 of run_all_regressions (pad2 merges p5d_bits and menu_tap_bits, explicit Q/E decision before key map dispatch, settings/pause/song branches tap LEFT/RIGHT, other non-dance screens tap LTRIG/RTRIG, dance falls through to the key map, menu map l=Q r=E, pixel keycap detector must not return), runtime gate tools/test_commu_qe_runtime.ps1 driving the real self-extractor launcher path asserting COMMU Q changes the character portrait and the pause settings page Q changes a value, enabled as step 10 with RECOMP_RUNTIME_GATE=1 and required before packaging a release, settings branch hardened with sticky pause state (3 s auto-release removed) plus config template recent timestamps 900 ms fallback, release exe payload 7B1EDFE022D59019. Verification: COMMU_QE_GUARD_PASS and ALL_REGRESSIONS_PASS, user confirmed both pages work.
+LOOKUP: M1465 adds the static and runtime guards that pin the Q/E mapping (COMMU = L/R shoulders, settings/song = D-pad) so later edits cannot silently break them -> 18.5005 [relevant: pause state], 18.5004 [relevant: PS-TV pad L/R bits], 18.5003 [relevant: launcher path]
