@@ -156,3 +156,15 @@
 - 实测（启动器 bat）：键盘方向键下×4+回车主菜单设置页 → `[SCR] settings` → Q/E=数值 → Backspace 回主菜单；剧情 ESC→暂停菜单 ✓。
 - **M1523c result-page payload:** D4B7DFC74BFC6930 (300,038,740 B / 00:40:29) - result menu wheel/left/right verified on the launcher bat.
 
+### 9) COLLECTION → CHARACTER → 角色服装/观赏界面（M1524）
+
+| 操作 | 要求 |
+|---|---|
+| **键盘 Enter** | 等同于 PS 的 **START**：进入「觀看模式」（全屏观赏角色） |
+| **键盘 Ctrl** | 等同于 PS 的 **△（三角）**：随机（随机服装/动作） |
+| 界面提示图标 | START 图标显示为 **Enter** 键帽，△ 图标显示为 **Ctrl** 键帽 |
+
+- 界面识别：纯代码（COLLECTION 作业名 + 端口自己累计的确认/返回步数判断"页签页 / 角色列表 / 服装界面"三层深度）；
+- **离开该界面自动失效**：深度变化或离开 COLLECTION 流程后，Enter 恢复为普通确认、Ctrl 不再映射，提示图标恢复原样（`[KEYCAP] collection viewer off`）；
+- 实测（启动器 bat）：服装界面底部提示为 `Enter 觀看模式` / `Ctrl 隨機`；Enter 进入观看模式（全屏角色）；Ctrl 变化动作（随机）；再按 Enter 退出观看模式；Backspace 返回角色列表后提示恢复。
+
