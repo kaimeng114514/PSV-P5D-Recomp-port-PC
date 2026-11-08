@@ -126,3 +126,28 @@
 - 启动器真实路径（桌面 bat），2K 全屏；
 - 每项用日志（`[KEY]`/`[MOUSE]`/`[UI] wheel`/`[SCENE]`/`input: profile`）＋截图证明；
 - 里程碑文档（P5D_MASTER）记录每次修复与证据。
+
+## 实现架构（M1523：输入判定已改为纯代码，全部用游戏作业名）
+
+用 `RECOMP_JOBDUMP=1` 抓取了游戏作业链表的全部作业名，每个界面都有游戏自己的"身份证"：
+
+| 界面 | 代码级证据（游戏作业名） |
+|---|---|
+| 主菜单 | `main menu p5` / `mainmenu load` |
+| 选歌 | `MusicSelectMain` |
+| 打歌 | `DanceProcess` / `DanceMemberPose` / `mns` / `danceVoiceSub` |
+| 暂停菜单 | `pause menu` |
+| 设置页 | `config menu` / `ConfigStartEffect` |
+| 社群 | `commuMain` |
+| 社群剧情 | `evtSceneManager` / `evtSMProcess` / `evtSpeakerManager` |
+| 标题 | `title` / `title sequence` / `titleDraw` |
+| 结算 | `result` |
+
+- 界面识别服务 = 作业名证据（按屏幕优先级）+ app state；**画面模型不再参与输入决策**（只在代码状态未知时做诊断显示）
+- **ESC**：设置页→设置退出、暂停→关闭暂停、打歌/剧情→打开暂停、菜单→返回
+- **Q/E**：选歌→难度、暂停/设置→数值、社群/剧情→切角色、主菜单/标题/结算→肩键
+- **鼠标**：滚轮=列表步进、左键=确认、右键=返回（画面鼠标悬停/点击路径在 PC-only 下已禁用）
+- 暂停"是否打开"以我们自己的开关为准（`pause menu` 作业在打歌时也会预载，不能当锁存源）
+- 日志：`[SCR] input screen -> <界面>`（每次切换）、`[KEY] Q/E -> ... scr=<界面>`、`[MOUSE] lmb/rmb`、`[EV] esc -> ... (code screen)`
+
+未完成：**主菜单选中行号**仍用端口自计数（滚轮/方向键步进），滚动与游戏高亮偶发差一行；下一步做纯代码的"选中索引"定位（写候选值 + 按 Circle + 看出现的作业名验证，不用画面），之后滚轮/点击/设置页识别全部零漂移。
