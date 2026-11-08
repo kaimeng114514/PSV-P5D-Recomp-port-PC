@@ -154,3 +154,4 @@
 - **设置页识别（M1523b）**：设置页由游戏自身的 `config menu` / `ConfigStartEffect` 作业识别，**任何入口**（主菜单 CONFIG 行 / 打歌暂停 / 社群剧情暂停）都成立，不再依赖端口行计数；COLLECTION 子页有自己的作业名（`collection main` 等），不会再被误判成设置页。
 - **键位档案强制**：代码级界面直接强制对应键位档案（主菜单/标题=MENU、选歌=SONG、社群=COMMU、设置/暂停=CONFIG、打歌/剧情=GAME），避免"界面识别对了但键位档案没切"的问题。
 - 实测（启动器 bat）：键盘方向键下×4+回车主菜单设置页 → `[SCR] settings` → Q/E=数值 → Backspace 回主菜单；剧情 ESC→暂停菜单 ✓。
+- **M1523c result-page payload:** D4B7DFC74BFC6930 (300,038,740 B / 00:40:29) - result menu wheel/left/right verified on the launcher bat.
