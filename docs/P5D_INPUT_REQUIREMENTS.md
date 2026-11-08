@@ -155,3 +155,4 @@
 - **键位档案强制**：代码级界面直接强制对应键位档案（主菜单/标题=MENU、选歌=SONG、社群=COMMU、设置/暂停=CONFIG、打歌/剧情=GAME），避免"界面识别对了但键位档案没切"的问题。
 - 实测（启动器 bat）：键盘方向键下×4+回车主菜单设置页 → `[SCR] settings` → Q/E=数值 → Backspace 回主菜单；剧情 ESC→暂停菜单 ✓。
 - **M1523c result-page payload:** D4B7DFC74BFC6930 (300,038,740 B / 00:40:29) - result menu wheel/left/right verified on the launcher bat.
+
