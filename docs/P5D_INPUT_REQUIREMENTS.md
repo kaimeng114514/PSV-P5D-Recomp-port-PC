@@ -105,6 +105,22 @@
 | 社群（COMMU） | 方向键=移动；Space/Enter=确定；Backspace=返回；Q/E=L/R（切换角色） |
 | 设置（CONFIG） | 方向键=选择；Q/E=左右（数值）；Space/Enter=确定；Backspace/Esc=返回 |
 
+
+## 实现架构（M1522：代码级界面识别 + 输入切换）
+
+1. **启动即 PC-only**：忽略所有 SDL 手柄事件（原 PS 手柄方案被禁用；`RECOMP_ALLOW_PAD=1` 仅供测试），游戏只从端口的键盘/鼠标映射得到按键。
+2. **屏幕状态服务（Screen State Service）**：每帧由游戏自己的代码状态判定当前界面，**不使用任何画面识别**：
+   - 我们自己的暂停/设置 latch（谁打开的暂停，谁负责关闭）
+   - **游戏作业链表扫描**（0x815554C4，每 150ms）：commuMain / MusicSelect / ConfigStartEffect / TutorialMain / result / mainMenuP5 / replay dance / danceVoiceSub / Dancig…
+   - **app state**（0x813B01A8 链）：1=initread、3=COMMU、4=TUTORIAL（按菜单处理）、5=MAIN MENU、6=TITLE
+   - 舞池作业流；最后是代码级场景标志
+   - 3 帧去抖；每次切换打印 `[SCR] input screen -> <名称>`（便于日志验收）
+3. **输入行为按屏幕切换**（日志可证）：
+   - 菜单类（title/main/commu/tutorial/song/result/pause/settings/story）：滚轮=原生列表步进；左键=确认（Circle）；右键=返回（Cross，锁存；暂停时按我们自己的行计数退出）
+   - 打歌界面：不拦截滚轮/鼠标，键盘走 Q/A/Z/O/K/M 映射，ESC=START（暂停）
+   - 设置页（无论从哪进入）：同一套映射；Q/E=调整；Alt=恢复预设确认框
+   - 退出某界面进入另一界面时，下一帧即切换到新界面的键位（`[SCR]` 日志显示切换）
+4. **选中行**：端口用"自己发送的步进"计数（滚轮/方向键）维护当前行；暂停菜单退出与点击目标使用它。下一步（纯代码）定位游戏内存中的选中索引后改为直接读写，彻底消除计数漂移。
 ## 验收方式
 
 - 启动器真实路径（桌面 bat），2K 全屏；
