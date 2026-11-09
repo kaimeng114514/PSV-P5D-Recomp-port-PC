@@ -171,3 +171,6 @@
 
 ### M1525 update (COLLECTION costume screen)
 The Enter / Ctrl hint art now comes from the game's own P5R keycap assets (P5R keycap face btn03_keyboard_b + the P5R keytop font glyphs; Enter is abbreviated as Ent), and the view-mode bookkeeping is code-level: a back while the watch mode is up only leaves the watch mode (the costume screen keeps the Ent / Ctrl keys and hints), and each back (Backspace, right click, Esc) walks exactly one level; returning to the character list restores the normal hints. Release payload AE914BC8BD211408 (300,043,620 B / 11:07:53).
+
+### M1527 update (COLLECTION watch mode controls)
+WASD = left stick (move) and the arrow keys = right stick (rotate), polled from SDL's keyboard state on every pad read; the mouse wheel = the L/R shoulders (zoom, the game's real zoom pair); Alt = SELECT (reset). The watch hint bar now shows a four-key WASD T cluster, a four-arrow-key cluster, wheel +/- zoom keycaps and an Alt keycap, all fully covering the game's original icons. Release payload 2404D1D9BACA531B (300,051,156 B / 12:06:22).
