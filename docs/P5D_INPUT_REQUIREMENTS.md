@@ -168,3 +168,6 @@
 - **离开该界面自动失效**：深度变化或离开 COLLECTION 流程后，Enter 恢复为普通确认、Ctrl 不再映射，提示图标恢复原样（`[KEYCAP] collection viewer off`）；
 - 实测（启动器 bat）：服装界面底部提示为 `Enter 觀看模式` / `Ctrl 隨機`；Enter 进入观看模式（全屏角色）；Ctrl 变化动作（随机）；再按 Enter 退出观看模式；Backspace 返回角色列表后提示恢复。
 
+
+### M1525 update (COLLECTION costume screen)
+The Enter / Ctrl hint art now comes from the game's own P5R keycap assets (P5R keycap face btn03_keyboard_b + the P5R keytop font glyphs; Enter is abbreviated as Ent), and the view-mode bookkeeping is code-level: a back while the watch mode is up only leaves the watch mode (the costume screen keeps the Ent / Ctrl keys and hints), and each back (Backspace, right click, Esc) walks exactly one level; returning to the character list restores the normal hints. Release payload AE914BC8BD211408 (300,043,620 B / 11:07:53).
