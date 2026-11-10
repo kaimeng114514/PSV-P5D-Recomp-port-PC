@@ -1648,6 +1648,7 @@
 | M1563 | §18.5090: **M-B3 architecture: the window presents at 60 Hz while the guest runs 30 fps.** Measured in the existing 30 fps runs: guest 30.0 fps, speed 1.00x, window 60.0 fps - window.c's present loop is already decoupled and duplicates the latest frame, so interpolation only needs to replace the duplicates with re-rendered interpolated content while the guest keeps its authored 30 Hz cadence. Missing pieces: (1) an env-gated draw recorder in the GPU layer (GfxDraw + state: streams/indices/uniforms/textures/render target/viewport/blend/depth) - the motion pass already keeps draw keys, previous-frame SA and LDST window snapshots for pose blending; (2) an interpolation re-render with a blended SA per skinned draw (alpha 0.5) into a second colour target in the present texture ring, alternated at 60 Hz. Validation: 60 distinct frames, per-second pixel change equal to the 30 fps baseline, music/judgement untouched, OSD 60, speed 1.00x. This is a real recorder/re-render subsystem (approximate matrix lerp first, 30 fps path untouched); next: the env-gated recorder counting draws/skinned draws/state bytes. Release untouched CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
 | M1564 | §18.5091: **M-B3 step 1: the env-gated GPU frame recorder works.** RECOMP_INTERP_REC=1 makes gfx_gpu_draw copy each API-neutral GfxDraw (guest addresses + state) into a per-frame list; skinned draws are counted where the motion pass resolves the previous SA (RECOMP_MV=1 or FSR on); gfx_gpu_frame_queued logs and resets. Dance at 30 fps: 356-362 draws/frame, 245-250 skinned (~70%), ~390-400 KB of GfxDraw copies; boot/title 3-26 draws, 0-1 skinned. Next step 2: re-execute the recorded draws with a blended SA (lerp previous/current floats, alpha 0.5, pointer words current) and current LDST windows through each draw's colour pipeline into a second colour target while the guest waits for its next 30 Hz vblank, present loop alternating base/interpolated images at 60 Hz. Release untouched CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
 | M1565 | §18.5092: **M-B3 implementation assessment.** With the frame recorder measured (dance 356-362 draws, 245-250 skinned, ~400 KB GfxDraw/frame) and the present loop decoupled (guest 30 fps, window 60 fps), a real interpolated 60 needs in gfx_gpu.c: a second colour target per display target + depth handling + window present-ring alternation (~200-400 lines); a replay path re-executing the recorded draws while the guest waits on its next vblank, re-establishing scene state/targets/caches (~150-300 lines); blended bone palettes (LDST window contents lerped into the ring, ~100 lines); interpolated-frame scheduling (alternate presents, scene-change frames as-is). Risks: guest-address-keyed caches revalidation, doubled GPU work on interpolated frames, depth/blend/UI ordering (copy base first), approximate lerp. Effort 3-6 rounds for a throwaway dance-only prototype, 10-20 for usable quality across 3D screens; 30 fps path untouched. Options: (A) continue M-B3, (B) pause at the shipped hybrid, (C) cheap image-level temporal blend (ghosting). Release untouched CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
+| M1566 | §18.5093: **M-B3 step 2a: second colour target + GPU blit copy verified pixel-identical.** gfx_gpu_present() with RECOMP_INTERP=1 copies the finished 960x544 R8G8B8A8 display target into a persistent second SDL_GPU texture via SDL_BlitGPUTexture (one command buffer/frame); RECOMP_INTERP_DUMP=prefix dumps both textures once as raw RGBA. Verification on the dance stage at 30 fps: target created 960x544 fmt 4, blit ready, both dumps 2,088,960 bytes and byte-identical (same sha256), game ran normally with no crash or visual change (the copy is a separate, unpublished texture). Foundation for step 2b: re-render the recorded draws into this target with blended bone palettes (LDST window lerp, alpha 0.5) while the guest waits on its vblank, then alternate the two images at 60 Hz. 30 fps path untouched. Release unchanged CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
 proposal).** mnsHandle_8111b64c/8111b190 receive a real-time float (+0.01668/frame at 60 vs +0.03337 at 30);
 mnsProcess_811251d6 fires per-frame but constant; other mnsProcess/mnsOption/gfd entries do not fire per-frame;
 object-word slopes show only the known danceQuantizer_81049976 w2 (+0.5 at 60 vs +1.0 at 30). The remaining
@@ -519996,3 +519997,36 @@ the plan for later, (C) cheaper image-level temporal blend (ghosting, not perfec
 CEBB6C124FF7B269 (2026-11-10 16:39:04), 60 experimental.
 LOOKUP: M1565 assesses M-B3 after M1564 -> 18.5091 [relevant: frame recorder], 18.5090 [relevant: present architecture],
 18.5089 [relevant: motion-pass design]
+
+### 18.5093 M1566 M-B3 STEP 2A: THE SECOND COLOUR TARGET AND GPU BLIT COPY ARE IN AND VERIFIED PIXEL-IDENTICAL
+
+The M-B3 interpolation prototype now has its second colour target. In runtime/gfx/gfx_gpu.c, gfx_gpu_present() with
+RECOMP_INTERP=1 copies the finished display colour target (e->color, 960x544, format 4 = R8G8B8A8) into a persistent
+second SDL_GPU texture of the same size and format through SDL_BlitGPUTexture (one command buffer per frame), logging
+the target creation and the first successful blit. RECOMP_INTERP_DUMP=prefix writes both textures once as raw RGBA
+(prefix.base.rgba, prefix.interp.rgba) for offline comparison.
+
+Verification (dance stage, 30 fps mode - the intended interpolation target, window presenting at 60):
+  - log: "second colour target 960x544 fmt 4 created", "blit path ready (960x544)", both dumps written;
+  - both dumps are 2,088,960 bytes (960*544*4) and byte-identical - sha256 of base and interpolated target match
+    (f3325e5c5ee33d9f...), so the second-target blit path is exact;
+  - the game ran its dance stage normally with the prototype active (no crash, no visual change: the copy is a
+    separate texture not yet presented).
+That is the foundation for step 2b: re-render the recorded draws into this second target with blended bone palettes
+(previous/current LDST window contents lerped, alpha 0.5) while the guest waits on its next 30 Hz vblank, then let the
+present loop alternate the two images at 60 Hz. The 30 fps path stays untouched (all env-gated); release unchanged:
+payload CEBB6C124FF7B269 (2026-11-10 16:39:04), 60 experimental.
+
+ANTI-FORGETTING ENTRY. Keywords: M1566 M-B3 step 2a - runtime/gfx/gfx_gpu.c gfx_gpu_present() with RECOMP_INTERP=1
+copies the finished display colour target (e->color, 960x544, format 4 = R8G8B8A8) into a persistent second SDL_GPU
+texture of the same size/format via SDL_BlitGPUTexture (one command buffer per frame), logging the target creation and
+first successful blit; RECOMP_INTERP_DUMP=prefix writes both textures once as raw RGBA (prefix.base.rgba,
+prefix.interp.rgba); verification on the dance stage at 30 fps: target created 960x544 fmt 4, blit path ready, both
+dumps 2,088,960 bytes (960*544*4) and byte-identical (same sha256), so the second-target blit path is exact, and the
+game ran normally with no crash or visual change (the copy is a separate, unpublished texture); this is the foundation
+for step 2b: re-render the recorded draws into the second target with blended bone palettes (previous/current LDST
+window contents lerped, alpha 0.5) while the guest waits on its next 30 Hz vblank, then alternate the two images in the
+present loop at 60 Hz; the 30 fps path stays untouched (env-gated) and the release is unchanged payload CEBB6C124FF7B269
+(2026-11-10 16:39:04), 60 experimental.
+LOOKUP: M1566 is M-B3 step 2 after M1564/M1565 -> 18.5091 [relevant: frame recorder], 18.5092 [relevant: assessment],
+18.5090 [relevant: present architecture]
