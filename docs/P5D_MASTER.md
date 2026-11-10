@@ -1687,6 +1687,7 @@
 | M1609 | §18.5129: **Packaged launcher page captured: the promoted 60 幀（全 60） option is in the shipped exe; injected clicks still do not register (focus/z-order).** Resizing the packaged launcher window and PrintWindow shows the full page: ROM imported (P5D 1.00-mai), firmware 3.74 installed, 已構建：可隨時啟動遊戲, resolution 2K selected, frequency 30 selected and the new 60 幀（全 60：選單/舞池/UI，實驗性） present - the promoted label is confirmed inside the release exe. Automated SendInput/mouse_event clicks and wheel still do not reach the SDL/ImGui window (radio stays 30, page does not scroll) because it needs real foreground/focus/z-order; remaining is the human click-through (desktop exe -> select 60 全 60 -> start -> dance OSD 60/guest 60fps/speed 1.00x). Release: desktop exe = promoted build, stub id A4A9DA194082155C, 287,636,147 B. |
 | M1610 | §18.5130: **Launcher pref parser: p5d_fps = 60 (with spaces) was ignored, p5d_fps=60 is the accepted form; the packaged payload cannot be launched directly (its python dir has only Lib).** The launcher.ini uses key=value without spaces; the earlier edit was not read (the packaged launcher still showed 30 selected) and was corrected to p5d_fps=60, so the desktop launch should now preselect 60. The extracted payload python/ directory has only Lib (no python.exe), so the game cannot be run directly from the payload by a packaged pipeline - the launcher arranges the runtime, so the remaining validation must go through the launcher GUI (real click) or launcher automation. A4A9DA194082155C release (287,636,147 B) unchanged; docs/builds audit-clean. |
 | M1611 | §18.5131: **The launcher preselects native 60 after the ini fix; the 60 option description was updated up and the release repackaged (stub id B16B982717582E60).** With launcher.ini `p5d_fps=60` the packaged GUI show 5) 遊戲頻率 with the red dot on the 60 幀（全 60...） option (previously 30), confirming M1610. The stale hybrid description text was replaced with the validated native-60 wording, the launcher rebuilt and the release repackaged: stub id B16B982717582E60, 287,636,154 B, SHA256 780774D2B8AC7006... (previous A4A9DA194082155C), copied to the desktop. Remaining: the human click-through (60 preselected; confirm dance OSD 60/guest 60fps/speed 1.00x/complete notes) since SDL/ImGui ignores injected clicks. |
+| M1612 | §18.5132: **Critical packaging regression found and fixed: the repack after the storage cleanup had dropped the embedded Python runtime; release rebuilt (300,317,559 B, stub id 6B029A072AD3ACA3).** make_p5d_release.py assembles the embedded CPython from C:/dev/tmp/m1448/pyembed, which the storage cleanup had deleted, so the repacks after that point (stubs A4A9DA194082155C / B16B982717582E60, ~287.6 MB vs the previous 300 MB) shipped without a Python runtime and could not run the game ("can't start python" in the headless ATIV_TASK play test). Fixed by recovering the runtime from a previous release payload (CEBB6C124FF7B269/python) into m1448/pyembed and rebuilding: stub id 6B029A072AD3ACA3, 300,317,559 B, SHA256 39C9533B9D375ECE..., payload 8719 files ~284 MB with python.exe + capstone, copied to the desktop. Headless ATIV_TASK now finds python but the path lacks the GUI env so it stops at the toolchain check; the definitive check remains the GUI Play (settings.ini already frame_rate=60, osd=1; 60 preselected). |
 proposal).** mnsHandle_8111b64c/8111b190 receive a real-time float (+0.01668/frame at 60 vs +0.03337 at 30);
 mnsProcess_811251d6 fires per-frame but constant; other mnsProcess/mnsOption/gfd entries do not fire per-frame;
 object-word slopes show only the known danceQuantizer_81049976 w2 (+0.5 at 60 vs +1.0 at 30). The remaining
@@ -521763,3 +521764,47 @@ SDL/ImGui launcher does not accept injected clicks in this environment (M1608/M1
 promoted build (stub id B16B982717582E60, 287,636,154 B, 2026-11-11 02:12:00), docs/builds audit-clean; the 30 fps path is unchanged and is still
 the default for a fresh profile.
 LOOKUP: M1611 follows M1610 -> 18.5130 [relevant: ini parser], 18.5129 [relevant: packaged page], 18.5126 [relevant: promotion]
+
+### 18.5132 M1612 CRITICAL PACKAGING REGRESSION FOUND AND FIXED: THE REPACK AFTER THE STORAGE CLEANUP HAD DROPPED THE EMBEDDED PYTHON RUNTIME; RELEASE REBUILT (300,317,559 B, STUB ID 6B029A072AD3ACA3)
+
+While exercising the packaged launcher's headless task channel (ATIV_TASK=play:PCSH10109, which starts the same play
+task the Play button runs), the task failed with "can't start python" and the extracted payload turned out to have no
+Python interpreter at all. Cause: dev/make_p5d_release.py assembles the embedded CPython from C:\dev\tmp\m1448\pyembed,
+and that working directory had been deleted by the storage cleanup earlier in the session; the release script then copied
+an empty pyembed into the package. The earlier repacks from that moment (stub A4A9DA194082155C and B16B982717582E60,
+287,636,147 / 287,636,154 B - about 12.7 MB smaller than the previous 300 MB releases) therefore shipped **without the
+Python runtime** and could not build/run the game.
+
+Fix: the embedded runtime was recovered from a previous release payload that still had it
+(%LOCALAPPDATA%\P5D-Port\CEBB6C124FF7B269\python: python.exe, python310.dll, Lib with capstone/pycryptodome), copied to
+C:\dev\tmp\m1448\pyembed, and the release rebuilt. New release: **stub id 6B029A072AD3ACA3, 300,317,559 B, SHA256
+39C9533B9D375ECE...** (payload 8719 files / ~284 MB, including python.exe and capstone - verified in the extracted payload),
+copied to the desktop launcher. This matches the previous working release size (~300.3 MB), and the launcher page still
+shows the promoted 60 option (verified earlier in the packaged GUI).
+
+Headless check after the fix: the ATIV_TASK play task now finds and starts the payload's python (the "can't start python"
+error is gone) and proceeds to "CHECKING THE GAME BUILD", then stops at "no Windows toolchain at <payload>/toolchain: run
+runtime/platform/win/setup-toolchain.sh" - the ATIV_TASK path does not set the full environment the GUI's Play button sets,
+so the definitive end-to-end check remains the GUI launch (settings.ini already has frame_rate = 60 and osd = 1; the
+launcher preselects the 60 option).
+
+Release state: desktop exe = native-60 promoted build, stub id 6B029A072AD3ACA3 (300,317,559 B, 2026-11-11 02:30:00). The two broken repacks
+(B16B982717582E60, A4A9DA194082155C) are superseded. Docs/builds audit-clean.
+
+ANTI-FORGETTING ENTRY. Keywords: M1612 packaging regression - dev/make_p5d_release.py assembles the embedded CPython from
+C:/dev/tmp/m1448/pyembed and that directory had been deleted by the storage cleanup, so the repacks after that point (stub
+A4A9DA194082155C and B16B982717582E60, 287,636,147/154 B - about 12.7 MB smaller than the 300 MB releases) shipped without
+the Python runtime; the headless ATIV_TASK=play:PCSH10109 test exposed it with "can't start python" and the extracted
+payload had no interpreter; fix: recovered the embedded runtime from a previous release payload
+(LOCALAPPDATA/P5D-Port/CEBB6C124FF7B269/python: python.exe, python310.dll, Lib with capstone/pycryptodome), copied it to
+C:/dev/tmp/m1448/pyembed and rebuilt - new release stub id 6B029A072AD3ACA3, 300,317,559 B, SHA256 39C9533B9D375ECE...,
+payload 8719 files ~284 MB including python.exe and capstone (verified in the extracted payload), copied to the desktop
+launcher; matches the previous working release size and still shows the promoted 60 option; headless check after the fix:
+ATIV_TASK play now starts the payload python and reaches CHECKING THE GAME BUILD but stops at "no Windows toolchain at
+<payload>/toolchain: run runtime/platform/win/setup-toolchain.sh" because the ATIV_TASK path does not set the full
+environment the GUI Play button sets, so the definitive end-to-end check remains the GUI launch (settings.ini already
+frame_rate = 60, osd = 1; launcher preselects 60); release state: desktop exe = native-60 promoted build, stub id
+6B029A072AD3ACA3 (300,317,559 B, 2026-11-11 02:30:00); the broken repacks B16B982717582E60 and A4A9DA194082155C are superseded; docs/builds
+audit-clean.
+LOOKUP: M1612 fixes the packaging regression from M1611 -> 18.5131 [relevant: repack], 18.5130 [relevant: ini fix], 18.5126
+[relevant: promotion]
