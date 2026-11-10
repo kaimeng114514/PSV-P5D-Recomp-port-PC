@@ -1659,6 +1659,7 @@
 | M1574 | §18.5101: **M-B3 2b: rotation-aware blending in; replay costs ~106 ms per replay frame.** The blended-window pass now detects affine matrices (4x4 with [0,0,0,1] last row or 3x4), checks orthonormal + det +1, slerps the rotation quaternions and lerps the translation, rebuilding the matrix (non-matrix floats lerped, non-floats passed through, one blended copy per unique palette). With no dump, replay frames still take about 106 ms (2402/2432/2462: 106.6/106.3/106.2 ms, 6 edges; guest ~27 fps): the replay doubles the frame's vertex/index/LDST-ring consumption and meets the ring fences waiting on GPU earlier laps. Fix: replay-specific queue discipline (own command buffer/transfer rings or reserved ring segment) so replay draws never wait on the normal frame's fences; then re-validate the rotation-aware blend visually, redirect the composite into the second colour target, alternate presents at 60 Hz. Release unchanged CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
 | M1575 | §18.5102: **Replay hitch persists after four sync fixes; PS4-60 lead becomes the priority.** Tried: GPU drain before replay; skip guest->GPU uploads and end-of-scene readbacks during replay (interp_no_sync); skip begin_scene downloads; early-out matrix detection - hitch unchanged (117.5/125.4 ms on hitches 59/60; run reached dance). Next: instrument the replay sections (per begin_scene / draw range / end_scene) to find where the ~100 ms goes (per-scene begin/end overhead or LDST-ring placement suspects). PS4 lead: user reports PS4 UI looks smooth (60 fps), so the shared codebase may carry platform-conditional pacing the Vita build never selects; next search the modules for platform/refresh-rate/60 code paths around the appMframe boot init callers and check what init(1,1,1) is derived from at the original call sites - a PS4 branch passing different args or setting a 60 flag would be a cleaner path than render-level interpolation. Release unchanged CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
 | M1576 | §18.5103: **PS4-60 lead: Vita eboot has only Vita platform paths; frame rate is configurable (appMframe 60 table, CRI framerate_n/d).** String scan: all platform paths are Vita (touch/platform/vita, unique/vita, appMemoryCard/module/vita, test/vita, archive vita.cpk; CRI all VITA builds), so a PS4 branch is not visibly compiled into the Vita executable (PS4 release is a separate build of the shared engine). The appMframe 60 table and the debug fields framerate_n/framerate_d exist, so the rate is config, not a constant; no game 60fps/vsync/console-type option string. Next: trace the appMframe boot init(1,1,1) argument provenance (config value/platform constant/computed rate; also the denominators), locate the framerate_n/d readers, and test overriding the app rate config instead of the init args after the fact - the native path if it exists. Release unchanged CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
+| M1577 | §18.5104: **Found the boot frame-rate call sequence: flag 0x81670354=1, appMframe init(1,1,1), then fn_81154a1c(30,30) - the likely appCalculator frame-rate config hardcoded to 30.** game_part8.c at VA 0x81184692-0x811846b0 shows the three hardcoded steps; fn_81154a1c (game_part7.c) loads a global 0x813af5a8 and stores two args (matches framerate_n/framerate_d from M1576). The PS4 build of the shared engine most likely passes 60 here, explaining why its UI/animations run at 60 without double-speed. MFRAME60 only changed step 2 (frame counts) while step 3 kept the animation time base at 30 - matching the residual dance mismatch. Next: hook fn_81154a1c at the boot call site, override to 60,60 (RECOMP_P5D_APPFPS60=1, 60 mode only), combined with MFRAME60, and measure dance animation speed, title time, song duration - the native 60 path may open up. Release unchanged CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
 proposal).** mnsHandle_8111b64c/8111b190 receive a real-time float (+0.01668/frame at 60 vs +0.03337 at 30);
 mnsProcess_811251d6 fires per-frame but constant; other mnsProcess/mnsOption/gfd entries do not fire per-frame;
 object-word slopes show only the known danceQuantizer_81049976 w2 (+0.5 at 60 vs +1.0 at 30). The remaining
@@ -520475,3 +520476,45 @@ rate) and test overriding the app rate config (rather than the init args after t
 experimental, all prototypes env-gated and the 30 fps path unaffected.
 LOOKUP: M1576 follows M1575 on the PS4-60 lead -> 18.5102 [relevant: PS4 lead + replay hitch], 18.5096 [relevant: PS4 init
 probe], 18.5094 [relevant: Phase B status]
+
+### 18.5104 M1577 FOUND THE BOOT FRAME-RATE CALL SEQUENCE: flag 0x81670354=1, appMframe init(1,1,1), then fn_81154a1c(30,30) - THE LIKELY APP-CALCULATOR FRAME-RATE CONFIG HARDCODED TO 30
+
+The recompiled C (game_part8.c around guest VA 0x81184692-0x811846b0) shows the Vita boot frame-rate setup as three
+consecutive steps, all hardcoded constants in the instruction stream:
+
+1. write 1 to 0x81670354 (twice, with 0x81670354=1 around fn_811546f0 call);
+2. r0=1, r1=1, r2=1 then bl 0x8102a780 = the appMframe init (1,1,1) we already knew;
+3. r0=0x1e, r1=0x1e, then bl 0x81154a1c = fn_81154a1c(30,30).
+
+fn_81154a1c (game_part7.c) loads a global from 0x813af5a8 and stores two arguments into a struct - consistent with the
+appCalculator/app framework frame-rate configuration (the binary also contains the "framerate_n"/"framerate_d" debug
+field names from M1576). The Vita build hardcodes 30 here; the PS4 build of the shared engine most likely passes 60 at
+the same place (or the platform wrapper does), which would explain why the PS4 version runs its UI/animations at 60
+without the double-speed artifacts: the whole app framework knows the presentation rate.
+
+This is the missing piece of the M-B1/M-B3 puzzle: our MFRAME60 experiment changed only step 2 (frame-count conversion)
+while step 3 still told the animation calculator 30 - so frame counts were converted but the animation time base stayed
+30, matching the observed residual dance animation speed mismatch at 60. Next: hook fn_81154a1c at the boot call site
+and override its arguments to 60,60 (env-gated RECOMP_P5D_APPFPS60=1, only in the 60 fps presentation mode), combined
+with MFRAME60, then measure the dance stage (animation speed versus the 30 fps baseline), the title sequence time and
+the song duration. If the calculator time base was the cause of the residual mismatch, the native 60 path (no
+render-level interpolation needed) opens up.
+
+Release unchanged: payload CEBB6C124FF7B269 (2026-11-10 16:39:04), 60 experimental; all prototypes env-gated, the 30 fps path unaffected.
+
+ANTI-FORGETTING ENTRY. Keywords: M1577 boot frame-rate call sequence - the recompiled C game_part8.c around guest VA
+0x81184692-0x811846b0 shows the Vita boot frame-rate setup as three hardcoded steps: write 1 to 0x81670354 (twice, with
+fn_811546f0 call), then r0=r1=r2=1 bl 0x8102a780 (the appMframe init(1,1,1)), then r0=0x1e r1=0x1e bl 0x81154a1c =
+fn_81154a1c(30,30); fn_81154a1c (game_part7.c) loads a global from 0x813af5a8 and stores two arguments into a struct,
+consistent with the appCalculator/app framework frame-rate configuration (binary also has framerate_n/framerate_d debug
+field names from M1576); the Vita build hardcodes 30 and the PS4 build of the shared engine most likely passes 60 at the
+same place, explaining why the PS4 version runs UI/animations at 60 without double-speed artifacts; this is the missing
+piece: MFRAME60 changed only step 2 (frame-count conversion) while step 3 still told the animation calculator 30, so
+frame counts converted but the animation time base stayed 30 - matching the observed residual dance animation speed
+mismatch at 60; next: hook fn_81154a1c at the boot call site and override its arguments to 60,60 (env-gated
+RECOMP_P5D_APPFPS60=1, only in 60 fps presentation mode) combined with MFRAME60, then measure the dance stage animation
+speed versus the 30 fps baseline, the title sequence time and the song duration; if the calculator time base was the
+cause, the native 60 path (no render-level interpolation) opens up; release unchanged payload CEBB6C124FF7B269 (2026-11-10 16:39:04), 60
+experimental, all prototypes env-gated and the 30 fps path unaffected.
+LOOKUP: M1577 follows M1576 on the PS4-60 lead -> 18.5103 [relevant: string scan], 18.5102 [relevant: PS4 lead], 18.5094
+[relevant: M-B1 appMframe rescale]
