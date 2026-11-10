@@ -1685,6 +1685,7 @@
 | M1607 | §18.5127: **Repackaged with the promoted native-60 mode: new desktop exe 287,636,147 B (stub id A4A9DA194082155C, SHA256 2310B313AC1290D7...).** The launcher was rebuilt with the 全 60 label (dev exe 2,089,456 B), the release script (C:\dev\tmp\m1448 had to be re-created after the storage cleanup) produced the 287,636,147 B exe (stub id A4A9DA194082155C), it was copied over the desktop launcher (previous backed up), and prefs p5d_fps=60 were set. The packaged stub extracts/builds on first launch (the 540x160 window is the extraction progress window). Remaining: the end-to-end click-through test of the packaged launcher GUI (automation grabbed the wrong window so the start click did not happen); the same code was validated in the dev build (M1606) and via the pipeline path (M1597/M1604/M1605). Previous payload CEBB6C124FF7B269. |
 | M1608 | §18.5128: **Packaged-launcher GUI automation blocked by SDL/ImGui input; the end-to-end desktop click test remains manual.** The desktop exe is a stub that extracts the payload to %LOCALAPPDATA%\P5D-Port\A4A9DA194082155C\ and starts the inner launcher from there (a different process - the stub pid has no window). The inner window was found (1195x797) and PrintWindow captured the first page (ROM/firmware installed; page continues below), but posted WM_MOUSEWHEEL messages do not scroll it because SDL/ImGui reads real pointer state, so the scripted start click needs real SendInput or a manual launch. Release already promoted and copied (stub id A4A9DA194082155C, 287,636,147 B). |
 | M1609 | §18.5129: **Packaged launcher page captured: the promoted 60 幀（全 60） option is in the shipped exe; injected clicks still do not register (focus/z-order).** Resizing the packaged launcher window and PrintWindow shows the full page: ROM imported (P5D 1.00-mai), firmware 3.74 installed, 已構建：可隨時啟動遊戲, resolution 2K selected, frequency 30 selected and the new 60 幀（全 60：選單/舞池/UI，實驗性） present - the promoted label is confirmed inside the release exe. Automated SendInput/mouse_event clicks and wheel still do not reach the SDL/ImGui window (radio stays 30, page does not scroll) because it needs real foreground/focus/z-order; remaining is the human click-through (desktop exe -> select 60 全 60 -> start -> dance OSD 60/guest 60fps/speed 1.00x). Release: desktop exe = promoted build, stub id A4A9DA194082155C, 287,636,147 B. |
+| M1610 | §18.5130: **Launcher pref parser: p5d_fps = 60 (with spaces) was ignored, p5d_fps=60 is the accepted form; the packaged payload cannot be launched directly (its python dir has only Lib).** The launcher.ini uses key=value without spaces; the earlier edit was not read (the packaged launcher still showed 30 selected) and was corrected to p5d_fps=60, so the desktop launch should now preselect 60. The extracted payload python/ directory has only Lib (no python.exe), so the game cannot be run directly from the payload by a packaged pipeline - the launcher arranges the runtime, so the remaining validation must go through the launcher GUI (real click) or launcher automation. A4A9DA194082155C release (287,636,147 B) unchanged; docs/builds audit-clean. |
 proposal).** mnsHandle_8111b64c/8111b190 receive a real-time float (+0.01668/frame at 60 vs +0.03337 at 30);
 mnsProcess_811251d6 fires per-frame but constant; other mnsProcess/mnsOption/gfd entries do not fire per-frame;
 object-word slopes show only the known danceQuantizer_81049976 w2 (+0.5 at 60 vs +1.0 at 30). The remaining
@@ -521684,3 +521685,43 @@ stage with OSD 60 / guest 60 fps / speed 1.00x / complete notes and HUD; release
 A4A9DA194082155C (287,636,147 B, 2026-11-11 01:52:02), docs/builds audit-clean.
 LOOKUP: M1609 follows M1608 -> 18.5128 [relevant: automation blocked], 18.5127 [relevant: repack], 18.5126 [relevant:
 promotion]
+
+### 18.5130 M1610 LAUNCHER PREF PARSER FINDS: p5d_fps = 60 (WITH SPACES) WAS IGNORED, p5d_fps=60 IS THE ACCEPTED FORM; THE PACKAGED PAYLOAD CANNOT BE LAUNCHED DIRECTLY (ITS PYTHON DIR HAS ONLY Lib)
+
+Two small but decisive findings while trying to finish the packaged click-through:
+
+1. The launcher preferences file (C:\Users\...\AppData\Roaming\P5D-Port\P5D\launcher.ini) uses `key=value` with no
+   spaces around '='. The earlier edit wrote `p5d_fps = 60`, which the parser did not read (the packaged launcher still
+   showed 30 帧 selected, M1609) - the file has been corrected to `p5d_fps=60` (the other keys were already in that form:
+   p5d_frame_rate_fixed=1, p5d_res=2560x1440, p5d_show_fps=1, setup_done=). This also means the desktop launch will now
+   preselect the 60 option (assuming the parser strips nothing else).
+
+2. The extracted payload (%LOCALAPPDATA%\P5D-Port\A4A9DA194082155C\) has a python/ directory containing only Lib (no
+   python.exe), so the game cannot be run directly from the payload directory by pointing a packaged pipeline at it - the
+   launcher supplies/arranges the Python runtime when it starts the game. Therefore the remaining validation step has to
+   go through the launcher GUI (real user click) or through a launcher-side automation, not by re-running the payload
+   pipeline directly.
+
+Status: the promoted release is packaged (stub id A4A9DA194082155C, 287,636,147 B, 2026-11-11 01:52:02), copied to the desktop, its page
+confirmed to contain the promoted 60 option (M1609), the launcher pref now actually selects 60 (this milestone), and the
+code path is validated in the dev build (M1606) and the pipeline path (M1597/M1604/M1605). Remaining: launch the desktop
+exe (the 60 option should now be preselected), click 開始遊戲, and confirm in the dance stage: OSD 60 / guest 60 fps /
+speed 1.00x / music and judgement in real time / complete notes and HUD - then update the release notes and mark the 60
+option promoted. Docs/builds audit-clean.
+
+ANTI-FORGETTING ENTRY. Keywords: M1610 launcher pref parser - the launcher preferences file
+(C:\Users\...\AppData\Roaming\P5D-Port\P5D\launcher.ini) uses key=value with no spaces around '='; the earlier edit
+wrote 'p5d_fps = 60' which the parser did not read (the packaged launcher still showed 30 帧 selected, M1609) - corrected to
+'p5d_fps=60' (the other keys were already p5d_frame_rate_fixed=1, p5d_res=2560x1440, p5d_show_fps=1, setup_done=), so the
+desktop launch now preselects the 60 option; the extracted payload (%LOCALAPPDATA%/P5D-Port/A4A9DA194082155C/) has a python/
+directory containing only Lib (no python.exe), so the game cannot be run directly from the payload directory by pointing a
+packaged pipeline at it - the launcher supplies/arranges the Python runtime when it starts the game, so the remaining
+validation must go through the launcher GUI (real user click) or launcher-side automation, not by re-running the payload
+pipeline directly; status: the promoted release is packaged (stub id A4A9DA194082155C, 287,636,147 B, 2026-11-11 01:52:02), copied to the
+desktop, its page confirmed to contain the promoted 60 option (M1609), the launcher pref now actually selects 60, and the
+code path validated in the dev build (M1606) and pipeline path (M1597/M1604/M1605); remaining: launch the desktop exe (the
+60 option should now be preselected), click 開始遊戲, and confirm in the dance stage OSD 60 / guest 60 fps / speed 1.00x /
+music and judgement in real time / complete notes and HUD, then update the release notes and mark the 60 option promoted;
+docs/builds audit-clean.
+LOOKUP: M1610 follows M1609 -> 18.5129 [relevant: packaged page], 18.5128 [relevant: automation blocked], 18.5127
+[relevant: repack]
