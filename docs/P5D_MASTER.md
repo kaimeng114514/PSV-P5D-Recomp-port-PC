@@ -1686,6 +1686,7 @@
 | M1608 | §18.5128: **Packaged-launcher GUI automation blocked by SDL/ImGui input; the end-to-end desktop click test remains manual.** The desktop exe is a stub that extracts the payload to %LOCALAPPDATA%\P5D-Port\A4A9DA194082155C\ and starts the inner launcher from there (a different process - the stub pid has no window). The inner window was found (1195x797) and PrintWindow captured the first page (ROM/firmware installed; page continues below), but posted WM_MOUSEWHEEL messages do not scroll it because SDL/ImGui reads real pointer state, so the scripted start click needs real SendInput or a manual launch. Release already promoted and copied (stub id A4A9DA194082155C, 287,636,147 B). |
 | M1609 | §18.5129: **Packaged launcher page captured: the promoted 60 幀（全 60） option is in the shipped exe; injected clicks still do not register (focus/z-order).** Resizing the packaged launcher window and PrintWindow shows the full page: ROM imported (P5D 1.00-mai), firmware 3.74 installed, 已構建：可隨時啟動遊戲, resolution 2K selected, frequency 30 selected and the new 60 幀（全 60：選單/舞池/UI，實驗性） present - the promoted label is confirmed inside the release exe. Automated SendInput/mouse_event clicks and wheel still do not reach the SDL/ImGui window (radio stays 30, page does not scroll) because it needs real foreground/focus/z-order; remaining is the human click-through (desktop exe -> select 60 全 60 -> start -> dance OSD 60/guest 60fps/speed 1.00x). Release: desktop exe = promoted build, stub id A4A9DA194082155C, 287,636,147 B. |
 | M1610 | §18.5130: **Launcher pref parser: p5d_fps = 60 (with spaces) was ignored, p5d_fps=60 is the accepted form; the packaged payload cannot be launched directly (its python dir has only Lib).** The launcher.ini uses key=value without spaces; the earlier edit was not read (the packaged launcher still showed 30 selected) and was corrected to p5d_fps=60, so the desktop launch should now preselect 60. The extracted payload python/ directory has only Lib (no python.exe), so the game cannot be run directly from the payload by a packaged pipeline - the launcher arranges the runtime, so the remaining validation must go through the launcher GUI (real click) or launcher automation. A4A9DA194082155C release (287,636,147 B) unchanged; docs/builds audit-clean. |
+| M1611 | §18.5131: **The launcher preselects native 60 after the ini fix; the 60 option description was updated up and the release repackaged (stub id B16B982717582E60).** With launcher.ini `p5d_fps=60` the packaged GUI show 5) 遊戲頻率 with the red dot on the 60 幀（全 60...） option (previously 30), confirming M1610. The stale hybrid description text was replaced with the validated native-60 wording, the launcher rebuilt and the release repackaged: stub id B16B982717582E60, 287,636,154 B, SHA256 780774D2B8AC7006... (previous A4A9DA194082155C), copied to the desktop. Remaining: the human click-through (60 preselected; confirm dance OSD 60/guest 60fps/speed 1.00x/complete notes) since SDL/ImGui ignores injected clicks. |
 proposal).** mnsHandle_8111b64c/8111b190 receive a real-time float (+0.01668/frame at 60 vs +0.03337 at 30);
 mnsProcess_811251d6 fires per-frame but constant; other mnsProcess/mnsOption/gfd entries do not fire per-frame;
 object-word slopes show only the known danceQuantizer_81049976 w2 (+0.5 at 60 vs +1.0 at 30). The remaining
@@ -521725,3 +521726,40 @@ music and judgement in real time / complete notes and HUD, then update the relea
 docs/builds audit-clean.
 LOOKUP: M1610 follows M1609 -> 18.5129 [relevant: packaged page], 18.5128 [relevant: automation blocked], 18.5127
 [relevant: repack]
+
+### 18.5131 M1611 THE LAUNCHER PRESELECTS NATIVE 60 AFTER THE INI FIX; THE 60 OPTION DESCRIPTION WAS UPDATED AND THE RELEASE REPACKAGED (STUB ID B16B982717582E60)
+
+Verification of the M1610 pref finding on the packaged launcher: with launcher.ini rewritten as `p5d_fps=60` (no spaces),
+the desktop launcher's game-frequency row now shows the 60 option selected - the wheel-scrolled PrintWindow capture of
+the shipped GUI shows ⑤ 遊戲頻率 with the red dot on "60 幀（全 60：選單/舞池/UI，實驗性）" (previously the dot was on 30).
+So the preference parser issue explained the earlier 30-selection and the fix works.
+
+The per-option description under ⑤ was still the old hybrid text ("3D 角色動畫時鐘仍在校準，選單/標題維持原版 30 幀
+節奏"), which no longer matches the validated native-60 behaviour (M1604/M1605: animation matched-gap ratios 1.01-1.04,
+title 28.5 vs 29.8 s, full song 167.18 s, dance clock real time). launcher/hub.cpp now says: "60 幀：全畫面以 60 Hz 實時
+推進（音樂/判定/動畫皆真實時間、無倍速；標題與整曲時長已驗證一致）；如遇異常可切回 30 幀".
+
+The launcher was rebuilt and the release repackaged: **stub id B16B982717582E60, 287,636,154 B, SHA256 780774D2B8AC7006...**
+(previous A4A9DA194082155C). It was copied over the desktop exe. The remaining end-to-end check is the human click-through
+(selecting 60 is now preselected; start the game and confirm in the dance stage OSD 60 / guest 60 fps / speed 1.00x /
+music and judgement real time / complete notes and HUD), because the SDL/ImGui launcher does not accept injected clicks in
+this environment (M1608/M1609).
+
+Release state: desktop exe = native-60 promoted build (stub id B16B982717582E60, 287,636,154 B, 2026-11-11 02:12:00); docs/builds
+audit-clean. The 30 fps path is unchanged and is still the default for a fresh profile; the launcher help text now
+describes the validated native-60 behaviour.
+
+ANTI-FORGETTING ENTRY. Keywords: M1611 launcher preselects native 60 after the ini fix - with launcher.ini rewritten as
+p5d_fps=60 (no spaces) the desktop launcher game-frequency row now shows the 60 option selected (the wheel-scrolled PrintWindow
+capture shows 5) 遊戲頻率 with the red dot on 60 幀（全 60：選單/舞池/UI，實驗性）, previously on 30), confirming the M1610 pref
+parser finding and fix; the per-option description was still the old hybrid text ("3D 角色動畫時鐘仍在校準，選單/標題維持原版
+30 幀節奏") which no longer matches the validated native-60 behaviour (M1604/M1605: matched-gap animation ratios 1.01-1.04,
+title 28.5 vs 29.8 s, full song 167.18 s, dance clock real time), so launcher/hub.cpp now says "60 幀：全畫面以 60 Hz 實時推進
+（音樂/判定/動畫皆真實時間、無倍速；標題與整曲時長已驗證一致）；如遇異常可切回 30 幀"; the launcher was rebuilt and the release
+repackaged (stub id B16B982717582E60, 287,636,154 B, SHA256 780774D2B8AC7006..., previous A4A9DA194082155C) and copied over
+the desktop exe; the remaining end-to-end check is the human click-through (select 60 - now preselected - start the game and
+confirm dance OSD 60 / guest 60 fps / speed 1.00x / music and judgement real time / complete notes and HUD) because the
+SDL/ImGui launcher does not accept injected clicks in this environment (M1608/M1609); release state: desktop exe = native-60
+promoted build (stub id B16B982717582E60, 287,636,154 B, 2026-11-11 02:12:00), docs/builds audit-clean; the 30 fps path is unchanged and is still
+the default for a fresh profile.
+LOOKUP: M1611 follows M1610 -> 18.5130 [relevant: ini parser], 18.5129 [relevant: packaged page], 18.5126 [relevant: promotion]
