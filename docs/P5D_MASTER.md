@@ -1651,6 +1651,7 @@
 | M1566 | §18.5093: **M-B3 step 2a: second colour target + GPU blit copy verified pixel-identical.** gfx_gpu_present() with RECOMP_INTERP=1 copies the finished 960x544 R8G8B8A8 display target into a persistent second SDL_GPU texture via SDL_BlitGPUTexture (one command buffer/frame); RECOMP_INTERP_DUMP=prefix dumps both textures once as raw RGBA. Verification on the dance stage at 30 fps: target created 960x544 fmt 4, blit ready, both dumps 2,088,960 bytes and byte-identical (same sha256), game ran normally with no crash or visual change (the copy is a separate, unpublished texture). Foundation for step 2b: re-render the recorded draws into this target with blended bone palettes (LDST window lerp, alpha 0.5) while the guest waits on its vblank, then alternate the two images at 60 Hz. 30 fps path untouched. Release unchanged CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
 | M1567 | §18.5094: **Phase B status: M-B3 step 2a verified; the remaining re-render needs a scene-state recorder + replay engine + present alternation (blocking condition).** M-B1: appMframe is a frame-rate rescale (M1555) enabled by the 60-base init, fixing song/chart length; most probed per-frame dance/MNS clocks are already dt-aware (M1558-M1561) but a residual 1.28-1.64x dance motion mismatch remains. M-B3: present already decoupled (guest 30, window 60, M1563); frame recorder copies 356-362 GfxDraw/frame (245-250 skinned, ~400 KB, M1564); second colour target blit copy pixel-identical (M1566). The re-render needs a scene-state recorder + replay engine + present alternation - 10-20 rounds of renderer work with regression risk, so the goal is reported blocked on that condition; delivered and kept: launcher 30/60, FPS OSD, hybrid dance-stage 60 with real-time music/judgement, the appMframe 60-base fix, the M-B3 architecture/data, the Phase A report. Release unchanged CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
 | M1568 | §18.5095: **Phase B2 started: scene-state recorder works; a dance frame is 5 scenes.** RECOMP_INTERP_REC now records every gfx_gpu_begin_scene boundary (colour target, depth address/type, format, stride/height, draw count) and attributes each draw to its scene. Dance at 30 fps: s0 (colour 0, 2x1 stride, 17 draws), s1 (colour 0x1dfc0000, tiled depth, 1024x544, 289-294 draws - the main 3D scene, 245-250 skinned), s2 (0x242c0000 224x68, 3), s3 (0x24400000 224x68, 3), s4 (0x1dfc0000 1024x544, 42-46 second pass); 356-362 draws total, ~390-400 KB, 5 scene boundaries. Next 2b: replay per scene with the recorded target/depth, re-execute the draws with blended LDST bone windows, composite/present into the second colour target (M1566 path) while the guest waits on its vblank. 30 fps path untouched. Release unchanged CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
+| M1569 | §18.5096: **Phase B2: replay engine works; PS4-60 init probe does not fix title pacing.** RECOMP_INTERP_REPLAY=1 re-executes the last frame through the game's own entry points (per scene: begin_scene with the recorded GfxTarget, recorded draws in order, end_scene; motion-pass state suspended): dance frames replayed at 303/903/1503/2103 as 12/558/332/359 draws in 4/5 scenes with no crash (guest 30, window 60, speed 1.00x). Next: redirect into the second colour target with blended LDST windows and alternate presents. PS4 hint: appMframe boot init made configurable (RECOMP_P5D_MFRAME_INIT="a,b,c"); title time at 60 all-screen (30 fps 4.13 s, untouched ~2.5 s): none 3.08, 1,1,2 2.72, 2,2,2 2.48, 1,2,2 2.47, 2,1,2 2.83, 1,1,1 2.59 - none restores authored pacing (title is frame-count paced, the M-B2 problem), while 1,1,2 keeps the song/chart-length fix. Release unchanged CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
 proposal).** mnsHandle_8111b64c/8111b190 receive a real-time float (+0.01668/frame at 60 vs +0.03337 at 30);
 mnsProcess_811251d6 fires per-frame but constant; other mnsProcess/mnsOption/gfd entries do not fire per-frame;
 object-word slopes show only the known danceQuantizer_81049976 w2 (+0.5 at 60 vs +1.0 at 30). The remaining
@@ -520114,3 +520115,54 @@ composite/present into the second colour target (the M1566 pixel-identical copy 
 experimental.
 LOOKUP: M1568 starts Phase B2 after the M1567 status -> 18.5094 [relevant: status], 18.5093 [relevant: second target],
 18.5091 [relevant: frame recorder], 18.5090 [relevant: present architecture]
+
+### 18.5096 M1569 PHASE B2: THE REPLAY ENGINE WORKS; THE PS4-60 HINT PROBE (appMframe INIT CANDIDATES) DOES NOT FIX THE TITLE PACING
+
+Two results this round:
+
+1. Replay engine (M-B3 step 2b first half): the recorded frame can be re-executed through the game's own graphics
+   entry points. RECOMP_INTERP_REPLAY=1 (with RECOMP_INTERP_REC=1 and RECOMP_MV=1; every RECOMP_INTERP_REPLAY_EVERY
+   presents, default 30) replays the last completed frame: for each recorded scene it calls gfx_gpu_begin_scene with
+   the recorded GfxTarget (colour address, depth address/format/type, format, stride/height, colour type), calls
+   gfx_gpu_draw for that scene's recorded draws in order, then gfx_gpu_end_scene; the motion-pass state is suspended
+   during the replay so the next frame's motion matching is unaffected. Measured in the dance stage at 30 fps
+   (log):
+     #10 frame 303: 12 draws in 4 scenes
+     #30 frame 903: 558 draws in 5 scenes
+     #50 frame 1503: 332 draws in 5 scenes
+     #70 frame 2103: 359 draws in 5 scenes
+   The game ran its dance stage normally with the replay active (no crash, no assertion; metrics 30.0 fps guest /
+   60 fps window / speed 1.00x) - the replay machinery is sound. Next: redirect the replay's scenes/draws into the
+   second colour target (the M1566 pixel-identical copy path) with blended LDST bone windows (previous snapshot vs
+   current guest window contents, alpha 0.5), then let the present loop alternate base and interpolated images.
+
+2. PS4-60 hint: the user noted the PS4 release runs at 60 fps; the game's appMframe table does include 60 (and 120),
+   so a 60-aware path plausibly exists. The boot init call (singleton 0x8132ae64, init(1,1,1)) was made fully
+   configurable (RECOMP_P5D_MFRAME60=1 + RECOMP_P5D_MFRAME_INIT="a,b,c") and candidate configurations were measured
+   against the title sequence wall time at 60 fps all-screen (4.13 s at the 30 fps baseline, ~2.5 s untouched):
+   none 3.08 s, 1,1,2 2.72 s, 2,2,2 2.48 s, 1,2,2 2.47 s, 2,1,2 2.83 s, 1,1,1 2.59 s. None restores the authored
+   pacing, so the title sequence is paced by a frame-count path outside the appMframe init (the M-B2 problem), while
+   1,1,2 remains the configuration that fixes the song/chart length (M1555). The PS4 version thus likely differs in the
+   sequence/timing code, not only in an init argument; the HLE already reports 59.94 Hz via sceDisplayGetRefreshRate,
+   so that query is not the switch either.
+
+Release unchanged: payload CEBB6C124FF7B269 (2026-11-10 16:39:04), 60 experimental; all prototypes env-gated and the 30 fps path
+untouched.
+
+ANTI-FORGETTING ENTRY. Keywords: M1569 Phase B2 replay engine works - RECOMP_INTERP_REPLAY=1 (with RECOMP_INTERP_REC=1
+and RECOMP_MV=1; every RECOMP_INTERP_REPLAY_EVERY presents, default 30) re-executes the last completed frame through
+the game's own graphics entry points: per recorded scene gfx_gpu_begin_scene with the recorded GfxTarget (colour
+address, depth address/format/type, format, stride/height, colour type), gfx_gpu_draw for each recorded draw in order,
+gfx_gpu_end_scene, with the motion-pass state suspended during the replay; dance-stage measurements: frame 303 12
+draws/4 scenes, frame 903 558/5, frame 1503 332/5, frame 2103 359/5; the game ran normally with the replay active (no
+crash/assertion, guest 30 fps / window 60 fps / speed 1.00x), so the replay machinery is sound; next redirect the
+replay into the second colour target (M1566 path) with blended LDST bone windows (previous snapshot vs current window,
+alpha 0.5) and alternate presents; PS4-60 hint probe: the appMframe boot init call (singleton 0x8132ae64 init(1,1,1))
+was made fully configurable (RECOMP_P5D_MFRAME60=1 + RECOMP_P5D_MFRAME_INIT="a,b,c"); title-sequence wall time at 60 fps
+all-screen (30 fps baseline 4.13 s, untouched ~2.5 s): none 3.08, 1,1,2 2.72, 2,2,2 2.48, 1,2,2 2.47, 2,1,2 2.83,
+1,1,1 2.59 - none restores the authored pacing, so the title sequence is paced by a frame-count path outside the
+appMframe init (the M-B2 problem), while 1,1,2 remains the song/chart-length fix (M1555); the PS4 version likely differs
+in sequence/timing code, not only an init argument, and sceDisplayGetRefreshRate already reports 59.94 Hz in the HLE;
+release unchanged payload CEBB6C124FF7B269 (2026-11-10 16:39:04), 60 experimental, all prototypes env-gated and the 30 fps path untouched.
+LOOKUP: M1569 continues Phase B2 after M1568 -> 18.5095 [relevant: scene recorder], 18.5093 [relevant: second target],
+18.5090 [relevant: present architecture], 18.5069 [relevant: prior title timing]
