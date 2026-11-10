@@ -196,16 +196,6 @@ ANTI-FORGETTING 记录、命令、日志与截图路径）。
 > 当前工程基于 GPL-2 的 [nativ](https://github.com/TheLostPantheon/nativ) 架构与部分 GPL-2 参考
 > （Vita3K 等）。归属说明见 [NOTICE.md](NOTICE.md) / [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 
-## 开发期运行（从源码构建）
-
-> 发布版用户用上面的**单文件启动器**即可；以下是开发/验证形态。
-
-1. 自备 PS Vita 3.74 固件（从自己的设备提取），解密到 nativ 工具链的 `firmware/3.74`。
-2. 自备合法持有的 P5D（PCSH10109 1.00）数据：`eboot_origin.bin`、`data.cpk`、`vita.cpk` 等。
-3. 使用 nativ 流水线：`add → import → analyze → recompile → build → test`（细节与命令见
-   [docs/NATIV_REFERENCE.md](docs/NATIV_REFERENCE.md) 与 [docs/P5D_MASTER.md](docs/P5D_MASTER.md)）。
-4. 发布打包：`dev/make_p5d_release.py`（单文件自解压 exe + 启动器 + 内置 Python/mingw）。
-
 ## 发布合规与版权
 
 - 发布树红线（不含游戏可执行码/资源/着色器衍生数据/密钥固件）见
