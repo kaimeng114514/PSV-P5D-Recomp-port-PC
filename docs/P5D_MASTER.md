@@ -1644,6 +1644,7 @@
 | M1558 | §18.5086: **M-B1 round 6: the 1/30 quantizer is already dt-aware; the residual dance motion is mixed (1.28-1.64x).** fn_81049976 (count=ceil(t*30), t'=count/30) advances 0.500 per presented frame at 60 fps and 1.000 at 30 fps (about 30 units per wall second both) - already dt-aware, do not touch (its 1/30 constant replacement distorted the animation earlier). With MFRAME60 the dance scene at matched clock phase 8.37-11.07 s is fast by region: character 733 vs 446 per s (1.64x), background 615 vs 462 (1.33x), HUD left 586 vs 438 (1.34x), HUD right 640 vs 475 (1.35x), bottom bar 595 vs 417 (1.43x), top corner 853 vs 669 (1.28x) - multiple remaining frame-count clocks. Next: a multi-site single-run probe of danceResident_81040a7c / 81047280 / 81046d04 / danceGraphics / danceDancer for a 1.0-per-frame value at 60 fps. Release untouched CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
 | M1559 | §18.5087: **M-B1 round 7 multi-site slope probe.** 12 dance functions sampled per frame at 60 (+MFRAME60) and 30 fps: every firing per-frame site with a time-like float is already dt-aware (0.5 per presented frame at 60 vs 1.0 at 30) - danceGraphics_81041740 s0 +0.0167 vs +0.0333, danceQuantizer_81049976 same, danceScreenEffect_810489d8 and danceMain_81043fee constant; danceResident/danceDancer/danceGraphics(8104142c/be/16d4)/danceSystem fire once or not during the dance (setup paths). So the 1.28-1.64x residual does not come from these calls; next suspects: the MNS/note-lane update path and the camera matrix path (camera track GFS 1931 keyframes / 210.667 s, sampling input not found), probed the same way. Release untouched CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
 | M1561 | §18.5088: **M-B1 round 8: MNS current time is dt-aware; no 1.0-per-frame clock in the probed set (pivot
+| M1562 | §18.5089: **M-B3 prototype design on the port's existing motion pass.** runtime/gfx/gfx_gpu.c already pairs each frame's skinned draws with the previous frame's pose: mv_match() returns the previous SA (bone/matrix palette uniform words) nearest by draw key, mv_win_snap() snapshots LDST windows, the motion pass re-renders with the previous SA into an RG16F target, mv_frame_end() rotates the tables. Design: RECOMP_INTERP=1 delivers vblanks to the guest at 30 Hz (authored logic rate) while presenting 60; interpolation presents re-execute the last game frame's draws with a CPU-blended SA (lerp of previous/current float words, alpha 0.5, pointer words current) through each draw's normal colour pipeline; validate 60 fps dance captures per-second motion equal to the 30 fps baseline (per-frame about half), music/judgement unchanged, OSD 60. Matrix lerp is approximate; depth/blend ordering reuse the motion pass's solutions. Release untouched CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
 proposal).** mnsHandle_8111b64c/8111b190 receive a real-time float (+0.01668/frame at 60 vs +0.03337 at 30);
 mnsProcess_811251d6 fires per-frame but constant; other mnsProcess/mnsOption/gfd entries do not fire per-frame;
 object-word slopes show only the known danceQuantizer_81049976 w2 (+0.5 at 60 vs +1.0 at 30). The remaining
@@ -519809,3 +519810,52 @@ between game frames in the port GXM replay layer, decided by a one-model verific
 release unchanged payload CEBB6C124FF7B269 (2026-11-10 16:39:04), 60 experimental.
 LOOKUP: M1561 continues M-B1 after M1559 -> 18.5087 [relevant: multi-site slopes], 18.5086 [relevant: quantizer],
 18.5085 [relevant: proper-phase measurement]
+
+### 18.5089 M1562 PHASE B M-B3 PROTOTYPE DESIGN: THE PORT'S MOTION PASS ALREADY SNAPSHOTS THE PREVIOUS POSE -
+INTERPOLATED 60 FPS CAN BE BUILT ON IT
+
+Code inspection of the port's GPU layer found the infrastructure the interpolation plan needs: the motion-vector
+pass (RECOMP_MV / FSR history) already pairs each frame's skinned draws with the previous frame's pose. In
+runtime/gfx/gfx_gpu.c: mv_match() keys every draw by vertex program/streams/indices/count/primitive and returns the
+previous frame's SA (the uniform block words that carry the bone/matrix palette), with a nearest-SA search among
+equivalent draws; mv_win_snap() copies each draw's LDST windows (bone palettes in guest memory) once per address per
+frame; the motion pass then re-renders the draw with the previous-frame SA/windows bound (a skinned character's
+previous pose, not only its previous placement) and writes screen-space motion vectors into an RG16F target.
+mv_frame_end() rotates the two MvRec tables each frame, and the M2 comment documents the previous-frame uniform block
+pointing its pointer words at the snapshot windows.
+
+Design for the M-B3 prototype (interpolated 60 fps), reusing that machinery:
+
+1. Guest logic rate vs presentation: add a runtime mode (env RECOMP_INTERP=1) that delivers vblanks/CB waits to the
+   guest at 30 Hz (so the game's frame-indexed logic and animation run at their authored rate - correct durations by
+   construction) while the window still presents at 60 Hz. The extra presents are the interpolation frames.
+2. Intermediate pose: for an interpolation present, re-execute the last completed game frame's draw list. For every
+   draw that has a matched previous SA (the same pairing mv_match already computes), build a blended SA block on the
+   CPU (float words lerped with alpha=0.5 between previous and current; pointer words stay current, and the current
+   LDST windows are used), bind it in place of the draw's own uniform block and render through the draw's normal colour
+   pipeline into the frame's target. Unmatched draws (new objects, no previous pose) draw as-is.
+3. Validation: 60 fps captures of the dance stage should show 60 distinct frames whose per-second pixel change equals
+   the 30 fps baseline (per-frame change about half), with the music/judgement clock untouched (it already runs in real
+   time; only the display loop changes), and the OSD FPS counter reporting 60.
+4. Scope: first only the dance character (prototype); if viable, extend to the main menu 3D background/camera and the
+   other 3D screens, then M-B4.
+
+Risk: matrix lerp is an approximation (rotations blend componentwise; acceptable for a first prototype and to be
+replaced by rotation-aware blending if visible), and the re-render must respect depth/blend state ordering; the motion
+pass already solved the depth-test and binding problems for the same draws, so it is a known-good starting point.
+Release unchanged: payload CEBB6C124FF7B269 (2026-11-10 16:39:04), 60 experimental.
+
+ANTI-FORGETTING ENTRY. Keywords: M1562 Phase B M-B3 prototype design - the port already has the previous-pose
+infrastructure in runtime/gfx/gfx_gpu.c: mv_match() pairs every draw by vertex program/streams/indices/count/primitive
+and returns the previous frame's SA (uniform block words carrying the bone/matrix palette) with a nearest-SA search;
+mv_win_snap() snapshots each draw's LDST windows (bone palettes) once per address per frame; the motion pass
+re-renders with the previous SA/windows bound (M2) into an RG16F motion target; mv_frame_end() rotates the MvRec
+tables; so an interpolated 60 fps prototype can run guest logic at 30 Hz (RECOMP_INTERP=1 delivering vblanks at
+30 Hz) and, for the extra 60 Hz presents, re-execute the last game frame's draws with a CPU-blended SA (lerp of
+previous and current SA floats, alpha 0.5, pointer words current) through each draw's normal colour pipeline; validate
+with 60 fps dance captures (per-second pixel change equal to the 30 fps baseline, per-frame about half, music/judgement
+clock unchanged, OSD FPS 60); matrix lerp is approximate and the re-render must respect depth/blend ordering (the
+motion pass already solved the same draws' binding/depth); release unchanged payload CEBB6C124FF7B269 (2026-11-10 16:39:04), 60
+experimental.
+LOOKUP: M1562 opens M-B3 after the M-B1 pivot proposal -> 18.5088 [relevant: pivot proposal], 18.5087 [relevant: "
+multi-site slopes], 18.5086 [relevant: quantizer dt-aware]
