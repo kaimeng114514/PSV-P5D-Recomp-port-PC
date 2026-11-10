@@ -1689,6 +1689,7 @@
 | M1611 | §18.5131: **The launcher preselects native 60 after the ini fix; the 60 option description was updated up and the release repackaged (stub id B16B982717582E60).** With launcher.ini `p5d_fps=60` the packaged GUI show 5) 遊戲頻率 with the red dot on the 60 幀（全 60...） option (previously 30), confirming M1610. The stale hybrid description text was replaced with the validated native-60 wording, the launcher rebuilt and the release repackaged: stub id B16B982717582E60, 287,636,154 B, SHA256 780774D2B8AC7006... (previous A4A9DA194082155C), copied to the desktop. Remaining: the human click-through (60 preselected; confirm dance OSD 60/guest 60fps/speed 1.00x/complete notes) since SDL/ImGui ignores injected clicks. |
 | M1612 | §18.5132: **Critical packaging regression found and fixed: the repack after the storage cleanup had dropped the embedded Python runtime; release rebuilt (300,317,559 B, stub id 6B029A072AD3ACA3).** make_p5d_release.py assembles the embedded CPython from C:/dev/tmp/m1448/pyembed, which the storage cleanup had deleted, so the repacks after that point (stubs A4A9DA194082155C / B16B982717582E60, ~287.6 MB vs the previous 300 MB) shipped without a Python runtime and could not run the game ("can't start python" in the headless ATIV_TASK play test). Fixed by recovering the runtime from a previous release payload (CEBB6C124FF7B269/python) into m1448/pyembed and rebuilding: stub id 6B029A072AD3ACA3, 300,317,559 B, SHA256 39C9533B9D375ECE..., payload 8719 files ~284 MB with python.exe + capstone, copied to the desktop. Headless ATIV_TASK now finds python but the path lacks the GUI env so it stops at the toolchain check; the definitive check remains the GUI Play (settings.ini already frame_rate=60, osd=1; 60 preselected). |
 | M1613 | §18.5133: **Packaged payload integrity after the python fix: embedded Python + mingw/toolchain present; headless Play compiles but the manual build hit an obj-dir error (the launcher flow remains the check).** The extracted payload now has python/ (python.exe, python310.dll, capstone) plus mingw64/ and toolchain/ - 8719 files ~284 MB, matching the previous working release. The library keeps a previously built host (46,732,721 B, 2026-11-10 17:58). ATIV_TASK play finds python and reaches the build; the same build run manually failed with "can't create obj_win_min_native/game_part9.o" because the launcher Play flow prepares the build tree (manual invocation differs), and it was cancelled to avoid a half-built library. Next: the launcher Play itself (it rebuilds from the packaged sources containing the native-60 defaults; first Play takes several minutes), settings.ini already frame_rate=60/osd=1, 60 preselected. Release = stub 6B029A072AD3ACA3, 300,317,559 B. |
+| M1614 | §18.5134: **End-to-end native-60 validation on the packaged build product: the launcher Play flow built the host from the packaged sources/toolchain and it runs the dance at 60 fps real time.** Play flow built game_host_min.exe (46,754,211 B, 2026-11-11 03:37:59) from the packaged payload sources with the packaged mingw64 and then ran the game into song-select (frame 11050, TITLE/UI lines; stopped by the automation cancel timer). Headless ATIV_TASK writes the settings before loading the launcher prefs (wrote frame_rate=30/osd=0 - the GUI path reads prefs and writes 60). Running the packaged-built host with recomp/settings.ini frame_rate=60/osd=1: [MFRAME60] init auto-on, dance clock median 0.01672 s/frame = 1.003 per 60 frames, metrics 60.0 fps speed 1.00x window 60.0 - native 60 works on the packaged build. Settings left at 60/OSD; remaining: the human visual pass, then relabel the option from experimental. Release = stub 6B029A072AD3ACA3, 300,317,559 B. |
 proposal).** mnsHandle_8111b64c/8111b190 receive a real-time float (+0.01668/frame at 60 vs +0.03337 at 30);
 mnsProcess_811251d6 fires per-frame but constant; other mnsProcess/mnsOption/gfd entries do not fire per-frame;
 object-word slopes show only the known danceQuantizer_81049976 w2 (+0.5 at 60 vs +1.0 at 30). The remaining
@@ -521854,3 +521855,54 @@ configuration); the first Play will take the build time (several minutes) then s
 frame_rate=60 and osd=1 and the launcher preselects 60; release state: desktop exe = native-60 promoted build, stub id
 6B029A072AD3ACA3 (300,317,559 B); docs/builds audit-clean.
 LOOKUP: M1613 follows M1612 -> 18.5132 [relevant: python fix], 18.5131 [relevant: preselect], 18.5126 [relevant: promotion]
+
+### 18.5134 M1614 END-TO-END NATIVE-60 VALIDATION ON THE PACKAGED BUILD PRODUCT: THE LAUNCHER PLAY FLOW BUILT THE HOST FROM THE PACKAGED SOURCES/TOOLCHAIN AND IT RUNS THE DANCE AT 60 FPS REAL TIME
+
+With the repaired release (stub 6B029A072AD3ACA3, 300,317,559 B) the launcher's own Play task was exercised to the end:
+
+1. Play flow (ATIV_TASK=play:PCSH10109 on the extracted launcher, with the packaged python/toolchain env): the task ran
+   ready, decided to build, and **built game_host_min.exe from the packaged payload sources with the packaged mingw64
+   toolchain** (46,754,211 B, 2026-11-11 03:37:59) - so the packaged sources and toolchain are complete and usable; the
+   task then started the game, which ran through the title into the song-select screen (the game log reached frame 11050,
+   [TITLE] and [UI] scr=SONG lines) and was stopped by the automation's own cancel timer, not by a crash.
+2. Finding (automation artifact): the headless ATIV_TASK path writes the game settings file before the launcher prefs are
+   loaded, so it wrote frame_rate = 30 / osd = 0 (the defaults); that run therefore ran at 30 fps. The GUI path reads the
+   launcher prefs (p5d_fps, M1611 shows 60 preselected) before Play, so the shipped GUI writes frame_rate = 60.
+3. Native-60 check on the **packaged-built host**: running that same packaged-built game_host_min.exe with
+   decrypted/PCSH10109/recomp/settings.ini frame_rate = 60 / osd = 1 gives:
+   - [MFRAME60] init(1,1,1) -> init(1,1,2) (the promotion default is active in the packaged build);
+   - dance clock median 0.01672 s/frame = **1.003 per 60 frames** (real time; M1597);
+   - metrics: **60.0 fps, speed 1.00x**, window 60.0 fps, render 7.8 ms - i.e. the native-60 configuration validated in
+     M1606/M1604/M1605 works identically when built and run from the packaged payload.
+4. The game settings were restored/left at frame_rate = 60, osd = 1 (both the shared file and the recomp directory the
+   runtime reads), so the desktop launcher starts the game in native 60 with the OSD overlay.
+
+So the release now has: (a) the promoted native-60 defaults in its packaged sources (all-screen 60 scope + MFRAME60 auto-on);
+(b) a working build toolchain and embedded Python in the payload (M1612); (c) the launcher preselecting the 60 option
+(M1611); (d) the settings files at frame_rate 60 / osd 1; and (e) the native-60 behaviour verified on the packaged-built
+host (this milestone). The remaining step is the human visual pass of the dance/notes at 60 Hz through the desktop
+launcher, then the 60 option can be relabelled from experimental to native 60 in the release notes.
+
+Release state: desktop exe = native-60 promoted build, stub id 6B029A072AD3ACA3 (300,317,559 B); docs/builds audit-clean.
+
+ANTI-FORGETTING ENTRY. Keywords: M1614 end-to-end native-60 validation on the packaged build product - with the repaired
+release (stub 6B029A072AD3ACA3, 300,317,559 B) the launcher Play task (ATIV_TASK=play:PCSH10109 on the extracted launcher with
+the packaged python/toolchain env) ran ready, decided to build, and built game_host_min.exe from the packaged payload sources
+with the packaged mingw64 toolchain (46,754,211 B, 2026-11-11 03:37:59), so the packaged sources and toolchain are complete and
+usable; the task then started the game, which ran through the title into song-select (game log reached frame 11050, TITLE and UI
+scr=SONG lines) and was stopped by the automation cancel timer, not a crash; finding (automation artifact): the headless
+ATIV_TASK path writes the game settings file before the launcher prefs are loaded so it wrote frame_rate=30/osd=0 (defaults) and
+that run ran at 30 fps, while the GUI path reads the launcher prefs (p5d_fps, M1611 shows 60 preselected) before Play so the
+shipped GUI writes frame_rate=60; native-60 check on the packaged-built host: running that same packaged-built
+game_host_min.exe with decrypted/PCSH10109/recomp/settings.ini frame_rate=60/osd=1 gives [MFRAME60] init(1,1,1)->init(1,1,2)
+(promotion default active in the packaged build), dance clock median 0.01672 s/frame = 1.003 per 60 frames (real time, M1597),
+metrics 60.0 fps speed 1.00x window 60.0 fps render 7.8 ms - the M1606/M1604/M1605 configuration works identically when built
+and run from the packaged payload; the game settings were restored/left at frame_rate=60 and osd=1 (shared file and the recomp
+directory the runtime reads) so the desktop launcher starts the game in native 60 with the OSD overlay; the release now has the
+promoted native-60 defaults in its packaged sources, a working build toolchain and embedded Python in the payload (M1612), the
+launcher preselecting 60 (M1611), the settings at 60/OSD, and the native-60 behaviour verified on the packaged-built host; the
+remaining step is the human visual pass of the dance/notes at 60 Hz through the desktop launcher, then the 60 option can be
+relabelled from experimental to native 60 in the release notes; release state: desktop exe = native-60 promoted build, stub id
+6B029A072AD3ACA3 (300,317,559 B), docs/builds audit-clean.
+LOOKUP: M1614 completes the packaged validation after M1612/M1613 -> 18.5133 [relevant: payload integrity], 18.5132
+[relevant: python fix], 18.5126 [relevant: promotion], 18.5124 [relevant: matched-gap class]
