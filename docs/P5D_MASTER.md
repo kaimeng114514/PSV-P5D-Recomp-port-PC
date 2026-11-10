@@ -1669,6 +1669,7 @@
 | M1584 | §18.5111: **Pair sweep (60,20) is not between (60,15) and (60,30) - mapping non-monotonic; (60,15) best so far (mean abs dev 0.12).** Same capture (60 fps + MFRAME60, 121 aligned frames, DCLK start 2678, baseline 446/462/438/475/417/669): 60,30 char 1.24/bg 1.51/hud_l 1.63/hud_r 1.16/bottom 1.42/top 1.01 (mean dev 0.30); 60,20 char 1.35/bg 1.32/hud_l 1.42/hud_r 0.99/bottom 1.21/top 1.08 (0.24); 60,15 char 1.15/bg 1.12/hud_l 1.24/hud_r 0.80/bottom 1.07/top 0.84 (0.12). The second value is not a linear speed control (60,20 char worse than 60,15) - several subsystems or phase-dependent region noise; next repeat (60,15)/(60,30) for noise, try (60,12)/(60,18), then full-song validation (guest 60/speed 1.00x/title 4.13 s/song/HUD), then promote or keep interpolation. Release unchanged CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
 | M1585 | §18.5112: **The (60,15) repeat disagrees with the first run (char 1.62 vs 1.15): the region-ratio methodology is not reproducible - align by the music start.** Second (60,15) run (DCLK start 2649, 121 aligned frames): char 1.62/bg 1.54/hud_l 1.62/hud_r 1.06/bottom 1.41/top 1.02 vs first run 1.15/1.12/1.24/0.80/1.07/0.84. The window is placed by the first [DCLK] clk=0 line, but the real music/choreography start comes later and varies (start frames observed 2596/2649/2664/2678/2733/2776), so each run samples a different segment; the sweep is unreliable beyond broad trends (only the 30,30 pair is consistently much faster, ~1.7-1.9x). Fix: align by the music start ([DCLK] where music first > 0), re-run the sweep, and check the driver always selects the same song. Release unchanged CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
 | M1586 | §18.5113: **Fine-grained dance-clock logging did not take (probe called ~every 60 frames); alignment problem open.** Lowering the [DCLK] threshold from 60 to 6 frames still yields ~16 lines over ~900 frames, so the hooked guest function itself runs only about every 60 frames. Fresh 60 fps (MFRAME60+APPFPS60+pair 60,15, 841 shots) and 30 fps (601 shots) captures: the aligned comparison selected 74 frames for 60 fps and none for 30 fps - the [DCLK] f numbering and the shot numbering do not line up. Next: unify the frame base (log display_frames in the shot code or the shot number in DCLK), add a per-frame clock probe on a per-frame dance function reading the same clock struct, or use the audio/music time as the base (DCLK music reads 0.0000, wrong offset); then redo the 60/30 comparison. Pair hook env-gated/off; release unchanged CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
+| M1587 | §18.5114: **Dance clock's own advance rate: MFRAME60-only is real-time (1/60 s per frame); the APPFPS60 pair runs mostly read 1.55-2.0x, so the pair may break the real-time clock.** Median [DCLK] clk delta/frame from existing logs: MFRAME60+pair(60,60) appfps60 = 1.000/60f (real time, matches M1555's full-song 0.01668 s/frame); pairs (60,30/20/15) = 1.56-1.61/60f; pair repeats 1.78-2.0; 30 fps hybrid reference 1.07/30f (method sound within ~7%). Pair-run logs include pre-dance/countdown phases, so medians are not dance-only; but the only unambiguous full-song measurement (M1555, MFRAME60 only) is real time and the pair runs have no equivalent. Earlier 'pair 60,15 best' is not supported by clock data; next: full-song timing for MFRAME60-only vs +pair(60,60) vs +pair(60,15) (expect ~167 s), pick the real-time winner, then redo screenshots for it; if MFRAME60-only wins, the residual animation mismatch is elsewhere and M-B3 remains the fallback. Release unchanged CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
 proposal).** mnsHandle_8111b64c/8111b190 receive a real-time float (+0.01668/frame at 60 vs +0.03337 at 30);
 mnsProcess_811251d6 fires per-frame but constant; other mnsProcess/mnsOption/gfd entries do not fire per-frame;
 object-word slopes show only the known danceQuantizer_81049976 w2 (+0.5 at 60 vs +1.0 at 30). The remaining
@@ -520899,3 +520900,56 @@ window and judge the native-60 configuration; the frame-rate pair hook (RECOMP_P
 env-gated and off by default; release payload CEBB6C124FF7B269 (2026-11-10 16:39:04), 60 experimental, kb_audit/DOC_INTEGRITY green.
 LOOKUP: M1586 follows M1585 on alignment -> 18.5112 [relevant: reproducibility problem], 18.5111 [relevant: sweep 60,20],
 18.5110 [relevant: sweep 60,15]
+
+### 18.5114 M1587 THE DANCE CLOCK'S OWN ADVANCE RATE: MFRAME60-ONLY RUNS ARE REAL-TIME (1/60 s PER FRAME); THE APPFPS60 PAIR RUNS MOSTLY READ 1.55-2.0x, SO THE PAIR MAY BREAK THE REAL-TIME CLOCK
+
+Instead of relying on screenshot alignment, this round measured the dance clock's own advance from the [DCLK] lines
+already present in the existing logs (median of adjacent clk deltas divided by the frame delta):
+
+| log | config | clk per frame | per 60 frames |
+|---|---|---|---|
+| frames_appfps60 | MFRAME60 + APPFPS60 (pair 60,60) | 0.01667 | **1.000 (real time)** |
+| frames_appfps6030 | MFRAME60 + pair (60,30) | 0.02595 | 1.557 |
+| frames_appfps6020 | MFRAME60 + pair (60,20) | 0.02613 | 1.568 |
+| frames_appfps6015 | MFRAME60 + pair (60,15) | 0.02675 | 1.605 |
+| frames_appfps6015b | MFRAME60 + pair (60,15) repeat | 0.02964 | 1.778 |
+| frames_appfps6030nomf | pair (60,30), no MFRAME60 | 0.02707 | 1.624 |
+| frames_appfps60b/60c | MFRAME60 + APPFPS60 (default pair 60,60), later runs | 0.029-0.033 | 1.77-1.99 |
+| frames_rplysync (30 fps hybrid) | no 60 hooks | 0.03563 | 2.138 (i.e. 1.07 per 30 frames - real time at 30 fps) |
+
+The 30 fps reference reads 1.07 x (1/30 s per frame would be 0.0333), so the method is sound within ~7%. The clean
+MFRAME60-only measurement from M1555 (full song 167.18 s over 10020 presented frames = 0.01668 s/frame) matches the
+"frames_appfps60" row: **with MFRAME60 alone the dance clock advances in real time**. But all the pair-configured runs
+mostly read 1.55-2.0x, including runs where the pair was the default (60,60) - the logs with the SHOT window appear to
+include pre-dance/countdown phases where the dance clock advances differently, so the median is not steady-state
+dance-only. The one unambiguous full-song measurement (M1555, MFRAME60 only) is real-time, and the pair experiments have
+no equivalent full-song measurement; therefore the earlier "pair (60,15) is best" conclusion is not supported by the
+clock data and must be re-checked with the full-song measurement (dance clock total time over a whole song) rather than
+screenshot regions.
+
+Next: (1) full-song timing runs for MFRAME60-only (reference, expect ~167 s), MFRAME60 + pair (60,60), MFRAME60 + pair
+(60,15); the winner is the configuration whose whole-song dance clock equals real time (about 166-168 s, as M1555);
+(2) only for that winner, run the screenshot comparison again with the mapping fixed; (3) if MFRAME60-only is the
+real-time config (as M1555 suggested), the residual animation-speed mismatch must come from a subsystem other than the
+dance clock, and the M-B3 render interpolation remains the fallback. Release unchanged: payload CEBB6C124FF7B269 (2026-11-10 16:39:04), 60
+experimental; all hooks env-gated and off by default.
+
+ANTI-FORGETTING ENTRY. Keywords: M1587 dance clock advance rate - instead of screenshot alignment, measured the dance
+clock advance from existing [DCLK] lines (median of adjacent clk deltas divided by frame delta): frames_appfps60
+(MFRAME60 + APPFPS60 pair 60,60) 0.01667 clk/frame = 1.000 per 60 frames real time; frames_appfps6030 (60,30) 0.02595 =
+1.557; frames_appfps6020 1.568; frames_appfps6015 1.605; frames_appfps6015b 1.778; frames_appfps6030nomf 1.624;
+frames_appfps60b/60c 1.77-1.99; frames_rplysync (30 fps hybrid, no 60 hooks) 2.138 per 60 frames i.e. 1.07 per 30 frames
+(real time at 30 fps); the 30 fps reference reads 1.07x so the method is sound within ~7%; the clean MFRAME60-only
+measurement from M1555 (full song 167.18 s over 10020 presented frames = 0.01668 s/frame) matches frames_appfps60 - with
+MFRAME60 alone the dance clock advances in real time; but all pair-configured runs mostly read 1.55-2.0x including default
+pair 60,60 runs, whose logs include pre-dance/countdown phases where the clock advances differently, so the median is not
+steady-state dance-only; the one unambiguous full-song measurement (M1555, MFRAME60 only) is real-time and the pair
+experiments have no equivalent full-song measurement, so the earlier "pair 60,15 is best" conclusion is not supported by
+the clock data and must be re-checked with the full-song measurement (dance clock total time over a whole song); next run
+full-song timing for MFRAME60-only (reference ~167 s), MFRAME60 + pair 60,60 and MFRAME60 + pair 60,15, pick the
+configuration whose whole-song dance clock equals real time (166-168 s), then redo the screenshot comparison for that
+winner with the mapping fixed, and if MFRAME60-only is the real-time config the residual animation-speed mismatch must
+come from a subsystem other than the dance clock (M-B3 interpolation remains the fallback); release unchanged payload
+CEBB6C124FF7B269 (2026-11-10 16:39:04), 60 experimental, all hooks env-gated and off by default.
+LOOKUP: M1587 re-checks the pair story from M1581-M1584 via the clock -> 18.5112 [relevant: reproducibility problem],
+18.5110 [relevant: sweep 60,15], 18.5094 [relevant: MFRAME60 full-song real-time]
