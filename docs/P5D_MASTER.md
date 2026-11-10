@@ -1676,6 +1676,7 @@
 | M1591 | §18.5118: **Song-entry key experiments still do not start a real song; this run ends with the route open.** Round 40: pressing 'e' once then no input, and 'e' then 'p' (START), both end with the log "song -> dance (song confirmed)" then "dance -> song (song modelled)" and the driver reporting "song: True scr=MAIN" - the Wait-For returned while the screen was back at MAIN, so the keys hit the main menu. The song-confirmed dialog needs a different key/step (candidate 'b' (Cross), a difficulty/settings confirm, or waiting for the preview to end); without it there is no full-song measurement and the native-60 verdict stays open. Resume: learn the exact dialog keys (interactive or screenshot steps), fix drive_song_clean.ps1, run the three configs (MFRAME60 only; +pair 60,60; +pair 60,15) with the whole-song dance clock/wall ~166-168 s as arbiter, then M-B4/build/repack/release notes; fallback to the render-interpolation road only if none is real-time. Release unchanged CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
 | M1597 | §18.5119: **Controlled preview benchmark: all three 60 fps configs advance the dance clock in real time; M1587's 1.55-2.0x readings were polluted.** The song-list preview dance is reachable deterministically (main menu -> song list -> confirm), so the same route benchmarks every config: steady-state dance-clock median at 60 fps all-screen: MFRAME60 only 0.01663 s/frame (0.998/60), +APPFPS60 pair(60,60) 0.01662 (0.997), +APPFPS(60,15) 0.01666 (1.000) - all real time. M1587's multi-config 1.55-2.0x numbers came from non-steady segments; the pair does not break the dance clock, so the native-60 question hinges on animation/render pacing. Next M1598: pixel-diff benchmark on the same preview (low RECOMP_SHOT_EVERY, four configs, [DCLK]-aligned steady window) to check per-second change against the 30 fps baseline; if it matches, native 60 is validated and M-B4 proceeds. Release unchanged CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
 | M1598/M1599 | §18.5120: **Preview pixel benchmark: at 60 fps the dance animation is 1.5-1.7x the 30 fps baseline while the dance clock is real time; the frame-rate pair lowers it to ~1.1-1.4x but breaks the note/HUD layer.** Same preview route, RECOMP_SHOT=5, shot frames mapped to the dance clock via [DCLK], steady window 6-14 s: 60 MFRAME60 only ratios 1.49-1.68; pair (60,60) 1.46-1.64; (60,15) 1.10-1.34; (60,12) 1.10-1.35; (60,10) 1.12-1.39; (60,7) 1.14-1.43 (never 1.0). Screenshots at ~11 s: MFRAME60-only has the full note ring/buttons/progress bar, pair (60,7) shows only one star note and no ring/buttons/progress bar - the note/HUD layer desyncs (user also saw picture errors); metrics still guest ~60 fps/speed 1.00x/no errors, so it is pacing/state, not GPU. Conclusion: the gap is the animation advance rate, not the dance clock; the pair is unacceptable; next make the character and note/HUD animation time base advance by real time (preview benchmark as the acceptance test). Release unchanged CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
+| M1600/M1601 | §18.5121: **Native-60 animation-speed diagnostics: MFRAME60-off, EVALSLOW, JOBSLOW and their combination all leave a 1.3-1.5x residual.** Same preview benchmark: reference 60 MFRAME60 1.49-1.68; no MFRAME60 1.44-1.63 (not the cause); +EVALSLOW 1.28-1.42; +JOBSLOW 1.43-1.58; +JOBSLOW+EVALSLOW 1.31-1.50 (never 1.0). The dance animation time base is not yet found (likely the dance playback/motion job advancing a frame counter per presented frame and sampling motion at frame/30 without appMframe conversion; motion=018 frames=60 fits). EVALSLOW does not break the picture (notes/HUD complete, character present). Per the user's bar (correct picture + no double speed) the shipped hybrid 60 option already qualifies (M1555: 167.18 s full song, real-time dance clock, speed 1.00x; trade-off 30 Hz content), while native 60 currently either runs 1.3-1.5x fast or breaks the note/HUD layer. Next: hook the dance playback job frame-counter advance and halve it at 60 fps, re-check the benchmark; otherwise finalize the hybrid with accurate release notes. Release unchanged CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
 proposal).** mnsHandle_8111b64c/8111b190 receive a real-time float (+0.01668/frame at 60 vs +0.03337 at 30);
 mnsProcess_811251d6 fires per-frame but constant; other mnsProcess/mnsOption/gfd entries do not fire per-frame;
 object-word slopes show only the known danceQuantizer_81049976 w2 (+0.5 at 60 vs +1.0 at 30). The remaining
@@ -521243,3 +521244,54 @@ real time instead of per frame - the preview benchmark is the fast acceptance te
 env-gated and off by default, the 30 fps path untouched.
 LOOKUP: M1598/M1599 measure after M1597 -> 18.5119 [relevant: preview clock benchmark], 18.5114 [relevant: clock rate
 correction], 18.5107 [relevant: earlier screenshot measurements]
+
+### 18.5121 M1600/M1601 NATIVE-60 ANIMATION-SPEED DIAGNOSTICS: MFRAME60-OFF, EVALSLOW, JOBSLOW AND THEIR COMBINATION ALL LEAVE A 1.3-1.5x RESIDUAL; THE DANCE PLAYBACK TIME BASE IS ELSEWHERE
+
+Four controlled preview-benchmark runs (same route, RECOMP_SHOT=5, [DCLK]-aligned steady window 6-14 s, per-second pixel
+change versus the 30 fps baseline; the baseline values are the second column):
+
+| config | char_center | bg_left | hud_left | hud_right | bottom_bar | top_corner |
+|---|---|---|---|---|---|---|
+| 60 fps MFRAME60 only (reference) | 1373 / 1.50 | 1131 / 1.68 | 1093 / 1.68 | 1153 / 1.62 | 1174 / 1.62 | 1248 / 1.49 |
+| 60 fps, no MFRAME60 | 1321 / 1.44 | 1095 / 1.62 | 1058 / 1.62 | 1121 / 1.58 | 1185 / 1.63 | 1220 / 1.45 |
+| 60 fps, MFRAME60 + EVALSLOW | 1266 / 1.38 | 953 / 1.41 | 928 / 1.42 | 1010 / 1.42 | 927 / 1.28 | 1174 / 1.40 |
+| 60 fps, MFRAME60 + JOBSLOW | 1330 / 1.45 | 1070 / 1.58 | 1031 / 1.58 | 1107 / 1.56 | 1136 / 1.56 | 1198 / 1.43 |
+| 60 fps, MFRAME60 + JOBSLOW + EVALSLOW | 1266 / 1.38 | 990 / 1.47 | 967 / 1.48 | 1040 / 1.46 | 951 / 1.31 | 1256 / 1.50 |
+
+Findings: (1) MFRAME60 is not the cause - without it the ratio barely changes (1.44-1.63); (2) halving the appCalculator
+evaluator time (EVALSLOW) only moves 1.6 to 1.35 and (3) halving the job-time getter (JOBSLOW) only to 1.43-1.58; together
+they reach 1.31-1.50 but not 1.0. So the dance animation is driven by a time base we have not found yet (most likely the
+dance playback/motion job advances a frame counter per presented frame and samples the motion data at frame/30 without
+the appMframe conversion; the earlier motion-data note "motion=018 帧数=60" fits that). The EVALSLOW screenshot at the
+benchmark frame shows the notes/HUD complete and the character present, so that lever does not break the picture - it is
+simply not the main driver.
+
+Decision input (user's bar): the picture must be correct and there must be no double speed. The shipped hybrid 60 option
+(dance stage presents at 60 Hz while logic/music/judgement run at 30 Hz, verified in M1555: full song 167.18 s, dance clock
+real time, speed 1.00x) already satisfies both requirements - the trade-off is that content updates at 30 Hz. The native-60
+configuration at present either runs the animation 1.3-1.5x fast (EVALSLOW/JOBSLOW) or breaks the note/HUD layer (the
+frame-rate pair runs, M1598/M1599), so it does not yet meet the bar. Next if native-60 is to continue: find and hook the
+dance playback job's frame-counter advance (per presented frame) and halve it at 60 fps, then re-check the preview
+benchmark (target ratios ~1.0 with the full note/HUD present); otherwise finalize the hybrid as the 60 option with
+accurate release notes (dance stage 60 Hz output, 30 Hz logic, real-time music/judgement, no double speed, correct
+picture). Release unchanged: payload CEBB6C124FF7B269 (2026-11-10 16:39:04), 60 experimental; all hooks env-gated and off by default.
+
+ANTI-FORGETTING ENTRY. Keywords: M1600/M1601 native-60 animation-speed diagnostics - four controlled preview-benchmark
+runs (same route, RECOMP_SHOT=5, DCLK-aligned steady window 6-14 s, per-second pixel change versus the 30 fps baseline):
+60 MFRAME60 only ratios char_center 1.50, bg_left 1.68, hud_left 1.68, hud_right 1.62, bottom_bar 1.62, top_corner 1.49;
+60 no MFRAME60 1.44-1.63; MFRAME60+EVALSLOW 1.28-1.42; MFRAME60+JOBSLOW 1.43-1.58; MFRAME60+JOBSLOW+EVALSLOW 1.31-1.50 -
+so MFRAME60 is not the cause, halving the appCalculator evaluator time (EVALSLOW) moves 1.6 to 1.35, halving the job-time
+getter (JOBSLOW) to 1.43-1.58, together 1.31-1.50 but never 1.0, meaning the dance animation is driven by a time base not
+yet found (most likely the dance playback/motion job advances a frame counter per presented frame and samples the motion
+data at frame/30 without the appMframe conversion; the motion-data note motion=018 frames=60 fits); the EVALSLOW screenshot
+at the benchmark frame shows the notes/HUD complete and the character present so that lever does not break the picture, it
+is simply not the main driver; decision input (user bar: picture correct and no double speed): the shipped hybrid 60 option
+(dance stage presents at 60 Hz while logic/music/judgement run at 30 Hz, verified in M1555 - full song 167.18 s, dance clock
+real time, speed 1.00x) already satisfies both, the trade-off being 30 Hz content updates; the native-60 configuration at
+present either runs the animation 1.3-1.5x fast (EVALSLOW/JOBSLOW) or breaks the note/HUD layer (frame-rate pair runs,
+M1598/M1599) so it does not meet the bar yet; next if native-60 continues: find and hook the dance playback job frame
+counter advance and halve it at 60 fps, then re-check the preview benchmark (target ratios ~1.0 with full note/HUD present);
+otherwise finalize the hybrid as the 60 option with accurate release notes; release unchanged payload CEBB6C124FF7B269 (2026-11-10 16:39:04),
+60 experimental, all hooks env-gated and off by default.
+LOOKUP: M1600/M1601 diagnose after M1598/M1599 -> 18.5120 [relevant: pair benchmark + UI regression], 18.5119 [relevant:
+preview clock benchmark], 18.5107 [relevant: earlier screenshots]
