@@ -1679,6 +1679,7 @@
 | M1600/M1601 | §18.5121: **Native-60 animation-speed diagnostics: MFRAME60-off, EVALSLOW, JOBSLOW and their combination all leave a 1.3-1.5x residual.** Same preview benchmark: reference 60 MFRAME60 1.49-1.68; no MFRAME60 1.44-1.63 (not the cause); +EVALSLOW 1.28-1.42; +JOBSLOW 1.43-1.58; +JOBSLOW+EVALSLOW 1.31-1.50 (never 1.0). The dance animation time base is not yet found (likely the dance playback/motion job advancing a frame counter per presented frame and sampling motion at frame/30 without appMframe conversion; motion=018 frames=60 fits). EVALSLOW does not break the picture (notes/HUD complete, character present). Per the user's bar (correct picture + no double speed) the shipped hybrid 60 option already qualifies (M1555: 167.18 s full song, real-time dance clock, speed 1.00x; trade-off 30 Hz content), while native 60 currently either runs 1.3-1.5x fast or breaks the note/HUD layer. Next: hook the dance playback job frame-counter advance and halve it at 60 fps, re-check the benchmark; otherwise finalize the hybrid with accurate release notes. Release unchanged CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
 | M1602 | §18.5122: **Dance job process nodes found; the dance-system update functions are identified.** Job-struct dumps from the preview run: init dancemain entry 0x81184cf9 (FUN_81184cf8); DanceSystem 0x81049afd (FUN_81049afc, next to the 1/30 quantizer); DanceReady_P5 0x81138541; DanceMemberPose 0x811391c1 (FUN_811391c0, a state dispatcher over its 8 members, node 0x10380240); DanceProcess 0x81043fef (FUN_81043ee2, contains the dance clock site_10 0x81043fee); danceVoiceSub 0x81050bab. Next: env-gated probes on these five entries (frame, r0/r1, struct words), compare 30/60 fps previews, find the pose's clock (if it advances per presented frame at frame/30 that is the residual 1.3-1.7x source), halve it only at 60 fps and let the preview benchmark decide. Release unchanged CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
 | M1603 | §18.5123: **Dance entry probes: the entries receive dt-aware deltas (pose s0 0.0333 at 30 fps, 0.0166 at 60 fps), so the residual speedup is deeper.** Probes on the five dance entries logged s0: pose 0.0333/0.0166, proc 0.0330/0.0167, ready 0.0333/0.0168, sys 0.0336/0.0162-0.0176, voice 0.0333/0.0166 - the frame-index-to-dt conversion at this layer is correct and is not the 1.5-1.7x source. The sampled module objects show no per-frame advancing counter (pose w0 steps 131072->131074 then holds; ready/voice words constant). Next: (1) walk the pose process object's 8-member array per frame to find the motion cursor; (2) measure per-frame pose-matrix change with the recorder (possible double dt); (3) fall back to the shipped hybrid if not pinned quickly (correct picture + no double speed). Release unchanged CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
+| M1604 | §18.5124: **Measurement correction: with matched frame gaps the 60 fps MFRAME60 animation is real time (ratio 1.01-1.04) - the earlier 1.5-1.7x was a sampling-gap artifact; MFRAME60-only is the leading native-60 candidate.** M1598/M1599 compared shots 5 frames apart (83 ms at 60 fps vs 167 ms at 30 fps) and normalized by frame rate; re-analysing the same shots with matched gaps (10 frames at 60 fps vs 5 at 30 fps, same 166.7 ms): MFRAME60 only char 1.04/bg 1.03/hud_l 1.04/hud_r 1.03/bottom 1.02/top 1.01; pair (60,60) 1.00-1.02; pairs (60,15/12/10/7) 0.76-0.96 (slower than real time) and they break the note/HUD layer. Combined with the real-time dance clock (M1597), the correct dt at the dance entries (M1603) and the M1555 full-song 167.18 s, MFRAME60-only at 60 fps is the native-60 candidate; next: title-sequence duration, full-song re-measurement, music/judgement sync, visual pass, then wire MFRAME60 into the launcher 60 option, rebuild, test, repackage, release notes. Release unchanged CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
 proposal).** mnsHandle_8111b64c/8111b190 receive a real-time float (+0.01668/frame at 60 vs +0.03337 at 30);
 mnsProcess_811251d6 fires per-frame but constant; other mnsProcess/mnsOption/gfd entries do not fire per-frame;
 object-word slopes show only the known danceQuantizer_81049976 w2 (+0.5 at 60 vs +1.0 at 30). The remaining
@@ -521392,3 +521393,64 @@ unchanged payload CEBB6C124FF7B269 (2026-11-10 16:39:04), 60 experimental, all p
 30 fps path untouched.
 LOOKUP: M1603 probes the dance entries from M1602 -> 18.5122 [relevant: dance job process nodes], 18.5121 [relevant:
 diagnostics residual], 18.5119 [relevant: preview benchmark]
+
+### 18.5124 M1604 MEASUREMENT CORRECTION: WITH MATCHED FRAME GAPS THE 60 FPS MFRAME60 ANIMATION IS REAL TIME (RATIO 1.01-1.04) - THE EARLIER 1.5-1.7x WAS A SAMPLING-GAP ARTIFACT; MFRAME60-ONLY IS THE LEADING NATIVE-60 CANDIDATE
+
+The M1598/M1599 benchmark compared shots 5 frames apart in both configurations and normalized the mean pixel change by
+the frame rate (60 vs 30). But 5 frames is 83 ms at 60 fps and 167 ms at 30 fps, and the mean |frame-to-frame| change of
+an oscillating animation is not linear in the gap (a half-beat of motion can nearly cancel), so that normalization
+inflates the 60 fps ratio. Re-analysing the SAME captured shots with MATCHED gaps - 10 frames at 60 fps (166.7 ms)
+against 5 frames at 30 fps (166.7 ms), so both sides measure the same wall-clock displacement and the per-second scale
+cancels - gives:
+
+| config | char_center | bg_left | hud_left | hud_right | bottom_bar | top_corner |
+|---|---|---|---|---|---|---|
+| 60 fps MFRAME60 only | **1.04** | 1.03 | 1.04 | 1.03 | 1.02 | 1.01 |
+| 60 fps + pair (60,60) | 1.01 | 1.01 | 1.02 | 1.01 | 1.01 | 1.00 |
+| 60 fps + pair (60,15) | 0.96 | 0.82 | 0.84 | 0.82 | 0.77 | 0.94 |
+| 60 fps + pair (60,12) | 0.94 | 0.81 | 0.83 | 0.83 | 0.76 | 0.93 |
+| 60 fps + pair (60,10) | 1.00 | 0.88 | 0.92 | 0.87 | 0.82 | 1.01 |
+| 60 fps + pair (60,7) | 0.97 | 0.87 | 0.91 | 0.85 | 0.80 | 0.98 |
+
+(30 fps baseline mean pixel change per 166.7 ms: char 31.22, bg 23.72, hud_left 22.93, hud_right 24.42, bottom 25.47,
+top 29.93; 48/87/91/94/94/83/89 compared pairs inside the same [DCLK] window 6-14 s.)
+
+So at 60 fps with MFRAME60 only, the dance animation advances in real time (ratios 1.01-1.04), the dance clock is real
+time (M1597), the dance-system entries receive correct dt (M1603), the notes/HUD are complete on screen (the MFRAME60-only
+screenshot at the benchmark frame), and the only full-song measurement ever made (M1555) with MFRAME60 gave 167.18 s -
+real time. The frame-rate pair configurations are actually SLOWER than real time (0.76-0.96) and break the note/HUD layer
+(M1598/M1599 screenshots), so they are rejected; the native-60 configuration to validate is **MFRAME60 only at 60 fps**.
+
+Consequences: the 'residual 1.5-1.7x speedup' chased in M1580-M1602 was a measurement artifact, and the native-60 path
+may already be correct. The remaining validation for the user's bar (correct picture + no double speed) and the M-B4
+checklist: (1) title-sequence duration at 60 fps with MFRAME60 (30 fps baseline ~4.1 s; a frame-count-paced title would
+be short - check with the title job probe); (2) full-song duration re-measurement at 60 fps with MFRAME60 (expect
+~166-168 s); (3) music/judgement sync over a song (dance clock real time already measured); (4) visual pass on the menus
+and dance for a few minutes; then wire MFRAME60 into the launcher's 60 option (only in 60 mode), rebuild, test through
+the desktop launcher, repackage and update the release notes.
+
+Release unchanged: payload CEBB6C124FF7B269 (2026-11-10 16:39:04), 60 experimental; all hooks env-gated (RECOMP_P5D_MFRAME60=1 opt-in) and
+off by default, the 30 fps path untouched.
+
+ANTI-FORGETTING ENTRY. Keywords: M1604 measurement correction - M1598/M1599 compared shots 5 frames apart in both
+configurations and normalized by frame rate (60 vs 30), but 5 frames is 83 ms at 60 fps and 167 ms at 30 fps and the mean
+frame-to-frame change of an oscillating animation is not linear in the gap, so the normalization inflated the 60 fps
+ratio; re-analysing the same shots with MATCHED gaps (10 frames at 60 fps = 166.7 ms against 5 frames at 30 fps = 166.7 ms,
+same wall-clock displacement, per-second scale cancels) gives: 60 fps MFRAME60 only ratios char_center 1.04, bg_left 1.03,
+hud_left 1.04, hud_right 1.03, bottom_bar 1.02, top_corner 1.01; pair 60,60 1.00-1.02; pair 60,15 0.77-0.96; pair 60,12
+0.76-0.94; pair 60,10 0.82-1.01; pair 60,7 0.80-0.98 (30 fps baseline mean pixel change per 166.7 ms: char 31.22, bg
+23.72, hud_left 22.93, hud_right 24.42, bottom 25.47, top 29.93; 48-94 compared pairs inside the [DCLK] window 6-14 s);
+so at 60 fps with MFRAME60 only the dance animation advances in real time, the dance clock is real time (M1597), the
+dance-system entries receive correct dt (M1603), the notes/HUD are complete on screen in the MFRAME60-only screenshot,
+and the only full-song measurement (M1555) with MFRAME60 gave 167.18 s real time; the frame-rate pair configurations are
+actually slower than real time (0.76-0.96) and break the note/HUD layer, so they are rejected and the native-60
+configuration to validate is MFRAME60 only at 60 fps; the 'residual 1.5-1.7x speedup' chased in M1580-M1602 was a
+measurement artifact and the native-60 path may already be correct; remaining validation for the user bar (correct
+picture + no double speed) and M-B4: (1) title-sequence duration at 60 fps with MFRAME60 (30 fps baseline ~4.1 s; a
+frame-count-paced title would be short - check with the title job probe); (2) full-song duration re-measurement at 60 fps
+with MFRAME60 (expect ~166-168 s); (3) music/judgement sync over a song (dance clock real time already measured); (4)
+visual pass on menus and dance for a few minutes; then wire MFRAME60 into the launcher 60 option (only in 60 mode),
+rebuild, test through the desktop launcher, repackage and update the release notes; release unchanged payload CEBB6C124FF7B269
+(2026-11-10 16:39:04), 60 experimental, all hooks env-gated (RECOMP_P5D_MFRAME60=1 opt-in) and off by default, 30 fps path untouched.
+LOOKUP: M1604 corrects M1598/M1599 -> 18.5120 [relevant: sampling-gap benchmark], 18.5123 [relevant: dance entry dt],
+18.5119 [relevant: preview clock benchmark], 18.5094 [relevant: MFRAME60 real time full song]
