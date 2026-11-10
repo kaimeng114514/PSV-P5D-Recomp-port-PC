@@ -206,14 +206,6 @@ ANTI-FORGETTING 记录、命令、日志与截图路径）。
    [docs/NATIV_REFERENCE.md](docs/NATIV_REFERENCE.md) 与 [docs/P5D_MASTER.md](docs/P5D_MASTER.md)）。
 4. 发布打包：`dev/make_p5d_release.py`（单文件自解压 exe + 启动器 + 内置 Python/mingw）。
 
-## 故障排查
-
-- **某界面 Q/E 不对**：按 **F3** 切换 Q/E 模式（自动 / L/R / D-pad），屏幕有提示，选择会被记住。
-- **启动后要求重新构建**：更新过启动器属于正常现象；进度条结束会自动开始游戏，之后启动秒进。
-- **构建失败**：打开启动器的"显示日志"查看完整输出；日志也会写到
-  `%APPDATA%\P5D-Port\P5D\launcher.log`。请附上 `session.log`（游戏中）一起反馈。
-- **分辨率/全屏**：启动器选择分辨率；内部倍率随分辨率自动设定。全屏可在游戏内设置，或用 `RECOMP_FULLSCREEN=1`。
-
 ## 发布合规与版权
 
 - 发布树红线（不含游戏可执行码/资源/着色器衍生数据/密钥固件）见
