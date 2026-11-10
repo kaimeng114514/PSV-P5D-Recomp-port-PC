@@ -1643,6 +1643,15 @@
 | M1557 | §18.5085: **M-B1 proper-phase dance measurement.** M1556's window was phase-mismatched; with DCLK-aligned windows at 8.37-11.07 s: 30 fps baseline 15.40 / 462 per second / no held; 60 fps + MFRAME60 12.21 / 733 (about 1.59x) / 2 held; 60 fps + MFRAME60 + EASE_DT v2 12.16 / 730 (no measurable dance effect). So MFRAME60 fixes song/chart length and MFrame-based menus, but the dance character 3D animation still runs about 1.6x fast on another frame-index clock - most plausibly the chart/note-sequence position or the dance motion player (m_app_musical_note_sequencer / motion data with frame counts). The m_app_dance map: danceAnimation_8103b658/8103b6ea are 8-slot registration functions, danceMain_81043fee's clock is real-time, danceProcessPerFrame_81049976 / danceDancer_8103ce26 / danceGraphics next. Release untouched CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
 | M1558 | §18.5086: **M-B1 round 6: the 1/30 quantizer is already dt-aware; the residual dance motion is mixed (1.28-1.64x).** fn_81049976 (count=ceil(t*30), t'=count/30) advances 0.500 per presented frame at 60 fps and 1.000 at 30 fps (about 30 units per wall second both) - already dt-aware, do not touch (its 1/30 constant replacement distorted the animation earlier). With MFRAME60 the dance scene at matched clock phase 8.37-11.07 s is fast by region: character 733 vs 446 per s (1.64x), background 615 vs 462 (1.33x), HUD left 586 vs 438 (1.34x), HUD right 640 vs 475 (1.35x), bottom bar 595 vs 417 (1.43x), top corner 853 vs 669 (1.28x) - multiple remaining frame-count clocks. Next: a multi-site single-run probe of danceResident_81040a7c / 81047280 / 81046d04 / danceGraphics / danceDancer for a 1.0-per-frame value at 60 fps. Release untouched CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
 | M1559 | §18.5087: **M-B1 round 7 multi-site slope probe.** 12 dance functions sampled per frame at 60 (+MFRAME60) and 30 fps: every firing per-frame site with a time-like float is already dt-aware (0.5 per presented frame at 60 vs 1.0 at 30) - danceGraphics_81041740 s0 +0.0167 vs +0.0333, danceQuantizer_81049976 same, danceScreenEffect_810489d8 and danceMain_81043fee constant; danceResident/danceDancer/danceGraphics(8104142c/be/16d4)/danceSystem fire once or not during the dance (setup paths). So the 1.28-1.64x residual does not come from these calls; next suspects: the MNS/note-lane update path and the camera matrix path (camera track GFS 1931 keyframes / 210.667 s, sampling input not found), probed the same way. Release untouched CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
+| M1561 | §18.5088: **M-B1 round 8: MNS current time is dt-aware; no 1.0-per-frame clock in the probed set (pivot
+proposal).** mnsHandle_8111b64c/8111b190 receive a real-time float (+0.01668/frame at 60 vs +0.03337 at 30);
+mnsProcess_811251d6 fires per-frame but constant; other mnsProcess/mnsOption/gfd entries do not fire per-frame;
+object-word slopes show only the known danceQuantizer_81049976 w2 (+0.5 at 60 vs +1.0 at 30). The remaining
+1.28-1.64x dance fastness comes from a clock outside this set (a model/GFD animation player or a chart-driven camera
+path). Clock-hunting has diminishing returns; efficient pivot: the M-B3 render-level plan - keep game logic at its
+authored rate and interpolate rendered scene state (bone matrices/draw transforms) between game frames in the port
+GXM replay layer, with a one-model verification prototype first. Release untouched CEBB6C124FF7B269, 2026-11-10 16:39:04; 60
+experimental. |
 | §18.5064 | M1524 gives the COLLECTION character costume screen its own code-level keys: Enter = START (watch mode), Ctrl = TRIANGLE (random outfit), and the START/triangle badges in the game 256x128 button-glyph atlas are repainted as Enter/Ctrl keycaps. Identification uses no picture model: the collection jobs mark the flow and a port-maintained depth counter (tab page 1, character list 2, costume screen 3) drives the routing; leaving the flow or changing depth refreshes the atlas back. Verified on the launcher bat with screenshots; release payload 2404D1D9BACA531B. |
 | §18.4979 | The six dance-stage button icons are now replaced by Q/A/Z/O/K/M, verified live. The user identified the real asset: not the menu-hint atlas but the 512x512 texture from icons_candidates.png bottom-right (s_1022_2170be80, FNV1a64=0x7aad5be59305ae99) which contains the six white symbols (up/left/down arrows, triangle, circle, cross) plus the red/grey rail nodes and scratch markers. Implementation: keyglyph_patch() in gfx_gpu.c identifies that atlas by content hash at decode time and, only in the dance key profile (window_in_dance_stage()) with keyboard input (window_uses_keyboard()), overwrites the six symbol cells with same-sized bold white letters Q(up)/A(left)/Z(down)/O(triangle)/K(circle)/M(cross) (masks in keyglyphs512.h, Arial Bold, anti-aliased, sized to the original symbols); only this one atlas is forced onto the RGBA decode path so every other texture keeps the normal path (no black-screen regression). Live log: [KG] icon atlas 0x2170be80 dance=1 kb=1 -> [KG] patched 512 icon atlas 0x2170be80; the screenshot confirms the dance HUD shows Q/A/Z/O/K/M and the game runs normally (pause menu works). RECOMP_KEYGLYPHS=0 disables it; the menus are not affected. |
 | §18.4978 | Black-screen false alarm clarified and the picture verified: launching the normal way (desktop shortcut / P5D_Play.bat, i.e. pipeline run) and screenshotting shows the game is perfectly fine - the capture is the dance stage (SHIBUYA, 6 COMBO, the left-side direction icons, the right-side triangle/circle/cross button icons, score 2100), mean brightness 119.9/255, not black. The black windows earlier had two causes: (1) the previous experimental build forced CPU decode of all textures by default (made opt-in in M1436), and (2) my automated tests launched game_host.exe directly, bypassing the pipeline's environment/config - the direct launch itself renders black, so those black windows were my test processes, not the product. The capture also confirms that the six dance-stage button icons are exactly the previously captured 256x128 icon atlas (circle/cross/triangle/square plus four d-pad badges), giving the accurate target and verification frame for the coming keyboard-letter replacement. |
@@ -519761,3 +519770,42 @@ Consequence: the 1.28-1.64x residual measured by pixels (M1558) is NOT produced 
 ANTI-FORGETTING ENTRY. Keywords: M1559 Phase B M-B1 round 7 multi-site slope probe - explicit per-site wrappers (the hook point does not expose the entry VA) sampled 12 dance functions every 30 presented frames at 60 fps (+MFRAME60) and 30 fps; every firing per-frame site with a time-like float is dt-aware: danceGraphics_81041740 s0 +0.0167/frame at 60 vs +0.0333 at 30 (0.5 ratio), danceQuantizer_81049976 same, danceScreenEffect_810489d8 and danceMain_81043fee fire per-frame with constant arguments; danceResident 81040a7c/81047280/81046d04, danceDancer_8103ce26, danceGraphics 8104142c/810414be/810416d4 and danceSystem_810499b4 fire once/not during dance (setup paths); so the 1.28-1.64x residual is not produced by these callss - next suspects are the MNS/note-lane update path and the camera matrix path (dance camera track GFS: 1931 keyframes over 210.667 s, sampling input not yet found), probed the same way in one run each; then per-consumer dt half-step; release unchanged payload CEBB6C124FF7B269 (2026-11-10 16:39:04), 60 experimental.
 LOOKUP: M1559 continues M-B1 after M1558 -> 18.5086 [relevant: quantizer dt-aware + region ratios], 18.5085 [relevant: proper-phase measurement], 18.5083 [relevant: MFRAME60 rescale]
 
+
+### 18.5088 M1561 PHASE B M-B1 ROUND 8: MNS CURRENT TIME IS DT-AWARE; NO 1.0-PER-FRAME CLOCK AMONG THE PROBED
+DANCE/MNS FUNCTIONS (PIVOT PROPOSAL TO M-B3)
+
+Round-8 probes (one dance run at 60 fps +MFRAME60 and one at 30 fps; per-site wrappers for the MNS judgement/process
+functions and the gfd model/scene entries, logging the first eight object words of the r0 argument):
+
+- MNS current time is dt-aware: mnsHandle_8111b64c (site 12) and mnsHandle_8111b190 (site 13) receive a float time
+  in s0 that advances +0.01668 per presented frame at 60 fps and +0.03337 at 30 fps - real time, consistent with the
+  judgement path documented as time in seconds.
+- mnsProcess_811251d6 (site 15) fires per frame but its probed register/object-word slopes are constant; the other
+  mnsProcess entries (81122a80, 81121bf6, 81122058), mnsOption_8111c280 and the two gfd entries did not fire
+  per-frame during the dance.
+- object-word slopes: only danceQuantizer_81049976 (site 11) shows a meaningful word slope - w2 advances +0.5 per
+  presented frame at 60 fps vs +1.0 at 30 fps (the already-known dt-aware counter). No probed function exposes a
+  1.0-per-presented-frame counter at 60 fps.
+
+Conclusion: the remaining 1.28-1.64x dance fastness (M1558) is not carried by any probed per-frame function. The
+music/judgement time, the quantizer, the graphics entry and the measured animation values are all dt-aware. The dance
+character pose/camera sampling must read a clock outside this set (an animation player inside the model/GFD layer, or
+a chart-driven camera path). Clock-hunting has now covered the obvious namespace paths and is yielding diminishing
+returns, so the efficient route is to pivot to the M-B3 render-level plan: keep the game logic at its authored rate
+and produce 60 fps motion by interpolating the rendered scene state (bone matrices / draw transforms) between game
+frames in the port's GXM replay layer, where the port already controls every draw submission. That path does not
+depend on identifying every game-side clock. A one-model verification prototype (the dance character) decides
+viability. Release unchanged: payload CEBB6C124FF7B269 (2026-11-10 16:39:04), 60 experimental.
+
+ANTI-FORGETTING ENTRY. Keywords: M1561 Phase B M-B1 round 8 - MNS current time is dt-aware (mnsHandle_8111b64c /
+mnsHandle_8111b190 s0 +0.01668 per presented frame at 60 fps vs +0.03337 at 30 fps), mnsProcess_811251d6 fires
+per-frame but its register/object-word slopes are constant, the other mnsProcess/mnsOption/gfd entries do not fire
+per-frame during the dance; object-word slopes show only danceQuantizer_81049976 w2 advancing +0.5 per presented
+frame at 60 vs +1.0 at 30 (already known dt-aware); no probed function exposes a 1.0-per-presented-frame clock, so
+the remaining 1.28-1.64x dance fastness comes from a clock outside this set (a model/GFD animation player or a
+chart-driven camera path); clock-hunting yields diminishing returns, so the efficient pivot is the M-B3 render-level
+plan: keep game logic at its authored rate and interpolate the rendered scene state (bone matrices / draw transforms)
+between game frames in the port GXM replay layer, decided by a one-model verification prototype (dance character);
+release unchanged payload CEBB6C124FF7B269 (2026-11-10 16:39:04), 60 experimental.
+LOOKUP: M1561 continues M-B1 after M1559 -> 18.5087 [relevant: multi-site slopes], 18.5086 [relevant: quantizer],
+18.5085 [relevant: proper-phase measurement]
