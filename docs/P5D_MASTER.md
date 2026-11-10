@@ -1678,6 +1678,7 @@
 | M1598/M1599 | §18.5120: **Preview pixel benchmark: at 60 fps the dance animation is 1.5-1.7x the 30 fps baseline while the dance clock is real time; the frame-rate pair lowers it to ~1.1-1.4x but breaks the note/HUD layer.** Same preview route, RECOMP_SHOT=5, shot frames mapped to the dance clock via [DCLK], steady window 6-14 s: 60 MFRAME60 only ratios 1.49-1.68; pair (60,60) 1.46-1.64; (60,15) 1.10-1.34; (60,12) 1.10-1.35; (60,10) 1.12-1.39; (60,7) 1.14-1.43 (never 1.0). Screenshots at ~11 s: MFRAME60-only has the full note ring/buttons/progress bar, pair (60,7) shows only one star note and no ring/buttons/progress bar - the note/HUD layer desyncs (user also saw picture errors); metrics still guest ~60 fps/speed 1.00x/no errors, so it is pacing/state, not GPU. Conclusion: the gap is the animation advance rate, not the dance clock; the pair is unacceptable; next make the character and note/HUD animation time base advance by real time (preview benchmark as the acceptance test). Release unchanged CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
 | M1600/M1601 | §18.5121: **Native-60 animation-speed diagnostics: MFRAME60-off, EVALSLOW, JOBSLOW and their combination all leave a 1.3-1.5x residual.** Same preview benchmark: reference 60 MFRAME60 1.49-1.68; no MFRAME60 1.44-1.63 (not the cause); +EVALSLOW 1.28-1.42; +JOBSLOW 1.43-1.58; +JOBSLOW+EVALSLOW 1.31-1.50 (never 1.0). The dance animation time base is not yet found (likely the dance playback/motion job advancing a frame counter per presented frame and sampling motion at frame/30 without appMframe conversion; motion=018 frames=60 fits). EVALSLOW does not break the picture (notes/HUD complete, character present). Per the user's bar (correct picture + no double speed) the shipped hybrid 60 option already qualifies (M1555: 167.18 s full song, real-time dance clock, speed 1.00x; trade-off 30 Hz content), while native 60 currently either runs 1.3-1.5x fast or breaks the note/HUD layer. Next: hook the dance playback job frame-counter advance and halve it at 60 fps, re-check the benchmark; otherwise finalize the hybrid with accurate release notes. Release unchanged CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
 | M1602 | §18.5122: **Dance job process nodes found; the dance-system update functions are identified.** Job-struct dumps from the preview run: init dancemain entry 0x81184cf9 (FUN_81184cf8); DanceSystem 0x81049afd (FUN_81049afc, next to the 1/30 quantizer); DanceReady_P5 0x81138541; DanceMemberPose 0x811391c1 (FUN_811391c0, a state dispatcher over its 8 members, node 0x10380240); DanceProcess 0x81043fef (FUN_81043ee2, contains the dance clock site_10 0x81043fee); danceVoiceSub 0x81050bab. Next: env-gated probes on these five entries (frame, r0/r1, struct words), compare 30/60 fps previews, find the pose's clock (if it advances per presented frame at frame/30 that is the residual 1.3-1.7x source), halve it only at 60 fps and let the preview benchmark decide. Release unchanged CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
+| M1603 | §18.5123: **Dance entry probes: the entries receive dt-aware deltas (pose s0 0.0333 at 30 fps, 0.0166 at 60 fps), so the residual speedup is deeper.** Probes on the five dance entries logged s0: pose 0.0333/0.0166, proc 0.0330/0.0167, ready 0.0333/0.0168, sys 0.0336/0.0162-0.0176, voice 0.0333/0.0166 - the frame-index-to-dt conversion at this layer is correct and is not the 1.5-1.7x source. The sampled module objects show no per-frame advancing counter (pose w0 steps 131072->131074 then holds; ready/voice words constant). Next: (1) walk the pose process object's 8-member array per frame to find the motion cursor; (2) measure per-frame pose-matrix change with the recorder (possible double dt); (3) fall back to the shipped hybrid if not pinned quickly (correct picture + no double speed). Release unchanged CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
 proposal).** mnsHandle_8111b64c/8111b190 receive a real-time float (+0.01668/frame at 60 vs +0.03337 at 30);
 mnsProcess_811251d6 fires per-frame but constant; other mnsProcess/mnsOption/gfd entries do not fire per-frame;
 object-word slopes show only the known danceQuantizer_81049976 w2 (+0.5 at 60 vs +1.0 at 30). The remaining
@@ -521344,3 +521345,50 @@ release unchanged payload CEBB6C124FF7B269 (2026-11-10 16:39:04), 60 experimenta
 untouched.
 LOOKUP: M1602 continues M1600/M1601 -> 18.5121 [relevant: diagnostics residual], 18.5119 [relevant: preview benchmark],
 18.5118 [relevant: job name stream]
+
+### 18.5123 M1603 DANCE ENTRY PROBES: THE ENTRIES RECEIVE DT-AWARE DELTAS (POSE s0 0.0333 AT 30 FPS, 0.0166 AT 60 FPS), SO THE RESIDUAL ANIMATION SPEEDUP IS DEEPER THAN THESE ENTRIES
+
+Env-gated probes on the five dance entries (M1602) logged frame, r0, the float input s0 and the module object's first
+words during the same preview at 30 fps and at 60 fps (MFRAME60):
+
+| entry | calls (60/30) | s0 at 30 fps | s0 at 60 fps |
+|---|---|---|---|
+| pose (0x811391c0) | 19/10 | **0.0333** | **0.0166** (some samples 0.0078, 0.0169) |
+| proc (0x81043ee2) | 132/66 | 0.0330 | 0.0167 |
+| ready (0x81138540) | 68/34 | 0.0333 | 0.0168 |
+| sys (0x81049afc) | 293/164 | 0.0336 | 0.0162-0.0176 |
+| voice (0x81050baa) | 132/66 | 0.0333 | 0.0166 |
+
+So the dance entries already receive correct dt (1/rate): the frame-index-to-dt conversion at this layer is fine and is
+not the source of the 1.5-1.7x rendered-animation speedup. The sampled module objects (node+8) show no frame-based
+counter advancing linearly in the first six words (pose w0 steps 131072 -> 131074 across ~10 frames then holds, ready
+w0/w1 constant, voice w0-w2 constant); the pose object is a different allocation per member, so the pose time might be
+in a deeper object reachable from the process object.
+
+Next options: (1) sample deeper - from the pose process object, walk its member array (the dispatcher loops over up to 8
+members at r5[4*i+4] and r5[0x84]) and log each member's words per frame, looking for the actual motion cursor; (2) since
+the entry dt is correct, the speedup may be in the render/pose-sampling layer: e.g., the pose evaluator could apply the
+dt twice (once in the entry and once at sampling), which would be a clean 2x scaled by interpolation - measure the
+per-frame pose-matrix change (not pixels) with the existing recorder; (3) if this cannot be pinned quickly, fall back to
+the shipped hybrid for the user's bar (correct picture + no double speed) and keep the native-60 investigation documented.
+Release unchanged: payload CEBB6C124FF7B269 (2026-11-10 16:39:04), 60 experimental; all probes env-gated (RECOMP_P5D_DANCE_PROBE=1) and off by
+default, the 30 fps path untouched.
+
+ANTI-FORGETTING ENTRY. Keywords: M1603 dance entry probes - env-gated probes on the five dance entries (M1602) logged
+frame, r0, the float input s0 and the module object first words during the same preview at 30 and 60 fps (MFRAME60):
+pose (0x811391c0) calls 19/10, s0 0.0333 at 30 fps and 0.0166 at 60 fps (some samples 0.0078, 0.0169); proc (0x81043ee2)
+132/66, 0.0330 vs 0.0167; ready (0x81138540) 68/34, 0.0333 vs 0.0168; sys (0x81049afc) 293/164, 0.0336 vs 0.0162-0.0176;
+voice (0x81050baa) 132/66, 0.0333 vs 0.0166 - so the dance entries already receive correct dt (1/rate) and the
+frame-index-to-dt conversion at this layer is fine, not the source of the 1.5-1.7x rendered-animation speedup; the sampled
+module objects (node+8) show no frame-based counter advancing linearly in the first six words (pose w0 steps
+131072 -> 131074 across ~10 frames then holds, ready w0/w1 and voice w0-w2 constant) and the pose object is a per-member
+allocation so the pose time may be in a deeper object reachable from the process object; next options: (1) sample deeper -
+from the pose process object walk its member array (the dispatcher loops over up to 8 members at r5[4*i+4] and r5[0x84])
+and log each member words per frame looking for the motion cursor; (2) since the entry dt is correct the speedup may be in
+the render/pose-sampling layer (e.g. the pose evaluator applying dt twice, once in the entry and once at sampling) - measure
+the per-frame pose-matrix change (not pixels) with the existing recorder; (3) if not pinned quickly fall back to the shipped
+hybrid for the user bar (correct picture + no double speed) and keep the native-60 investigation documented; release
+unchanged payload CEBB6C124FF7B269 (2026-11-10 16:39:04), 60 experimental, all probes env-gated (RECOMP_P5D_DANCE_PROBE=1) and off by default,
+30 fps path untouched.
+LOOKUP: M1603 probes the dance entries from M1602 -> 18.5122 [relevant: dance job process nodes], 18.5121 [relevant:
+diagnostics residual], 18.5119 [relevant: preview benchmark]
