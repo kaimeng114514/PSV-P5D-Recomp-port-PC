@@ -1668,6 +1668,7 @@
 | M1583 | §18.5110: **Pair sweep (60,15): dance animation ratios fall to 1.12-1.24 (hud_right 0.80, top 0.84) - the optimum is near.** Same capture/measurement (60 fps + MFRAME60, 121 aligned frames, DCLK start 2733, baseline 446/462/438/475/417/669): 30,30 char ~1.76; 60,30 guest 60.0, char 1.24/bg 1.51/hud_l 1.63/hud_r 1.16/bottom 1.42/top 1.01; 60,15 guest ~36-38, char 1.15/bg 1.12/hud_l 1.24/hud_r 0.80/bottom 1.07/top 0.84. The second value controls animation advance (30->15 slows further); at (60,15) five of six regions are within 0.80-1.24 (hud_right/top slightly slow). Ideal pair around (60,20)-(60,25); caveat guest loop read ~36-38 fps at (60,15), so the pair interacts with pacing and needs a full-song check. Next measure (60,20)/(60,25), pick the pair with all regions closest to 1.0 and guest 60/speed 1.00x, validate title 4.13 s/full song/OSD 60/music-judgement, then promote into the 60 option and retire M-B3 interpolation for the dance. Release unchanged CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
 | M1584 | §18.5111: **Pair sweep (60,20) is not between (60,15) and (60,30) - mapping non-monotonic; (60,15) best so far (mean abs dev 0.12).** Same capture (60 fps + MFRAME60, 121 aligned frames, DCLK start 2678, baseline 446/462/438/475/417/669): 60,30 char 1.24/bg 1.51/hud_l 1.63/hud_r 1.16/bottom 1.42/top 1.01 (mean dev 0.30); 60,20 char 1.35/bg 1.32/hud_l 1.42/hud_r 0.99/bottom 1.21/top 1.08 (0.24); 60,15 char 1.15/bg 1.12/hud_l 1.24/hud_r 0.80/bottom 1.07/top 0.84 (0.12). The second value is not a linear speed control (60,20 char worse than 60,15) - several subsystems or phase-dependent region noise; next repeat (60,15)/(60,30) for noise, try (60,12)/(60,18), then full-song validation (guest 60/speed 1.00x/title 4.13 s/song/HUD), then promote or keep interpolation. Release unchanged CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
 | M1585 | §18.5112: **The (60,15) repeat disagrees with the first run (char 1.62 vs 1.15): the region-ratio methodology is not reproducible - align by the music start.** Second (60,15) run (DCLK start 2649, 121 aligned frames): char 1.62/bg 1.54/hud_l 1.62/hud_r 1.06/bottom 1.41/top 1.02 vs first run 1.15/1.12/1.24/0.80/1.07/0.84. The window is placed by the first [DCLK] clk=0 line, but the real music/choreography start comes later and varies (start frames observed 2596/2649/2664/2678/2733/2776), so each run samples a different segment; the sweep is unreliable beyond broad trends (only the 30,30 pair is consistently much faster, ~1.7-1.9x). Fix: align by the music start ([DCLK] where music first > 0), re-run the sweep, and check the driver always selects the same song. Release unchanged CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
+| M1586 | §18.5113: **Fine-grained dance-clock logging did not take (probe called ~every 60 frames); alignment problem open.** Lowering the [DCLK] threshold from 60 to 6 frames still yields ~16 lines over ~900 frames, so the hooked guest function itself runs only about every 60 frames. Fresh 60 fps (MFRAME60+APPFPS60+pair 60,15, 841 shots) and 30 fps (601 shots) captures: the aligned comparison selected 74 frames for 60 fps and none for 30 fps - the [DCLK] f numbering and the shot numbering do not line up. Next: unify the frame base (log display_frames in the shot code or the shot number in DCLK), add a per-frame clock probe on a per-frame dance function reading the same clock struct, or use the audio/music time as the base (DCLK music reads 0.0000, wrong offset); then redo the 60/30 comparison. Pair hook env-gated/off; release unchanged CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
 proposal).** mnsHandle_8111b64c/8111b190 receive a real-time float (+0.01668/frame at 60 vs +0.03337 at 30);
 mnsProcess_811251d6 fires per-frame but constant; other mnsProcess/mnsOption/gfd entries do not fire per-frame;
 object-word slopes show only the known danceQuantizer_81049976 w2 (+0.5 at 60 vs +1.0 at 30). The remaining
@@ -520859,3 +520860,42 @@ run (a different chart would break any cross-run comparison); release unchanged 
 experimental; the pair hook stays env-gated (RECOMP_P5D_APPFPS60=1 + RECOMP_P5D_APPFPS) and off by default.
 LOOKUP: M1585 checks M1583/M1584 reproducibility -> 18.5111 [relevant: sweep 60,20], 18.5110 [relevant: sweep 60,15],
 18.5109 [relevant: pair needs MFRAME60]
+
+### 18.5113 M1586 THE FINE-GRAINED DANCE-CLOCK LOGGING DID NOT TAKE (THE PROBE IS CALLED ~EVERY 60 FRAMES); THE ALIGNMENT PROBLEM NEEDS A PER-FRAME CLOCK SOURCE
+
+Trying to fix the M1585 alignment problem by logging the dance clock more often: the probe's threshold was lowered from
+60 to 6 frames (recomp_ihook_p5d_dance_clock), but the new captures still show only ~16 [DCLK] lines over ~900 frames
+(every ~60 frames), so the hook's guest function is itself called only about every 60 frames - the log frequency cannot
+be raised from the probe side. A fresh 60 fps capture (MFRAME60 + APPFPS60 + pair (60,15)) and a 30 fps baseline capture
+were taken with the fine-log build (841 and 601 shots), but the aligned comparison still selected only 74 frames for the
+60 fps run and none for the 30 fps run: the [DCLK] f numbering and the shot numbering do not line up (the DCLK lines are
+sparse, so the clk 8.4-10.4 s window maps onto shot frame numbers whose correspondence to [DCLK] f is unverified), and the
+30 fps capture's shot window (1850-2450) evidently does not contain the frames that map into the clk window.
+
+So the alignment problem is still open. Next options (cheapest first): (1) find the frame-number base the SHOT files use
+and log it in [DCLK] so both are on the same clock (the probe prints display_frames(); compare with the shot numbering
+by logging display_frames in the shot code or vice versa); (2) add a per-frame clock probe - hook a function that runs
+every dance frame (the earlier per-frame site probes exist, e.g. the site table) and read the same dance clock struct,
+so every frame's clk is logged; (3) use the audio/music time as the alignment base if a reliable reader exists (the
+[DCLK] music field reads 0.0000, so its offset in the struct is wrong or not updated). Once one of these is in, redo
+the 60/30 dance comparison with the same clk window and only then judge the native-60 configuration.
+
+State otherwise unchanged: the frame-rate pair hook (RECOMP_P5D_APPFPS60=1 + RECOMP_P5D_APPFPS) is env-gated and off
+by default; release payload CEBB6C124FF7B269 (2026-11-10 16:39:04), 60 experimental; kb_audit/DOC_INTEGRITY green.
+
+ANTI-FORGETTING ENTRY. Keywords: M1586 fine-grained dance clock logging did not take - the probe threshold in
+recomp_ihook_p5d_dance_clock was lowered from 60 to 6 frames but new captures still show ~16 [DCLK] lines over ~900
+frames (every ~60), so the hooked guest function is itself called only about every 60 frames and the log frequency cannot
+be raised from the probe side; a fresh 60 fps capture (MFRAME60 + APPFPS60 + pair 60,15, 841 shots) and a 30 fps baseline
+capture (601 shots) were taken with the fine-log build, but the aligned comparison selected only 74 frames for 60 fps and
+none for 30 fps because the [DCLK] f numbering and the shot numbering do not line up (DCLK lines sparse; the clk
+8.4-10.4 s window maps onto shot frame numbers whose correspondence to [DCLK] f is unverified, and the 30 fps shot window
+1850-2450 does not contain the frames mapping into that clk window); the alignment problem is still open; next options:
+(1) find the frame-number base the SHOT files use and log it in DCLK so both are on the same clock, (2) add a per-frame
+clock probe - hook a function that runs every dance frame (per-frame site probes exist) and read the same dance clock
+struct so every frame's clk is logged, (3) use the audio/music time as base if a reliable reader exists (the DCLK music
+field reads 0.0000 so its struct offset is wrong or not updated); once in, redo the 60/30 comparison with the same clk
+window and judge the native-60 configuration; the frame-rate pair hook (RECOMP_P5D_APPFPS60=1 + RECOMP_P5D_APPFPS) is
+env-gated and off by default; release payload CEBB6C124FF7B269 (2026-11-10 16:39:04), 60 experimental, kb_audit/DOC_INTEGRITY green.
+LOOKUP: M1586 follows M1585 on alignment -> 18.5112 [relevant: reproducibility problem], 18.5111 [relevant: sweep 60,20],
+18.5110 [relevant: sweep 60,15]
