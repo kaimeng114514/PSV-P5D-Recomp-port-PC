@@ -1660,6 +1660,7 @@
 | M1575 | §18.5102: **Replay hitch persists after four sync fixes; PS4-60 lead becomes the priority.** Tried: GPU drain before replay; skip guest->GPU uploads and end-of-scene readbacks during replay (interp_no_sync); skip begin_scene downloads; early-out matrix detection - hitch unchanged (117.5/125.4 ms on hitches 59/60; run reached dance). Next: instrument the replay sections (per begin_scene / draw range / end_scene) to find where the ~100 ms goes (per-scene begin/end overhead or LDST-ring placement suspects). PS4 lead: user reports PS4 UI looks smooth (60 fps), so the shared codebase may carry platform-conditional pacing the Vita build never selects; next search the modules for platform/refresh-rate/60 code paths around the appMframe boot init callers and check what init(1,1,1) is derived from at the original call sites - a PS4 branch passing different args or setting a 60 flag would be a cleaner path than render-level interpolation. Release unchanged CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
 | M1576 | §18.5103: **PS4-60 lead: Vita eboot has only Vita platform paths; frame rate is configurable (appMframe 60 table, CRI framerate_n/d).** String scan: all platform paths are Vita (touch/platform/vita, unique/vita, appMemoryCard/module/vita, test/vita, archive vita.cpk; CRI all VITA builds), so a PS4 branch is not visibly compiled into the Vita executable (PS4 release is a separate build of the shared engine). The appMframe 60 table and the debug fields framerate_n/framerate_d exist, so the rate is config, not a constant; no game 60fps/vsync/console-type option string. Next: trace the appMframe boot init(1,1,1) argument provenance (config value/platform constant/computed rate; also the denominators), locate the framerate_n/d readers, and test overriding the app rate config instead of the init args after the fact - the native path if it exists. Release unchanged CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
 | M1577 | §18.5104: **Found the boot frame-rate call sequence: flag 0x81670354=1, appMframe init(1,1,1), then fn_81154a1c(30,30) - the likely appCalculator frame-rate config hardcoded to 30.** game_part8.c at VA 0x81184692-0x811846b0 shows the three hardcoded steps; fn_81154a1c (game_part7.c) loads a global 0x813af5a8 and stores two args (matches framerate_n/framerate_d from M1576). The PS4 build of the shared engine most likely passes 60 here, explaining why its UI/animations run at 60 without double-speed. MFRAME60 only changed step 2 (frame counts) while step 3 kept the animation time base at 30 - matching the residual dance mismatch. Next: hook fn_81154a1c at the boot call site, override to 60,60 (RECOMP_P5D_APPFPS60=1, 60 mode only), combined with MFRAME60, and measure dance animation speed, title time, song duration - the native 60 path may open up. Release unchanged CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
+| M1578 | §18.5105: **APPFPS60 hook works: boot fn_81154a1c(30,30) -> (60,60) and the game reaches the dance at 60 fps.** hooks.c registers 0x81154a1c:p5d_appfps; at the app-framework boot call site (LR 0x811846b5) with RECOMP_P5D_APPFPS60=1 and 60 fps, the arguments become (60,60) so the animation calculator/app framework sees the presentation rate instead of the hardcoded 30. Probe run (rate 60 all-screen + MFRAME60 + APPFPS60) logged "[APPFPS60] boot fn_81154a1c(30,30) -> (60,60)" and "[DCLK] f=2776 ... rate=60" and reached main menu and dance (main/dance True). Next: capture the dance with the SHOT window and compare per-second pixel change against the 30 fps baseline (frames_mb1d30b, aligned by DCLK start; MFRAME60-only capture was frames_mb1d60mf4) - if ratios are ~1.0 instead of 1.28-1.64, MFRAME60+APPFPS60 is the native 60 mode and render-level interpolation may not be needed for the dance; also measure title time and full-song duration. Release unchanged CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
 proposal).** mnsHandle_8111b64c/8111b190 receive a real-time float (+0.01668/frame at 60 vs +0.03337 at 30);
 mnsProcess_811251d6 fires per-frame but constant; other mnsProcess/mnsOption/gfd entries do not fire per-frame;
 object-word slopes show only the known danceQuantizer_81049976 w2 (+0.5 at 60 vs +1.0 at 30). The remaining
@@ -520518,3 +520519,44 @@ cause, the native 60 path (no render-level interpolation) opens up; release unch
 experimental, all prototypes env-gated and the 30 fps path unaffected.
 LOOKUP: M1577 follows M1576 on the PS4-60 lead -> 18.5103 [relevant: string scan], 18.5102 [relevant: PS4 lead], 18.5094
 [relevant: M-B1 appMframe rescale]
+
+### 18.5105 M1578 THE APPFPS60 HOOK WORKS: THE BOOT fn_81154a1c(30,30) CALL IS REWRITTEN TO (60,60) AND THE GAME REACHES THE DANCE AT 60 FPS
+
+The M1577 finding is now a working hook. packs/PCSH10109/hooks.c registers 0x81154a1c:p5d_appfps; at the app-framework
+boot call site (return address 0x811846b5) with RECOMP_P5D_APPFPS60=1 and 60 fps presentation, it rewrites the
+arguments of fn_81154a1c from (30,30) to (60,60), so the animation calculator/app framework frame-rate configuration
+sees the presentation rate instead of the Vita build's hardcoded 30.
+
+Probe run (RECOMP_FRAME_RATE=60, RECOMP_FPS_SCOPE=all, RECOMP_P5D_MFRAME60=1, RECOMP_P5D_APPFPS60=1):
+  [APPFPS60] boot fn_81154a1c(30,30) -> (60,60)
+  [DCLK] f=2776 clk=0.0000 music=0.0000 rate=60
+and the automated drive reached main menu and the dance stage (main: True, dance: True) - so the app framework accepts
+the 60,60 configuration and the game runs at 60 with the frame-count conversion (MFRAME60) plus the calculator rate
+(APPFPS60).
+
+Next (M1579): measure whether this is the native 60 path - capture the dance stage with the SHOT window (the drive
+script's EXTRA_ENV needs RECOMP_SHOT=1 RECOMP_SHOT_FROM/_TO again) and compare the per-second pixel change against the
+30 fps baseline (frames_mb1d30b, aligned by the run's DCLK start frame; the MFRAME60-only capture was
+frames_mb1d60mf4). If the animation speed now matches the 30 fps baseline (region ratios ~1.0 instead of 1.28-1.64),
+then MFRAME60+APPFPS60 is the native 60 mode and the render-level interpolation work (M-B3) may not be needed for the
+dance stage at all. Also measure the title sequence time and the full-song duration in this configuration.
+
+Release unchanged: payload CEBB6C124FF7B269 (2026-11-10 16:39:04), 60 experimental; all prototypes env-gated, the 30 fps path unaffected.
+
+ANTI-FORGETTING ENTRY. Keywords: M1578 APPFPS60 hook works - packs/PCSH10109/hooks.c registers 0x81154a1c:p5d_appfps; at
+the app-framework boot call site (return address 0x811846b5) with RECOMP_P5D_APPFPS60=1 and 60 fps presentation it
+rewrites the arguments of fn_81154a1c from (30,30) to (60,60), so the animation calculator/app framework frame-rate
+configuration sees the presentation rate instead of the Vita build hardcoded 30; probe run (RECOMP_FRAME_RATE=60,
+RECOMP_FPS_SCOPE=all, RECOMP_P5D_MFRAME60=1, RECOMP_P5D_APPFPS60=1) logged "[APPFPS60] boot fn_81154a1c(30,30) ->
+(60,60)" and "[DCLK] f=2776 clk=0.0000 music=0.0000 rate=60", and the automated drive reached main menu and the dance
+stage (main: True, dance: True) - the app framework accepts the 60,60 configuration and the game runs at 60 with the
+frame-count conversion (MFRAME60) plus the calculator rate (APPFPS60); next (M1579): measure whether this is the native
+60 path - capture the dance stage with the SHOT window (the drive script EXTRA_ENV needs RECOMP_SHOT=1
+RECOMP_SHOT_FROM/_TO again) and compare the per-second pixel change against the 30 fps baseline (frames_mb1d30b, aligned
+by the DCLK start frame; the MFRAME60-only capture was frames_mb1d60mf4); if the animation speed matches the 30 fps
+baseline (region ratios ~1.0 instead of 1.28-1.64) then MFRAME60+APPFPS60 is the native 60 mode and the render-level
+interpolation work (M-B3) may not be needed for the dance stage; also measure the title sequence time and the full-song
+duration; release unchanged payload CEBB6C124FF7B269 (2026-11-10 16:39:04), 60 experimental, all prototypes env-gated and the 30 fps path
+unaffected.
+LOOKUP: M1578 implements M1577's hook -> 18.5104 [relevant: boot frame-rate call sequence], 18.5103 [relevant: PS4 string
+scan], 18.5102 [relevant: PS4 lead]
