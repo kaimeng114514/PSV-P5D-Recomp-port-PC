@@ -1665,6 +1665,7 @@
 | M1580 | §18.5107: **Decisive measurement: MFRAME60+APPFPS60 still runs the dance about 1.8x fast.** Full-shot capture (667 shots, dance-clock start 2664; 121 frames in 8.4-10.4 s): char_center 783.3/s vs 30 fps baseline ~446/s (1.76), bg_left 1.93, hud_left 1.91, hud_right 1.48, bottom_bar 2.04, top_corner 0.83 (mostly static UI, noise). So fn_81154a1c(30,30)->(60,60) alone is not the native 60 switch (MFRAME60-only was ~1.64x, no improvement); its args may not be a frame rate at all, or more places must change together. The 60 fps run also read guest ~30 fps at the end (window ~58), so the app-framework rate change perturbs pacing. Next: establish what fn_81154a1c configures (global 0x813af5a8 + the struct's readers) and re-check the 0x81670354=1 flag and fn_811546f0. APPFPS60 stays env-gated/off by default. Release unchanged CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
 | M1581 | §18.5108: **fn_81154a1c builds an {u32,u32} frame-rate pair at 0x813af5a8; (60,30) runs the guest at 60 and cuts the animation-speed ratio to 1.24-1.63x.** Disassembly: fn_81154a1c allocates an 8-byte object (fn_8115d36a size 8/4), zeroes it, writes the two u32 args to offsets 0/4 and stores the pointer at 0x813af5a8 - the boot call creates the app framework frame-rate pair. The hook now sweeps RECOMP_P5D_APPFPS="a,b" (default 60,60). At 60 fps + MFRAME60, pair (60,30) gives guest 60.0 fps (16.7 ms, speed 1.00x, window 60.0) and ratios char_center 1.24, bg_left 1.51, hud_left 1.63, hud_right 1.16, bottom_bar 1.42, top_corner 1.01 (baseline 446/462/438/475/417/669), vs ~1.76x char for (30,30) and (60,60). Remaining 1.4-1.6x in some regions suggests elements paced elsewhere (camera/HUD tracks), so the pair is part of the native 60 config but not all of it. Next sweep (60,15/30,60/120,30), pick best, validate title time/full song/guest 60; if ratios settle ~1.0 the native path retires M-B3 interpolation for the dance. Release unchanged CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
 | M1582 | §18.5109: **(60,30) frame-rate pair needs MFRAME60: without it guest ~35 fps and ratios 1.42-1.86x.** Same capture with MFRAME60 off but pair (60,30): guest ~35 fps, char_center 1.62, bg_left 1.75, hud_left 1.86, hud_right 1.42, bottom_bar 1.61, top_corner 1.46 (baseline 446/462/438/475/417/669; 121 aligned frames, DCLK start 2596), versus (60,30)+MFRAME60 guest 60.0 fps / char 1.24 / hud_right 1.16 / top_corner 1.01. So the pair and the appMframe conversion are complementary: the pair tells the framework the presentation rate, the conversion keeps authored frame counts (songs/menus/MFrame) in the 60 fps world. Best candidate: (60,30)+MFRAME60. Next sweep (60,20)/(60,25)/(60,45) and (60,30) variants, then validate title 4.13 s/full song/guest 60/HUD; if regions stay 1.4-1.6x identify their pacer and either extend native config or keep M-B3 interpolation only for them. Release unchanged CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
+| M1583 | §18.5110: **Pair sweep (60,15): dance animation ratios fall to 1.12-1.24 (hud_right 0.80, top 0.84) - the optimum is near.** Same capture/measurement (60 fps + MFRAME60, 121 aligned frames, DCLK start 2733, baseline 446/462/438/475/417/669): 30,30 char ~1.76; 60,30 guest 60.0, char 1.24/bg 1.51/hud_l 1.63/hud_r 1.16/bottom 1.42/top 1.01; 60,15 guest ~36-38, char 1.15/bg 1.12/hud_l 1.24/hud_r 0.80/bottom 1.07/top 0.84. The second value controls animation advance (30->15 slows further); at (60,15) five of six regions are within 0.80-1.24 (hud_right/top slightly slow). Ideal pair around (60,20)-(60,25); caveat guest loop read ~36-38 fps at (60,15), so the pair interacts with pacing and needs a full-song check. Next measure (60,20)/(60,25), pick the pair with all regions closest to 1.0 and guest 60/speed 1.00x, validate title 4.13 s/full song/OSD 60/music-judgement, then promote into the 60 option and retire M-B3 interpolation for the dance. Release unchanged CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
 proposal).** mnsHandle_8111b64c/8111b190 receive a real-time float (+0.01668/frame at 60 vs +0.03337 at 30);
 mnsProcess_811251d6 fires per-frame but constant; other mnsProcess/mnsOption/gfd entries do not fire per-frame;
 object-word slopes show only the known danceQuantizer_81049976 w2 (+0.5 at 60 vs +1.0 at 30). The remaining
@@ -520740,3 +520741,43 @@ unchanged payload CEBB6C124FF7B269 (2026-11-10 16:39:04), 60 experimental, the p
 RECOMP_P5D_APPFPS) and off by default.
 LOOKUP: M1582 supplies the MFRAME60 control for M1581 -> 18.5108 [relevant: pair 60,30 + MFRAME60], 18.5107 [relevant:
 APPFPS60 alone], 18.5104 [relevant: boot frame-rate call sequence]
+
+### 18.5110 M1583 PAIR SWEEP (60,15): THE DANCE ANIMATION-SPEED RATIOS FALL TO 1.12-1.24 (WITH HUD-RIGHT 0.80, TOP 0.84) - THE OPTIMUM IS NEAR
+
+Third frame-rate pair measured with the same capture/measurement (60 fps all-screen + MFRAME60, 121 aligned frames,
+dance-clock start 2733, baseline 446/462/438/475/417/669 per second):
+
+| pair | guest fps | char_center | bg_left | hud_left | hud_right | bottom_bar | top_corner |
+|---|---|---|---|---|---|---|---|
+| 30,30 (Vita) | 60 | ~1.76 | 1.93 | 1.91 | 1.48 | 2.04 | 0.83 |
+| 60,30 | 60.0 | 1.24 | 1.51 | 1.63 | 1.16 | 1.42 | 1.01 |
+| **60,15** | ~36-38 | **1.15** | **1.12** | **1.24** | **0.80** | **1.07** | **0.84** |
+
+So the second value of the pair controls the animation advance: halving it from 30 to 15 slows the dance animation
+further, and at (60,15) five of the six regions are within 0.80-1.24 of the 30 fps baseline (the outliers are hud_right
+0.80 and top 0.84, i.e. slightly slow, while char/bg/bottom are 1.07-1.15). The dance is therefore much closer to
+real-time at (60,15) than at (60,30); the ideal pair is somewhere between, around (60,20)-(60,25) for the regions that
+read 1.07-1.24 at 15, with the caveat that the guest loop metrics at (60,15) read ~36-38 fps on the sampled late
+frames (window ~58), so the pair also interacts with the game's own pacing - that must be checked over a full song.
+
+Next: measure (60,20) and (60,25), pick the pair that puts all six regions closest to 1.0 while keeping guest 60 fps
+and speed 1.00x over a full song; then validate the winner end to end (title 4.13 s baseline, full-song length, OSD
+60, music/judgement) and, if it holds, promote this native configuration into the 60 option and retire the M-B3 render
+interpolation for the dance. Release unchanged: payload CEBB6C124FF7B269 (2026-11-10 16:39:04), 60 experimental; the pair hook stays
+env-gated (RECOMP_P5D_APPFPS60=1 + RECOMP_P5D_APPFPS) and off by default.
+
+ANTI-FORGETTING ENTRY. Keywords: M1583 pair sweep 60,15 - third frame-rate pair measured with the same capture (60 fps
+all-screen + MFRAME60, 121 aligned frames, dance-clock start 2733, baseline 446/462/438/475/417/669): 30,30 gives char
+~1.76; 60,30 gives guest 60.0 fps, char 1.24, bg 1.51, hud_left 1.63, hud_right 1.16, bottom 1.42, top 1.01; 60,15 gives
+guest ~36-38 fps, char 1.15, bg 1.12, hud_left 1.24, hud_right 0.80, bottom 1.07, top 0.84 - halving the second value
+from 30 to 15 slows the dance animation further and at (60,15) five of six regions are within 0.80-1.24 of the baseline
+(outliers hud_right 0.80 and top 0.84 slightly slow, char/bg/bottom 1.07-1.15); the dance is much closer to real-time at
+(60,15) than (60,30); the ideal pair is around (60,20)-(60,25) for the regions that read 1.07-1.24; caveat: guest loop
+metrics at (60,15) read ~36-38 fps on sampled late frames (window ~58), so the pair also interacts with the game pacing
+and must be checked over a full song; next measure (60,20) and (60,25), pick the pair that puts all six regions closest to
+1.0 while keeping guest 60 fps and speed 1.00x over a full song, validate the winner end to end (title 4.13 s baseline,
+full-song length, OSD 60, music/judgement), and if it holds promote the native configuration into the 60 option and
+retire M-B3 render interpolation for the dance; release unchanged payload CEBB6C124FF7B269 (2026-11-10 16:39:04), 60 experimental; the pair
+hook stays env-gated (RECOMP_P5D_APPFPS60=1 + RECOMP_P5D_APPFPS) and off by default.
+LOOKUP: M1583 extends the pair sweep from M1581/M1582 -> 18.5109 [relevant: pair needs MFRAME60], 18.5108 [relevant: pair
+60,30], 18.5107 [relevant: APPFPS60 alone]
