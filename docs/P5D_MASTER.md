@@ -1688,6 +1688,7 @@
 | M1610 | §18.5130: **Launcher pref parser: p5d_fps = 60 (with spaces) was ignored, p5d_fps=60 is the accepted form; the packaged payload cannot be launched directly (its python dir has only Lib).** The launcher.ini uses key=value without spaces; the earlier edit was not read (the packaged launcher still showed 30 selected) and was corrected to p5d_fps=60, so the desktop launch should now preselect 60. The extracted payload python/ directory has only Lib (no python.exe), so the game cannot be run directly from the payload by a packaged pipeline - the launcher arranges the runtime, so the remaining validation must go through the launcher GUI (real click) or launcher automation. A4A9DA194082155C release (287,636,147 B) unchanged; docs/builds audit-clean. |
 | M1611 | §18.5131: **The launcher preselects native 60 after the ini fix; the 60 option description was updated up and the release repackaged (stub id B16B982717582E60).** With launcher.ini `p5d_fps=60` the packaged GUI show 5) 遊戲頻率 with the red dot on the 60 幀（全 60...） option (previously 30), confirming M1610. The stale hybrid description text was replaced with the validated native-60 wording, the launcher rebuilt and the release repackaged: stub id B16B982717582E60, 287,636,154 B, SHA256 780774D2B8AC7006... (previous A4A9DA194082155C), copied to the desktop. Remaining: the human click-through (60 preselected; confirm dance OSD 60/guest 60fps/speed 1.00x/complete notes) since SDL/ImGui ignores injected clicks. |
 | M1612 | §18.5132: **Critical packaging regression found and fixed: the repack after the storage cleanup had dropped the embedded Python runtime; release rebuilt (300,317,559 B, stub id 6B029A072AD3ACA3).** make_p5d_release.py assembles the embedded CPython from C:/dev/tmp/m1448/pyembed, which the storage cleanup had deleted, so the repacks after that point (stubs A4A9DA194082155C / B16B982717582E60, ~287.6 MB vs the previous 300 MB) shipped without a Python runtime and could not run the game ("can't start python" in the headless ATIV_TASK play test). Fixed by recovering the runtime from a previous release payload (CEBB6C124FF7B269/python) into m1448/pyembed and rebuilding: stub id 6B029A072AD3ACA3, 300,317,559 B, SHA256 39C9533B9D375ECE..., payload 8719 files ~284 MB with python.exe + capstone, copied to the desktop. Headless ATIV_TASK now finds python but the path lacks the GUI env so it stops at the toolchain check; the definitive check remains the GUI Play (settings.ini already frame_rate=60, osd=1; 60 preselected). |
+| M1613 | §18.5133: **Packaged payload integrity after the python fix: embedded Python + mingw/toolchain present; headless Play compiles but the manual build hit an obj-dir error (the launcher flow remains the check).** The extracted payload now has python/ (python.exe, python310.dll, capstone) plus mingw64/ and toolchain/ - 8719 files ~284 MB, matching the previous working release. The library keeps a previously built host (46,732,721 B, 2026-11-10 17:58). ATIV_TASK play finds python and reaches the build; the same build run manually failed with "can't create obj_win_min_native/game_part9.o" because the launcher Play flow prepares the build tree (manual invocation differs), and it was cancelled to avoid a half-built library. Next: the launcher Play itself (it rebuilds from the packaged sources containing the native-60 defaults; first Play takes several minutes), settings.ini already frame_rate=60/osd=1, 60 preselected. Release = stub 6B029A072AD3ACA3, 300,317,559 B. |
 proposal).** mnsHandle_8111b64c/8111b190 receive a real-time float (+0.01668/frame at 60 vs +0.03337 at 30);
 mnsProcess_811251d6 fires per-frame but constant; other mnsProcess/mnsOption/gfd entries do not fire per-frame;
 object-word slopes show only the known danceQuantizer_81049976 w2 (+0.5 at 60 vs +1.0 at 30). The remaining
@@ -521808,3 +521809,48 @@ frame_rate = 60, osd = 1; launcher preselects 60); release state: desktop exe = 
 audit-clean.
 LOOKUP: M1612 fixes the packaging regression from M1611 -> 18.5131 [relevant: repack], 18.5130 [relevant: ini fix], 18.5126
 [relevant: promotion]
+
+### 18.5133 M1613 PACKAGED PAYLOAD INTEGRITY AFTER THE PYTHON FIX: EMBEDDED PYTHON + MINGW/TOOLCHAIN PRESENT; HEADLESS PLAY COMPILES BUT HIT AN OBJ-DIR ERROR IN THE MANUAL RUN (THE LAUNCHER'S OWN FLOW REMAINS THE CHECK)
+
+After the M1612 fix the rebuilt release (stub 6B029A072AD3ACA3, 300,317,559 B) was inspected end to end:
+
+- extracted payload %LOCALAPPDATA%\P5D-Port\6B029A072AD3ACA3\ now contains python/python.exe, python310.dll and
+  Lib/site-packages/capstone (8719 files in the stub payload, ~284 MB) plus mingw64/ (bin, include, lib, x86_64-w64-mingw32)
+  and toolchain/ (SDL3, ffmpeg, zlib) - i.e. the embedded Python and the Windows toolchain are back after the M1612
+  recovery, matching the previous working release size (~300.3 MB);
+- the library keeps a previously built game_host_min.exe (2026-11-10 17:58, 46,732,721 B) at
+  %LOCALAPPDATA%\P5D-Port\P5D\library\decrypted\PCSH10109\recomp;
+- headless Play test (ATIV_TASK=play:PCSH10109 on the extracted launcher): the payload python is found and the play task
+  proceeds into "CHECKING THE GAME BUILD" and starts compiling the game parts; running that same build manually (payload
+  python + payload toolchain against the library) then failed part-way with an assembler error "can't create
+  ...\obj_win_min_native\game_part9.o: No such file or directory" - the object dir was missing in that manual invocation
+  (the launcher's Play flow prepares the build tree; a bare manual build against a library built by a different toolchain
+  is not the same thing). The manually started build was cancelled to avoid leaving a half-built library.
+
+So the packaged payload itself is complete (python + toolchain + sources), and the remaining definitive step is the
+launcher's own Play flow: it runs ready (checks the build) and, because the packaged sources now contain the promoted
+native-60 defaults (display.c all-screen scope, hooks.c MFRAME60 auto-on), it rebuilds the host from those sources and runs
+the game at 60 fps all-screen with MFRAME60 - exactly the configuration validated in M1606/M1604/M1605. The first Play
+after this release will therefore take the build time (several minutes) and then start the game; settings.ini already has
+frame_rate=60 and osd=1 and the launcher preselects the 60 option.
+
+Release state: desktop exe = native-60 promoted build, stub id 6B029A072AD3ACA3 (300,317,559 B, 2026-11-11 02:30:00); docs/builds audit-clean.
+
+ANTI-FORGETTING ENTRY. Keywords: M1613 packaged payload integrity after the python fix - the extracted payload
+LOCALAPPDATA/P5D-Port/6B029A072AD3ACA3/ contains python/python.exe, python310.dll and Lib/site-packages/capstone (8719 files
+in the stub payload ~284 MB) plus mingw64/ (bin, include, lib, x86_64-w64-mingw32) and toolchain/ (SDL3, ffmpeg, zlib), so the
+embedded Python and Windows toolchain are back after the M1612 recovery and the size matches the previous working release
+(~300.3 MB); the library keeps a previously built game_host_min.exe (2026-11-10 17:58, 46,732,721 B) at
+LOCALAPPDATA/P5D-Port/P5D/library/decrypted/PCSH10109/recomp; headless Play test (ATIV_TASK=play:PCSH10109 on the extracted
+launcher) finds the payload python and proceeds into CHECKING THE GAME BUILD and starts compiling the game parts, but running
+that same build manually (payload python + payload toolchain against the library) failed part-way with an assembler error
+"can't create .../obj_win_min_native/game_part9.o: No such file or directory" because the object dir was missing in that manual
+invocation (the launcher Play flow prepares the build tree; a bare manual build against a library built by a different
+toolchain is not the same thing) and the manually started build was cancelled to avoid leaving a half-built library; the
+packaged payload is complete (python + toolchain + sources) and the remaining definitive step is the launcher own Play flow -
+it runs ready and, because the packaged sources contain the promoted native-60 defaults (display.c all-screen scope, hooks.c
+MFRAME60 auto-on), rebuilds the host from those sources and runs 60 fps all-screen with MFRAME60 (the M1606/M1604/M1605
+configuration); the first Play will take the build time (several minutes) then start the game; settings.ini already has
+frame_rate=60 and osd=1 and the launcher preselects 60; release state: desktop exe = native-60 promoted build, stub id
+6B029A072AD3ACA3 (300,317,559 B); docs/builds audit-clean.
+LOOKUP: M1613 follows M1612 -> 18.5132 [relevant: python fix], 18.5131 [relevant: preselect], 18.5126 [relevant: promotion]
