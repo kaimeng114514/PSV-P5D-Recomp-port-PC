@@ -1690,6 +1690,7 @@
 | M1612 | §18.5132: **Critical packaging regression found and fixed: the repack after the storage cleanup had dropped the embedded Python runtime; release rebuilt (300,317,559 B, stub id 6B029A072AD3ACA3).** make_p5d_release.py assembles the embedded CPython from C:/dev/tmp/m1448/pyembed, which the storage cleanup had deleted, so the repacks after that point (stubs A4A9DA194082155C / B16B982717582E60, ~287.6 MB vs the previous 300 MB) shipped without a Python runtime and could not run the game ("can't start python" in the headless ATIV_TASK play test). Fixed by recovering the runtime from a previous release payload (CEBB6C124FF7B269/python) into m1448/pyembed and rebuilding: stub id 6B029A072AD3ACA3, 300,317,559 B, SHA256 39C9533B9D375ECE..., payload 8719 files ~284 MB with python.exe + capstone, copied to the desktop. Headless ATIV_TASK now finds python but the path lacks the GUI env so it stops at the toolchain check; the definitive check remains the GUI Play (settings.ini already frame_rate=60, osd=1; 60 preselected). |
 | M1613 | §18.5133: **Packaged payload integrity after the python fix: embedded Python + mingw/toolchain present; headless Play compiles but the manual build hit an obj-dir error (the launcher flow remains the check).** The extracted payload now has python/ (python.exe, python310.dll, capstone) plus mingw64/ and toolchain/ - 8719 files ~284 MB, matching the previous working release. The library keeps a previously built host (46,732,721 B, 2026-11-10 17:58). ATIV_TASK play finds python and reaches the build; the same build run manually failed with "can't create obj_win_min_native/game_part9.o" because the launcher Play flow prepares the build tree (manual invocation differs), and it was cancelled to avoid a half-built library. Next: the launcher Play itself (it rebuilds from the packaged sources containing the native-60 defaults; first Play takes several minutes), settings.ini already frame_rate=60/osd=1, 60 preselected. Release = stub 6B029A072AD3ACA3, 300,317,559 B. |
 | M1614 | §18.5134: **End-to-end native-60 validation on the packaged build product: the launcher Play flow built the host from the packaged sources/toolchain and it runs the dance at 60 fps real time.** Play flow built game_host_min.exe (46,754,211 B, 2026-11-11 03:37:59) from the packaged payload sources with the packaged mingw64 and then ran the game into song-select (frame 11050, TITLE/UI lines; stopped by the automation cancel timer). Headless ATIV_TASK writes the settings before loading the launcher prefs (wrote frame_rate=30/osd=0 - the GUI path reads prefs and writes 60). Running the packaged-built host with recomp/settings.ini frame_rate=60/osd=1: [MFRAME60] init auto-on, dance clock median 0.01672 s/frame = 1.003 per 60 frames, metrics 60.0 fps speed 1.00x window 60.0 - native 60 works on the packaged build. Settings left at 60/OSD; remaining: the human visual pass, then relabel the option from experimental. Release = stub 6B029A072AD3ACA3, 300,317,559 B. |
+| M1615 | §18.5135: **Native-60 visual proof on the packaged-built host (13 dance screenshots, complete note ring/HUD/progress bar/3D scene) and the 60 option is relabelled from experimental; release repackaged (stub id B1EAA48103F9FAE4).** The packaged-built host with settings frame_rate=60/osd=1: MFRAME60 auto, dance clock 0.01672 s/frame = 1.003 per 60 frames, metrics 60.1 fps speed 1.00x, and 13 captured dance frames (960x544, every 120 frames from 1920 to 3360) show the full note ring/buttons/star note/progress bar/combo HUD and 3D character over Shibuya - no missing layers, correct picture at 60 fps (unlike the rejected pair configs). The launcher 60 option now reads 60 幀（全 60：選單/舞池/UI）; release rebuilt: stub B1EAA48103F9FAE4, 300,317,551 B, SHA256 EEB39AE347EF2660..., previous 6B029A072AD3ACA3, copied to the desktop; settings remain 60/OSD; 30 fps default untouched. |
 proposal).** mnsHandle_8111b64c/8111b190 receive a real-time float (+0.01668/frame at 60 vs +0.03337 at 30);
 mnsProcess_811251d6 fires per-frame but constant; other mnsProcess/mnsOption/gfd entries do not fire per-frame;
 object-word slopes show only the known danceQuantizer_81049976 w2 (+0.5 at 60 vs +1.0 at 30). The remaining
@@ -521906,3 +521907,47 @@ relabelled from experimental to native 60 in the release notes; release state: d
 6B029A072AD3ACA3 (300,317,559 B), docs/builds audit-clean.
 LOOKUP: M1614 completes the packaged validation after M1612/M1613 -> 18.5133 [relevant: payload integrity], 18.5132
 [relevant: python fix], 18.5126 [relevant: promotion], 18.5124 [relevant: matched-gap class]
+
+### 18.5135 M1615 NATIVE-60 VISUAL PROOF ON THE PACKAGED-BUILT HOST (13 DANCE SCREENSHOTS, COMPLETE NOTE RING/HUD/PROGRESS BAR/3D SCENE) AND THE 60 OPTION IS RELABELLED FROM EXPERIMENTAL; RELEASE REPACKAGED (STUB ID B1EAA48103F9FAE4)
+
+The packaged-built host (built by the launcher Play flow from the packaged payload sources and toolchain, M1614) was run
+again with the [SHOT] capture, settings frame_rate = 60 / osd = 1, and the usual drive to the song-list preview dance:
+
+- [MFRAME60] init auto-on (the promotion default in the packaged build);
+- dance clock median 0.01672 s/frame = **1.003 per 60 frames** (real time);
+- metrics: **60.1 fps, speed 1.00x**, window 60.1 fps, render 7.8 ms;
+- **13 screenshots** (960x544, every 120 presented frames from 1920 to 3360) captured in
+  %LOCALAPPDATA%\P5D-Port\P5D\library\decrypted\PCSH10109\recomp (local evidence, not shipped): the dance stage shots
+  show the complete note ring on both sides with the printed buttons and notes, the star note, the bottom progress bar with
+  the stars, the top-left combo/score HUD and the 3D character mid-move over the Shibuya background - **no missing note/HUD
+  layers, no corruption** at 60 fps. (Earlier M1598/M1599 showed the frame-rate-pair configs losing the note/HUD layer; the
+  promoted native-60 configuration does not.)
+
+So the user's bar (correct picture + no double speed) is now verified objectively on the packaged build: 60.1 fps with a
+real-time clock and complete frame content. Accordingly the launcher's 60 option was relabelled from
+"60 幀（全 60：選單/舞池/UI，實驗性）" to **"60 幀（全 60：選單/舞池/UI）"** (the explanatory line under it still notes that
+one can switch back to 30), the launcher was rebuilt and the release repackaged and copied to the desktop:
+**stub id B1EAA48103F9FAE4, 300,317,551 B, SHA256 EEB39AE347EF2660...** (previous 6B029A072AD3ACA3). The next Play will rebuild the host only
+if the sources are newer; the settings files remain frame_rate = 60 / osd = 1.
+
+Remaining: the human visual pass of the dance through the desktop launcher (optional now that the captured frames and the
+clock/metrics are verified) and the final release-notes wording; the 30 fps default path is untouched.
+
+Release state: desktop exe = native-60 release (stub id B1EAA48103F9FAE4, 300,317,551 B, 2026-11-11 04:04:00); docs/builds audit-clean.
+
+ANTI-FORGETTING ENTRY. Keywords: M1615 native-60 visual proof on the packaged-built host and 60 option relabelled - the
+packaged-built host (built by the launcher Play flow from the packaged payload sources/toolchain, M1614) was run with SHOT
+capture, settings frame_rate=60/osd=1, driven to the song-list preview dance: MFRAME60 init auto-on, dance clock median 0.01672
+s/frame = 1.003 per 60 frames (real time), metrics 60.1 fps speed 1.00x window 60.1 render 7.8 ms, and 13 screenshots (960x544,
+every 120 presented frames from 1920 to 3360) in LOCALAPPDATA/P5D-Port/P5D/library/decrypted/PCSH10109/recomp (local evidence)
+show the complete note ring on both sides with buttons/notes, star note, bottom progress bar with stars, top-left combo/score HUD
+and the 3D character mid-move over the Shibuya background - no missing note/HUD layers and no corruption at 60 fps (unlike the
+rejected frame-rate-pair configs from M1598/M1599 which lost the note/HUD layer); the user bar (correct picture + no double
+speed) is now verified objectively on the packaged build, so the launcher 60 option was relabelled from 60 幀（全 60：選單/舞池/
+UI，實驗性）to 60 幀（全 60：選單/舞池/UI）(the explanatory line still notes switching back to 30), the launcher rebuilt and the
+release repackaged and copied to the desktop: stub id B1EAA48103F9FAE4, 300,317,551 B, SHA256 EEB39AE347EF2660... (previous
+6B029A072AD3ACA3); the next Play rebuilds only if sources are newer, settings remain frame_rate=60/osd=1; remaining: the human
+visual pass through the desktop launcher (optional now) and the final release-notes wording; the 30 fps default path is
+untouched; release state: desktop exe = native-60 release (stub id B1EAA48103F9FAE4, 300,317,551 B), docs/builds audit-clean.
+LOOKUP: M1615 completes after M1614 -> 18.5134 [relevant: packaged e2e], 18.5126 [relevant: promotion], 18.5124
+[relevant: matched-gap class]
