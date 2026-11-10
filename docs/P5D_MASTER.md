@@ -1666,6 +1666,7 @@
 | M1581 | §18.5108: **fn_81154a1c builds an {u32,u32} frame-rate pair at 0x813af5a8; (60,30) runs the guest at 60 and cuts the animation-speed ratio to 1.24-1.63x.** Disassembly: fn_81154a1c allocates an 8-byte object (fn_8115d36a size 8/4), zeroes it, writes the two u32 args to offsets 0/4 and stores the pointer at 0x813af5a8 - the boot call creates the app framework frame-rate pair. The hook now sweeps RECOMP_P5D_APPFPS="a,b" (default 60,60). At 60 fps + MFRAME60, pair (60,30) gives guest 60.0 fps (16.7 ms, speed 1.00x, window 60.0) and ratios char_center 1.24, bg_left 1.51, hud_left 1.63, hud_right 1.16, bottom_bar 1.42, top_corner 1.01 (baseline 446/462/438/475/417/669), vs ~1.76x char for (30,30) and (60,60). Remaining 1.4-1.6x in some regions suggests elements paced elsewhere (camera/HUD tracks), so the pair is part of the native 60 config but not all of it. Next sweep (60,15/30,60/120,30), pick best, validate title time/full song/guest 60; if ratios settle ~1.0 the native path retires M-B3 interpolation for the dance. Release unchanged CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
 | M1582 | §18.5109: **(60,30) frame-rate pair needs MFRAME60: without it guest ~35 fps and ratios 1.42-1.86x.** Same capture with MFRAME60 off but pair (60,30): guest ~35 fps, char_center 1.62, bg_left 1.75, hud_left 1.86, hud_right 1.42, bottom_bar 1.61, top_corner 1.46 (baseline 446/462/438/475/417/669; 121 aligned frames, DCLK start 2596), versus (60,30)+MFRAME60 guest 60.0 fps / char 1.24 / hud_right 1.16 / top_corner 1.01. So the pair and the appMframe conversion are complementary: the pair tells the framework the presentation rate, the conversion keeps authored frame counts (songs/menus/MFrame) in the 60 fps world. Best candidate: (60,30)+MFRAME60. Next sweep (60,20)/(60,25)/(60,45) and (60,30) variants, then validate title 4.13 s/full song/guest 60/HUD; if regions stay 1.4-1.6x identify their pacer and either extend native config or keep M-B3 interpolation only for them. Release unchanged CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
 | M1583 | §18.5110: **Pair sweep (60,15): dance animation ratios fall to 1.12-1.24 (hud_right 0.80, top 0.84) - the optimum is near.** Same capture/measurement (60 fps + MFRAME60, 121 aligned frames, DCLK start 2733, baseline 446/462/438/475/417/669): 30,30 char ~1.76; 60,30 guest 60.0, char 1.24/bg 1.51/hud_l 1.63/hud_r 1.16/bottom 1.42/top 1.01; 60,15 guest ~36-38, char 1.15/bg 1.12/hud_l 1.24/hud_r 0.80/bottom 1.07/top 0.84. The second value controls animation advance (30->15 slows further); at (60,15) five of six regions are within 0.80-1.24 (hud_right/top slightly slow). Ideal pair around (60,20)-(60,25); caveat guest loop read ~36-38 fps at (60,15), so the pair interacts with pacing and needs a full-song check. Next measure (60,20)/(60,25), pick the pair with all regions closest to 1.0 and guest 60/speed 1.00x, validate title 4.13 s/full song/OSD 60/music-judgement, then promote into the 60 option and retire M-B3 interpolation for the dance. Release unchanged CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
+| M1584 | §18.5111: **Pair sweep (60,20) is not between (60,15) and (60,30) - mapping non-monotonic; (60,15) best so far (mean abs dev 0.12).** Same capture (60 fps + MFRAME60, 121 aligned frames, DCLK start 2678, baseline 446/462/438/475/417/669): 60,30 char 1.24/bg 1.51/hud_l 1.63/hud_r 1.16/bottom 1.42/top 1.01 (mean dev 0.30); 60,20 char 1.35/bg 1.32/hud_l 1.42/hud_r 0.99/bottom 1.21/top 1.08 (0.24); 60,15 char 1.15/bg 1.12/hud_l 1.24/hud_r 0.80/bottom 1.07/top 0.84 (0.12). The second value is not a linear speed control (60,20 char worse than 60,15) - several subsystems or phase-dependent region noise; next repeat (60,15)/(60,30) for noise, try (60,12)/(60,18), then full-song validation (guest 60/speed 1.00x/title 4.13 s/song/HUD), then promote or keep interpolation. Release unchanged CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
 proposal).** mnsHandle_8111b64c/8111b190 receive a real-time float (+0.01668/frame at 60 vs +0.03337 at 30);
 mnsProcess_811251d6 fires per-frame but constant; other mnsProcess/mnsOption/gfd entries do not fire per-frame;
 object-word slopes show only the known danceQuantizer_81049976 w2 (+0.5 at 60 vs +1.0 at 30). The remaining
@@ -520781,3 +520782,44 @@ retire M-B3 render interpolation for the dance; release unchanged payload CEBB6C
 hook stays env-gated (RECOMP_P5D_APPFPS60=1 + RECOMP_P5D_APPFPS) and off by default.
 LOOKUP: M1583 extends the pair sweep from M1581/M1582 -> 18.5109 [relevant: pair needs MFRAME60], 18.5108 [relevant: pair
 60,30], 18.5107 [relevant: APPFPS60 alone]
+
+### 18.5111 M1584 PAIR SWEEP (60,20): NOT BETWEEN (60,15) AND (60,30) - THE MAPPING IS NON-MONOTONIC; (60,15) REMAINS THE BEST PAIR SO FAR
+
+Fourth frame-rate pair measured with the same capture/measurement (60 fps all-screen + MFRAME60, 121 aligned frames,
+dance-clock start 2678, baseline 446/462/438/475/417/669 per second):
+
+| pair | char_center | bg_left | hud_left | hud_right | bottom_bar | top_corner | mean abs dev from 1.0 |
+|---|---|---|---|---|---|---|---|
+| 60,30 | 1.24 | 1.51 | 1.63 | 1.16 | 1.42 | 1.01 | 0.30 |
+| 60,20 | 1.35 | 1.32 | 1.42 | 0.99 | 1.21 | 1.08 | 0.24 |
+| **60,15** | **1.15** | **1.12** | **1.24** | **0.80** | **1.07** | **0.84** | **0.12** |
+
+(60,20) is not between (60,15) and (60,30) - its char_center (1.35) is worse than (60,15)'s (1.15) - so the second value
+does not act as a simple linear speed control; either the pair feeds several subsystems in different proportions or the
+region measurement carries phase-dependent noise (different draws dominate at different dance-clock windows). (60,15)
+remains the best pair so far by mean absolute deviation (~0.12 vs 0.24/0.30), with hud_right 0.80 and top 0.84 slightly
+slow and char/bg/bottom 1.07-1.15 slightly fast.
+
+Next: (1) repeat the (60,15) measurement once to check reproducibility (and the (60,30) one) so the sweep's noise level is
+known; (2) try (60,12) and (60,18) around the best; (3) run the full-song validation for the best pair (guest 60 fps,
+speed 1.00x over a whole song, title 4.13 s, song length, HUD/judgement); (4) only then decide whether to promote the
+native pair + MFRAME60 into the 60 option (retiring M-B3 interpolation for the dance) or keep the render-interpolation
+plan. Release unchanged: payload CEBB6C124FF7B269 (2026-11-10 16:39:04), 60 experimental; the pair hook stays env-gated
+(RECOMP_P5D_APPFPS60=1 + RECOMP_P5D_APPFPS) and off by default.
+
+ANTI-FORGETTING ENTRY. Keywords: M1584 pair sweep 60,20 - fourth frame-rate pair measured with the same capture (60 fps
+all-screen + MFRAME60, 121 aligned frames, dance-clock start 2678, baseline 446/462/438/475/417/669): 60,30 char_center
+1.24 bg_left 1.51 hud_left 1.63 hud_right 1.16 bottom_bar 1.42 top_corner 1.01 (mean abs dev 0.30); 60,20 char 1.35 bg
+1.32 hud_left 1.42 hud_right 0.99 bottom 1.21 top 1.08 (mean dev 0.24); 60,15 char 1.15 bg 1.12 hud_left 1.24 hud_right
+0.80 bottom 1.07 top 0.84 (mean dev 0.12); 60,20 is not between 60,15 and 60,30 - its char_center 1.35 is worse than
+60,15 (1.15) - so the second value is not a simple linear speed control, either the pair feeds several subsystems in
+different proportions or the region measurement carries phase-dependent noise; 60,15 remains the best pair so far by mean
+absolute deviation with hud_right 0.80 and top 0.84 slightly slow and char/bg/bottom 1.07-1.15 slightly fast; next repeat
+the 60,15 measurement once to check reproducibility (and the 60,30 one) so the sweep noise level is known, try 60,12 and
+60,18 around the best, run the full-song validation for the best pair (guest 60 fps, speed 1.00x over a whole song, title
+4.13 s, song length, HUD/judgement), and only then decide whether to promote the native pair plus MFRAME60 into the 60
+option (retiring M-B3 interpolation for the dance) or keep the render-interpolation plan; release unchanged payload
+CEBB6C124FF7B269 (2026-11-10 16:39:04), 60 experimental; the pair hook stays env-gated (RECOMP_P5D_APPFPS60=1 + RECOMP_P5D_APPFPS) and off by
+default.
+LOOKUP: M1584 extends the sweep from M1583 -> 18.5110 [relevant: point 60,15], 18.5109 [relevant: pair needs MFRAME60],
+18.5108 [relevant: pair 60,30]
