@@ -1663,6 +1663,7 @@
 | M1578 | §18.5105: **APPFPS60 hook works: boot fn_81154a1c(30,30) -> (60,60) and the game reaches the dance at 60 fps.** hooks.c registers 0x81154a1c:p5d_appfps; at the app-framework boot call site (LR 0x811846b5) with RECOMP_P5D_APPFPS60=1 and 60 fps, the arguments become (60,60) so the animation calculator/app framework sees the presentation rate instead of the hardcoded 30. Probe run (rate 60 all-screen + MFRAME60 + APPFPS60) logged "[APPFPS60] boot fn_81154a1c(30,30) -> (60,60)" and "[DCLK] f=2776 ... rate=60" and reached main menu and dance (main/dance True). Next: capture the dance with the SHOT window and compare per-second pixel change against the 30 fps baseline (frames_mb1d30b, aligned by DCLK start; MFRAME60-only capture was frames_mb1d60mf4) - if ratios are ~1.0 instead of 1.28-1.64, MFRAME60+APPFPS60 is the native 60 mode and render-level interpolation may not be needed for the dance; also measure title time and full-song duration. Release unchanged CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
 | M1579 | §18.5106: **APPFPS60 measurement attempt: hook works but shot-window copy limit makes the region comparison unreliable.** The 60 fps capture (shot window 2780-3620) logged [APPFPS60] boot fn_81154a1c(30,30) -> (60,60) and reached the dance (741 shots; only the last 200 copied). [DCLK] starts 2679 (60) and 1566 (30 baseline); the aligned dance-clock window needs frames 3183-3333 and 1818-1841 but only 13/54 shots survive the last-200 copy, so ratios 0.18-0.91 are not meaningful (samples partly past the dance; final metrics 35.6 fps guest with 17 draws). Also observed: guest pacing 35.6 fps at 60 all-screen with MFRAME60+APPFPS60 - the app-framework rate change may alter pacing, target is guest 60/speed 1.00x. Next: copy all shots in the capture window, re-run the aligned comparison (expect ~1.0), measure title time (4.13 s baseline) and full-song duration with APPFPS60; if native 60 holds, M-B3 interpolation is unnecessary for the dance and the plan shifts to promoting MFRAME60+APPFPS60. Release unchanged CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
 | M1580 | §18.5107: **Decisive measurement: MFRAME60+APPFPS60 still runs the dance about 1.8x fast.** Full-shot capture (667 shots, dance-clock start 2664; 121 frames in 8.4-10.4 s): char_center 783.3/s vs 30 fps baseline ~446/s (1.76), bg_left 1.93, hud_left 1.91, hud_right 1.48, bottom_bar 2.04, top_corner 0.83 (mostly static UI, noise). So fn_81154a1c(30,30)->(60,60) alone is not the native 60 switch (MFRAME60-only was ~1.64x, no improvement); its args may not be a frame rate at all, or more places must change together. The 60 fps run also read guest ~30 fps at the end (window ~58), so the app-framework rate change perturbs pacing. Next: establish what fn_81154a1c configures (global 0x813af5a8 + the struct's readers) and re-check the 0x81670354=1 flag and fn_811546f0. APPFPS60 stays env-gated/off by default. Release unchanged CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
+| M1581 | §18.5108: **fn_81154a1c builds an {u32,u32} frame-rate pair at 0x813af5a8; (60,30) runs the guest at 60 and cuts the animation-speed ratio to 1.24-1.63x.** Disassembly: fn_81154a1c allocates an 8-byte object (fn_8115d36a size 8/4), zeroes it, writes the two u32 args to offsets 0/4 and stores the pointer at 0x813af5a8 - the boot call creates the app framework frame-rate pair. The hook now sweeps RECOMP_P5D_APPFPS="a,b" (default 60,60). At 60 fps + MFRAME60, pair (60,30) gives guest 60.0 fps (16.7 ms, speed 1.00x, window 60.0) and ratios char_center 1.24, bg_left 1.51, hud_left 1.63, hud_right 1.16, bottom_bar 1.42, top_corner 1.01 (baseline 446/462/438/475/417/669), vs ~1.76x char for (30,30) and (60,60). Remaining 1.4-1.6x in some regions suggests elements paced elsewhere (camera/HUD tracks), so the pair is part of the native 60 config but not all of it. Next sweep (60,15/30,60/120,30), pick best, validate title time/full song/guest 60; if ratios settle ~1.0 the native path retires M-B3 interpolation for the dance. Release unchanged CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
 proposal).** mnsHandle_8111b64c/8111b190 receive a real-time float (+0.01668/frame at 60 vs +0.03337 at 30);
 mnsProcess_811251d6 fires per-frame but constant; other mnsProcess/mnsOption/gfd entries do not fire per-frame;
 object-word slopes show only the known danceQuantizer_81049976 w2 (+0.5 at 60 vs +1.0 at 30). The remaining
@@ -520650,3 +520651,50 @@ writes) and re-check the other boot items (the 0x81670354=1 flag and the fn_8115
 env-gated and off by default; release unchanged payload CEBB6C124FF7B269 (2026-11-10 16:39:04), 60 experimental.
 LOOKUP: M1580 measures M1578/M1579 -> 18.5106 [relevant: measurement attempt], 18.5105 [relevant: APPFPS60 hook], 18.5104
 [relevant: boot frame-rate call sequence]
+
+### 18.5108 M1581 fn_81154a1c BUILDS AN {u32,u32} FRAME-RATE PAIR; (60,30) AT 60 FPS RUNS THE GUEST AT 60 AND CUTS THE ANIMATION-SPEED RATIO TO 1.24-1.63x
+
+Disassembly of fn_81154a1c (game_part7.c) shows what it configures: it allocates an 8-byte object (fn_8115d36a with
+size 8/4), zeroes it, writes its two u32 arguments to offsets 0 and 4, and stores the object pointer at 0x813af5a8 - so
+the boot call is creating the app framework's frame-rate pair {a, b} from the two constants (Vita: 30,30). The hook now
+reads RECOMP_P5D_APPFPS="a,b" (default 60,60) so pairs can be swept.
+
+Sweep so far (60 fps all-screen + MFRAME60, per-second pixel change versus the 30 fps baseline 446/462/438/475/417/669):
+
+| pair | guest fps (metrics) | char_center | bg_left | hud_left | hud_right | bottom_bar | top_corner |
+|---|---|---|---|---|---|---|---|
+| 30,30 (Vita) | 60 | ~1.76x | 1.93 | 1.91 | 1.48 | 2.04 | 0.83 |
+| 60,60 | ~30-36 | ~1.76x | 1.93 | 1.91 | 1.48 | 2.04 | 0.83 |
+| **60,30** | **60.0** | **1.24** | 1.51 | 1.63 | **1.16** | 1.42 | **1.01** |
+
+(30,30 row is the earlier MFRAME60-only measurement; 60,60 was the previous APPFPS60 run.) The (60,30) pair is the first
+configuration where the guest loop itself runs at 60.0 fps (metrics: 60.0 fps, frame 16.7 ms, speed 1.00x, window 60.0)
+and the animation-speed ratios drop sharply, with char_center 1.24, hud_right 1.16 and top_corner 1.01; the remaining
+1.4-1.6x in bg_left/hud_left/bottom_bar suggests those regions still carry elements paced elsewhere (camera/HUD tracks),
+so the pair is likely part of the native 60 configuration but not the whole of it.
+
+Next: sweep the pair more (e.g. 60,15 / 30,60 / 60,60 were tried; 120,30 to test the table's top entry), pick the best
+by the same measurement, then validate the winner end to end: title sequence time (4.13 s baseline), full-song
+duration, guest 60 fps with speed 1.00x, and the dance HUD/judgement over a full song; if the remaining region ratios
+settle near 1.0, this is the native 60 path and the M-B3 render interpolation can be retired for the dance.
+
+Release unchanged: payload CEBB6C124FF7B269 (2026-11-10 16:39:04), 60 experimental; the pair hook stays env-gated (RECOMP_P5D_APPFPS60=1
+plus RECOMP_P5D_APPFPS) and off by default.
+
+ANTI-FORGETTING ENTRY. Keywords: M1581 fn_81154a1c frame-rate pair - disassembly of fn_81154a1c (game_part7.c) shows it
+allocates an 8-byte object (fn_8115d36a size 8/4), zeroes it, writes its two u32 arguments to offsets 0 and 4, and stores
+the object pointer at 0x813af5a8, so the boot call creates the app framework frame-rate pair {a,b} from the constants
+(Vita: 30,30); the hook reads RECOMP_P5D_APPFPS="a,b" (default 60,60) to sweep pairs; sweep at 60 fps all-screen +
+MFRAME60, per-second pixel change versus the 30 fps baseline 446/462/438/475/417/669: 30,30 (Vita) char_center ~1.76x,
+bg_left 1.93, hud_left 1.91, hud_right 1.48, bottom_bar 2.04, top_corner 0.83; 60,60 ~1.76x with guest ~30-36 fps;
+60,30 guest fps 60.0 (frame 16.7 ms, speed 1.00x, window 60.0) with char_center 1.24, bg_left 1.51, hud_left 1.63,
+hud_right 1.16, bottom_bar 1.42, top_corner 1.01 - the first configuration where the guest loop itself runs at 60.0 fps
+and the animation-speed ratios drop sharply; the remaining 1.4-1.6x in bg_left/hud_left/bottom_bar suggests those regions
+still carry elements paced elsewhere (camera/HUD tracks), so the pair is likely part of the native 60 configuration but
+not all of it; next sweep the pair more (60,15 / 30,60 / 120,30) and pick the best with the same measurement, then
+validate end to end: title sequence time (4.13 s baseline), full-song duration, guest 60 fps speed 1.00x, dance
+HUD/judgement over a full song; if the remaining region ratios settle near 1.0 this is the native 60 path and M-B3 render
+interpolation can be retired for the dance; release unchanged payload CEBB6C124FF7B269 (2026-11-10 16:39:04), 60 experimental; the pair hook
+stays env-gated (RECOMP_P5D_APPFPS60=1 plus RECOMP_P5D_APPFPS) and off by default.
+LOOKUP: M1581 follows M1580 -> 18.5107 [relevant: APPFPS60 alone insufficient], 18.5105 [relevant: APPFPS60 hook],
+18.5104 [relevant: boot frame-rate call sequence]
