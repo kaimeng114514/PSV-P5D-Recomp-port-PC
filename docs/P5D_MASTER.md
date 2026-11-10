@@ -1674,6 +1674,7 @@
 | M1589 | §18.5116: **Phase B2 wrap-up: proven vs open + concrete next actions.** Proven: configurable frame-rate pair at 0x813af5a8 (boot 30,30; hook rewrites it); MFRAME60 fixes song/chart length with the one clean full-song measurement 167.18 s/10020 frames real time; the dance-clock rate check (30 fps ref 1.07/30f, MFRAME60-only 1.00/60f, pair runs 1.55-2.0x/60f); an isolated render-interpolation path (recorder M1564, pixel-identical replay M1570, second target M1566, scene recorder M1568, blended replay M1573/M1574) but the replay costs ~100 ms/frame and the blend is not visually validated. Open: fix measurement alignment (DCLK probe only ~every 60 frames and frame numbering mismatch), restore the full-song drive route (stops at the preview, ~32 s, M1588) and use whole-song time ~166-168 s as arbiter for the three configs, instrument the replay cost, then decide native vs interpolation and do M-B4/build/repack/release-notes. Release unchanged CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
 | M1590 | §18.5117: **GitHub fetch solved via gh-proxy mirror; the P3D/P4D/P5D patch repo has no Vita 60 fps patch.** github.com resolves to 127.0.0.1/::1 (hosts block; curl HTTP 000); gh-proxy.com (HTTP 200) proxies raw + GitHub API, so zarroboogs/ppp (74 files, PS4+PSV Persona patches) was fetched: PSV P5D (PCSE01275), P3D (PCSE01274), P4D (PCSE00764) each have only auto/intro_skip/mod/no_trp; PS4 P5D/P3D have intro_skip/mod/no_trp/overlay/psvc; none is a 60 fps/framerate patch - consistent with PS4 being natively 60 and Vita 30, so there is no public Vita 60 patch to copy; our engine-level path (frame-rate pair + MFRAME60 + measurement) remains the only route. Mod Support means a data/mod.cpk route exists if a native-60 setting turns out data-driven. Release unchanged CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
 | M1591 | §18.5118: **Song-entry key experiments still do not start a real song; this run ends with the route open.** Round 40: pressing 'e' once then no input, and 'e' then 'p' (START), both end with the log "song -> dance (song confirmed)" then "dance -> song (song modelled)" and the driver reporting "song: True scr=MAIN" - the Wait-For returned while the screen was back at MAIN, so the keys hit the main menu. The song-confirmed dialog needs a different key/step (candidate 'b' (Cross), a difficulty/settings confirm, or waiting for the preview to end); without it there is no full-song measurement and the native-60 verdict stays open. Resume: learn the exact dialog keys (interactive or screenshot steps), fix drive_song_clean.ps1, run the three configs (MFRAME60 only; +pair 60,60; +pair 60,15) with the whole-song dance clock/wall ~166-168 s as arbiter, then M-B4/build/repack/release notes; fallback to the render-interpolation road only if none is real-time. Release unchanged CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
+| M1597 | §18.5119: **Controlled preview benchmark: all three 60 fps configs advance the dance clock in real time; M1587's 1.55-2.0x readings were polluted.** The song-list preview dance is reachable deterministically (main menu -> song list -> confirm), so the same route benchmarks every config: steady-state dance-clock median at 60 fps all-screen: MFRAME60 only 0.01663 s/frame (0.998/60), +APPFPS60 pair(60,60) 0.01662 (0.997), +APPFPS(60,15) 0.01666 (1.000) - all real time. M1587's multi-config 1.55-2.0x numbers came from non-steady segments; the pair does not break the dance clock, so the native-60 question hinges on animation/render pacing. Next M1598: pixel-diff benchmark on the same preview (low RECOMP_SHOT_EVERY, four configs, [DCLK]-aligned steady window) to check per-second change against the 30 fps baseline; if it matches, native 60 is validated and M-B4 proceeds. Release unchanged CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
 proposal).** mnsHandle_8111b64c/8111b190 receive a real-time float (+0.01668/frame at 60 vs +0.03337 at 30);
 mnsProcess_811251d6 fires per-frame but constant; other mnsProcess/mnsOption/gfd entries do not fire per-frame;
 object-word slopes show only the known danceQuantizer_81049976 w2 (+0.5 at 60 vs +1.0 at 30). The remaining
@@ -521137,3 +521138,49 @@ data under C:\dev\tmp and backups under C:\dev\p5d_build\tools_backup\m15xx; rel
 (2026-11-10 16:39:04), 60 experimental, all prototypes env-gated and the 30 fps path untouched.
 LOOKUP: M1591 closes this run -> 18.5117 [relevant: gh-proxy + patch set], 18.5116 [relevant: Phase B2 wrap-up], 18.5115
 [relevant: full-song route attempt]
+
+### 18.5119 M1597 CONTROLLED PREVIEW BENCHMARK: ALL THREE 60FPS CONFIGS ADVANCE THE DANCE CLOCK IN REAL TIME - M1587's 1.55-2.0x READINGS WERE POLLUTED
+
+A reachable, deterministic benchmark was established this round: from the main menu the drive reaches the song list and
+a confirm starts the song-list preview dance (scene "song -> dance (dance stage)", [DCLK] begins to advance). The same
+route works for every configuration, so the dance clock's steady-state advance rate can be compared directly:
+
+| config (all at 60 fps, FPS_SCOPE=all) | [DCLK] lines | median s/frame | per 60 frames | verdict |
+|---|---|---|---|---|
+| MFRAME60 only | 32 | 0.01663 | 0.998 | real time |
+| MFRAME60 + APPFPS60 (pair 60,60) | 32 | 0.01662 | 0.997 | real time |
+| MFRAME60 + APPFPS60 + APPFPS=60,15 | 32 | 0.01666 | 1.000 | real time |
+
+So in the steady dance stage the dance clock advances exactly in real time for all three configurations - including the
+frame-rate-pair ones. This corrects M1587: its 1.55-2.0x multi-config readings came from including non-steady segments
+(menu/loading transitions, where the clock is sampled before the dance stage is running); a steady-state-only median is
+clean. It also means the frame-rate pair does not break the dance clock, and the native-60 question now hinges on the
+animation/render pacing, not on the music/dance clock.
+
+Next (M1598): the same preview is the ideal pixel-diff benchmark - capture frames with the shot window at a low
+RECOMP_SHOT_EVERY for the four configurations (30 fps baseline; 60 fps with MFRAME60 only; +pair 60,60; +pair 60,15),
+map each shot frame to the dance clock through the [DCLK] lines, and compare the per-second pixel change inside the same
+steady dance-clock window. Because the clock is real time in all runs, this directly answers whether the 60 fps
+configurations advance the animation in real time (per-second change equal to the 30 fps baseline, per-frame change
+about half), or whether a residual render-side speedup remains. If they match, the native-60 configuration is validated
+and M-B4 can proceed (title timing, full song length, guest 60 fps, speed 1.00x, repackage).
+
+Release unchanged: payload CEBB6C124FF7B269 (2026-11-10 16:39:04), 60 experimental; all hooks env-gated and off by default, the 30 fps path
+untouched.
+
+ANTI-FORGETTING ENTRY. Keywords: M1597 controlled preview benchmark - the song-list preview dance is reachable
+deterministically (main menu -> song list -> confirm starts the preview: scene "song -> dance (dance stage)" and [DCLK]
+advances); running the same route at 60 fps all-screen for three configs gave the steady-state dance-clock median:
+MFRAME60 only 0.01663 s/frame (0.998 per 60), MFRAME60+APPFPS60 pair(60,60) 0.01662 (0.997), MFRAME60+APPFPS60+APPFPS(60,15)
+0.01666 (1.000) - all real time; this corrects M1587 whose 1.55-2.0x readings included non-steady segments (menu/loading
+transitions before the dance stage runs) and shows the frame-rate pair does not break the dance clock, so the native-60
+question hinges on animation/render pacing rather than on the music/dance clock; next M1598 is the pixel-diff benchmark
+on the same preview: capture frames with a low RECOMP_SHOT_EVERY for four configurations (30 fps baseline; 60 fps
+MFRAME60 only; +pair 60,60; +pair 60,15), map shot frames to the dance clock through the [DCLK] lines, and compare the
+per-second pixel change inside the same steady window - since the clock is real time in all runs this directly answers
+whether the 60 fps configs advance the animation in real time (per-second equal to the 30 fps baseline, per-frame about
+half) or a residual render-side speedup remains; if they match, the native-60 configuration is validated and M-B4 can
+proceed (title timing, full song length, guest 60 fps, speed 1.00x, repackage); release unchanged payload CEBB6C124FF7B269
+(2026-11-10 16:39:04), 60 experimental, all hooks env-gated and off by default, 30 fps path untouched.
+LOOKUP: M1597 corrects M1587 -> 18.5114 [relevant: clock rate verdict], 18.5118 [relevant: route/heuristics], 18.5094
+[relevant: MFRAME60 full-song real time]
