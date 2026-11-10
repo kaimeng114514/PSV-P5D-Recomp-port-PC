@@ -1677,6 +1677,7 @@
 | M1597 | §18.5119: **Controlled preview benchmark: all three 60 fps configs advance the dance clock in real time; M1587's 1.55-2.0x readings were polluted.** The song-list preview dance is reachable deterministically (main menu -> song list -> confirm), so the same route benchmarks every config: steady-state dance-clock median at 60 fps all-screen: MFRAME60 only 0.01663 s/frame (0.998/60), +APPFPS60 pair(60,60) 0.01662 (0.997), +APPFPS(60,15) 0.01666 (1.000) - all real time. M1587's multi-config 1.55-2.0x numbers came from non-steady segments; the pair does not break the dance clock, so the native-60 question hinges on animation/render pacing. Next M1598: pixel-diff benchmark on the same preview (low RECOMP_SHOT_EVERY, four configs, [DCLK]-aligned steady window) to check per-second change against the 30 fps baseline; if it matches, native 60 is validated and M-B4 proceeds. Release unchanged CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
 | M1598/M1599 | §18.5120: **Preview pixel benchmark: at 60 fps the dance animation is 1.5-1.7x the 30 fps baseline while the dance clock is real time; the frame-rate pair lowers it to ~1.1-1.4x but breaks the note/HUD layer.** Same preview route, RECOMP_SHOT=5, shot frames mapped to the dance clock via [DCLK], steady window 6-14 s: 60 MFRAME60 only ratios 1.49-1.68; pair (60,60) 1.46-1.64; (60,15) 1.10-1.34; (60,12) 1.10-1.35; (60,10) 1.12-1.39; (60,7) 1.14-1.43 (never 1.0). Screenshots at ~11 s: MFRAME60-only has the full note ring/buttons/progress bar, pair (60,7) shows only one star note and no ring/buttons/progress bar - the note/HUD layer desyncs (user also saw picture errors); metrics still guest ~60 fps/speed 1.00x/no errors, so it is pacing/state, not GPU. Conclusion: the gap is the animation advance rate, not the dance clock; the pair is unacceptable; next make the character and note/HUD animation time base advance by real time (preview benchmark as the acceptance test). Release unchanged CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
 | M1600/M1601 | §18.5121: **Native-60 animation-speed diagnostics: MFRAME60-off, EVALSLOW, JOBSLOW and their combination all leave a 1.3-1.5x residual.** Same preview benchmark: reference 60 MFRAME60 1.49-1.68; no MFRAME60 1.44-1.63 (not the cause); +EVALSLOW 1.28-1.42; +JOBSLOW 1.43-1.58; +JOBSLOW+EVALSLOW 1.31-1.50 (never 1.0). The dance animation time base is not yet found (likely the dance playback/motion job advancing a frame counter per presented frame and sampling motion at frame/30 without appMframe conversion; motion=018 frames=60 fits). EVALSLOW does not break the picture (notes/HUD complete, character present). Per the user's bar (correct picture + no double speed) the shipped hybrid 60 option already qualifies (M1555: 167.18 s full song, real-time dance clock, speed 1.00x; trade-off 30 Hz content), while native 60 currently either runs 1.3-1.5x fast or breaks the note/HUD layer. Next: hook the dance playback job frame-counter advance and halve it at 60 fps, re-check the benchmark; otherwise finalize the hybrid with accurate release notes. Release unchanged CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
+| M1602 | §18.5122: **Dance job process nodes found; the dance-system update functions are identified.** Job-struct dumps from the preview run: init dancemain entry 0x81184cf9 (FUN_81184cf8); DanceSystem 0x81049afd (FUN_81049afc, next to the 1/30 quantizer); DanceReady_P5 0x81138541; DanceMemberPose 0x811391c1 (FUN_811391c0, a state dispatcher over its 8 members, node 0x10380240); DanceProcess 0x81043fef (FUN_81043ee2, contains the dance clock site_10 0x81043fee); danceVoiceSub 0x81050bab. Next: env-gated probes on these five entries (frame, r0/r1, struct words), compare 30/60 fps previews, find the pose's clock (if it advances per presented frame at frame/30 that is the residual 1.3-1.7x source), halve it only at 60 fps and let the preview benchmark decide. Release unchanged CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
 proposal).** mnsHandle_8111b64c/8111b190 receive a real-time float (+0.01668/frame at 60 vs +0.03337 at 30);
 mnsProcess_811251d6 fires per-frame but constant; other mnsProcess/mnsOption/gfd entries do not fire per-frame;
 object-word slopes show only the known danceQuantizer_81049976 w2 (+0.5 at 60 vs +1.0 at 30). The remaining
@@ -521295,3 +521296,51 @@ otherwise finalize the hybrid as the 60 option with accurate release notes; rele
 60 experimental, all hooks env-gated and off by default.
 LOOKUP: M1600/M1601 diagnose after M1598/M1599 -> 18.5120 [relevant: pair benchmark + UI regression], 18.5119 [relevant:
 preview clock benchmark], 18.5107 [relevant: earlier screenshots]
+
+### 18.5122 M1602 DANCE JOB PROCESS NODES FOUND: THE DANCE-SYSTEM UPDATE FUNCTIONS ARE IDENTIFIED (DanceProcess 0x81043FEF = THE DANCE CLOCK SITE; DanceMemberPose 0x811391C1; DanceReady 0x81138541; DanceSystem 0x81049AFD; danceVoiceSub 0x81050BAB)
+
+The port already publishes the game's app-process names through the job lookup/create hooks (p5d_job_name). The job
+struct diagnostic now dumps the process nodes of dance-named jobs, and the preview run identified them (node[0] = module
+vtable-like code pointer, node[5] = the process's own code entry, node[8] = small state fields):
+
+| job name | node | node[5] (entry) | notes |
+|---|---|---|---|
+| init dancemain | 0x10381418 | 0x81184cf9 (FUN_81184cf8) | the dance init in the boot region |
+| DanceSystem | 0x10381458 | **0x81049afd (FUN_81049afc)** | next to the 1/30 quantizer FN_81049976 |
+| DanceReady_P5 | 0x10380310 | **0x81138541** | the dance-ready/replay job |
+| DanceMemberPose | 0x10380240 | **0x811391c1 (FUN_811391c0)** | the member pose update (entry is a state dispatcher: int16 state at r5[0], calls fn_810968b8 for its 8 members and r5[0x84]) |
+| DanceProcess | 0x10380350 | **0x81043fef (FUN_81043ee2)** | contains the dance clock source site (site_10 0x81043fee) |
+| danceVoiceSub | 0x10381380 | **0x81050bab** | voice/subtitle |
+
+This is the concrete lead for the animation time base: hooking DanceMemberPose/DanceProcess/DanceReady entries and
+sampling the struct/time they read (or their per-frame internal counters) will show which clock the pose uses - if it
+advances per presented frame (frame/30) that is the source of the residual 1.3-1.7x animation speed, and halving that
+advance at 60 fps (only) should bring the preview benchmark to ~1.0 with the picture intact, which is exactly the
+user's bar (correct picture, no double speed). The functions are in game_part6.c (fn_811391c0) and the dance clock
+region; the per-frame call rate can be measured by a plain HOOKS entry that logs display_frames and the entry's r0.
+
+Next: add env-gated probes on these five entries (log frame, r0/r1 and a few struct words once per 30 frames), run the
+30 fps and 60 fps previews, and compare the advance of any counter/time they carry; then the specific advance gets a
+targeted halving at 60 fps and the preview benchmark decides. Release unchanged: payload CEBB6C124FF7B269 (2026-11-10 16:39:04), 60
+experimental; all hooks env-gated and off by default, the 30 fps path untouched.
+
+ANTI-FORGETTING ENTRY. Keywords: M1602 dance job process nodes found - the port publishes app-process names through the
+job lookup/create hooks (p5d_job_name); the job struct diagnostic now dumps dance-named process nodes and the preview run
+identified them (node[0] = module vtable-like code pointer, node[5] = the process own code entry, node[8] = small state
+fields): init dancemain node 0x10381418 entry 0x81184cf9 (FUN_81184cf8, dance init); DanceSystem 0x10381458 entry
+0x81049afd (FUN_81049afc, next to the 1/30 quantizer FUN_81049976); DanceReady_P5 0x10380310 entry 0x81138541 (the
+dance-ready/replay job); DanceMemberPose 0x10380240 entry 0x811391c1 (FUN_811391c0 - the member pose update, a state
+dispatcher: int16 state at r5[0], calls fn_810968b8 for its 8 members and r5[0x84]); DanceProcess 0x10380350 entry
+0x81043fef (FUN_81043ee2, contains the dance clock source site_10 0x81043fee); danceVoiceSub 0x10381380 entry 0x81050bab;
+this is the concrete lead for the animation time base - hooking the DanceMemberPose/DanceProcess/DanceReady entries and
+sampling the struct/time they read (or their per-frame internal counters) will show which clock the pose uses; if it
+advances per presented frame (frame/30) that is the source of the residual 1.3-1.7x animation speed, and halving that
+advance at 60 fps only should bring the preview benchmark to ~1.0 with the picture intact (the user bar: correct picture,
+no double speed); the functions are in game_part6.c (fn_811391c0) and the dance clock region, and the per-frame call rate
+can be measured by a plain HOOKS entry that logs display_frames and the entry r0; next: add env-gated probes on these five
+entries (log frame, r0/r1 and a few struct words once per 30 frames), run the 30 fps and 60 fps previews, compare the
+advance of any counter/time they carry, then halve the specific advance at 60 fps and let the preview benchmark decide;
+release unchanged payload CEBB6C124FF7B269 (2026-11-10 16:39:04), 60 experimental, all hooks env-gated and off by default, 30 fps path
+untouched.
+LOOKUP: M1602 continues M1600/M1601 -> 18.5121 [relevant: diagnostics residual], 18.5119 [relevant: preview benchmark],
+18.5118 [relevant: job name stream]
