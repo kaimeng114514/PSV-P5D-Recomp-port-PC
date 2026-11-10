@@ -1667,6 +1667,7 @@
 | M1582 | §18.5109: **(60,30) frame-rate pair needs MFRAME60: without it guest ~35 fps and ratios 1.42-1.86x.** Same capture with MFRAME60 off but pair (60,30): guest ~35 fps, char_center 1.62, bg_left 1.75, hud_left 1.86, hud_right 1.42, bottom_bar 1.61, top_corner 1.46 (baseline 446/462/438/475/417/669; 121 aligned frames, DCLK start 2596), versus (60,30)+MFRAME60 guest 60.0 fps / char 1.24 / hud_right 1.16 / top_corner 1.01. So the pair and the appMframe conversion are complementary: the pair tells the framework the presentation rate, the conversion keeps authored frame counts (songs/menus/MFrame) in the 60 fps world. Best candidate: (60,30)+MFRAME60. Next sweep (60,20)/(60,25)/(60,45) and (60,30) variants, then validate title 4.13 s/full song/guest 60/HUD; if regions stay 1.4-1.6x identify their pacer and either extend native config or keep M-B3 interpolation only for them. Release unchanged CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
 | M1583 | §18.5110: **Pair sweep (60,15): dance animation ratios fall to 1.12-1.24 (hud_right 0.80, top 0.84) - the optimum is near.** Same capture/measurement (60 fps + MFRAME60, 121 aligned frames, DCLK start 2733, baseline 446/462/438/475/417/669): 30,30 char ~1.76; 60,30 guest 60.0, char 1.24/bg 1.51/hud_l 1.63/hud_r 1.16/bottom 1.42/top 1.01; 60,15 guest ~36-38, char 1.15/bg 1.12/hud_l 1.24/hud_r 0.80/bottom 1.07/top 0.84. The second value controls animation advance (30->15 slows further); at (60,15) five of six regions are within 0.80-1.24 (hud_right/top slightly slow). Ideal pair around (60,20)-(60,25); caveat guest loop read ~36-38 fps at (60,15), so the pair interacts with pacing and needs a full-song check. Next measure (60,20)/(60,25), pick the pair with all regions closest to 1.0 and guest 60/speed 1.00x, validate title 4.13 s/full song/OSD 60/music-judgement, then promote into the 60 option and retire M-B3 interpolation for the dance. Release unchanged CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
 | M1584 | §18.5111: **Pair sweep (60,20) is not between (60,15) and (60,30) - mapping non-monotonic; (60,15) best so far (mean abs dev 0.12).** Same capture (60 fps + MFRAME60, 121 aligned frames, DCLK start 2678, baseline 446/462/438/475/417/669): 60,30 char 1.24/bg 1.51/hud_l 1.63/hud_r 1.16/bottom 1.42/top 1.01 (mean dev 0.30); 60,20 char 1.35/bg 1.32/hud_l 1.42/hud_r 0.99/bottom 1.21/top 1.08 (0.24); 60,15 char 1.15/bg 1.12/hud_l 1.24/hud_r 0.80/bottom 1.07/top 0.84 (0.12). The second value is not a linear speed control (60,20 char worse than 60,15) - several subsystems or phase-dependent region noise; next repeat (60,15)/(60,30) for noise, try (60,12)/(60,18), then full-song validation (guest 60/speed 1.00x/title 4.13 s/song/HUD), then promote or keep interpolation. Release unchanged CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
+| M1585 | §18.5112: **The (60,15) repeat disagrees with the first run (char 1.62 vs 1.15): the region-ratio methodology is not reproducible - align by the music start.** Second (60,15) run (DCLK start 2649, 121 aligned frames): char 1.62/bg 1.54/hud_l 1.62/hud_r 1.06/bottom 1.41/top 1.02 vs first run 1.15/1.12/1.24/0.80/1.07/0.84. The window is placed by the first [DCLK] clk=0 line, but the real music/choreography start comes later and varies (start frames observed 2596/2649/2664/2678/2733/2776), so each run samples a different segment; the sweep is unreliable beyond broad trends (only the 30,30 pair is consistently much faster, ~1.7-1.9x). Fix: align by the music start ([DCLK] where music first > 0), re-run the sweep, and check the driver always selects the same song. Release unchanged CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
 proposal).** mnsHandle_8111b64c/8111b190 receive a real-time float (+0.01668/frame at 60 vs +0.03337 at 30);
 mnsProcess_811251d6 fires per-frame but constant; other mnsProcess/mnsOption/gfd entries do not fire per-frame;
 object-word slopes show only the known danceQuantizer_81049976 w2 (+0.5 at 60 vs +1.0 at 30). The remaining
@@ -520823,3 +520824,38 @@ CEBB6C124FF7B269 (2026-11-10 16:39:04), 60 experimental; the pair hook stays env
 default.
 LOOKUP: M1584 extends the sweep from M1583 -> 18.5110 [relevant: point 60,15], 18.5109 [relevant: pair needs MFRAME60],
 18.5108 [relevant: pair 60,30]
+
+### 18.5112 M1585 THE (60,15) REPEAT DISAGREES WITH THE FIRST RUN (char 1.62 vs 1.15): THE REGION-RATIO METHODOLOGY IS NOT REPRODUCIBLE, ALIGN BY THE MUSIC START
+
+Reproducibility check of the best pair (60,15) - same capture and measurement, second run (dance-clock start 2649, 121
+aligned frames): char_center 1.62, bg_left 1.54, hud_left 1.62, hud_right 1.06, bottom_bar 1.41, top_corner 1.02.
+That is very different from the first (60,15) run (char 1.15, bg 1.12, hud_left 1.24, hud_right 0.80, bottom 1.07, top
+0.84), so the methodology is not reproducible: the analysis window is placed by the first "[DCLK] f=... clk=0.0000"
+line, but that line only reports the dance scene's clock start - the actual music/choreography start comes some frames
+later and varies between runs (the logs show DCLK start frames varying by tens to hundreds of frames, e.g. 2596, 2649,
+2664, 2678, 2733, 2776/2777), so the same "[start + 8.4 s]" window samples a different choreography segment each run.
+The region-ratio sweep of M1581-M1584 is therefore unreliable beyond broad trends; the consistent finding across runs
+is only that the Vita (30,30) pair is much faster (~1.7-1.9x) than the 60,x pairs, while the fine ranking of the
+second value needs the fixed alignment.
+
+Fix: align by the music start - the [DCLK] line where "music" first becomes > 0 (or where clk and music both advance),
+then sample the same music interval in every run; re-run the sweep pairs with that alignment, and only then pick the
+pair. Also check whether the driver selects the same song/difficulty every run (a different chart would break any
+cross-run comparison). Release unchanged: payload CEBB6C124FF7B269 (2026-11-10 16:39:04), 60 experimental; the pair hook stays env-gated
+(RECOMP_P5D_APPFPS60=1 + RECOMP_P5D_APPFPS) and off by default.
+
+ANTI-FORGETTING ENTRY. Keywords: M1585 reproducibility - repeat of the best pair 60,15 disagrees with the first run:
+second run (dance-clock start 2649, 121 aligned frames) char_center 1.62, bg_left 1.54, hud_left 1.62, hud_right 1.06,
+bottom_bar 1.41, top_corner 1.02 versus the first run char 1.15, bg 1.12, hud_left 1.24, hud_right 0.80, bottom 1.07, top
+0.84, so the region-ratio methodology is not reproducible; the window is placed by the first [DCLK] f=... clk=0.0000 line
+which only reports the dance scene clock start - the actual music/choreography start comes some frames later and varies
+between runs (DCLK start frames observed 2596, 2649, 2664, 2678, 2733, 2776/2777), so the same start+8.4 s window samples a
+different choreography segment each run; the region-ratio sweep of M1581-M1584 is unreliable beyond broad trends - the
+consistent finding is only that the Vita 30,30 pair is much faster (~1.7-1.9x) than the 60,x pairs, while the fine ranking
+of the second value needs the fixed alignment; fix: align by the music start - the [DCLK] line where music first becomes
+greater than 0 (or where clk and music both advance) - then sample the same music interval in every run, re-run the sweep
+pairs with that alignment and only then pick the pair; also check whether the driver selects the same song/difficulty every
+run (a different chart would break any cross-run comparison); release unchanged payload CEBB6C124FF7B269 (2026-11-10 16:39:04), 60
+experimental; the pair hook stays env-gated (RECOMP_P5D_APPFPS60=1 + RECOMP_P5D_APPFPS) and off by default.
+LOOKUP: M1585 checks M1583/M1584 reproducibility -> 18.5111 [relevant: sweep 60,20], 18.5110 [relevant: sweep 60,15],
+18.5109 [relevant: pair needs MFRAME60]
