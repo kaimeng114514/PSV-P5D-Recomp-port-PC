@@ -1673,6 +1673,7 @@
 | M1588 | §18.5115: **Full-song timing attempt did not reach a real song - the clean-song driver stops at the song-select preview.** Three 60 fps configs (MFRAME60 only; +APPFPS60 pair 60,60; +APPFPS 60,15): all ~32 s wall, dance clock ~31 s, 1860/1860/1800 frames, scene log bouncing song->dance->song, result after ~32 s instead of the real song's ~166 s - so the driver no longer performs the input sequence that enters a full song (M1555 used a different route). These runs measured the preview and cannot decide the real-time config; next restore the working full-song input sequence (main menu START -> SONG -> select -> confirm) and re-run the three configs, then use the whole-song wall time/dance clock (~166-168 s) as the arbiter; until then M1587 stands (MFRAME60-only has the one real-time full-song measurement). Release unchanged CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
 | M1589 | §18.5116: **Phase B2 wrap-up: proven vs open + concrete next actions.** Proven: configurable frame-rate pair at 0x813af5a8 (boot 30,30; hook rewrites it); MFRAME60 fixes song/chart length with the one clean full-song measurement 167.18 s/10020 frames real time; the dance-clock rate check (30 fps ref 1.07/30f, MFRAME60-only 1.00/60f, pair runs 1.55-2.0x/60f); an isolated render-interpolation path (recorder M1564, pixel-identical replay M1570, second target M1566, scene recorder M1568, blended replay M1573/M1574) but the replay costs ~100 ms/frame and the blend is not visually validated. Open: fix measurement alignment (DCLK probe only ~every 60 frames and frame numbering mismatch), restore the full-song drive route (stops at the preview, ~32 s, M1588) and use whole-song time ~166-168 s as arbiter for the three configs, instrument the replay cost, then decide native vs interpolation and do M-B4/build/repack/release-notes. Release unchanged CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
 | M1590 | §18.5117: **GitHub fetch solved via gh-proxy mirror; the P3D/P4D/P5D patch repo has no Vita 60 fps patch.** github.com resolves to 127.0.0.1/::1 (hosts block; curl HTTP 000); gh-proxy.com (HTTP 200) proxies raw + GitHub API, so zarroboogs/ppp (74 files, PS4+PSV Persona patches) was fetched: PSV P5D (PCSE01275), P3D (PCSE01274), P4D (PCSE00764) each have only auto/intro_skip/mod/no_trp; PS4 P5D/P3D have intro_skip/mod/no_trp/overlay/psvc; none is a 60 fps/framerate patch - consistent with PS4 being natively 60 and Vita 30, so there is no public Vita 60 patch to copy; our engine-level path (frame-rate pair + MFRAME60 + measurement) remains the only route. Mod Support means a data/mod.cpk route exists if a native-60 setting turns out data-driven. Release unchanged CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
+| M1591 | §18.5118: **Song-entry key experiments still do not start a real song; this run ends with the route open.** Round 40: pressing 'e' once then no input, and 'e' then 'p' (START), both end with the log "song -> dance (song confirmed)" then "dance -> song (song modelled)" and the driver reporting "song: True scr=MAIN" - the Wait-For returned while the screen was back at MAIN, so the keys hit the main menu. The song-confirmed dialog needs a different key/step (candidate 'b' (Cross), a difficulty/settings confirm, or waiting for the preview to end); without it there is no full-song measurement and the native-60 verdict stays open. Resume: learn the exact dialog keys (interactive or screenshot steps), fix drive_song_clean.ps1, run the three configs (MFRAME60 only; +pair 60,60; +pair 60,15) with the whole-song dance clock/wall ~166-168 s as arbiter, then M-B4/build/repack/release notes; fallback to the render-interpolation road only if none is real-time. Release unchanged CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
 proposal).** mnsHandle_8111b64c/8111b190 receive a real-time float (+0.01668/frame at 60 vs +0.03337 at 30);
 mnsProcess_811251d6 fires per-frame but constant; other mnsProcess/mnsOption/gfd entries do not fire per-frame;
 object-word slopes show only the known danceQuantizer_81049976 w2 (+0.5 at 60 vs +1.0 at 30). The remaining
@@ -521090,3 +521091,49 @@ data-driven (nothing in this patch set suggests that); release unchanged payload
 prototypes env-gated and the 30 fps path untouched.
 LOOKUP: M1590 answers the user's patch-set lead -> 18.5116 [relevant: Phase B2 wrap-up], 18.5114 [relevant: clock verdict],
 18.5103 [relevant: PS4 string scan]
+
+### 18.5118 M1591 SONG-ENTRY KEY EXPERIMENTS STILL DO NOT START A REAL SONG; THIS RUN ENDS WITH THE ROUTE OPEN
+
+Two more song-select input experiments (round 40, final round of this autonomous run): (a) press 'e' once on the song
+list then no input; (b) press 'e' then 'p' (START). Both ended the same way: the log shows "song -> dance (song
+confirmed)" followed by "dance -> song (song modelled)", and the driver reported "song: True scr=MAIN" - i.e. the
+script's Wait-For returned while the screen had already gone back to MAIN, so the sent keys hit the main menu.
+
+So the real song-confirmed dialog needs a different confirm key/step (candidates: 'b' (Cross) as confirm on the
+song-confirmed dialog, a difficulty/settings confirm, or waiting for the preview to finish); without it no full-song
+measurement can be made, and the native-60 verdict (MFRAME60 vs +frame-rate pair) stays open. This run ends with the
+route open; the procedure to resume is documented below.
+
+Resume plan (next session):
+1. drive the song-select flow interactively once (or with RECOMP_UI_CMD screenshot 's' at each step) to learn the exact
+   song-confirmed dialog keys, then fix drive_song_clean.ps1;
+2. run the three full-song configurations (MFRAME60 only; MFRAME60+pair 60,60; MFRAME60+pair 60,15) and use the
+   whole-song dance clock/wall time (~166-168 s) as the arbiter; the 30 fps reference (M1555) is 166 s;
+3. revisit the render-interpolation fallback only if none of the native configs is real-time, starting with the replay
+   cost instrumentation (M1574) and the rotation-aware blend visual check (M1573);
+4. then M-B4 validation, launcher full-chain build test, repackaging and release notes.
+
+Already-in-hand for the next session: the screenshots/reports docs (M1580-M1590), the drive scripts
+(drive_song_clean.ps1 partially patched, drive_frames.ps1), the hooks (MFRAME60/RECOMP_P5D_MFRAME_INIT,
+RECOMP_P5D_APPFPS60/RECOMP_P5D_APPFPS, RECOMP_INTERP*), the metrics/data files under C:\dev\tmp and the backups under
+C:\dev\p5d_build\tools_backup\m15xx. Release unchanged: payload CEBB6C124FF7B269 (2026-11-10 16:39:04), 60 experimental; all prototypes
+env-gated, the 30 fps path untouched.
+
+ANTI-FORGETTING ENTRY. Keywords: M1591 song-entry key experiments - round 40 final round of this run; pressing 'e' once on
+the song list then no input, and pressing 'e' then 'p' (START), both ended with the log "song -> dance (song confirmed)"
+followed by "dance -> song (song modelled)" and the driver reporting "song: True scr=MAIN" - the Wait-For returned while
+the screen had gone back to MAIN so the sent keys hit the main menu; the real song-confirmed dialog needs a different
+confirm key/step (candidates: 'b' (Cross) as confirm on the song-confirmed dialog, a difficulty/settings confirm, or
+waiting for the preview to finish); without it no full-song measurement can be made and the native-60 verdict (MFRAME60 vs
+plus frame-rate pair) stays open; this run ends with the route open; resume plan: (1) drive the song-select flow
+interactively once (or with RECOMP_UI_CMD screenshot 's' at each step) to learn the exact song-confirmed dialog keys, then
+fix drive_song_clean.ps1; (2) run the three full-song configurations (MFRAME60 only; MFRAME60+pair 60,60; MFRAME60+pair
+60,15) and use the whole-song dance clock/wall time (~166-168 s) as the arbiter, the 30 fps reference (M1555) being 166 s;
+(3) revisit the render-interpolation fallback only if none of the native configs is real-time, starting with the replay cost
+instrumentation (M1574) and the rotation-aware blend visual check (M1573); (4) then M-B4 validation, launcher full-chain
+build test, repackaging and release notes; already in hand: docs M1580-M1590, drive scripts (drive_song_clean.ps1 partially
+patched, drive_frames.ps1), hooks (MFRAME60/RECOMP_P5D_MFRAME_INIT, RECOMP_P5D_APPFPS60/RECOMP_P5D_APPFPS, RECOMP_INTERP*),
+data under C:\dev\tmp and backups under C:\dev\p5d_build\tools_backup\m15xx; release unchanged payload CEBB6C124FF7B269
+(2026-11-10 16:39:04), 60 experimental, all prototypes env-gated and the 30 fps path untouched.
+LOOKUP: M1591 closes this run -> 18.5117 [relevant: gh-proxy + patch set], 18.5116 [relevant: Phase B2 wrap-up], 18.5115
+[relevant: full-song route attempt]
