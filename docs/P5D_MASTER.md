@@ -1662,6 +1662,7 @@
 | M1577 | §18.5104: **Found the boot frame-rate call sequence: flag 0x81670354=1, appMframe init(1,1,1), then fn_81154a1c(30,30) - the likely appCalculator frame-rate config hardcoded to 30.** game_part8.c at VA 0x81184692-0x811846b0 shows the three hardcoded steps; fn_81154a1c (game_part7.c) loads a global 0x813af5a8 and stores two args (matches framerate_n/framerate_d from M1576). The PS4 build of the shared engine most likely passes 60 here, explaining why its UI/animations run at 60 without double-speed. MFRAME60 only changed step 2 (frame counts) while step 3 kept the animation time base at 30 - matching the residual dance mismatch. Next: hook fn_81154a1c at the boot call site, override to 60,60 (RECOMP_P5D_APPFPS60=1, 60 mode only), combined with MFRAME60, and measure dance animation speed, title time, song duration - the native 60 path may open up. Release unchanged CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
 | M1578 | §18.5105: **APPFPS60 hook works: boot fn_81154a1c(30,30) -> (60,60) and the game reaches the dance at 60 fps.** hooks.c registers 0x81154a1c:p5d_appfps; at the app-framework boot call site (LR 0x811846b5) with RECOMP_P5D_APPFPS60=1 and 60 fps, the arguments become (60,60) so the animation calculator/app framework sees the presentation rate instead of the hardcoded 30. Probe run (rate 60 all-screen + MFRAME60 + APPFPS60) logged "[APPFPS60] boot fn_81154a1c(30,30) -> (60,60)" and "[DCLK] f=2776 ... rate=60" and reached main menu and dance (main/dance True). Next: capture the dance with the SHOT window and compare per-second pixel change against the 30 fps baseline (frames_mb1d30b, aligned by DCLK start; MFRAME60-only capture was frames_mb1d60mf4) - if ratios are ~1.0 instead of 1.28-1.64, MFRAME60+APPFPS60 is the native 60 mode and render-level interpolation may not be needed for the dance; also measure title time and full-song duration. Release unchanged CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
 | M1579 | §18.5106: **APPFPS60 measurement attempt: hook works but shot-window copy limit makes the region comparison unreliable.** The 60 fps capture (shot window 2780-3620) logged [APPFPS60] boot fn_81154a1c(30,30) -> (60,60) and reached the dance (741 shots; only the last 200 copied). [DCLK] starts 2679 (60) and 1566 (30 baseline); the aligned dance-clock window needs frames 3183-3333 and 1818-1841 but only 13/54 shots survive the last-200 copy, so ratios 0.18-0.91 are not meaningful (samples partly past the dance; final metrics 35.6 fps guest with 17 draws). Also observed: guest pacing 35.6 fps at 60 all-screen with MFRAME60+APPFPS60 - the app-framework rate change may alter pacing, target is guest 60/speed 1.00x. Next: copy all shots in the capture window, re-run the aligned comparison (expect ~1.0), measure title time (4.13 s baseline) and full-song duration with APPFPS60; if native 60 holds, M-B3 interpolation is unnecessary for the dance and the plan shifts to promoting MFRAME60+APPFPS60. Release unchanged CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
+| M1580 | §18.5107: **Decisive measurement: MFRAME60+APPFPS60 still runs the dance about 1.8x fast.** Full-shot capture (667 shots, dance-clock start 2664; 121 frames in 8.4-10.4 s): char_center 783.3/s vs 30 fps baseline ~446/s (1.76), bg_left 1.93, hud_left 1.91, hud_right 1.48, bottom_bar 2.04, top_corner 0.83 (mostly static UI, noise). So fn_81154a1c(30,30)->(60,60) alone is not the native 60 switch (MFRAME60-only was ~1.64x, no improvement); its args may not be a frame rate at all, or more places must change together. The 60 fps run also read guest ~30 fps at the end (window ~58), so the app-framework rate change perturbs pacing. Next: establish what fn_81154a1c configures (global 0x813af5a8 + the struct's readers) and re-check the 0x81670354=1 flag and fn_811546f0. APPFPS60 stays env-gated/off by default. Release unchanged CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
 proposal).** mnsHandle_8111b64c/8111b190 receive a real-time float (+0.01668/frame at 60 vs +0.03337 at 30);
 mnsProcess_811251d6 fires per-frame but constant; other mnsProcess/mnsOption/gfd entries do not fire per-frame;
 object-word slopes show only the known danceQuantizer_81049976 w2 (+0.5 at 60 vs +1.0 at 30). The remaining
@@ -520603,3 +520604,49 @@ stage and the plan shifts to promoting MFRAME60+APPFPS60 into the 60 option; rel
 (2026-11-10 16:39:04), 60 experimental, all prototypes env-gated and the 30 fps path unaffected.
 LOOKUP: M1579 measures M1578's hook -> 18.5105 [relevant: APPFPS60 hook], 18.5104 [relevant: boot frame-rate call
 sequence], 18.5094 [relevant: M-B1 rescale]
+
+### 18.5107 M1580 DECISIVE MEASUREMENT: MFRAME60+APPFPS60 STILL RUNS THE DANCE ABOUT 1.8x FAST - fn_81154a1c(30,30) IS NOT THE NATIVE 60 SWITCH BY ITSELF
+
+Full-shot measurement this round (the drive script now copies up to 900 shots, so the aligned dance window has enough
+frames). The 60 fps run (rate 60 all-screen, MFRAME60 + APPFPS60) logged
+"[APPFPS60] boot fn_81154a1c(30,30) -> (60,60)", reached the dance with 667 shots captured (dance-clock start frame
+2664, 121 shots in the 8.4-10.4 s window). Per-second pixel change in that window:
+
+| region | 60 fps with MFRAME60+APPFPS60 | 30 fps baseline (same route) | ratio |
+|---|---|---|---|
+| char_center | 783.3 /s | ~446 /s | ~1.76 |
+| bg_left | 890.6 /s | ~462 /s | ~1.93 |
+| hud_left | 837.5 /s | ~438 /s | ~1.91 |
+| hud_right | 701.1 /s | ~475 /s | ~1.48 |
+| bottom_bar | 848.8 /s | ~417 /s | ~2.04 |
+| top_corner | 552.5 /s | ~669 /s | ~0.83 |
+
+(the baseline column is the M1562 proper-phase 30 fps measurement: 446/462/438/475/417/669 per second; the top corner
+is mostly static UI so its ratio is noise-dominated). The 60 fps capture's final metrics also read guest ~30 fps with
+window ~58 (the lighter post-dance screen), and the earlier APPFPS60 probe read 35.6 fps guest - so the app-framework
+rate change may also perturb the game's pacing.
+
+Conclusion: rewriting the boot fn_81154a1c(30,30) call to (60,60) does not make the dance animation real-time; the
+~1.8x mismatch is still there (the MFRAME60-only measurement was ~1.64x, so this did not improve it). So that call is
+not the native 60 switch by itself - its arguments may not be a frame rate at all (they could be a frame window /
+evaluation pair, and the two 30 values inside may be something else), or more places have to change together. Next:
+establish what fn_81154a1c actually configures (the global it reads at 0x813af5a8, and the readers of the struct it
+writes), and re-check the other boot items - the 0x81670354=1 flag and the fn_811546f0 call. The APPFPS60 hook stays
+env-gated and off by default; release unchanged: payload CEBB6C124FF7B269 (2026-11-10 16:39:04), 60 experimental.
+
+ANTI-FORGETTING ENTRY. Keywords: M1580 decisive APPFPS60 measurement - full-shot measurement with the drive script
+copying up to 900 shots; the 60 fps run (rate 60 all-screen, MFRAME60 + APPFPS60) logged "[APPFPS60] boot
+fn_81154a1c(30,30) -> (60,60)", reached the dance with 667 shots (dance-clock start frame 2664, 121 shots in the
+8.4-10.4 s window); per-second pixel change: char_center 783.3/s vs ~446/s baseline (ratio 1.76), bg_left 890.6 vs
+~462 (1.93), hud_left 837.5 vs ~438 (1.91), hud_right 701.1 vs ~475 (1.48), bottom_bar 848.8 vs ~417 (2.04), top_corner
+552.5 vs ~669 (0.83, mostly static UI so noise-dominated); the baseline column is the M1562 proper-phase 30 fps
+measurement; the 60 fps capture final metrics read guest ~30 fps with window ~58 (lighter post-dance screen) and the
+earlier APPFPS60 probe read 35.6 fps guest, so the app-framework rate change may perturb pacing; conclusion: rewriting
+the boot fn_81154a1c(30,30) to (60,60) does not make the dance animation real-time - the ~1.8x mismatch is still there
+(MFRAME60-only was ~1.64x, so this did not improve it); that call is not the native 60 switch by itself - its arguments
+may not be a frame rate at all (possibly a frame window/evaluation pair) or more places must change together; next:
+establish what fn_81154a1c actually configures (the global it reads at 0x813af5a8 and the readers of the struct it
+writes) and re-check the other boot items (the 0x81670354=1 flag and the fn_811546f0 call); the APPFPS60 hook stays
+env-gated and off by default; release unchanged payload CEBB6C124FF7B269 (2026-11-10 16:39:04), 60 experimental.
+LOOKUP: M1580 measures M1578/M1579 -> 18.5106 [relevant: measurement attempt], 18.5105 [relevant: APPFPS60 hook], 18.5104
+[relevant: boot frame-rate call sequence]
