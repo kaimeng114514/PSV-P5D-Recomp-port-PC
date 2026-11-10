@@ -1646,6 +1646,7 @@
 | M1561 | §18.5088: **M-B1 round 8: MNS current time is dt-aware; no 1.0-per-frame clock in the probed set (pivot
 | M1562 | §18.5089: **M-B3 prototype design on the port's existing motion pass.** runtime/gfx/gfx_gpu.c already pairs each frame's skinned draws with the previous frame's pose: mv_match() returns the previous SA (bone/matrix palette uniform words) nearest by draw key, mv_win_snap() snapshots LDST windows, the motion pass re-renders with the previous SA into an RG16F target, mv_frame_end() rotates the tables. Design: RECOMP_INTERP=1 delivers vblanks to the guest at 30 Hz (authored logic rate) while presenting 60; interpolation presents re-execute the last game frame's draws with a CPU-blended SA (lerp of previous/current float words, alpha 0.5, pointer words current) through each draw's normal colour pipeline; validate 60 fps dance captures per-second motion equal to the 30 fps baseline (per-frame about half), music/judgement unchanged, OSD 60. Matrix lerp is approximate; depth/blend ordering reuse the motion pass's solutions. Release untouched CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
 | M1563 | §18.5090: **M-B3 architecture: the window presents at 60 Hz while the guest runs 30 fps.** Measured in the existing 30 fps runs: guest 30.0 fps, speed 1.00x, window 60.0 fps - window.c's present loop is already decoupled and duplicates the latest frame, so interpolation only needs to replace the duplicates with re-rendered interpolated content while the guest keeps its authored 30 Hz cadence. Missing pieces: (1) an env-gated draw recorder in the GPU layer (GfxDraw + state: streams/indices/uniforms/textures/render target/viewport/blend/depth) - the motion pass already keeps draw keys, previous-frame SA and LDST window snapshots for pose blending; (2) an interpolation re-render with a blended SA per skinned draw (alpha 0.5) into a second colour target in the present texture ring, alternated at 60 Hz. Validation: 60 distinct frames, per-second pixel change equal to the 30 fps baseline, music/judgement untouched, OSD 60, speed 1.00x. This is a real recorder/re-render subsystem (approximate matrix lerp first, 30 fps path untouched); next: the env-gated recorder counting draws/skinned draws/state bytes. Release untouched CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
+| M1564 | §18.5091: **M-B3 step 1: the env-gated GPU frame recorder works.** RECOMP_INTERP_REC=1 makes gfx_gpu_draw copy each API-neutral GfxDraw (guest addresses + state) into a per-frame list; skinned draws are counted where the motion pass resolves the previous SA (RECOMP_MV=1 or FSR on); gfx_gpu_frame_queued logs and resets. Dance at 30 fps: 356-362 draws/frame, 245-250 skinned (~70%), ~390-400 KB of GfxDraw copies; boot/title 3-26 draws, 0-1 skinned. Next step 2: re-execute the recorded draws with a blended SA (lerp previous/current floats, alpha 0.5, pointer words current) and current LDST windows through each draw's colour pipeline into a second colour target while the guest waits for its next 30 Hz vblank, present loop alternating base/interpolated images at 60 Hz. Release untouched CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
 proposal).** mnsHandle_8111b64c/8111b190 receive a real-time float (+0.01668/frame at 60 vs +0.03337 at 30);
 mnsProcess_811251d6 fires per-frame but constant; other mnsProcess/mnsOption/gfd entries do not fire per-frame;
 object-word slopes show only the known danceQuantizer_81049976 w2 (+0.5 at 60 vs +1.0 at 30). The remaining
@@ -519905,3 +519906,42 @@ untouched (env-gated) and the shipped hybrid stays; next step: the env-gated fra
 draws/state bytes; release unchanged payload CEBB6C124FF7B269 (2026-11-10 16:39:04), 60 experimental.
 LOOKUP: M1563 refines M-B3 after M1562 -> 18.5089 [relevant: motion-pass design], 18.5088 [relevant: pivot proposal],
 18.5087 [relevant: multi-site slopes]
+
+### 18.5091 M1564 M-B3 PROTOTYPE STEP 1: THE ENV-GATED GPU FRAME RECORDER WORKS (DANCE: ~360 DRAWS, ~248 SKINNED PER FRAME)
+
+The first piece of the M-B3 interpolation prototype is in: runtime/gfx/gfx_gpu.c now has an env-gated frame recorder
+(RECOMP_INTERP_REC=1). Every gfx_gpu_draw copies its API-neutral GfxDraw into a growable per-frame list (the struct is
+all guest addresses and draw state, so a copy is a complete draw description); skinned draws are counted where the
+motion pass already resolves their previous SA (mv_want && mv_psa); gfx_gpu_frame_queued() logs the per-frame stats
+and resets the list. Note that the skinned count needs the motion pass on (RECOMP_MV=1 or FSR), since that is where the
+previous-SA matching runs.
+
+Measured in the dance stage at 30 fps (the intended interpolation mode, window presenting at 60):
+  - per frame 356-362 recorded draws, of which 245-250 have a matched previous SA (skinned), i.e. about 70% of the
+    frame's draws would need a blended SA for the interpolated re-render;
+  - the recorded GfxDraw bytes are about 390-400 KB per frame (356 * sizeof(GfxDraw)), a small working set;
+  - at boot/title the counts are 3-26 draws with 0-1 skinned, so the dance stage is where the re-render matters.
+
+Next (M-B3 step 2): use this list for the interpolated re-render. Because the guest is blocked waiting for its next
+30 Hz vblank while the window shows the frame twice, guest memory (vertex/index streams, SA blocks, LDST windows) is
+stable between the two presents, so the recorded draws can be re-executed then: bind a blended SA for skinned draws
+(lerp of previous/current float words, alpha 0.5, pointer words current) and the current LDST windows (or blended
+window contents), render through each draw's own colour pipeline into a second colour target, and let the present loop
+alternate the base and interpolated images at 60 Hz. Validation then follows the M1562 plan (60 distinct frames,
+per-second pixel change equal to the 30 fps baseline, music/judgement untouched, OSD 60, speed 1.00x). Release
+unchanged: payload CEBB6C124FF7B269 (2026-11-10 16:39:04), 60 experimental.
+
+ANTI-FORGETTING ENTRY. Keywords: M1564 M-B3 prototype step 1 - runtime/gfx/gfx_gpu.c has an env-gated GPU frame
+recorder (RECOMP_INTERP_REC=1): gfx_gpu_draw copies each API-neutral GfxDraw (guest addresses + draw state) into a
+growable per-frame list, skinned draws are counted where the motion pass resolves the previous SA (mv_want && mv_psa,
+so RECOMP_MV=1 or FSR must be on), and gfx_gpu_frame_queued logs per-frame stats and resets; dance at 30 fps shows
+356-362 draws per frame of which 245-250 are skinned (about 70 percent) and about 390-400 KB of GfxDraw copies, while
+boot/title frames are 3-26 draws with 0-1 skinned; next M-B3 step 2 uses the list for the interpolated re-render: the
+guest is blocked waiting for its next 30 Hz vblank while the window shows the frame twice, so guest memory is stable
+and the recorded draws can be re-executed with a blended SA for skinned draws (lerp of previous/current float words,
+alpha 0.5, pointer words current) and the current LDST windows through each draw's own colour pipeline into a second
+colour target, with the present loop alternating base/interpolated images at 60 Hz; validation per M1562 (60 distinct
+frames, per-second pixel change equal to the 30 fps baseline, music/judgement untouched, OSD 60, speed 1.00x); release
+unchanged payload CEBB6C124FF7B269 (2026-11-10 16:39:04), 60 experimental.
+LOOKUP: M1564 is the first M-B3 code step after M1563 -> 18.5090 [relevant: present-loop architecture], 18.5089
+[relevant: motion-pass design], 18.5088 [relevant: pivot proposal]
