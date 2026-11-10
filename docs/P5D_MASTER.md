@@ -1658,6 +1658,7 @@
 | M1573 | §18.5100: **M-B3 step 2b: blended replay engages (frame differs 7.15%) but componentwise matrix lerp distorts the model.** Self-managed double-buffered window snapshots are in: the recorder copies each skinned draw's current LDST window bytes into the frame arena (double-buffered, swapped per frame), the replay blends the guest current window with the previous frame's copy (float lerp 0.5, one blended copy per unique palette) into the LDST ring. Replay+dump in the menu: replayed target differs from the original by 159,397 bytes (7.15% of 2,228,224), so interpolation really renders different content - but Mona appears turned/skewed, the artifact of lerping rotation matrices componentwise (50% blend of two rotations isn't a rotation). Next: rotation-aware blending (decompose translation/rotation/scale, slerp, rebuild; or re-orthonormalize), verify a plausible halfway pose, then second-target redirect, 60 Hz alternation, M-B2. Release unchanged CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
 | M1574 | §18.5101: **M-B3 2b: rotation-aware blending in; replay costs ~106 ms per replay frame.** The blended-window pass now detects affine matrices (4x4 with [0,0,0,1] last row or 3x4), checks orthonormal + det +1, slerps the rotation quaternions and lerps the translation, rebuilding the matrix (non-matrix floats lerped, non-floats passed through, one blended copy per unique palette). With no dump, replay frames still take about 106 ms (2402/2432/2462: 106.6/106.3/106.2 ms, 6 edges; guest ~27 fps): the replay doubles the frame's vertex/index/LDST-ring consumption and meets the ring fences waiting on GPU earlier laps. Fix: replay-specific queue discipline (own command buffer/transfer rings or reserved ring segment) so replay draws never wait on the normal frame's fences; then re-validate the rotation-aware blend visually, redirect the composite into the second colour target, alternate presents at 60 Hz. Release unchanged CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
 | M1575 | §18.5102: **Replay hitch persists after four sync fixes; PS4-60 lead becomes the priority.** Tried: GPU drain before replay; skip guest->GPU uploads and end-of-scene readbacks during replay (interp_no_sync); skip begin_scene downloads; early-out matrix detection - hitch unchanged (117.5/125.4 ms on hitches 59/60; run reached dance). Next: instrument the replay sections (per begin_scene / draw range / end_scene) to find where the ~100 ms goes (per-scene begin/end overhead or LDST-ring placement suspects). PS4 lead: user reports PS4 UI looks smooth (60 fps), so the shared codebase may carry platform-conditional pacing the Vita build never selects; next search the modules for platform/refresh-rate/60 code paths around the appMframe boot init callers and check what init(1,1,1) is derived from at the original call sites - a PS4 branch passing different args or setting a 60 flag would be a cleaner path than render-level interpolation. Release unchanged CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
+| M1576 | §18.5103: **PS4-60 lead: Vita eboot has only Vita platform paths; frame rate is configurable (appMframe 60 table, CRI framerate_n/d).** String scan: all platform paths are Vita (touch/platform/vita, unique/vita, appMemoryCard/module/vita, test/vita, archive vita.cpk; CRI all VITA builds), so a PS4 branch is not visibly compiled into the Vita executable (PS4 release is a separate build of the shared engine). The appMframe 60 table and the debug fields framerate_n/framerate_d exist, so the rate is config, not a constant; no game 60fps/vsync/console-type option string. Next: trace the appMframe boot init(1,1,1) argument provenance (config value/platform constant/computed rate; also the denominators), locate the framerate_n/d readers, and test overriding the app rate config instead of the init args after the fact - the native path if it exists. Release unchanged CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
 proposal).** mnsHandle_8111b64c/8111b190 receive a real-time float (+0.01668/frame at 60 vs +0.03337 at 30);
 mnsProcess_811251d6 fires per-frame but constant; other mnsProcess/mnsOption/gfd entries do not fire per-frame;
 object-word slopes show only the known danceQuantizer_81049976 w2 (+0.5 at 60 vs +1.0 at 30). The remaining
@@ -520434,3 +520435,43 @@ drive the engine at 60 instead of render-level interpolation; both tracks contin
 CEBB6C124FF7B269 (2026-11-10 16:39:04), 60 experimental, all prototypes env-gated and the 30 fps path unaffected.
 LOOKUP: M1575 continues M-B3 step 2b after M1574 -> 18.5101 [relevant: rotation blend + hitch], 18.5100 [relevant:
 matrix lerp distortion], 18.5099 [relevant: blend engagement]
+
+### 18.5103 M1576 PS4-60 LEAD: STRING SCAN OF THE VITA EBOOT (ONLY VITA PLATFORM PATHS; APP-MFRAME 60 TABLE AND CRI framerate_n/d; NEXT: INIT ARGUMENT PROVENANCE)
+
+Scanning the decrypted Vita eboot (6.28 MB) and libsmart.suprx for platform/frame-rate strings found:
+
+- platform paths are all Vita: "app_system/low_layer/touch/platform/vita/vita_ll_to...",
+  "app_system/unique/vita/vita_unique.c", ".../unique/vita/vita_unique_addcontents.c",
+  "app_system/utility/appMemoryCard/module/vita/vita_a...", "test/tohyama/vita/tstTus.c", and the archive "vita.cpk";
+  the CRI runtime strings are all "CRI .../VITA Ver...". So the Vita executable is a Vita build - a PS4-specific code
+  branch is not visibly compiled in (the PS4 release is a separate executable of the shared engine).
+- the engine's frame-rate machinery is present: the appMframe conversion table includes 60 (and 120), and the debug
+  field names "framerate_n" and "framerate_d" (numerators/denominators) exist in the binary (CRI movie player also has
+  a framerate config) - so the frame rate is a configurable quantity, not a compile-time constant.
+- no "60fps"/"vsync"/"console_type" style option string showed up for the game itself.
+
+Conclusion so far: the clean PS4 path in the Vita binary is not a separate branch but the configurable frame-rate /
+appMframe machinery. Next: (1) find who calls the appMframe boot init and where its (1,1,1) arguments come from (a
+config value, a platform constant or a computed rate), and whether the denominators come from the same source; (2)
+locate the "framerate_n/framerate_d" fields and their readers (movie/CRI config and possibly the app framework's
+display rate), and test whether overriding the app's rate config (rather than the init args after the fact) makes the
+engine run its sequences and animations at 60 natively. That is preferable to render-level interpolation if it exists.
+
+Release unchanged: payload CEBB6C124FF7B269 (2026-11-10 16:39:04), 60 experimental; all prototypes env-gated, the 30 fps path unaffected.
+
+ANTI-FORGETTING ENTRY. Keywords: M1576 PS4-60 lead string scan - scanning the decrypted Vita eboot (6.28 MB) and
+libsmart.suprx for platform/frame-rate strings found: platform paths are all Vita ("app_system/low_layer/touch/platform/
+vita/...", "app_system/unique/vita/vita_unique.c", ".../unique/vita/vita_unique_addcontents.c", "app_system/utility/
+appMemoryCard/module/vita/...", "test/tohyama/vita/tstTus.c", archive "vita.cpk"; CRI runtime strings all "CRI .../VITA
+Ver..."), so the Vita executable is a Vita build and a PS4-specific branch is not visibly compiled in (the PS4 release is
+a separate executable of the shared engine); the engine frame-rate machinery is present: the appMframe conversion table
+includes 60 (and 120) and debug field names "framerate_n" and "framerate_d" exist in the binary (CRI movie player also
+has a framerate config), so the frame rate is configurable, not a compile-time constant; no game "60fps"/"vsync"/
+"console_type" option string showed up; next: find who calls the appMframe boot init and where its (1,1,1) arguments
+come from (config value, platform constant or computed rate) and whether the denominators come from the same source;
+locate the "framerate_n/framerate_d" fields and their readers (movie/CRI config and possibly the app framework display
+rate) and test overriding the app rate config (rather than the init args after the fact) to run sequences/animations at
+60 natively - preferable to render-level interpolation if it exists; release unchanged payload CEBB6C124FF7B269 (2026-11-10 16:39:04), 60
+experimental, all prototypes env-gated and the 30 fps path unaffected.
+LOOKUP: M1576 follows M1575 on the PS4-60 lead -> 18.5102 [relevant: PS4 lead + replay hitch], 18.5096 [relevant: PS4 init
+probe], 18.5094 [relevant: Phase B status]
