@@ -1645,6 +1645,7 @@
 | M1559 | §18.5087: **M-B1 round 7 multi-site slope probe.** 12 dance functions sampled per frame at 60 (+MFRAME60) and 30 fps: every firing per-frame site with a time-like float is already dt-aware (0.5 per presented frame at 60 vs 1.0 at 30) - danceGraphics_81041740 s0 +0.0167 vs +0.0333, danceQuantizer_81049976 same, danceScreenEffect_810489d8 and danceMain_81043fee constant; danceResident/danceDancer/danceGraphics(8104142c/be/16d4)/danceSystem fire once or not during the dance (setup paths). So the 1.28-1.64x residual does not come from these calls; next suspects: the MNS/note-lane update path and the camera matrix path (camera track GFS 1931 keyframes / 210.667 s, sampling input not found), probed the same way. Release untouched CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
 | M1561 | §18.5088: **M-B1 round 8: MNS current time is dt-aware; no 1.0-per-frame clock in the probed set (pivot
 | M1562 | §18.5089: **M-B3 prototype design on the port's existing motion pass.** runtime/gfx/gfx_gpu.c already pairs each frame's skinned draws with the previous frame's pose: mv_match() returns the previous SA (bone/matrix palette uniform words) nearest by draw key, mv_win_snap() snapshots LDST windows, the motion pass re-renders with the previous SA into an RG16F target, mv_frame_end() rotates the tables. Design: RECOMP_INTERP=1 delivers vblanks to the guest at 30 Hz (authored logic rate) while presenting 60; interpolation presents re-execute the last game frame's draws with a CPU-blended SA (lerp of previous/current float words, alpha 0.5, pointer words current) through each draw's normal colour pipeline; validate 60 fps dance captures per-second motion equal to the 30 fps baseline (per-frame about half), music/judgement unchanged, OSD 60. Matrix lerp is approximate; depth/blend ordering reuse the motion pass's solutions. Release untouched CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
+| M1563 | §18.5090: **M-B3 architecture: the window presents at 60 Hz while the guest runs 30 fps.** Measured in the existing 30 fps runs: guest 30.0 fps, speed 1.00x, window 60.0 fps - window.c's present loop is already decoupled and duplicates the latest frame, so interpolation only needs to replace the duplicates with re-rendered interpolated content while the guest keeps its authored 30 Hz cadence. Missing pieces: (1) an env-gated draw recorder in the GPU layer (GfxDraw + state: streams/indices/uniforms/textures/render target/viewport/blend/depth) - the motion pass already keeps draw keys, previous-frame SA and LDST window snapshots for pose blending; (2) an interpolation re-render with a blended SA per skinned draw (alpha 0.5) into a second colour target in the present texture ring, alternated at 60 Hz. Validation: 60 distinct frames, per-second pixel change equal to the 30 fps baseline, music/judgement untouched, OSD 60, speed 1.00x. This is a real recorder/re-render subsystem (approximate matrix lerp first, 30 fps path untouched); next: the env-gated recorder counting draws/skinned draws/state bytes. Release untouched CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
 proposal).** mnsHandle_8111b64c/8111b190 receive a real-time float (+0.01668/frame at 60 vs +0.03337 at 30);
 mnsProcess_811251d6 fires per-frame but constant; other mnsProcess/mnsOption/gfd entries do not fire per-frame;
 object-word slopes show only the known danceQuantizer_81049976 w2 (+0.5 at 60 vs +1.0 at 30). The remaining
@@ -519859,3 +519860,48 @@ motion pass already solved the same draws' binding/depth); release unchanged pay
 experimental.
 LOOKUP: M1562 opens M-B3 after the M-B1 pivot proposal -> 18.5088 [relevant: pivot proposal], 18.5087 [relevant: "
 multi-site slopes], 18.5086 [relevant: quantizer dt-aware]
+
+### 18.5090 M1563 PHASE B M-B3 ARCHITECTURE: THE WINDOW PRESENT LOOP ALREADY RUNS AT 60 HZ WHILE THE GUEST RUNS AT 30 FPS
+
+Measured in the existing 30 fps runs (the hybrid mode used for the comparisons): metrics report the guest at
+30.0 fps with speed 1.00x while the window presents at 60.0 fps - window.c's present loop is already decoupled from the
+guest frame rate and shows the latest finished frame twice when the guest runs at 30 Hz. So the M-B3 interpolation
+problem reduces to: replace the duplicated present frames with re-rendered interpolated content, while the guest keeps
+running at its authored 30 Hz cadence (correct animation timing by construction).
+
+The pieces needed (from the code inspection):
+1. A draw recorder in the GPU layer: every gfx_gpu_draw already receives an API-neutral GfxDraw whose fields are guest
+   addresses (vertex streams, indices, uniform blocks, uniform buffers, textures, render target). Recording the last
+   frame's draw list plus the state needed to re-execute it (scene/target, viewport, blend/depth) is the missing
+   piece; the motion pass's mv_match() already keeps each draw's key and the previous-frame SA (bone palette words),
+   and mv_win_snap() keeps the LDST window snapshots, so the pose data for blending is already available.
+2. An interpolation re-render: after the guest finishes a frame (or at the swap the window shows), re-execute the
+   recorded draw list of that frame with a blended SA per skinned draw (lerp of previous/current float words,
+   alpha=0.5, pointer words current) into a second colour target; window_present_gpu's texture ring (gtl[3]) can carry
+   the two images and the present loop alternates them at 60 Hz.
+3. Validation: 60 fps dance captures show 60 distinct frames with per-second pixel change equal to the 30 fps
+   baseline, the music/judgement clock untouched (the guest keeps its authored cadence), OSD FPS 60, and speed 1.00x.
+
+Risk/scale: this is a real frame recorder/re-render subsystem in the GPU layer (GfxDraw copies, state capture,
+second target, present-loop alternation), not a small hook; matrix lerp is approximate (rotations blend componentwise;
+acceptable for the first prototype, improved later with rotation-aware blending). The 30 fps mode stays untouched
+(the prototype is env-gated), and the shipped hybrid stays as-is. Next concrete step: add an env-gated frame recorder
+that counts and validates what a frame's draw list contains (draws, skinned draws with matched previous SA, state
+bytes), so the re-render prototype can be built on measured data rather than assumptions. Release unchanged: payload
+CEBB6C124FF7B269 (2026-11-10 16:39:04), 60 experimental.
+
+ANTI-FORGETTING ENTRY. Keywords: M1563 Phase B M-B3 architecture - the existing 30 fps runs already show the guest at
+30.0 fps with speed 1.00x while the window presents at 60.0 fps (window.c present loop decoupled from the guest, showing
+the latest finished frame twice), so interpolation only has to replace the duplicated present frames with re-rendered
+interpolated content while the guest keeps its authored 30 Hz cadence; the missing pieces are (1) an env-gated draw
+recorder in the GPU layer copying GfxDraw + state (vertex streams/indices/uniform blocks/textures/render target/
+viewport/blend/depth) for the last frame - the motion pass already keeps each draw's key, previous-frame SA and LDST
+window snapshots for pose blending - and (2) an interpolation re-render re-executing the recorded draw list with a
+blended SA per skinned draw (lerp of previous/current float words, alpha 0.5, pointer words current) into a second
+colour target carried by window_present_gpu's texture ring and alternated by the present loop at 60 Hz; validation:
+60 distinct frames, per-second pixel change equal to the 30 fps baseline, music/judgement untouched, OSD 60, speed
+1.00x; this is a real frame recorder/re-render subsystem, matrix lerp is approximate at first, the 30 fps path stays
+untouched (env-gated) and the shipped hybrid stays; next step: the env-gated frame recorder counting draws/skinned
+draws/state bytes; release unchanged payload CEBB6C124FF7B269 (2026-11-10 16:39:04), 60 experimental.
+LOOKUP: M1563 refines M-B3 after M1562 -> 18.5089 [relevant: motion-pass design], 18.5088 [relevant: pivot proposal],
+18.5087 [relevant: multi-site slopes]
