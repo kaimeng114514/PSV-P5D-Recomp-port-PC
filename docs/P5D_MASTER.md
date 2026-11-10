@@ -1653,6 +1653,7 @@
 | M1568 | §18.5095: **Phase B2 started: scene-state recorder works; a dance frame is 5 scenes.** RECOMP_INTERP_REC now records every gfx_gpu_begin_scene boundary (colour target, depth address/type, format, stride/height, draw count) and attributes each draw to its scene. Dance at 30 fps: s0 (colour 0, 2x1 stride, 17 draws), s1 (colour 0x1dfc0000, tiled depth, 1024x544, 289-294 draws - the main 3D scene, 245-250 skinned), s2 (0x242c0000 224x68, 3), s3 (0x24400000 224x68, 3), s4 (0x1dfc0000 1024x544, 42-46 second pass); 356-362 draws total, ~390-400 KB, 5 scene boundaries. Next 2b: replay per scene with the recorded target/depth, re-execute the draws with blended LDST bone windows, composite/present into the second colour target (M1566 path) while the guest waits on its vblank. 30 fps path untouched. Release unchanged CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
 | M1569 | §18.5096: **Phase B2: replay engine works; PS4-60 init probe does not fix title pacing.** RECOMP_INTERP_REPLAY=1 re-executes the last frame through the game's own entry points (per scene: begin_scene with the recorded GfxTarget, recorded draws in order, end_scene; motion-pass state suspended): dance frames replayed at 303/903/1503/2103 as 12/558/332/359 draws in 4/5 scenes with no crash (guest 30, window 60, speed 1.00x). Next: redirect into the second colour target with blended LDST windows and alternate presents. PS4 hint: appMframe boot init made configurable (RECOMP_P5D_MFRAME_INIT="a,b,c"); title time at 60 all-screen (30 fps 4.13 s, untouched ~2.5 s): none 3.08, 1,1,2 2.72, 2,2,2 2.48, 1,2,2 2.47, 2,1,2 2.83, 1,1,1 2.59 - none restores authored pacing (title is frame-count paced, the M-B2 problem), while 1,1,2 keeps the song/chart-length fix. Release unchanged CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
 | M1570 | §18.5097: **M-B3 step 2b: replay is pixel-identical; bone-window blend needs per-draw previous-window recording.** With RECOMP_INTERP_REPLAY=1 + RECOMP_INTERP_REPLAY_DUMP=prefix, the main 3D scene target (0x1dfc0000, 1024x544) dumped before and after replaying the recorded frame is byte-identical (2,228,224 bytes, same sha256 8eff04176efbf011...), so the replay engine reproduces the original scene exactly (game ran normally: 30 fps guest / 60 fps window / speed 1.00x, no crash). The blended bone palettes did not take effect because the dance character's LDST windows are double-buffered (current frame window addresses differ from the previous frame's); the fix is to record each skinned draw's matched previous-window bases during the original frame (mv_match already computes the previous SA per draw) and blend against those in the replay, then redirect the composite into the second colour target and alternate at 60 Hz. Release unchanged CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
+| M1571 | §18.5098: **M-B3 step 2b: arena-based blended-window replay exists but costs a 121 ms hitch.** The recorder copies each skinned draw's previous matched LDST window bytes (mv_psrc at draw time) into a 32 MB arena (only when RECOMP_INTERP_REPLAY is on), stores per-window offsets, and the replay blends current window with the recorded previous snapshot (float lerp, alpha 0.5) into the LDST ring, bypassing the reuse cache. The blended copies are 245-250 draws x 64 KB = about 16 MB per replayed frame, which wraps the ring and forces flushes: a 121.2 ms hitch and a guest drop to 26.5 fps (from 30) on replay frames, though the replay completes without a crash. Next: dedicated blended-window placement (larger ring segment / reuse only for blends, or blend once per unique palette address per frame), then dump comparison and the second-target redirect. Release unchanged CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
 proposal).** mnsHandle_8111b64c/8111b190 receive a real-time float (+0.01668/frame at 60 vs +0.03337 at 30);
 mnsProcess_811251d6 fires per-frame but constant; other mnsProcess/mnsOption/gfd entries do not fire per-frame;
 object-word slopes show only the known danceQuantizer_81049976 w2 (+0.5 at 60 vs +1.0 at 30). The remaining
@@ -520209,3 +520210,46 @@ base/interpolated images in the present loop at 60 Hz with the M1562 validation;
 (2026-11-10 16:39:04), 60 experimental, every prototype env-gated and the 30 fps path untouched.
 LOOKUP: M1570 advances M-B3 step 2b after M1569 -> 18.5096 [relevant: replay engine], 18.5095 [relevant: scene
 recorder], 18.5093 [relevant: second target]
+
+### 18.5098 M1571 M-B3 STEP 2B: THE ARENA-BASED BLENDED-WINDOW REPLAY EXISTS BUT ITS RING PLACEMENT COSTS A 121 MS HITCH
+
+This round implemented the per-draw previous-window capture and the blended replay it enables:
+
+- the recorder now copies, for every skinned draw, the previous frame's matched LDST window bytes (the motion pass's
+  mv_psrc pointers, which are valid at draw time) into a 32 MB arena, storing the arena offset per window
+  (RECOMP_INTERP_REPLAY must be on, so the copy only costs when the replay prototype is in use);
+- the replay publishes those offsets and the per-draw index (replay_prev / replay_draw_index), maps each accepted
+  window to its recorded previous offset (win_prev), and in the window placement blends the current window contents
+  with the recorded previous snapshot (float-word lerp, alpha 0.5, non-float words kept) into the LDST ring, bypassing
+  the reuse cache (the blended bytes are new content every frame).
+
+Result: the blend path is in, but it is too expensive in this form. The blended windows are placed into the LDST ring
+on every skinned draw of a replayed frame (245-250 draws x 64 KB, about 16 MB per replay), which wraps the ring and
+forces batch flushes/ring waits: the dance run showed a 121.2 ms hitch on a replay frame (7 edges) and the guest rate
+dropped to 26.5 fps around it (from 30). The replay still completed and the game continued (no crash), but a
+per-present 16 MB ring walk is not usable for the 60 Hz interpolation target.
+
+Next step: give the blended windows a dedicated placement path - either reserve a large enough LDST ring segment so a
+replay's 16 MB does not wrap (and skip the reuse cache only for the blended copies), or blend only the windows a draw
+actually reads and amortize the copies across frames, or (best) blend the previous and current window once per unique
+address per frame instead of per draw (the same bone palette serves many draws). Then re-run the dump comparison (the
+replayed frame should differ from the base frame at the skinned areas) and continue to the second-target redirect and
+the present alternation. Release unchanged: payload CEBB6C124FF7B269 (2026-11-10 16:39:04), 60 experimental; all prototypes env-gated,
+the 30 fps path unaffected.
+
+ANTI-FORGETTING ENTRY. Keywords: M1571 M-B3 step 2b blended-window replay - the recorder copies each skinned draw's
+previous matched LDST window bytes (the motion pass mv_psrc pointers valid at draw time) into a 32 MB arena with
+per-window arena offsets (only when RECOMP_INTERP_REPLAY is on); the replay publishes the offsets and draw index
+(replay_prev / replay_draw_index), maps accepted windows to their recorded previous offsets (win_prev) and blends the
+current window with the previous snapshot (float-word lerp, alpha 0.5, non-float words kept) into the LDST ring,
+bypassing the reuse cache; the blend path is in but too expensive: 245-250 skinned draws x 64 KB = about 16 MB per
+replayed frame wraps the ring, forcing batch flushes/ring waits - a 121.2 ms hitch on a replay frame (7 edges) and the
+guest rate dropped to 26.5 fps around it (from 30), though the replay completed and the game continued without a crash;
+next step: dedicated placement for blended windows - reserve a large enough LDST ring segment so a replay 16 MB does not
+wrap and skip the reuse cache only for blended copies, or blend only the windows a draw reads and amortize copies, or
+blend previous/current window once per unique address per frame (the same bone palette serves many draws); then re-run
+the dump comparison (replayed frame should differ at the skinned areas) and continue to the second-target redirect and
+present alternation; release unchanged payload CEBB6C124FF7B269 (2026-11-10 16:39:04), 60 experimental, all prototypes env-gated and the
+30 fps path unaffected.
+LOOKUP: M1571 continues M-B3 step 2b after M1570 -> 18.5097 [relevant: replay fidelity + double-buffered windows],
+18.5096 [relevant: replay engine], 18.5093 [relevant: second target]
