@@ -1652,6 +1652,7 @@
 | M1567 | §18.5094: **Phase B status: M-B3 step 2a verified; the remaining re-render needs a scene-state recorder + replay engine + present alternation (blocking condition).** M-B1: appMframe is a frame-rate rescale (M1555) enabled by the 60-base init, fixing song/chart length; most probed per-frame dance/MNS clocks are already dt-aware (M1558-M1561) but a residual 1.28-1.64x dance motion mismatch remains. M-B3: present already decoupled (guest 30, window 60, M1563); frame recorder copies 356-362 GfxDraw/frame (245-250 skinned, ~400 KB, M1564); second colour target blit copy pixel-identical (M1566). The re-render needs a scene-state recorder + replay engine + present alternation - 10-20 rounds of renderer work with regression risk, so the goal is reported blocked on that condition; delivered and kept: launcher 30/60, FPS OSD, hybrid dance-stage 60 with real-time music/judgement, the appMframe 60-base fix, the M-B3 architecture/data, the Phase A report. Release unchanged CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
 | M1568 | §18.5095: **Phase B2 started: scene-state recorder works; a dance frame is 5 scenes.** RECOMP_INTERP_REC now records every gfx_gpu_begin_scene boundary (colour target, depth address/type, format, stride/height, draw count) and attributes each draw to its scene. Dance at 30 fps: s0 (colour 0, 2x1 stride, 17 draws), s1 (colour 0x1dfc0000, tiled depth, 1024x544, 289-294 draws - the main 3D scene, 245-250 skinned), s2 (0x242c0000 224x68, 3), s3 (0x24400000 224x68, 3), s4 (0x1dfc0000 1024x544, 42-46 second pass); 356-362 draws total, ~390-400 KB, 5 scene boundaries. Next 2b: replay per scene with the recorded target/depth, re-execute the draws with blended LDST bone windows, composite/present into the second colour target (M1566 path) while the guest waits on its vblank. 30 fps path untouched. Release unchanged CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
 | M1569 | §18.5096: **Phase B2: replay engine works; PS4-60 init probe does not fix title pacing.** RECOMP_INTERP_REPLAY=1 re-executes the last frame through the game's own entry points (per scene: begin_scene with the recorded GfxTarget, recorded draws in order, end_scene; motion-pass state suspended): dance frames replayed at 303/903/1503/2103 as 12/558/332/359 draws in 4/5 scenes with no crash (guest 30, window 60, speed 1.00x). Next: redirect into the second colour target with blended LDST windows and alternate presents. PS4 hint: appMframe boot init made configurable (RECOMP_P5D_MFRAME_INIT="a,b,c"); title time at 60 all-screen (30 fps 4.13 s, untouched ~2.5 s): none 3.08, 1,1,2 2.72, 2,2,2 2.48, 1,2,2 2.47, 2,1,2 2.83, 1,1,1 2.59 - none restores authored pacing (title is frame-count paced, the M-B2 problem), while 1,1,2 keeps the song/chart-length fix. Release unchanged CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
+| M1570 | §18.5097: **M-B3 step 2b: replay is pixel-identical; bone-window blend needs per-draw previous-window recording.** With RECOMP_INTERP_REPLAY=1 + RECOMP_INTERP_REPLAY_DUMP=prefix, the main 3D scene target (0x1dfc0000, 1024x544) dumped before and after replaying the recorded frame is byte-identical (2,228,224 bytes, same sha256 8eff04176efbf011...), so the replay engine reproduces the original scene exactly (game ran normally: 30 fps guest / 60 fps window / speed 1.00x, no crash). The blended bone palettes did not take effect because the dance character's LDST windows are double-buffered (current frame window addresses differ from the previous frame's); the fix is to record each skinned draw's matched previous-window bases during the original frame (mv_match already computes the previous SA per draw) and blend against those in the replay, then redirect the composite into the second colour target and alternate at 60 Hz. Release unchanged CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
 proposal).** mnsHandle_8111b64c/8111b190 receive a real-time float (+0.01668/frame at 60 vs +0.03337 at 30);
 mnsProcess_811251d6 fires per-frame but constant; other mnsProcess/mnsOption/gfd entries do not fire per-frame;
 object-word slopes show only the known danceQuantizer_81049976 w2 (+0.5 at 60 vs +1.0 at 30). The remaining
@@ -520166,3 +520167,45 @@ in sequence/timing code, not only an init argument, and sceDisplayGetRefreshRate
 release unchanged payload CEBB6C124FF7B269 (2026-11-10 16:39:04), 60 experimental, all prototypes env-gated and the 30 fps path untouched.
 LOOKUP: M1569 continues Phase B2 after M1568 -> 18.5095 [relevant: scene recorder], 18.5093 [relevant: second target],
 18.5090 [relevant: present architecture], 18.5069 [relevant: prior title timing]
+
+### 18.5097 M1570 M-B3 STEP 2B: THE REPLAY IS PIXEL-IDENTICAL TO THE ORIGINAL FRAME; THE BONE-WINDOW BLEND NEEDS PER-DRAW PREVIOUS-WINDOW RECORDING
+
+Two measurements this round:
+
+1. Replay fidelity (the key correctness milestone): with RECOMP_INTERP_REPLAY=1 and
+   RECOMP_INTERP_REPLAY_DUMP=prefix, the replay dumps the main 3D scene target (colour 0x1dfc0000, 1024x544) before and
+   after re-executing the recorded frame. Both dumps are 2,228,224 bytes (1024*544*4) and byte-identical (same sha256
+   8eff04176efbf011...), so re-running the frame through the game's own graphics entry points reproduces the original
+   scene exactly - the replay engine is faithful, and the hardest correctness risk of the interpolation plan is gone.
+   The game ran the dance stage normally with the replay and the dumps active (30 fps guest / 60 fps window / speed
+   1.00x, no crash).
+
+2. The blended bone palettes did not take effect yet: the replay's LDST-window path blended each current window with
+   mv_win_find(mv_cur^1, base), but the dance character's bone palette windows are double-buffered by the game - the
+   current frame's window addresses differ from the previous frame's, so the previous-snapshot lookup by the same base
+   misses and the replay draws the same pose (hence the identical image). The fix: record, during the original frame,
+   each skinned draw's matched previous-window bases (the motion pass already computes the previous SA per draw at its
+   mv_match call; store up to eight previous window bases per recorded draw), then in the replay bind the blend of the
+   current window and the snapshot at the recorded previous base. That is the next concrete piece.
+
+Then: redirect the replay's final composite into the second colour target (M1566) and alternate base/interpolated
+images in the present loop at 60 Hz, with the M1562 validation (60 distinct frames, per-second pixel change equal to
+the 30 fps baseline, music/judgement untouched, OSD 60, speed 1.00x). Release unchanged: payload CEBB6C124FF7B269 (2026-11-10 16:39:04),
+60 experimental; every prototype is env-gated and the 30 fps path untouched.
+
+ANTI-FORGETTING ENTRY. Keywords: M1570 M-B3 step 2b - replay fidelity verified: with RECOMP_INTERP_REPLAY=1 and
+RECOMP_INTERP_REPLAY_DUMP=prefix the replay dumps the main 3D scene target (colour 0x1dfc0000, 1024x544) before and
+after re-executing the recorded frame; both dumps are 2,228,224 bytes (1024*544*4) and byte-identical (same sha256
+8eff04176efbf011...), so re-running the frame through the game's own graphics entry points reproduces the original scene
+exactly - the replay engine is faithful and the hardest correctness risk is gone; the game ran the dance stage normally
+with replay+dumps (30 fps guest / 60 fps window / speed 1.00x, no crash); the blended bone palettes did not take effect
+because the dance character's LDST bone-palette windows are double-buffered by the game (current frame window addresses
+differ from the previous frame's, so the previous-snapshot lookup by the same base misses and the replay draws the same
+pose, hence the identical image); the fix is to record each skinned draw's matched previous-window bases during the
+original frame (the motion pass already computes the previous SA per draw at mv_match; store up to eight previous
+window bases per recorded draw) and in the replay bind the blend of the current window and the snapshot at the recorded
+previous base; then redirect the replay's final composite into the second colour target (M1566) and alternate
+base/interpolated images in the present loop at 60 Hz with the M1562 validation; release unchanged payload CEBB6C124FF7B269
+(2026-11-10 16:39:04), 60 experimental, every prototype env-gated and the 30 fps path untouched.
+LOOKUP: M1570 advances M-B3 step 2b after M1569 -> 18.5096 [relevant: replay engine], 18.5095 [relevant: scene
+recorder], 18.5093 [relevant: second target]
