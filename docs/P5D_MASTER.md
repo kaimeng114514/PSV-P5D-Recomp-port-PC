@@ -1650,6 +1650,7 @@
 | M1565 | §18.5092: **M-B3 implementation assessment.** With the frame recorder measured (dance 356-362 draws, 245-250 skinned, ~400 KB GfxDraw/frame) and the present loop decoupled (guest 30 fps, window 60 fps), a real interpolated 60 needs in gfx_gpu.c: a second colour target per display target + depth handling + window present-ring alternation (~200-400 lines); a replay path re-executing the recorded draws while the guest waits on its next vblank, re-establishing scene state/targets/caches (~150-300 lines); blended bone palettes (LDST window contents lerped into the ring, ~100 lines); interpolated-frame scheduling (alternate presents, scene-change frames as-is). Risks: guest-address-keyed caches revalidation, doubled GPU work on interpolated frames, depth/blend/UI ordering (copy base first), approximate lerp. Effort 3-6 rounds for a throwaway dance-only prototype, 10-20 for usable quality across 3D screens; 30 fps path untouched. Options: (A) continue M-B3, (B) pause at the shipped hybrid, (C) cheap image-level temporal blend (ghosting). Release untouched CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
 | M1566 | §18.5093: **M-B3 step 2a: second colour target + GPU blit copy verified pixel-identical.** gfx_gpu_present() with RECOMP_INTERP=1 copies the finished 960x544 R8G8B8A8 display target into a persistent second SDL_GPU texture via SDL_BlitGPUTexture (one command buffer/frame); RECOMP_INTERP_DUMP=prefix dumps both textures once as raw RGBA. Verification on the dance stage at 30 fps: target created 960x544 fmt 4, blit ready, both dumps 2,088,960 bytes and byte-identical (same sha256), game ran normally with no crash or visual change (the copy is a separate, unpublished texture). Foundation for step 2b: re-render the recorded draws into this target with blended bone palettes (LDST window lerp, alpha 0.5) while the guest waits on its vblank, then alternate the two images at 60 Hz. 30 fps path untouched. Release unchanged CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
 | M1567 | §18.5094: **Phase B status: M-B3 step 2a verified; the remaining re-render needs a scene-state recorder + replay engine + present alternation (blocking condition).** M-B1: appMframe is a frame-rate rescale (M1555) enabled by the 60-base init, fixing song/chart length; most probed per-frame dance/MNS clocks are already dt-aware (M1558-M1561) but a residual 1.28-1.64x dance motion mismatch remains. M-B3: present already decoupled (guest 30, window 60, M1563); frame recorder copies 356-362 GfxDraw/frame (245-250 skinned, ~400 KB, M1564); second colour target blit copy pixel-identical (M1566). The re-render needs a scene-state recorder + replay engine + present alternation - 10-20 rounds of renderer work with regression risk, so the goal is reported blocked on that condition; delivered and kept: launcher 30/60, FPS OSD, hybrid dance-stage 60 with real-time music/judgement, the appMframe 60-base fix, the M-B3 architecture/data, the Phase A report. Release unchanged CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
+| M1568 | §18.5095: **Phase B2 started: scene-state recorder works; a dance frame is 5 scenes.** RECOMP_INTERP_REC now records every gfx_gpu_begin_scene boundary (colour target, depth address/type, format, stride/height, draw count) and attributes each draw to its scene. Dance at 30 fps: s0 (colour 0, 2x1 stride, 17 draws), s1 (colour 0x1dfc0000, tiled depth, 1024x544, 289-294 draws - the main 3D scene, 245-250 skinned), s2 (0x242c0000 224x68, 3), s3 (0x24400000 224x68, 3), s4 (0x1dfc0000 1024x544, 42-46 second pass); 356-362 draws total, ~390-400 KB, 5 scene boundaries. Next 2b: replay per scene with the recorded target/depth, re-execute the draws with blended LDST bone windows, composite/present into the second colour target (M1566 path) while the guest waits on its vblank. 30 fps path untouched. Release unchanged CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
 proposal).** mnsHandle_8111b64c/8111b190 receive a real-time float (+0.01668/frame at 60 vs +0.03337 at 30);
 mnsProcess_811251d6 fires per-frame but constant; other mnsProcess/mnsOption/gfd entries do not fire per-frame;
 object-word slopes show only the known danceQuantizer_81049976 w2 (+0.5 at 60 vs +1.0 at 30). The remaining
@@ -520071,4 +520072,45 @@ dance-stage 60 with real-time music/judgement clock, the appMframe 60-base fix, 
 Phase A report; release unchanged payload CEBB6C124FF7B269 (2026-11-10 16:39:04), 60 experimental, the 30 fps path untouched by every
 env-gated prototype.
 LOOKUP: M1567 closes this Phase B run -> 18.5093 [relevant: second target verified], 18.5092 [relevant: assessment],
+18.5091 [relevant: frame recorder], 18.5090 [relevant: present architecture]
+
+### 18.5095 M1568 PHASE B2 STARTED: THE SCENE-STATE RECORDER WORKS - A DANCE FRAME IS FIVE SCENES
+
+Phase B2 (the approved continuation) starts with the scene-state recorder the interpolated re-render needs. The
+existing RECOMP_INTERP_REC frame recorder now also records every scene boundary (gfx_gpu_begin_scene): the scene's
+colour target address, depth address and type, format, stride/height and its draw count; every recorded draw is
+attributed to its scene. Measured in the dance stage at 30 fps (RECOMP_INTERP_REC=1 RECOMP_MV=1), a dance frame is:
+
+| scene | colour target | depth | size | draws |
+|---|---|---|---|---|
+| s0 | 0 (special) | yes | 2x1 stride | 17 |
+| s1 | 0x1dfc0000 | yes (tiled) | 1024x544 | 289-294 |
+| s2 | 0x242c0000 | yes | 224x68 | 3 |
+| s3 | 0x24400000 | yes | 224x68 | 3 |
+| s4 | 0x1dfc0000 | yes (tiled) | 1024x544 | 42-46 |
+
+The main 3D scene (character + background + camera) is s1 with ~290 draws, of which 245-250 are skinned with a matched
+previous SA; s2/s3 are small intermediate targets (224x68: bloom/AA stages) and s4 is a second pass onto the same main
+target (transparent effects). The frame total is 356-362 draws, ~390-400 KB of GfxDraw copies, 5 scene boundaries.
+
+Next in Phase B2 (step 2b): drive the replay from this recorded structure - for each scene, re-enter it with the
+recorded target/depth (gfx_gpu_begin_scene on the recorded GfxTarget), re-execute its recorded draws with the skinned
+ones using blended LDST bone windows (previous snapshot vs current guest window contents), end the scene, and finally
+composite/present the result into the second colour target (the pixel-identical copy path from M1566), while the guest
+waits on its next 30 Hz vblank. The 30 fps path stays untouched (env-gated); release unchanged: payload CEBB6C124FF7B269
+(2026-11-10 16:39:04), 60 experimental.
+
+ANTI-FORGETTING ENTRY. Keywords: M1568 Phase B2 started - the RECOMP_INTERP_REC frame recorder now also records every
+scene boundary (gfx_gpu_begin_scene: colour target address, depth address/type, format, stride/height, draw count) and
+attributes each recorded draw to its scene; a dance frame at 30 fps is 5 scenes: s0 colour 0 special 2x1 stride 17
+draws with depth, s1 colour 0x1dfc0000 tiled depth 1024x544 289-294 draws (the main 3D scene with the skinned character:
+245-250 of the frame's draws are skinned with matched previous SA), s2 colour 0x242c0000 224x68 3 draws, s3 colour
+0x24400000 224x68 3 draws, s4 colour 0x1dfc0000 again 1024x544 42-46 draws (second pass); frame total 356-362 draws
+~390-400 KB GfxDraw and 5 scene boundaries; next step 2b drives the replay from this structure: per scene re-enter with
+the recorded target/depth (gfx_gpu_begin_scene on the recorded GfxTarget), re-execute the recorded draws with skinned
+ones using blended LDST bone windows (previous snapshot vs current guest window contents), end the scene, and
+composite/present into the second colour target (the M1566 pixel-identical copy path) while the guest waits on its next
+30 Hz vblank; the 30 fps path stays untouched (env-gated) and the release is unchanged payload CEBB6C124FF7B269 (2026-11-10 16:39:04), 60
+experimental.
+LOOKUP: M1568 starts Phase B2 after the M1567 status -> 18.5094 [relevant: status], 18.5093 [relevant: second target],
 18.5091 [relevant: frame recorder], 18.5090 [relevant: present architecture]
