@@ -1661,6 +1661,7 @@
 | M1576 | §18.5103: **PS4-60 lead: Vita eboot has only Vita platform paths; frame rate is configurable (appMframe 60 table, CRI framerate_n/d).** String scan: all platform paths are Vita (touch/platform/vita, unique/vita, appMemoryCard/module/vita, test/vita, archive vita.cpk; CRI all VITA builds), so a PS4 branch is not visibly compiled into the Vita executable (PS4 release is a separate build of the shared engine). The appMframe 60 table and the debug fields framerate_n/framerate_d exist, so the rate is config, not a constant; no game 60fps/vsync/console-type option string. Next: trace the appMframe boot init(1,1,1) argument provenance (config value/platform constant/computed rate; also the denominators), locate the framerate_n/d readers, and test overriding the app rate config instead of the init args after the fact - the native path if it exists. Release unchanged CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
 | M1577 | §18.5104: **Found the boot frame-rate call sequence: flag 0x81670354=1, appMframe init(1,1,1), then fn_81154a1c(30,30) - the likely appCalculator frame-rate config hardcoded to 30.** game_part8.c at VA 0x81184692-0x811846b0 shows the three hardcoded steps; fn_81154a1c (game_part7.c) loads a global 0x813af5a8 and stores two args (matches framerate_n/framerate_d from M1576). The PS4 build of the shared engine most likely passes 60 here, explaining why its UI/animations run at 60 without double-speed. MFRAME60 only changed step 2 (frame counts) while step 3 kept the animation time base at 30 - matching the residual dance mismatch. Next: hook fn_81154a1c at the boot call site, override to 60,60 (RECOMP_P5D_APPFPS60=1, 60 mode only), combined with MFRAME60, and measure dance animation speed, title time, song duration - the native 60 path may open up. Release unchanged CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
 | M1578 | §18.5105: **APPFPS60 hook works: boot fn_81154a1c(30,30) -> (60,60) and the game reaches the dance at 60 fps.** hooks.c registers 0x81154a1c:p5d_appfps; at the app-framework boot call site (LR 0x811846b5) with RECOMP_P5D_APPFPS60=1 and 60 fps, the arguments become (60,60) so the animation calculator/app framework sees the presentation rate instead of the hardcoded 30. Probe run (rate 60 all-screen + MFRAME60 + APPFPS60) logged "[APPFPS60] boot fn_81154a1c(30,30) -> (60,60)" and "[DCLK] f=2776 ... rate=60" and reached main menu and dance (main/dance True). Next: capture the dance with the SHOT window and compare per-second pixel change against the 30 fps baseline (frames_mb1d30b, aligned by DCLK start; MFRAME60-only capture was frames_mb1d60mf4) - if ratios are ~1.0 instead of 1.28-1.64, MFRAME60+APPFPS60 is the native 60 mode and render-level interpolation may not be needed for the dance; also measure title time and full-song duration. Release unchanged CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
+| M1579 | §18.5106: **APPFPS60 measurement attempt: hook works but shot-window copy limit makes the region comparison unreliable.** The 60 fps capture (shot window 2780-3620) logged [APPFPS60] boot fn_81154a1c(30,30) -> (60,60) and reached the dance (741 shots; only the last 200 copied). [DCLK] starts 2679 (60) and 1566 (30 baseline); the aligned dance-clock window needs frames 3183-3333 and 1818-1841 but only 13/54 shots survive the last-200 copy, so ratios 0.18-0.91 are not meaningful (samples partly past the dance; final metrics 35.6 fps guest with 17 draws). Also observed: guest pacing 35.6 fps at 60 all-screen with MFRAME60+APPFPS60 - the app-framework rate change may alter pacing, target is guest 60/speed 1.00x. Next: copy all shots in the capture window, re-run the aligned comparison (expect ~1.0), measure title time (4.13 s baseline) and full-song duration with APPFPS60; if native 60 holds, M-B3 interpolation is unnecessary for the dance and the plan shifts to promoting MFRAME60+APPFPS60. Release unchanged CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
 proposal).** mnsHandle_8111b64c/8111b190 receive a real-time float (+0.01668/frame at 60 vs +0.03337 at 30);
 mnsProcess_811251d6 fires per-frame but constant; other mnsProcess/mnsOption/gfd entries do not fire per-frame;
 object-word slopes show only the known danceQuantizer_81049976 w2 (+0.5 at 60 vs +1.0 at 30). The remaining
@@ -520560,3 +520561,45 @@ duration; release unchanged payload CEBB6C124FF7B269 (2026-11-10 16:39:04), 60 e
 unaffected.
 LOOKUP: M1578 implements M1577's hook -> 18.5104 [relevant: boot frame-rate call sequence], 18.5103 [relevant: PS4 string
 scan], 18.5102 [relevant: PS4 lead]
+
+### 18.5106 M1579 APPFPS60 MEASUREMENT ATTEMPT: THE HOOK WORKS BUT THE SHOT-WINDOW COPY LIMIT MAKES THE REGION COMPARISON UNRELIABLE
+
+The 60 fps capture with MFRAME60 + APPFPS60 ran with the shot window 2780-3620 and logged
+"[APPFPS60] boot fn_81154a1c(30,30) -> (60,60)", reaching main menu and the dance stage (741 shots taken; the drive
+script copies only the last 200 shots into frames_appfps60b). The [DCLK] start frames were 2679 (60 fps run) and 1566
+(the 30 fps baseline frames_mb1d30b), so the intended aligned comparison window (dance clock 8.4-10.9 s) selects frames
+3183-3333 and 1818-1841 - but only 13 and 54 shots respectively survive the last-200 copy, and the resulting region
+ratios (0.18-0.91, i.e. below 1) are not meaningful: the samples are too few and partly past the dance (the run's final
+metrics line shows 35.6 fps guest with 17 draws, a lighter screen after the dance). So this run neither confirms nor
+refutes the native-60 hypothesis - the measurement needs the full shot range copied, not the last 200.
+
+One real observation from the run: at 60 fps all-screen with MFRAME60+APPFPS60 the guest pacing read 35.6 fps in the
+final metrics (window 58.4) - the app-framework rate change may alter the game's own frame pacing, which must be watched
+in the next measurement (the target is guest 60 fps, speed 1.00x).
+
+Next: (1) raise the drive script's copied-shot limit (or copy all shots in the capture window) so the aligned dance
+window has enough frames at both rates; (2) re-run the 60 fps capture with MFRAME60+APPFPS60 and compare per-second
+pixel change with frames_mb1d30b (expect ~1.0 if the animation time base is now correct); (3) measure the title sequence
+time (4.13 s baseline) and the full-song duration with APPFPS60; (4) if the native path holds, the M-B3 render-level
+interpolation becomes unnecessary for the dance stage and the plan shifts to promoting MFRAME60+APPFPS60 into the 60
+option.
+
+Release unchanged: payload CEBB6C124FF7B269 (2026-11-10 16:39:04), 60 experimental; all prototypes env-gated, the 30 fps path unaffected.
+
+ANTI-FORGETTING ENTRY. Keywords: M1579 APPFPS60 measurement attempt - the 60 fps capture with MFRAME60+APPFPS60 (shot
+window 2780-3620) logged "[APPFPS60] boot fn_81154a1c(30,30) -> (60,60)", reached main menu and the dance (741 shots
+taken, the drive script copies only the last 200 into frames_appfps60b); [DCLK] start frames 2679 (60 fps run) and 1566
+(30 fps baseline frames_mb1d30b); the intended aligned comparison window (dance clock 8.4-10.9 s) selects frames
+3183-3333 and 1818-1841 but only 13 and 54 shots survive the last-200 copy, and the region ratios (0.18-0.91) are not
+meaningful - too few samples, partly past the dance (final metrics 35.6 fps guest with 17 draws, a lighter screen after
+the dance); so the run neither confirms nor refutes the native-60 hypothesis - the measurement needs the full shot range
+copied, not the last 200; also observed: at 60 fps all-screen with MFRAME60+APPFPS60 the final metrics read guest 35.6
+fps (window 58.4), the app-framework rate change may alter the game frame pacing and must be watched (target guest 60 fps,
+speed 1.00x); next: raise the copied-shot limit (or copy all shots in the capture window) so the aligned dance window has
+enough frames at both rates, re-run the 60 fps capture and compare per-second pixel change with frames_mb1d30b (expect
+~1.0 if the animation time base is now correct), measure the title sequence time (4.13 s baseline) and the full-song
+duration with APPFPS60; if the native path holds, the M-B3 render-level interpolation becomes unnecessary for the dance
+stage and the plan shifts to promoting MFRAME60+APPFPS60 into the 60 option; release unchanged payload CEBB6C124FF7B269
+(2026-11-10 16:39:04), 60 experimental, all prototypes env-gated and the 30 fps path unaffected.
+LOOKUP: M1579 measures M1578's hook -> 18.5105 [relevant: APPFPS60 hook], 18.5104 [relevant: boot frame-rate call
+sequence], 18.5094 [relevant: M-B1 rescale]
