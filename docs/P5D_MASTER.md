@@ -1684,6 +1684,7 @@
 | M1606 | §18.5126: **The 60 option is promoted to native 60: all-screen 60 scope, MFRAME60 auto-on, launcher label "全 60"; validated in both modes.** display.c fps_scope_dance() now defaults to every-screen 60 (RECOMP_FPS_SCOPE=dance restores the hybrid); the MFRAME60 boot init rewrite auto-enables in the 60 mode (RECOMP_P5D_MFRAME60=0 disables); the launcher label says 全 60. Validation with no env overrides: 60 mode MFRAME60 init yes (auto), dance clock median 0.01707 s/frame (steady preview 0.997-1.000), guest 60.0 fps/speed 1.00x; 30 mode no init, 0.03328 s/frame (real time at 30 fps), 30.0 fps - 30 path untouched. Next: build launcher, desktop end-to-end 60 test, repackage release, copy to desktop, update release notes. Release still previous payload CEBB6C124FF7B269, 2026-11-10 16:39:04 until repack. |
 | M1607 | §18.5127: **Repackaged with the promoted native-60 mode: new desktop exe 287,636,147 B (stub id A4A9DA194082155C, SHA256 2310B313AC1290D7...).** The launcher was rebuilt with the 全 60 label (dev exe 2,089,456 B), the release script (C:\dev\tmp\m1448 had to be re-created after the storage cleanup) produced the 287,636,147 B exe (stub id A4A9DA194082155C), it was copied over the desktop launcher (previous backed up), and prefs p5d_fps=60 were set. The packaged stub extracts/builds on first launch (the 540x160 window is the extraction progress window). Remaining: the end-to-end click-through test of the packaged launcher GUI (automation grabbed the wrong window so the start click did not happen); the same code was validated in the dev build (M1606) and via the pipeline path (M1597/M1604/M1605). Previous payload CEBB6C124FF7B269. |
 | M1608 | §18.5128: **Packaged-launcher GUI automation blocked by SDL/ImGui input; the end-to-end desktop click test remains manual.** The desktop exe is a stub that extracts the payload to %LOCALAPPDATA%\P5D-Port\A4A9DA194082155C\ and starts the inner launcher from there (a different process - the stub pid has no window). The inner window was found (1195x797) and PrintWindow captured the first page (ROM/firmware installed; page continues below), but posted WM_MOUSEWHEEL messages do not scroll it because SDL/ImGui reads real pointer state, so the scripted start click needs real SendInput or a manual launch. Release already promoted and copied (stub id A4A9DA194082155C, 287,636,147 B). |
+| M1609 | §18.5129: **Packaged launcher page captured: the promoted 60 幀（全 60） option is in the shipped exe; injected clicks still do not register (focus/z-order).** Resizing the packaged launcher window and PrintWindow shows the full page: ROM imported (P5D 1.00-mai), firmware 3.74 installed, 已構建：可隨時啟動遊戲, resolution 2K selected, frequency 30 selected and the new 60 幀（全 60：選單/舞池/UI，實驗性） present - the promoted label is confirmed inside the release exe. Automated SendInput/mouse_event clicks and wheel still do not reach the SDL/ImGui window (radio stays 30, page does not scroll) because it needs real foreground/focus/z-order; remaining is the human click-through (desktop exe -> select 60 全 60 -> start -> dance OSD 60/guest 60fps/speed 1.00x). Release: desktop exe = promoted build, stub id A4A9DA194082155C, 287,636,147 B. |
 proposal).** mnsHandle_8111b64c/8111b190 receive a real-time float (+0.01668/frame at 60 vs +0.03337 at 30);
 mnsProcess_811251d6 fires per-frame but constant; other mnsProcess/mnsOption/gfd entries do not fire per-frame;
 object-word slopes show only the known danceQuantizer_81049976 w2 (+0.5 at 60 vs +1.0 at 30). The remaining
@@ -521643,3 +521644,43 @@ build (M1606) and via the pipeline run path (M1597/M1604/M1605); the remaining s
 (or a later real-input automation) to confirm OSD 60 / guest 60 fps / speed 1.00x and the dance picture; release state:
 desktop exe = promoted build, stub id A4A9DA194082155C (287,636,147 B, 2026-11-11 01:52:02), docs/builds audit-clean.
 LOOKUP: M1608 follows M1607 -> 18.5127 [relevant: repack], 18.5126 [relevant: promotion], 18.5125 [relevant: title evidence]
+
+### 18.5129 M1609 PACKAGED LAUNCHER PAGE CAPTURED: THE PROMOTED "60 幀（全 60）" OPTION IS IN THE SHIPPED EXE; INJECTED CLICKS STILL DO NOT REGISTER (FOCUS/Z-ORDER)
+
+After M1608 (posted messages ignored), the packaged launcher window was resized taller and PrintWindow captured the page
+below the fold. The shipped launcher page shows, in order: ① game ROM (imported: Persona 5 Dancing in Starlight
+1.00-mai), ② firmware (PS Vita 3.74 installed), ③ 開始構建 ("已構建：可隨時啟動遊戲", 按鈕 重新構建/解壓縮-識別-編譯),
+④ 遊戲分辨率 (2K 2560x1440 selected), **⑤ 遊戲頻率: "30 幀（原版節奏）" selected by default and "60 幀（全 60：選單/舞池/
+UI，實驗性）" present** - i.e. the promoted native-60 option label from M1606 is confirmed inside the packaged release exe.
+The page continues below (the start/launch control is further down).
+
+The automatic click test still cannot be completed in this environment: with the window forced TOPMOST and the cursor
+moved over the 60 option and start area, the injected SendInput/mouse_event events (left down/up, wheel) did not change
+the page at all (the radio stayed on 30, the page did not scroll further). The launcher is SDL/ImGui: its window needs real
+foreground/focus (and z-order above the other windows) for the pointer state to be sampled; in this session the
+automation cannot guarantee that (another topmost window/host UI holds the foreground). This is an automation-environment
+limitation, not a product defect.
+
+Status: the promoted release is packaged, copied to the desktop, its launcher page confirmed to contain the native-60
+option (this milestone), and the code path was validated in the dev build (M1606) and the pipeline path
+(M1597/M1604/M1605). What remains is a human click-through: desktop exe -> select 60 幀（全 60...）-> 開始遊戲 -> dance
+stage with OSD 60 / guest 60 fps / speed 1.00x / complete notes and HUD. Release state: desktop exe = promoted build, stub
+id A4A9DA194082155C (287,636,147 B, 2026-11-11 01:52:02). Docs/builds audit-clean.
+
+ANTI-FORGETTING ENTRY. Keywords: M1609 packaged launcher page captured - after M1608 (posted messages ignored) the packaged
+launcher window was resized taller and PrintWindow captured the page below the fold: ① game ROM imported (Persona 5 Dancing
+in Starlight 1.00-mai), ② firmware PS Vita 3.74 installed, ③ 開始構建 ("已構建：可隨時啟動遊戲", buttons 重新構建
+解壓縮-識別-編譯), ④ 遊戲分辨率 (2K 2560x1440 selected), ⑤ 遊戲頻率: "30 幀（原版節奏）" selected by default and "60 幀
+（全 60：選單/舞池/UI，實驗性）" present - confirming the promoted native-60 option label from M1606 inside the packaged
+release exe; the page continues below (the start/launch control is further down); the automatic click test still cannot be
+completed here - with the window forced TOPMOST and the cursor moved over the 60 option and start area, the injected
+SendInput/mouse_event events (left down/up, wheel) did not change the page at all (radio stayed on 30, page did not scroll),
+because the SDL/ImGui launcher needs real foreground/focus and z-order above other windows for its pointer state to be sampled
+and automation cannot guarantee that in this session (another topmost window/host UI holds the foreground) - an
+automation-environment limitation, not a product defect; status: the promoted release is packaged, copied to the desktop, its
+launcher page confirmed to contain the native-60 option, and the code path validated in the dev build (M1606) and pipeline
+path (M1597/M1604/M1605); remaining is a human click-through: desktop exe -> select 60 幀（全 60...）-> 開始遊戲 -> dance
+stage with OSD 60 / guest 60 fps / speed 1.00x / complete notes and HUD; release state: desktop exe = promoted build, stub id
+A4A9DA194082155C (287,636,147 B, 2026-11-11 01:52:02), docs/builds audit-clean.
+LOOKUP: M1609 follows M1608 -> 18.5128 [relevant: automation blocked], 18.5127 [relevant: repack], 18.5126 [relevant:
+promotion]
