@@ -1682,6 +1682,7 @@
 | M1604 | §18.5124: **Measurement correction: with matched frame gaps the 60 fps MFRAME60 animation is real time (ratio 1.01-1.04) - the earlier 1.5-1.7x was a sampling-gap artifact; MFRAME60-only is the leading native-60 candidate.** M1598/M1599 compared shots 5 frames apart (83 ms at 60 fps vs 167 ms at 30 fps) and normalized by frame rate; re-analysing the same shots with matched gaps (10 frames at 60 fps vs 5 at 30 fps, same 166.7 ms): MFRAME60 only char 1.04/bg 1.03/hud_l 1.04/hud_r 1.03/bottom 1.02/top 1.01; pair (60,60) 1.00-1.02; pairs (60,15/12/10/7) 0.76-0.96 (slower than real time) and they break the note/HUD layer. Combined with the real-time dance clock (M1597), the correct dt at the dance entries (M1603) and the M1555 full-song 167.18 s, MFRAME60-only at 60 fps is the native-60 candidate; next: title-sequence duration, full-song re-measurement, music/judgement sync, visual pass, then wire MFRAME60 into the launcher 60 option, rebuild, test, repackage, release notes. Release unchanged CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
 | M1605 | §18.5125: **Title-sequence timing at 60 fps is real time (28.5 s at 30 fps vs 29.8 s at 60 fps with MFRAME60); the native-60 evidence set is complete for the user bar.** Title worker frames: 30 fps 79..934 (855 frames = 28.50 s), 60 fps + MFRAME60 95..1881 (1786 frames = 29.77 s) - rate independent. Consolidated 60 fps all-screen + MFRAME60 evidence: dance clock real time (0.997-1.000 per 60 frames), dance animation real time (matched-gap ratios 1.01-1.04), title real time, full song 167.18 s/10020 frames (M1555), complete note/HUD in screenshots, correct entry dt, guest 60 fps/speed 1.00x; the frame-rate pair configurations are rejected. Next: enable MFRAME60 automatically in 60 fps mode, rebuild, validate through the desktop launcher, repackage, update release notes and promote the 60 option. Release unchanged CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
 | M1606 | §18.5126: **The 60 option is promoted to native 60: all-screen 60 scope, MFRAME60 auto-on, launcher label "全 60"; validated in both modes.** display.c fps_scope_dance() now defaults to every-screen 60 (RECOMP_FPS_SCOPE=dance restores the hybrid); the MFRAME60 boot init rewrite auto-enables in the 60 mode (RECOMP_P5D_MFRAME60=0 disables); the launcher label says 全 60. Validation with no env overrides: 60 mode MFRAME60 init yes (auto), dance clock median 0.01707 s/frame (steady preview 0.997-1.000), guest 60.0 fps/speed 1.00x; 30 mode no init, 0.03328 s/frame (real time at 30 fps), 30.0 fps - 30 path untouched. Next: build launcher, desktop end-to-end 60 test, repackage release, copy to desktop, update release notes. Release still previous payload CEBB6C124FF7B269, 2026-11-10 16:39:04 until repack. |
+| M1607 | §18.5127: **Repackaged with the promoted native-60 mode: new desktop exe 287,636,147 B (stub id A4A9DA194082155C, SHA256 2310B313AC1290D7...).** The launcher was rebuilt with the 全 60 label (dev exe 2,089,456 B), the release script (C:\dev\tmp\m1448 had to be re-created after the storage cleanup) produced the 287,636,147 B exe (stub id A4A9DA194082155C), it was copied over the desktop launcher (previous backed up), and prefs p5d_fps=60 were set. The packaged stub extracts/builds on first launch (the 540x160 window is the extraction progress window). Remaining: the end-to-end click-through test of the packaged launcher GUI (automation grabbed the wrong window so the start click did not happen); the same code was validated in the dev build (M1606) and via the pipeline path (M1597/M1604/M1605). Previous payload CEBB6C124FF7B269. |
 proposal).** mnsHandle_8111b64c/8111b190 receive a real-time float (+0.01668/frame at 60 vs +0.03337 at 30);
 mnsProcess_811251d6 fires per-frame but constant; other mnsProcess/mnsOption/gfd entries do not fire per-frame;
 object-word slopes show only the known danceQuantizer_81049976 w2 (+0.5 at 60 vs +1.0 at 30). The remaining
@@ -521554,3 +521555,50 @@ desktop and update the release notes (60 option native 60 with MFRAME60, 30 defa
 payload CEBB6C124FF7B269 (2026-11-10 16:39:04) until the repack completes.
 LOOKUP: M1606 promotes after M1605 -> 18.5125 [relevant: title evidence], 18.5124 [relevant: matched-gap correction],
 18.5119 [relevant: dance clock], 18.5094 [relevant: MFRAME60 full song]
+
+### 18.5127 M1607 REPACKAGED WITH THE PROMOTED NATIVE-60 MODE: NEW DESKTOP EXE 287,636,147 B (STUB ID A4A9DA194082155C, SHA256 2310B313AC1290D7...)
+
+The promoted build (native 60 in the 60 option: all-screen 60 + MFRAME60 auto-on, launcher label 全 60, M1606) was
+packaged and copied to the desktop:
+
+- dev/build_p5d_launcher.ps1 rebuilt the launcher with the new label (compile clean, 2,089,456 B dev exe);
+- dev/make_p5d_release.py produced C:\dev\tmp\m1448\P5D Windows移植版启动器.exe = **287,636,147 B**, stub version id
+  **A4A9DA194082155C**, SHA256 **2310B313AC1290D7...** (the C:\dev\tmp\m1448 directory had been removed by the storage
+  cleanup, so it had to be re-created before packaging - noted for the next repack);
+- the exe was copied over C:\Users\凯梦\Desktop\P5D Windows移植版启动器.exe (previous one backed up to
+  C:\dev\tmp\P5D_launcher_prev.exe); launcher prefs (C:\Users\凯梦\AppData\Roaming\P5D-Port\P5D\launcher.ini)
+  were set to p5d_fps = 60 so a launch exercises the new native-60 mode;
+- the packaged exe contains the extraction payload (assets/decrypt/mingw64/packs/pipeline/python/recompiler/runtime); the
+  host itself is built/extracted on first launch by the stub, so the first launch is slow (the small 540x160 window is
+  the extraction progress window, not the GUI).
+
+Remaining step (not completed in this run): the end-to-end click-through test of the packaged launcher GUI. The
+automation attempted here launched the exe, but window enumeration captured the wrong window (an IDE window behind it)
+and the scripted click on the launcher's start control did not happen, so 'launch from the desktop exe -> game in the 60
+option -> OSD 60 / guest 60 fps / speed 1.00x' is still to be confirmed interactively. The dev build of the same code was
+already validated (M1606: 60 mode MFRAME60 auto init, guest 60.0 fps, speed 1.00x, real-time dance clock; 30 mode
+unchanged), and the same payload was validated through the pipeline run path (M1597/M1604/M1605).
+
+Also note for the next session: the release script expects C:\dev\tmp\m1448 to exist (create it before packaging); the
+desktop exe is the primary test entry point, never P5D_Play.bat.
+
+Release state: the desktop exe is now the promoted build (stub id A4A9DA194082155C, 287,636,147 B, 2026-11-11 01:52:02); the previous
+payload was CEBB6C124FF7B269. The docs/builds remain audit-clean.
+
+ANTI-FORGETTING ENTRY. Keywords: M1607 repackaged promoted native-60 build - dev/build_p5d_launcher.ps1 rebuilt the launcher
+with the 全 60 label (2,089,456 B dev exe), dev/make_p5d_release.py produced C:\dev\tmp\m1448\P5D Windows移植版启动器.exe =
+287,636,147 B, stub version id A4A9DA194082155C, SHA256 2310B313AC1290D7... (the m1448 directory had been removed by the
+storage cleanup and had to be re-created before packaging - noted for the next repack); the exe was copied over the desktop
+launcher (previous one backed up to C:\dev\tmp\P5D_launcher_prev.exe) and launcher prefs
+(C:\Users\凯梦\AppData\Roaming\P5D-Port\P5D\launcher.ini) were set to p5d_fps = 60 so a launch exercises the native-60
+mode; the packaged exe contains the extraction payload (assets/decrypt/mingw64/packs/pipeline/python/recompiler/runtime)
+and the host is built/extracted by the stub on first launch (the small 540x160 window is the extraction progress window);
+remaining step: the end-to-end click-through test of the packaged launcher GUI - automation launched the exe but window
+enumeration captured the wrong window (an IDE window behind it) so the scripted click on the launcher start control did
+not happen, and 'desktop exe -> game in the 60 option -> OSD 60 / guest 60 fps / speed 1.00x' is still to be confirmed
+interactively; the dev build of the same code was already validated (M1606: 60 mode MFRAME60 auto init, guest 60.0 fps,
+speed 1.00x, real-time dance clock; 30 mode unchanged) and the same payload was validated through the pipeline run path
+(M1597/M1604/M1605); release state: the desktop exe is now the promoted build (stub id A4A9DA194082155C, 287,636,147 B,
+2026-11-11 01:52:02), the previous payload was CEBB6C124FF7B269; docs/builds remain audit-clean.
+LOOKUP: M1607 packages M1606 -> 18.5126 [relevant: promotion], 18.5125 [relevant: title evidence], 18.5124 [relevant:
+matched-gap correction]
