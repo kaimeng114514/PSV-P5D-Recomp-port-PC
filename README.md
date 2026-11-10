@@ -92,32 +92,6 @@
 
 ---
 
-## 如何确认"画面是游戏自己画的"？——路线自检
-
-1. **原版二进制未改**：`app0/eboot.bin.elf` 的 SHA-256 = `f823faaeab2b7234e3f47392ba83728b6340aa30f291f70b5b46b617b4ddeb23`（6,279,728 B），
-   与 pack `[versions."1.00"] sha256` 一致、构建时校验；AOT 重编译产物只在本机生成，仓库不含。
-2. **截图取自游戏帧缓冲**：`runtime/gfx/gfx_soft.c` 的 `shot()` 直接从 **guest 显示内存**
-   (`RD32(base + …)`) 写 PPM；GPU 后端先把 guest libgxm 捕获的 GXM 绘制重放为 Vulkan，再同步回 guest 内存。
-   不是窗口截图，没有 UI overlay，也没有把任何图片 blit 到画面上。
-3. **host 不含游戏内容**：`game_host.exe` 中 `PRESS ANY BUTTON` / `PressAny` / `PERSONA5` / `DANCING` /
-   `ATLUS` / `title.spr` / `title_bg` / `NewGame` 出现次数**全为 0**；`packs/PCSH10109/hooks.c`、`pack.toml` 同样没有。
-4. **画面元素来自游戏资源（已做像素级提取验证）**：从玩家数据 `title/P5/title.spr6` 中解析出 2 张内嵌
-   color-mapped TGA：`title`（512×512，P5D 霓虹 logo）+ `title02`（256×64，`PRESS ANY BUTTON` 白字），
-   与屏幕上的 logo/按钮**完全一致**（本地提取对比，原始资源不入库）；另 `title/title.spr4` 含
-   `PressAny_off/on`、`NewGame_off/on`、`LoadGame_off/on`、`title_bg` —— 标题 UI 就是这些游戏 sprite
-   经游戏自己的 GXM 管线画出来的。
-5. **实时游戏状态机驱动**：hook 探针挂在 **guest 函数** `0x81198172`（title sequence）、
-   `0x81193fbe`（titleDraw）、`0x81193a90`（title 异步任务）上，观察到状态
-   `0→1→3→4→…→7` 与标题出现同帧对齐；标题出现后逐帧出现元素，frame 6910 出现镜头形变过渡，
-   之后按输入进入剧情对话（双叶→杏）——不是静态注入图。
-6. **渲染数据全部为 guest 数据**：Vulkan 绘制使用的 GXM shader 位于 guest 地址
-   （如 `0x8153…`、libgxm `0x1102b…`），纹理是 guest 内存里的游戏纹理；host 只做翻译/执行。
-7. **S4_GAME→RESULT 全流程实测（M1485/M1486/M1494）**：标题→主菜单→选歌→服装→舞池→结算的真实输入序列，
-   截图 `38_dance_stage_m1485.png`（舞池）与 `39_result_tally_m1485.png`（结算）；
-   结算 tally→4 行菜单→重试的交互链也有截图（`41_result_menu_after_tally.png`）。
-
----
-
 ## 与 Vita3K 模拟器的区别
 
 本项目不是模拟器，而是**把原版 P5D 的 ARM 代码静态重编译（AOT）成 x86-64 原生程序**，Sony 的系统库也从固件重编译成本地代码、由本地兼容层（HLE）接管。两者的定位与实现不同：
