@@ -1649,6 +1649,7 @@
 | M1564 | §18.5091: **M-B3 step 1: the env-gated GPU frame recorder works.** RECOMP_INTERP_REC=1 makes gfx_gpu_draw copy each API-neutral GfxDraw (guest addresses + state) into a per-frame list; skinned draws are counted where the motion pass resolves the previous SA (RECOMP_MV=1 or FSR on); gfx_gpu_frame_queued logs and resets. Dance at 30 fps: 356-362 draws/frame, 245-250 skinned (~70%), ~390-400 KB of GfxDraw copies; boot/title 3-26 draws, 0-1 skinned. Next step 2: re-execute the recorded draws with a blended SA (lerp previous/current floats, alpha 0.5, pointer words current) and current LDST windows through each draw's colour pipeline into a second colour target while the guest waits for its next 30 Hz vblank, present loop alternating base/interpolated images at 60 Hz. Release untouched CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
 | M1565 | §18.5092: **M-B3 implementation assessment.** With the frame recorder measured (dance 356-362 draws, 245-250 skinned, ~400 KB GfxDraw/frame) and the present loop decoupled (guest 30 fps, window 60 fps), a real interpolated 60 needs in gfx_gpu.c: a second colour target per display target + depth handling + window present-ring alternation (~200-400 lines); a replay path re-executing the recorded draws while the guest waits on its next vblank, re-establishing scene state/targets/caches (~150-300 lines); blended bone palettes (LDST window contents lerped into the ring, ~100 lines); interpolated-frame scheduling (alternate presents, scene-change frames as-is). Risks: guest-address-keyed caches revalidation, doubled GPU work on interpolated frames, depth/blend/UI ordering (copy base first), approximate lerp. Effort 3-6 rounds for a throwaway dance-only prototype, 10-20 for usable quality across 3D screens; 30 fps path untouched. Options: (A) continue M-B3, (B) pause at the shipped hybrid, (C) cheap image-level temporal blend (ghosting). Release untouched CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
 | M1566 | §18.5093: **M-B3 step 2a: second colour target + GPU blit copy verified pixel-identical.** gfx_gpu_present() with RECOMP_INTERP=1 copies the finished 960x544 R8G8B8A8 display target into a persistent second SDL_GPU texture via SDL_BlitGPUTexture (one command buffer/frame); RECOMP_INTERP_DUMP=prefix dumps both textures once as raw RGBA. Verification on the dance stage at 30 fps: target created 960x544 fmt 4, blit ready, both dumps 2,088,960 bytes and byte-identical (same sha256), game ran normally with no crash or visual change (the copy is a separate, unpublished texture). Foundation for step 2b: re-render the recorded draws into this target with blended bone palettes (LDST window lerp, alpha 0.5) while the guest waits on its vblank, then alternate the two images at 60 Hz. 30 fps path untouched. Release unchanged CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
+| M1567 | §18.5094: **Phase B status: M-B3 step 2a verified; the remaining re-render needs a scene-state recorder + replay engine + present alternation (blocking condition).** M-B1: appMframe is a frame-rate rescale (M1555) enabled by the 60-base init, fixing song/chart length; most probed per-frame dance/MNS clocks are already dt-aware (M1558-M1561) but a residual 1.28-1.64x dance motion mismatch remains. M-B3: present already decoupled (guest 30, window 60, M1563); frame recorder copies 356-362 GfxDraw/frame (245-250 skinned, ~400 KB, M1564); second colour target blit copy pixel-identical (M1566). The re-render needs a scene-state recorder + replay engine + present alternation - 10-20 rounds of renderer work with regression risk, so the goal is reported blocked on that condition; delivered and kept: launcher 30/60, FPS OSD, hybrid dance-stage 60 with real-time music/judgement, the appMframe 60-base fix, the M-B3 architecture/data, the Phase A report. Release unchanged CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
 proposal).** mnsHandle_8111b64c/8111b190 receive a real-time float (+0.01668/frame at 60 vs +0.03337 at 30);
 mnsProcess_811251d6 fires per-frame but constant; other mnsProcess/mnsOption/gfd entries do not fire per-frame;
 object-word slopes show only the known danceQuantizer_81049976 w2 (+0.5 at 60 vs +1.0 at 30). The remaining
@@ -520030,3 +520031,44 @@ present loop at 60 Hz; the 30 fps path stays untouched (env-gated) and the relea
 (2026-11-10 16:39:04), 60 experimental.
 LOOKUP: M1566 is M-B3 step 2 after M1564/M1565 -> 18.5091 [relevant: frame recorder], 18.5092 [relevant: assessment],
 18.5090 [relevant: present architecture]
+
+### 18.5094 M1567 PHASE B STATUS: M-B3 STEP 2A VERIFIED; THE REMAINING RE-RENDER NEEDS A SCENE-STATE RECORDER + REPLAY
+ENGINE + PRESENT ALTERNATION (REPORTED AS THE BLOCKING CONDITION)
+
+Status of Phase B at this point (everything env-gated, release untouched):
+- M-B1: the appMframe conversion is a frame-rate rescale (M1555) and is enabled by the 60-base init (MFRAME60), which
+  fixes the song/chart length and MFrame-based menu systems; most per-frame clocks measured in the dance/MNS paths are
+  already dt-aware (M1558-M1561). A residual 1.28-1.64x dance motion mismatch remains and is not carried by any probed
+  per-frame function;
+- M-B3: the window present loop is already decoupled (guest 30 fps, window 60 fps, M1563); a GPU frame recorder copies
+  the frame's 356-362 GfxDraw (245-250 skinned, ~400 KB, M1564); the second colour target exists and the GPU blit copy
+  into it is pixel-identical to the base frame (M1566).
+
+What the next step would need: the recorded draw list alone is not enough to re-render the interpolated frame - the
+replay must recreate each scene's render state (which target and depth buffer the draws went to, begin/end scene order,
+batch/view state), blend the LDST bone windows (previous snapshot vs current window contents) and bind them, and the
+present loop must alternate the base and interpolated images at 60 Hz. That is a scene-state recorder plus a replay
+engine plus present-loop alternation: 10-20 rounds of renderer work with real regression risk, not a small change.
+Within this autonomous run the remaining rounds cannot both implement and validate it, so the goal is reported blocked
+on that concrete condition instead of risking half-verified rendering changes in the shipped path.
+
+Delivered and kept (all verified in this run): the launcher 30/60 option, the top-left real-time FPS OSD, the hybrid
+dance-stage 60 presentation with a real-time music/judgement clock, the appMframe 60-base fix (song/chart length),
+the measured architecture/data for M-B3 (frame recorder, second target, pixel-identical copy), and the Phase A report.
+Release unchanged: payload CEBB6C124FF7B269 (2026-11-10 16:39:04), 60 experimental. The 30 fps path is untouched by every env-gated
+prototype.
+
+ANTI-FORGETTING ENTRY. Keywords: M1567 Phase B status - M-B1: appMframe is a frame-rate rescale (M1555) enabled by the
+60-base init (MFRAME60), fixing song/chart length and MFrame menu systems; most probed per-frame dance/MNS clocks are
+already dt-aware (M1558-M1561) but a residual 1.28-1.64x dance motion mismatch remains and is not carried by any probed
+per-frame function; M-B3: window present is already decoupled (guest 30 fps, window 60 fps, M1563), the GPU frame
+recorder copies 356-362 GfxDraw per dance frame (245-250 skinned, ~400 KB, M1564), and the second colour target's GPU
+blit copy is pixel-identical (M1566); the next step needs a scene-state recorder (per-scene target/depth/begin-end/batch
+state) plus a replay engine that blends LDST bone windows and a present-loop alternation at 60 Hz - a 10-20 round
+renderer subsystem with regression risk, so the goal is reported blocked on that concrete condition (the autonomous
+rounds cannot both implement and validate it); delivered and kept: launcher 30/60 option, top-left FPS OSD, hybrid
+dance-stage 60 with real-time music/judgement clock, the appMframe 60-base fix, the M-B3 architecture/data and the
+Phase A report; release unchanged payload CEBB6C124FF7B269 (2026-11-10 16:39:04), 60 experimental, the 30 fps path untouched by every
+env-gated prototype.
+LOOKUP: M1567 closes this Phase B run -> 18.5093 [relevant: second target verified], 18.5092 [relevant: assessment],
+18.5091 [relevant: frame recorder], 18.5090 [relevant: present architecture]
