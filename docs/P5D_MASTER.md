@@ -1683,6 +1683,7 @@
 | M1605 | §18.5125: **Title-sequence timing at 60 fps is real time (28.5 s at 30 fps vs 29.8 s at 60 fps with MFRAME60); the native-60 evidence set is complete for the user bar.** Title worker frames: 30 fps 79..934 (855 frames = 28.50 s), 60 fps + MFRAME60 95..1881 (1786 frames = 29.77 s) - rate independent. Consolidated 60 fps all-screen + MFRAME60 evidence: dance clock real time (0.997-1.000 per 60 frames), dance animation real time (matched-gap ratios 1.01-1.04), title real time, full song 167.18 s/10020 frames (M1555), complete note/HUD in screenshots, correct entry dt, guest 60 fps/speed 1.00x; the frame-rate pair configurations are rejected. Next: enable MFRAME60 automatically in 60 fps mode, rebuild, validate through the desktop launcher, repackage, update release notes and promote the 60 option. Release unchanged CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
 | M1606 | §18.5126: **The 60 option is promoted to native 60: all-screen 60 scope, MFRAME60 auto-on, launcher label "全 60"; validated in both modes.** display.c fps_scope_dance() now defaults to every-screen 60 (RECOMP_FPS_SCOPE=dance restores the hybrid); the MFRAME60 boot init rewrite auto-enables in the 60 mode (RECOMP_P5D_MFRAME60=0 disables); the launcher label says 全 60. Validation with no env overrides: 60 mode MFRAME60 init yes (auto), dance clock median 0.01707 s/frame (steady preview 0.997-1.000), guest 60.0 fps/speed 1.00x; 30 mode no init, 0.03328 s/frame (real time at 30 fps), 30.0 fps - 30 path untouched. Next: build launcher, desktop end-to-end 60 test, repackage release, copy to desktop, update release notes. Release still previous payload CEBB6C124FF7B269, 2026-11-10 16:39:04 until repack. |
 | M1607 | §18.5127: **Repackaged with the promoted native-60 mode: new desktop exe 287,636,147 B (stub id A4A9DA194082155C, SHA256 2310B313AC1290D7...).** The launcher was rebuilt with the 全 60 label (dev exe 2,089,456 B), the release script (C:\dev\tmp\m1448 had to be re-created after the storage cleanup) produced the 287,636,147 B exe (stub id A4A9DA194082155C), it was copied over the desktop launcher (previous backed up), and prefs p5d_fps=60 were set. The packaged stub extracts/builds on first launch (the 540x160 window is the extraction progress window). Remaining: the end-to-end click-through test of the packaged launcher GUI (automation grabbed the wrong window so the start click did not happen); the same code was validated in the dev build (M1606) and via the pipeline path (M1597/M1604/M1605). Previous payload CEBB6C124FF7B269. |
+| M1608 | §18.5128: **Packaged-launcher GUI automation blocked by SDL/ImGui input; the end-to-end desktop click test remains manual.** The desktop exe is a stub that extracts the payload to %LOCALAPPDATA%\P5D-Port\A4A9DA194082155C\ and starts the inner launcher from there (a different process - the stub pid has no window). The inner window was found (1195x797) and PrintWindow captured the first page (ROM/firmware installed; page continues below), but posted WM_MOUSEWHEEL messages do not scroll it because SDL/ImGui reads real pointer state, so the scripted start click needs real SendInput or a manual launch. Release already promoted and copied (stub id A4A9DA194082155C, 287,636,147 B). |
 proposal).** mnsHandle_8111b64c/8111b190 receive a real-time float (+0.01668/frame at 60 vs +0.03337 at 30);
 mnsProcess_811251d6 fires per-frame but constant; other mnsProcess/mnsOption/gfd entries do not fire per-frame;
 object-word slopes show only the known danceQuantizer_81049976 w2 (+0.5 at 60 vs +1.0 at 30). The remaining
@@ -521602,3 +521603,43 @@ speed 1.00x, real-time dance clock; 30 mode unchanged) and the same payload was 
 2026-11-11 01:52:02), the previous payload was CEBB6C124FF7B269; docs/builds remain audit-clean.
 LOOKUP: M1607 packages M1606 -> 18.5126 [relevant: promotion], 18.5125 [relevant: title evidence], 18.5124 [relevant:
 matched-gap correction]
+
+### 18.5128 M1608 PACKAGED-LAUNCHER GUI AUTOMATION BLOCKED BY SDL/IMGUI INPUT; THE END-TO-END DESKTOP CLICK TEST REMAINS MANUAL
+
+After the repackaging (M1607) the packaged launcher was launched to finish the end-to-end test automatically. Findings:
+
+- the desktop exe is a stub that extracts the payload to %LOCALAPPDATA%\P5D-Port\A4A9DA194082155C\ and then starts the inner
+  launcher from there (different process, path C:\Users\...\AppData\Local\P5D-Port\A4A9DA194082155C\P5D Windows移植版启动器.exe);
+  a robust window search must look for that inner process, not the stub pid (the first attempt enumerated the stub pid and
+  found no window);
+- the inner launcher window was found (hwnd 17244060, 1195x797, title "P5D Windows移植版启动器") and PrintWindow captured
+  its first page (game ROM installed: Persona 5 Dancing in Starlight 1.00-mai; firmware: PS Vita 3.74 installed; the page
+  continues below the viewport);
+- however PrintWindow returned the same static frame after posting WM_MOUSEWHEEL messages, and the page did not scroll:
+  the launcher uses SDL/ImGui input handling, which ignores posted window messages for wheel/pointer (it reads the real
+  mouse state/raw input), so a scripted scroll + click on the start/build control cannot be done with PostMessage alone. A
+  real-cursor SendInput sequence with the window focused could work, but that is a further automation step, and the
+  screenshot also suggests the control is below the visible area.
+
+Status: the promoted release is built, copied to the desktop and configured (p5d_fps=60 in launcher.ini, M1606/M1607);
+the code path was validated in the dev build (M1606) and the same payload through the pipeline run path
+(M1597/M1604/M1605). The remaining step is a manual launch from the desktop exe (or a later real-input automation): start
+the game in the 60 option and confirm the OSD 60 / guest 60 fps / speed 1.00x and the picture on the dance stage.
+
+Release state: desktop exe = promoted build, stub id A4A9DA194082155C (287,636,147 B, 2026-11-11 01:52:02). Docs/builds audit-clean.
+
+ANTI-FORGETTING ENTRY. Keywords: M1608 packaged-launcher GUI automation blocked - the desktop exe is a stub that extracts the
+payload to %LOCALAPPDATA%\P5D-Port\A4A9DA194082155C\ and then starts the inner launcher from there (different process, path
+C:\Users\...\AppData\Local\P5D-Port\A4A9DA194082155C\P5D Windows移植版启动器.exe), so a robust window search must look for that
+inner process, not the stub pid (the first attempt enumerated the stub pid and found no window); the inner launcher window
+was found (hwnd 17244060, 1195x797, title P5D Windows移植版启动器) and PrintWindow captured its first page (game ROM
+installed Persona 5 Dancing in Starlight 1.00-mai; firmware PS Vita 3.74 installed; page continues below the viewport); but
+PrintWindow returned the same static frame after posting WM_MOUSEWHEEL and the page did not scroll because the launcher uses
+SDL/ImGui input handling which ignores posted window messages for wheel/pointer (it reads the real mouse state/raw input), so
+a scripted scroll + click on the start/build control cannot be done with PostMessage alone; a real-cursor SendInput sequence
+with the window focused could work but is a further automation step and the control appears below the visible area; status:
+the promoted release is built, copied to the desktop and configured (p5d_fps=60), the code path was validated in the dev
+build (M1606) and via the pipeline run path (M1597/M1604/M1605); the remaining step is a manual launch from the desktop exe
+(or a later real-input automation) to confirm OSD 60 / guest 60 fps / speed 1.00x and the dance picture; release state:
+desktop exe = promoted build, stub id A4A9DA194082155C (287,636,147 B, 2026-11-11 01:52:02), docs/builds audit-clean.
+LOOKUP: M1608 follows M1607 -> 18.5127 [relevant: repack], 18.5126 [relevant: promotion], 18.5125 [relevant: title evidence]
