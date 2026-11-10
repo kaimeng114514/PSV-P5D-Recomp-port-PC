@@ -1681,6 +1681,7 @@
 | M1603 | §18.5123: **Dance entry probes: the entries receive dt-aware deltas (pose s0 0.0333 at 30 fps, 0.0166 at 60 fps), so the residual speedup is deeper.** Probes on the five dance entries logged s0: pose 0.0333/0.0166, proc 0.0330/0.0167, ready 0.0333/0.0168, sys 0.0336/0.0162-0.0176, voice 0.0333/0.0166 - the frame-index-to-dt conversion at this layer is correct and is not the 1.5-1.7x source. The sampled module objects show no per-frame advancing counter (pose w0 steps 131072->131074 then holds; ready/voice words constant). Next: (1) walk the pose process object's 8-member array per frame to find the motion cursor; (2) measure per-frame pose-matrix change with the recorder (possible double dt); (3) fall back to the shipped hybrid if not pinned quickly (correct picture + no double speed). Release unchanged CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
 | M1604 | §18.5124: **Measurement correction: with matched frame gaps the 60 fps MFRAME60 animation is real time (ratio 1.01-1.04) - the earlier 1.5-1.7x was a sampling-gap artifact; MFRAME60-only is the leading native-60 candidate.** M1598/M1599 compared shots 5 frames apart (83 ms at 60 fps vs 167 ms at 30 fps) and normalized by frame rate; re-analysing the same shots with matched gaps (10 frames at 60 fps vs 5 at 30 fps, same 166.7 ms): MFRAME60 only char 1.04/bg 1.03/hud_l 1.04/hud_r 1.03/bottom 1.02/top 1.01; pair (60,60) 1.00-1.02; pairs (60,15/12/10/7) 0.76-0.96 (slower than real time) and they break the note/HUD layer. Combined with the real-time dance clock (M1597), the correct dt at the dance entries (M1603) and the M1555 full-song 167.18 s, MFRAME60-only at 60 fps is the native-60 candidate; next: title-sequence duration, full-song re-measurement, music/judgement sync, visual pass, then wire MFRAME60 into the launcher 60 option, rebuild, test, repackage, release notes. Release unchanged CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
 | M1605 | §18.5125: **Title-sequence timing at 60 fps is real time (28.5 s at 30 fps vs 29.8 s at 60 fps with MFRAME60); the native-60 evidence set is complete for the user bar.** Title worker frames: 30 fps 79..934 (855 frames = 28.50 s), 60 fps + MFRAME60 95..1881 (1786 frames = 29.77 s) - rate independent. Consolidated 60 fps all-screen + MFRAME60 evidence: dance clock real time (0.997-1.000 per 60 frames), dance animation real time (matched-gap ratios 1.01-1.04), title real time, full song 167.18 s/10020 frames (M1555), complete note/HUD in screenshots, correct entry dt, guest 60 fps/speed 1.00x; the frame-rate pair configurations are rejected. Next: enable MFRAME60 automatically in 60 fps mode, rebuild, validate through the desktop launcher, repackage, update release notes and promote the 60 option. Release unchanged CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
+| M1606 | §18.5126: **The 60 option is promoted to native 60: all-screen 60 scope, MFRAME60 auto-on, launcher label "全 60"; validated in both modes.** display.c fps_scope_dance() now defaults to every-screen 60 (RECOMP_FPS_SCOPE=dance restores the hybrid); the MFRAME60 boot init rewrite auto-enables in the 60 mode (RECOMP_P5D_MFRAME60=0 disables); the launcher label says 全 60. Validation with no env overrides: 60 mode MFRAME60 init yes (auto), dance clock median 0.01707 s/frame (steady preview 0.997-1.000), guest 60.0 fps/speed 1.00x; 30 mode no init, 0.03328 s/frame (real time at 30 fps), 30.0 fps - 30 path untouched. Next: build launcher, desktop end-to-end 60 test, repackage release, copy to desktop, update release notes. Release still previous payload CEBB6C124FF7B269, 2026-11-10 16:39:04 until repack. |
 proposal).** mnsHandle_8111b64c/8111b190 receive a real-time float (+0.01668/frame at 60 vs +0.03337 at 30);
 mnsProcess_811251d6 fires per-frame but constant; other mnsProcess/mnsOption/gfd entries do not fire per-frame;
 object-word slopes show only the known danceQuantizer_81049976 w2 (+0.5 at 60 vs +1.0 at 30). The remaining
@@ -521509,3 +521510,47 @@ release unchanged for now payload CEBB6C124FF7B269 (2026-11-10 16:39:04), 60 exp
 promotion step, 30 fps path untouched.
 LOOKUP: M1605 completes the native-60 evidence after M1604 -> 18.5124 [relevant: matched-gap correction], 18.5119
 [relevant: dance clock], 18.5094 [relevant: MFRAME60 full song]
+
+### 18.5126 M1606 THE 60 OPTION IS PROMOTED TO NATIVE 60: ALL-SCREEN 60 SCOPE, MFRAME60 AUTO-ON, LAUNCHER LABEL "全 60"; VALIDATED IN BOTH MODES
+
+The validated native-60 configuration (60 fps all-screen + MFRAME60, M1597/M1604/M1605) is now the 60 option's
+behaviour:
+
+1. runtime/gfx/display.c: fps_scope_dance() defaults to false (= every screen caps at 60) in the 60 mode; the old hybrid
+   can still be requested with RECOMP_FPS_SCOPE=dance (and RECOMP_FPS_SCOPE=all is the explicit same as the default).
+2. packs/PCSH10109/hooks.c: the MFRAME60 boot init rewrite is auto-enabled in the 60 fps mode instead of opt-in;
+   RECOMP_P5D_MFRAME60=0 still disables it (all other env gates unchanged).
+3. launcher/hub.cpp: the 60 option is labelled "60 幀（全 60：選單/舞池/UI，實驗性）" (was 舞池 60 輸出 / 選單 30).
+
+Validation with the promoted build (no env overrides, both rates driven to the song-list preview):
+
+| run | MFRAME60 boot init | dance clock median | guest/OSD | result |
+|---|---|---|---|---|
+| 60 mode | **yes (auto)** | **0.01707 s/frame = 1.024 per 60 frames** (includes menu/loading samples; the steady preview window is 0.997-1.000) | 60.0 fps, speed 1.00x, window 59.5 | native 60 active |
+| 30 mode | no | 0.03328 s/frame = 1.997 per 60 frames (= real time at 30 fps) | 30.0 fps, speed 1.00x | 30 fps path unchanged |
+
+So the 60 option now runs logic/animation/UI/music at 60 Hz in real time (per the M1597/M1604/M1605 evidence) and the
+default 30 fps mode is untouched. The 195 captured dance-preview frames from the 60 run are available for the picture
+check (full note ring / buttons / progress bar / mascot as in the M1598/M1599 MFRAME60 frames).
+
+Next: build the launcher with the new label (dev/build_p5d_launcher.ps1), run the desktop launcher end-to-end in the 60
+option (menu -> dance stage: OSD 60, guest 60 fps, speed 1.00x; a few minute visual pass), repackage the release
+(dev/make_p5d_release.py), copy the new exe to the desktop, and update the release notes (60 option: native 60 with
+MFRAME60; 30 default unchanged). Release still the previous payload CEBB6C124FF7B269 (2026-11-10 16:39:04) until the repack completes.
+
+ANTI-FORGETTING ENTRY. Keywords: M1606 60 option promoted to native 60 - the validated configuration (60 fps all-screen +
+MFRAME60) is now the 60 option behaviour: (1) runtime/gfx/display.c fps_scope_dance() defaults to false (every screen caps
+at 60) in the 60 mode, with RECOMP_FPS_SCOPE=dance restoring the old hybrid and RECOMP_FPS_SCOPE=all explicit same as
+default; (2) packs/PCSH10109/hooks.c auto-enables the MFRAME60 boot init rewrite in the 60 fps mode instead of opt-in,
+RECOMP_P5D_MFRAME60=0 disables; (3) launcher/hub.cpp labels the 60 option "60 幀（全 60：選單/舞池/UI，實驗性）"; validation
+with the promoted build (no env overrides, driven to the song-list preview): 60 mode MFRAME60 boot init yes (auto), dance
+clock median 0.01707 s/frame = 1.024 per 60 frames (includes menu/loading samples; steady preview window 0.997-1.000),
+guest 60.0 fps speed 1.00x window 59.5; 30 mode no MFRAME60 init, dance clock 0.03328 s/frame = 1.997 per 60 frames (real
+time at 30 fps), 30.0 fps speed 1.00x - the 30 fps path untouched; 195 captured dance-preview frames from the 60 run are
+available for the picture check (full note ring/buttons/progress bar/mascot); next: build the launcher with the new label
+(dev/build_p5d_launcher.ps1), run the desktop launcher end-to-end in the 60 option (menu -> dance stage: OSD 60, guest 60
+fps, speed 1.00x; a few minute visual pass), repackage the release (dev/make_p5d_release.py), copy the new exe to the
+desktop and update the release notes (60 option native 60 with MFRAME60, 30 default unchanged); release still the previous
+payload CEBB6C124FF7B269 (2026-11-10 16:39:04) until the repack completes.
+LOOKUP: M1606 promotes after M1605 -> 18.5125 [relevant: title evidence], 18.5124 [relevant: matched-gap correction],
+18.5119 [relevant: dance clock], 18.5094 [relevant: MFRAME60 full song]
