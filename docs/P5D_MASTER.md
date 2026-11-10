@@ -1656,6 +1656,7 @@
 | M1571 | §18.5098: **M-B3 step 2b: arena-based blended-window replay exists but costs a 121 ms hitch.** The recorder copies each skinned draw's previous matched LDST window bytes (mv_psrc at draw time) into a 32 MB arena (only when RECOMP_INTERP_REPLAY is on), stores per-window offsets, and the replay blends current window with the recorded previous snapshot (float lerp, alpha 0.5) into the LDST ring, bypassing the reuse cache. The blended copies are 245-250 draws x 64 KB = about 16 MB per replayed frame, which wraps the ring and forces flushes: a 121.2 ms hitch and a guest drop to 26.5 fps (from 30) on replay frames, though the replay completes without a crash. Next: dedicated blended-window placement (larger ring segment / reuse only for blends, or blend once per unique palette address per frame), then dump comparison and the second-target redirect. Release unchanged CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
 | M1572 | §18.5099: **M-B3 step 2b: the blended-window replay does not engage yet (mv_psrc often 0); replays also show ~104 ms hitches.** The arena copy and blended placement are gated on the motion pass's previous-window pointer mv_psrc[k], which is often 0 because the snapshots live in the slot the motion pass reads at its own timing, so the blend counters stayed 0 (no RPLY blend line) - which also explains the pixel-identical replay dumps (replay drew the current pose). Fix plan: record every skinned draw's current LDST window bytes into a double-buffered per-frame arena keyed by the draw's place in the recorded list (stable dance frame order), blend guest window with last frame's copy at replay and place with the palette-address cache. Separately, replays still cost ~104 ms on some frames (2222: 104.1 ms/6 edges, 2252: 104.3 ms; guest ~27 fps) while the re-render is ~5 ms, so the machinery (ring placement/wrap, batch flush) needs its own allocation/queue discipline (replay batch, own command buffer) before the 60 Hz target. Release unchanged CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
 | M1573 | §18.5100: **M-B3 step 2b: blended replay engages (frame differs 7.15%) but componentwise matrix lerp distorts the model.** Self-managed double-buffered window snapshots are in: the recorder copies each skinned draw's current LDST window bytes into the frame arena (double-buffered, swapped per frame), the replay blends the guest current window with the previous frame's copy (float lerp 0.5, one blended copy per unique palette) into the LDST ring. Replay+dump in the menu: replayed target differs from the original by 159,397 bytes (7.15% of 2,228,224), so interpolation really renders different content - but Mona appears turned/skewed, the artifact of lerping rotation matrices componentwise (50% blend of two rotations isn't a rotation). Next: rotation-aware blending (decompose translation/rotation/scale, slerp, rebuild; or re-orthonormalize), verify a plausible halfway pose, then second-target redirect, 60 Hz alternation, M-B2. Release unchanged CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
+| M1574 | §18.5101: **M-B3 2b: rotation-aware blending in; replay costs ~106 ms per replay frame.** The blended-window pass now detects affine matrices (4x4 with [0,0,0,1] last row or 3x4), checks orthonormal + det +1, slerps the rotation quaternions and lerps the translation, rebuilding the matrix (non-matrix floats lerped, non-floats passed through, one blended copy per unique palette). With no dump, replay frames still take about 106 ms (2402/2432/2462: 106.6/106.3/106.2 ms, 6 edges; guest ~27 fps): the replay doubles the frame's vertex/index/LDST-ring consumption and meets the ring fences waiting on GPU earlier laps. Fix: replay-specific queue discipline (own command buffer/transfer rings or reserved ring segment) so replay draws never wait on the normal frame's fences; then re-validate the rotation-aware blend visually, redirect the composite into the second colour target, alternate presents at 60 Hz. Release unchanged CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
 proposal).** mnsHandle_8111b64c/8111b190 receive a real-time float (+0.01668/frame at 60 vs +0.03337 at 30);
 mnsProcess_811251d6 fires per-frame but constant; other mnsProcess/mnsOption/gfd entries do not fire per-frame;
 object-word slopes show only the known danceQuantizer_81049976 w2 (+0.5 at 60 vs +1.0 at 30). The remaining
@@ -520347,3 +520348,44 @@ M-B2 validation; release unchanged payload CEBB6C124FF7B269 (2026-11-10 16:39:04
 path unaffected.
 LOOKUP: M1573 makes the blended replay engage after M1572 -> 18.5099 [relevant: blend not engaging], 18.5098
 [relevant: arena blend], 18.5097 [relevant: replay fidelity]
+
+### 18.5101 M1574 M-B3 STEP 2B: ROTATION-AWARE BLENDING IS IN; THE REPLAY'S REMAINING BLOCKER IS ITS ~106 MS COST PER REPLAY FRAME
+
+This round addressed the matrix-lerp distortion seen in M1573 and isolated the replay's real performance blocker:
+
+1. Rotation-aware blending implemented: the blended-window pass now detects affine matrices in the window float
+   stream (4x4 with a last [0,0,0,1] row, or 3x4 rows of floats: three rotation rows plus translation), checks the
+   3x3 part is orthonormal with determinant +1, converts it to a quaternion, blends the quaternions (slerp, or nlerp
+   for nearly parallel ones) and the translation linearly, and rebuilds the matrix; non-matrix float words are lerped
+   as before and non-float words are passed through, one blended copy per unique palette address per replay. The dance
+   run with the replay still reaches the dance stage and the replay log shows frames of 334-470 draws in 5 scenes.
+
+2. Performance: the replay itself is the cost, not the dump. With no dump at all (RECOMP_INTERP_REC=1 RECOMP_MV=1
+   RECOMP_INTERP_REPLAY=1), replay frames still take about 106 ms (frames 2402/2432/2462: 106.6/106.3/106.2 ms, 6
+   edges) and the guest rate is ~27 fps around them. Since the replay re-renders the frame through the same batching
+   path, it doubles the frame's vertex/index/LDST-ring consumption and therefore meets the ring fences that wait for
+   the GPU's earlier laps - a GPU sync stall per replay. The fix is a replay-specific queue discipline: its own
+   command buffer/transfer rings (or a ring segment reserved for replay) so that replay draws never wait on the normal
+   frame's fences, and only then can the interpolated frame be produced inside a 60 Hz budget.
+
+Next: the replay resource discipline above, then re-validate the rotation-aware blend visually (a plausible halfway
+pose instead of the previous skew), then redirect the composite into the second colour target and alternate presents
+at 60 Hz, and finally M-B2/M-B4. Release unchanged: payload CEBB6C124FF7B269 (2026-11-10 16:39:04), 60 experimental; all prototypes
+env-gated, the 30 fps path unaffected.
+
+ANTI-FORGETTING ENTRY. Keywords: M1574 M-B3 step 2b - rotation-aware blending implemented: the blended-window pass
+detects affine matrices in the window float stream (4x4 with last [0,0,0,1] row, or 3x4 rows of floats), checks the
+3x3 part is orthonormal with determinant +1, converts to quaternion, blends quaternions (slerp; nlerp for nearly
+parallel) and translation linearly, rebuilds the matrix; non-matrix floats are lerped and non-float words passed
+through, one blended copy per unique palette address per replay; the dance run with replay reaches the stage and the
+replay log shows frames of 334-470 draws in 5 scenes; performance: the replay itself is the cost, not the dump - with
+no dump (RECOMP_INTERP_REC=1 RECOMP_MV=1 RECOMP_INTERP_REPLAY=1) replay frames still take about 106 ms (frames
+2402/2432/2462: 106.6/106.3/106.2 ms, 6 edges) and the guest rate is ~27 fps around them; the replay re-renders the
+frame through the same batching path, doubling the frame's vertex/index/LDST-ring consumption and meeting the ring
+fences that wait for the GPU earlier laps - a GPU sync stall per replay; fix: replay-specific queue discipline (own
+command buffer/transfer rings or a reserved ring segment) so replay draws never wait on the normal frame's fences;
+then re-validate the rotation-aware blend visually, redirect the composite into the second colour target, alternate
+presents at 60 Hz, then M-B2/M-B4; release unchanged payload CEBB6C124FF7B269 (2026-11-10 16:39:04), 60 experimental, all prototypes
+env-gated and the 30 fps path unaffected.
+LOOKUP: M1574 advances M-B3 step 2b after M1573 -> 18.5100 [relevant: matrix lerp distortion], 18.5099 [relevant: blend
+engagement], 18.5098 [relevant: arena blend + hitch]
