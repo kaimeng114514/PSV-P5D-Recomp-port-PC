@@ -1655,6 +1655,7 @@
 | M1570 | §18.5097: **M-B3 step 2b: replay is pixel-identical; bone-window blend needs per-draw previous-window recording.** With RECOMP_INTERP_REPLAY=1 + RECOMP_INTERP_REPLAY_DUMP=prefix, the main 3D scene target (0x1dfc0000, 1024x544) dumped before and after replaying the recorded frame is byte-identical (2,228,224 bytes, same sha256 8eff04176efbf011...), so the replay engine reproduces the original scene exactly (game ran normally: 30 fps guest / 60 fps window / speed 1.00x, no crash). The blended bone palettes did not take effect because the dance character's LDST windows are double-buffered (current frame window addresses differ from the previous frame's); the fix is to record each skinned draw's matched previous-window bases during the original frame (mv_match already computes the previous SA per draw) and blend against those in the replay, then redirect the composite into the second colour target and alternate at 60 Hz. Release unchanged CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
 | M1571 | §18.5098: **M-B3 step 2b: arena-based blended-window replay exists but costs a 121 ms hitch.** The recorder copies each skinned draw's previous matched LDST window bytes (mv_psrc at draw time) into a 32 MB arena (only when RECOMP_INTERP_REPLAY is on), stores per-window offsets, and the replay blends current window with the recorded previous snapshot (float lerp, alpha 0.5) into the LDST ring, bypassing the reuse cache. The blended copies are 245-250 draws x 64 KB = about 16 MB per replayed frame, which wraps the ring and forces flushes: a 121.2 ms hitch and a guest drop to 26.5 fps (from 30) on replay frames, though the replay completes without a crash. Next: dedicated blended-window placement (larger ring segment / reuse only for blends, or blend once per unique palette address per frame), then dump comparison and the second-target redirect. Release unchanged CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
 | M1572 | §18.5099: **M-B3 step 2b: the blended-window replay does not engage yet (mv_psrc often 0); replays also show ~104 ms hitches.** The arena copy and blended placement are gated on the motion pass's previous-window pointer mv_psrc[k], which is often 0 because the snapshots live in the slot the motion pass reads at its own timing, so the blend counters stayed 0 (no RPLY blend line) - which also explains the pixel-identical replay dumps (replay drew the current pose). Fix plan: record every skinned draw's current LDST window bytes into a double-buffered per-frame arena keyed by the draw's place in the recorded list (stable dance frame order), blend guest window with last frame's copy at replay and place with the palette-address cache. Separately, replays still cost ~104 ms on some frames (2222: 104.1 ms/6 edges, 2252: 104.3 ms; guest ~27 fps) while the re-render is ~5 ms, so the machinery (ring placement/wrap, batch flush) needs its own allocation/queue discipline (replay batch, own command buffer) before the 60 Hz target. Release unchanged CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
+| M1573 | §18.5100: **M-B3 step 2b: blended replay engages (frame differs 7.15%) but componentwise matrix lerp distorts the model.** Self-managed double-buffered window snapshots are in: the recorder copies each skinned draw's current LDST window bytes into the frame arena (double-buffered, swapped per frame), the replay blends the guest current window with the previous frame's copy (float lerp 0.5, one blended copy per unique palette) into the LDST ring. Replay+dump in the menu: replayed target differs from the original by 159,397 bytes (7.15% of 2,228,224), so interpolation really renders different content - but Mona appears turned/skewed, the artifact of lerping rotation matrices componentwise (50% blend of two rotations isn't a rotation). Next: rotation-aware blending (decompose translation/rotation/scale, slerp, rebuild; or re-orthonormalize), verify a plausible halfway pose, then second-target redirect, 60 Hz alternation, M-B2. Release unchanged CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
 proposal).** mnsHandle_8111b64c/8111b190 receive a real-time float (+0.01668/frame at 60 vs +0.03337 at 30);
 mnsProcess_811251d6 fires per-frame but constant; other mnsProcess/mnsOption/gfd entries do not fire per-frame;
 object-word slopes show only the known danceQuantizer_81049976 w2 (+0.5 at 60 vs +1.0 at 30). The remaining
@@ -520300,3 +520301,49 @@ interpolation target is reachable; release unchanged payload CEBB6C124FF7B269 (2
 env-gated and the 30 fps path unaffected.
 LOOKUP: M1572 diagnoses M-B3 step 2b after M1571 -> 18.5098 [relevant: arena blend + hitch], 18.5097 [relevant: replay
 fidelity + double-buffered windows], 18.5096 [relevant: replay engine]
+
+### 18.5100 M1573 M-B3 STEP 2B: THE BLENDED REPLAY ENGAGES (FRAME DIFFERS BY 7.15%) BUT COMPONENTWISE MATRIX LERP DISTORTS THE MODEL
+
+The self-managed double-buffered window snapshots are in and the blend now engages:
+
+- the recorder, when RECOMP_INTERP_REPLAY is on, copies each skinned draw's current LDST window bytes (64 KB window)
+  into the current frame's arena and stores per-window offsets in rec_prev[rec_prev_cur] (double-buffered with the
+  previous frame's arena/array, swapped at the first recorded draw of each frame);
+- the replay blends the guest's current window with the previous frame's recorded copy (float-word lerp, alpha 0.5,
+  non-float words kept, one blended copy per unique palette address per replay) and places it into the LDST ring.
+
+Verified: with the replay+dump run in the main menu, the replayed scene target differs from the original by
+159,397 bytes (7.15% of the 2,228,224-byte target) - the interpolation path is really rendering different content,
+not the same pose. However the difference is not a halfway pose: the dump shows the menu mascot (Mona) turned/skewed
+away from its normal orientation, the expected artifact of lerping rotation matrices componentwise (a 50% blend of two
+rotation matrices is not a rotation). So the remaining work on the blend is the classic skinning-interpolation problem:
+decompose each bone matrix into translation + rotation (quaternion) + scale (or at least re-orthonormalize the blended
+3x3 part and rebuild the matrix), blend in that space, and only then write the window back. Also verify what the
+windows actually hold beyond the bone palette (the window may carry per-object uniforms too) and that the draw order
+between consecutive frames maps 1:1 for the per-draw previous-window keying (the dance draw order looked stable in the
+scene records, but the menu frame may not be).
+
+Next: (1) implement rotation-aware blending for the window float blocks (detect 4x3/3x4 affine matrices in the
+window, slerp the rotation, lerp the translation; pass through anything else), (2) re-run the dump comparison and
+expect a plausible halfway pose, (3) redirect the replay's composite into the second colour target and alternate
+base/interpolated images at 60 Hz, (4) M-B2 validation. Release unchanged: payload CEBB6C124FF7B269 (2026-11-10 16:39:04), 60
+experimental; all prototypes env-gated, the 30 fps path unaffected.
+
+ANTI-FORGETTING ENTRY. Keywords: M1573 M-B3 step 2b - the self-managed double-buffered window snapshots are in: the
+recorder (when RECOMP_INTERP_REPLAY is on) copies each skinned draw's current LDST window bytes (64 KB) into the
+current frame's arena and stores per-window offsets in rec_prev[rec_prev_cur] (double-buffered with the previous
+frame's arena/array, swapped at the first recorded draw of each frame); the replay blends the guest current window with
+the previous frame's recorded copy (float-word lerp, alpha 0.5, non-float words kept, one blended copy per unique
+palette address per replay) into the LDST ring; verified: replay+dump in the main menu shows the replayed scene target
+differs from the original by 159,397 bytes (7.15% of 2,228,224) so the interpolation path really renders different
+content, but not a halfway pose - the dump shows the menu mascot Mona turned/skewed away from its normal orientation,
+the expected artifact of componentwise rotation-matrix lerp (a 50% blend of two rotation matrices is not a rotation);
+remaining work is the classic skinning-interpolation problem: decompose each bone matrix into translation + rotation
+(quaternion) + scale (or at least re-orthonormalize the blended 3x3 part and rebuild the matrix), blend in that space,
+then write the window back; also verify the windows hold beyond the bone palette (possible per-object uniforms) and
+that consecutive frames' draw order maps 1:1 for the per-draw previous-window keying; next: rotation-aware blending,
+dump comparison for a plausible halfway pose, redirect the composite into the second colour target, alternate at 60 Hz,
+M-B2 validation; release unchanged payload CEBB6C124FF7B269 (2026-11-10 16:39:04), 60 experimental, all prototypes env-gated and the 30 fps
+path unaffected.
+LOOKUP: M1573 makes the blended replay engage after M1572 -> 18.5099 [relevant: blend not engaging], 18.5098
+[relevant: arena blend], 18.5097 [relevant: replay fidelity]
