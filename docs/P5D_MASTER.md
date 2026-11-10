@@ -1670,6 +1670,7 @@
 | M1585 | §18.5112: **The (60,15) repeat disagrees with the first run (char 1.62 vs 1.15): the region-ratio methodology is not reproducible - align by the music start.** Second (60,15) run (DCLK start 2649, 121 aligned frames): char 1.62/bg 1.54/hud_l 1.62/hud_r 1.06/bottom 1.41/top 1.02 vs first run 1.15/1.12/1.24/0.80/1.07/0.84. The window is placed by the first [DCLK] clk=0 line, but the real music/choreography start comes later and varies (start frames observed 2596/2649/2664/2678/2733/2776), so each run samples a different segment; the sweep is unreliable beyond broad trends (only the 30,30 pair is consistently much faster, ~1.7-1.9x). Fix: align by the music start ([DCLK] where music first > 0), re-run the sweep, and check the driver always selects the same song. Release unchanged CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
 | M1586 | §18.5113: **Fine-grained dance-clock logging did not take (probe called ~every 60 frames); alignment problem open.** Lowering the [DCLK] threshold from 60 to 6 frames still yields ~16 lines over ~900 frames, so the hooked guest function itself runs only about every 60 frames. Fresh 60 fps (MFRAME60+APPFPS60+pair 60,15, 841 shots) and 30 fps (601 shots) captures: the aligned comparison selected 74 frames for 60 fps and none for 30 fps - the [DCLK] f numbering and the shot numbering do not line up. Next: unify the frame base (log display_frames in the shot code or the shot number in DCLK), add a per-frame clock probe on a per-frame dance function reading the same clock struct, or use the audio/music time as the base (DCLK music reads 0.0000, wrong offset); then redo the 60/30 comparison. Pair hook env-gated/off; release unchanged CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
 | M1587 | §18.5114: **Dance clock's own advance rate: MFRAME60-only is real-time (1/60 s per frame); the APPFPS60 pair runs mostly read 1.55-2.0x, so the pair may break the real-time clock.** Median [DCLK] clk delta/frame from existing logs: MFRAME60+pair(60,60) appfps60 = 1.000/60f (real time, matches M1555's full-song 0.01668 s/frame); pairs (60,30/20/15) = 1.56-1.61/60f; pair repeats 1.78-2.0; 30 fps hybrid reference 1.07/30f (method sound within ~7%). Pair-run logs include pre-dance/countdown phases, so medians are not dance-only; but the only unambiguous full-song measurement (M1555, MFRAME60 only) is real time and the pair runs have no equivalent. Earlier 'pair 60,15 best' is not supported by clock data; next: full-song timing for MFRAME60-only vs +pair(60,60) vs +pair(60,15) (expect ~167 s), pick the real-time winner, then redo screenshots for it; if MFRAME60-only wins, the residual animation mismatch is elsewhere and M-B3 remains the fallback. Release unchanged CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
+| M1588 | §18.5115: **Full-song timing attempt did not reach a real song - the clean-song driver stops at the song-select preview.** Three 60 fps configs (MFRAME60 only; +APPFPS60 pair 60,60; +APPFPS 60,15): all ~32 s wall, dance clock ~31 s, 1860/1860/1800 frames, scene log bouncing song->dance->song, result after ~32 s instead of the real song's ~166 s - so the driver no longer performs the input sequence that enters a full song (M1555 used a different route). These runs measured the preview and cannot decide the real-time config; next restore the working full-song input sequence (main menu START -> SONG -> select -> confirm) and re-run the three configs, then use the whole-song wall time/dance clock (~166-168 s) as the arbiter; until then M1587 stands (MFRAME60-only has the one real-time full-song measurement). Release unchanged CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
 proposal).** mnsHandle_8111b64c/8111b190 receive a real-time float (+0.01668/frame at 60 vs +0.03337 at 30);
 mnsProcess_811251d6 fires per-frame but constant; other mnsProcess/mnsOption/gfd entries do not fire per-frame;
 object-word slopes show only the known danceQuantizer_81049976 w2 (+0.5 at 60 vs +1.0 at 30). The remaining
@@ -520953,3 +520954,42 @@ come from a subsystem other than the dance clock (M-B3 interpolation remains the
 CEBB6C124FF7B269 (2026-11-10 16:39:04), 60 experimental, all hooks env-gated and off by default.
 LOOKUP: M1587 re-checks the pair story from M1581-M1584 via the clock -> 18.5112 [relevant: reproducibility problem],
 18.5110 [relevant: sweep 60,15], 18.5094 [relevant: MFRAME60 full-song real-time]
+
+### 18.5115 M1588 THE FULL-SONG TIMING ATTEMPT DID NOT REACH A REAL SONG: THE CLEAN-SONG DRIVER STOPS AT THE SONG-SELECT PREVIEW
+
+Three 60 fps configurations were run through drive_song_clean.ps1 (rate 60 all-screen): MFRAME60 only, MFRAME60 +
+APPFPS60 (pair 60,60), MFRAME60 + APPFPS60 + APPFPS=60,15. None produced a real full song:
+
+| run | wall | dance clock | frames | scene log |
+|---|---|---|---|---|
+| songmf | 32.4 s | 31.03 s | 1860 | f=1492 song->dance (song confirmed); f=1492 dance->song (song modelled); f=2150 song->dance (dance stage); f=2543 dance->song (song modelled) |
+| songmf60 | 32.4 s | 31.02 s | 1860 | f=2196 song->dance; f=2597 dance->song; f=2761 song->dance; f=4675 dance->song |
+| songmf6015 | 32.6 s | 30.37 s | 1800 | f=2146 song->dance; f=2679 dance->song |
+
+The scene log shows the run bouncing between the song-select screen and the dance preview (and the result screen was
+reported after ~32 s instead of the real song's ~166 s), so this driver no longer performs the input sequence that enters
+and plays a full song - the earlier successful full-song measurement (M1555: wall ~167 s / 10020 frames) used a
+different driving route/input sequence. Therefore these runs measured the song preview, not the song, and cannot decide
+which 60 fps configuration keeps the real-time clock.
+
+Next: restore the working full-song input sequence (e.g. from the earlier successful route or drive scripts: main menu
+START -> SONG screen -> select song -> confirm -> no further input) and re-run the three configurations; only then use
+the whole-song wall time and dance clock (expected ~166-168 s if real time) to pick the configuration. Until then the
+conclusion of M1587 stands: MFRAME60-only has the one real-time full-song measurement (M1555), and the APPFPS60 pair
+configurations have no equivalent measurement. Release unchanged: payload CEBB6C124FF7B269 (2026-11-10 16:39:04), 60 experimental; all
+hooks env-gated and off by default.
+
+ANTI-FORGETTING ENTRY. Keywords: M1588 full-song timing attempt failed - three 60 fps configurations (MFRAME60 only;
+MFRAME60+APPFPS60 pair 60,60; MFRAME60+APPFPS60+APPFPS=60,15) run through drive_song_clean.ps1 at rate 60 all-screen all
+stopped at the song-select preview: songmf wall 32.4 s dance clock 31.03 s 1860 frames, songmf60 wall 32.4 s clock 31.02 s
+1860 frames, songmf6015 wall 32.6 s clock 30.37 s 1800 frames, with scene logs bouncing song->dance->song (f=1492/1492/
+2150/2543 etc.) and result reported after ~32 s instead of the real song ~166 s; so the driver no longer performs the input
+sequence that enters a full song - the earlier successful full-song measurement (M1555, wall ~167 s / 10020 frames) used a
+different driving route/input sequence; these runs measured the song preview and cannot decide which 60 fps configuration
+keeps the real-time clock; next restore the working full-song input sequence (main menu START -> SONG screen -> select song
+-> confirm -> no further input) and re-run the three configurations, then use whole-song wall time and dance clock
+(expected ~166-168 s if real time) to pick the configuration; until then M1587 stands - MFRAME60-only has the one real-time
+full-song measurement (M1555) and the APPFPS60 pair configurations have no equivalent; release unchanged payload
+CEBB6C124FF7B269 (2026-11-10 16:39:04), 60 experimental; all hooks env-gated and off by default.
+LOOKUP: M1588 follows M1587 on full-song timing -> 18.5114 [relevant: clock rate verdict], 18.5094 [relevant: MFRAME60
+full-song real-time], 18.5104 [relevant: boot frame-rate call sequence]
