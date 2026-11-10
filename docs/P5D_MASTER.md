@@ -1657,6 +1657,7 @@
 | M1572 | §18.5099: **M-B3 step 2b: the blended-window replay does not engage yet (mv_psrc often 0); replays also show ~104 ms hitches.** The arena copy and blended placement are gated on the motion pass's previous-window pointer mv_psrc[k], which is often 0 because the snapshots live in the slot the motion pass reads at its own timing, so the blend counters stayed 0 (no RPLY blend line) - which also explains the pixel-identical replay dumps (replay drew the current pose). Fix plan: record every skinned draw's current LDST window bytes into a double-buffered per-frame arena keyed by the draw's place in the recorded list (stable dance frame order), blend guest window with last frame's copy at replay and place with the palette-address cache. Separately, replays still cost ~104 ms on some frames (2222: 104.1 ms/6 edges, 2252: 104.3 ms; guest ~27 fps) while the re-render is ~5 ms, so the machinery (ring placement/wrap, batch flush) needs its own allocation/queue discipline (replay batch, own command buffer) before the 60 Hz target. Release unchanged CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
 | M1573 | §18.5100: **M-B3 step 2b: blended replay engages (frame differs 7.15%) but componentwise matrix lerp distorts the model.** Self-managed double-buffered window snapshots are in: the recorder copies each skinned draw's current LDST window bytes into the frame arena (double-buffered, swapped per frame), the replay blends the guest current window with the previous frame's copy (float lerp 0.5, one blended copy per unique palette) into the LDST ring. Replay+dump in the menu: replayed target differs from the original by 159,397 bytes (7.15% of 2,228,224), so interpolation really renders different content - but Mona appears turned/skewed, the artifact of lerping rotation matrices componentwise (50% blend of two rotations isn't a rotation). Next: rotation-aware blending (decompose translation/rotation/scale, slerp, rebuild; or re-orthonormalize), verify a plausible halfway pose, then second-target redirect, 60 Hz alternation, M-B2. Release unchanged CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
 | M1574 | §18.5101: **M-B3 2b: rotation-aware blending in; replay costs ~106 ms per replay frame.** The blended-window pass now detects affine matrices (4x4 with [0,0,0,1] last row or 3x4), checks orthonormal + det +1, slerps the rotation quaternions and lerps the translation, rebuilding the matrix (non-matrix floats lerped, non-floats passed through, one blended copy per unique palette). With no dump, replay frames still take about 106 ms (2402/2432/2462: 106.6/106.3/106.2 ms, 6 edges; guest ~27 fps): the replay doubles the frame's vertex/index/LDST-ring consumption and meets the ring fences waiting on GPU earlier laps. Fix: replay-specific queue discipline (own command buffer/transfer rings or reserved ring segment) so replay draws never wait on the normal frame's fences; then re-validate the rotation-aware blend visually, redirect the composite into the second colour target, alternate presents at 60 Hz. Release unchanged CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
+| M1575 | §18.5102: **Replay hitch persists after four sync fixes; PS4-60 lead becomes the priority.** Tried: GPU drain before replay; skip guest->GPU uploads and end-of-scene readbacks during replay (interp_no_sync); skip begin_scene downloads; early-out matrix detection - hitch unchanged (117.5/125.4 ms on hitches 59/60; run reached dance). Next: instrument the replay sections (per begin_scene / draw range / end_scene) to find where the ~100 ms goes (per-scene begin/end overhead or LDST-ring placement suspects). PS4 lead: user reports PS4 UI looks smooth (60 fps), so the shared codebase may carry platform-conditional pacing the Vita build never selects; next search the modules for platform/refresh-rate/60 code paths around the appMframe boot init callers and check what init(1,1,1) is derived from at the original call sites - a PS4 branch passing different args or setting a 60 flag would be a cleaner path than render-level interpolation. Release unchanged CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
 proposal).** mnsHandle_8111b64c/8111b190 receive a real-time float (+0.01668/frame at 60 vs +0.03337 at 30);
 mnsProcess_811251d6 fires per-frame but constant; other mnsProcess/mnsOption/gfd entries do not fire per-frame;
 object-word slopes show only the known danceQuantizer_81049976 w2 (+0.5 at 60 vs +1.0 at 30). The remaining
@@ -520389,3 +520390,47 @@ presents at 60 Hz, then M-B2/M-B4; release unchanged payload CEBB6C124FF7B269 (2
 env-gated and the 30 fps path unaffected.
 LOOKUP: M1574 advances M-B3 step 2b after M1573 -> 18.5100 [relevant: matrix lerp distortion], 18.5099 [relevant: blend
 engagement], 18.5098 [relevant: arena blend + hitch]
+
+### 18.5102 M1575 REPLAY HITCH PERSISTS AFTER EVERY SYNC EXPERIMENT; THE PS4-60 LEAD MAKES THE PLATFORM/60 CODE PATH SEARCH THE PRIORITY
+
+This round tried four fixes for the replay's ~104-125 ms hitch (a replay every 30 presents):
+
+1. a full GPU drain before the replay (batch_flush + empty submit/fence wait) so the replay's ring writes would not
+   meet in-flight fences - hitch unchanged;
+2. skipping the guest->GPU target uploads and the end-of-scene readback enqueues during the replay (interp_no_sync) -
+   hitch unchanged;
+3. skipping the begin_scene target downloads during the replay - hitch unchanged (the automated run reached the dance
+   stage; hitches 59/60 took 117.5/125.4 ms);
+4. cheap early-outs in the affine-matrix detection (the detection runs over every float of every window) - hitch
+   unchanged.
+So the 100 ms is not the sync/readback path factors tried so far. Next diagnostic: instrument the replay's own
+sections (per begin_scene, per draw range, end_scene) with timers and log a breakdown when a replay exceeds 20 ms; the
+prime suspects are the five per-scene begin/end overheads (batch flush + render pass setup) and the LDST-ring placement
+of the blended windows.
+
+The more promising lead came from the user: the PS4 release's UI looks smooth (60 fps), so the shared codebase may
+carry platform-conditional pacing code that the Vita build never selects. Next: search the game modules for
+platform/refresh-rate/60 code paths (strings and constants around the appMframe boot init callers and any console-type
+or config switch), and check what the boot init(1,1,1) arguments are derived from at their original call sites - if a
+PS4 branch passes different arguments or sets a 60 flag, that is the clean way to drive the engine at 60 instead of
+render-level interpolation. Both tracks continue: the replay timing breakdown, and the platform/60 path search.
+
+Release unchanged: payload CEBB6C124FF7B269 (2026-11-10 16:39:04), 60 experimental; all prototypes env-gated, the 30 fps path unaffected.
+
+ANTI-FORGETTING ENTRY. Keywords: M1575 replay hitch persists - four fixes tried for the replay ~104-125 ms hitch (a
+replay every 30 presents): a full GPU drain before the replay (batch_flush + empty submit/fence wait) so the replay ring
+writes do not meet in-flight fences - unchanged; skipping guest->GPU target uploads and end-of-scene readback enqueues
+during the replay (interp_no_sync) - unchanged; skipping begin_scene target downloads during the replay - unchanged
+(hitches 59/60: 117.5/125.4 ms, automated run reached the dance stage); cheap early-outs in the affine-matrix detection
+(detection runs over every float of every window) - unchanged; so the 100 ms is not those sync/readback path factors;
+next diagnostic: instrument the replay own sections (per begin_scene, per draw range, end_scene) with timers and log a
+breakdown when a replay exceeds 20 ms, prime suspects being the five per-scene begin/end overheads (batch flush +
+render pass setup) and the LDST-ring placement of blended windows; PS4-60 lead: the user reports the PS4 release UI
+looks smooth (60 fps), so the shared codebase may carry platform-conditional pacing code the Vita build never selects;
+next search the game modules for platform/refresh-rate/60 code paths (strings and constants around the appMframe boot
+init callers and any console-type or config switch) and check what the boot init(1,1,1) arguments are derived from at
+their original call sites - if a PS4 branch passes different arguments or sets a 60 flag, that is the clean way to
+drive the engine at 60 instead of render-level interpolation; both tracks continue; release unchanged payload
+CEBB6C124FF7B269 (2026-11-10 16:39:04), 60 experimental, all prototypes env-gated and the 30 fps path unaffected.
+LOOKUP: M1575 continues M-B3 step 2b after M1574 -> 18.5101 [relevant: rotation blend + hitch], 18.5100 [relevant:
+matrix lerp distortion], 18.5099 [relevant: blend engagement]
