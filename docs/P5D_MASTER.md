@@ -1675,6 +1675,7 @@
 | M1590 | §18.5117: **GitHub fetch solved via gh-proxy mirror; the P3D/P4D/P5D patch repo has no Vita 60 fps patch.** github.com resolves to 127.0.0.1/::1 (hosts block; curl HTTP 000); gh-proxy.com (HTTP 200) proxies raw + GitHub API, so zarroboogs/ppp (74 files, PS4+PSV Persona patches) was fetched: PSV P5D (PCSE01275), P3D (PCSE01274), P4D (PCSE00764) each have only auto/intro_skip/mod/no_trp; PS4 P5D/P3D have intro_skip/mod/no_trp/overlay/psvc; none is a 60 fps/framerate patch - consistent with PS4 being natively 60 and Vita 30, so there is no public Vita 60 patch to copy; our engine-level path (frame-rate pair + MFRAME60 + measurement) remains the only route. Mod Support means a data/mod.cpk route exists if a native-60 setting turns out data-driven. Release unchanged CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
 | M1591 | §18.5118: **Song-entry key experiments still do not start a real song; this run ends with the route open.** Round 40: pressing 'e' once then no input, and 'e' then 'p' (START), both end with the log "song -> dance (song confirmed)" then "dance -> song (song modelled)" and the driver reporting "song: True scr=MAIN" - the Wait-For returned while the screen was back at MAIN, so the keys hit the main menu. The song-confirmed dialog needs a different key/step (candidate 'b' (Cross), a difficulty/settings confirm, or waiting for the preview to end); without it there is no full-song measurement and the native-60 verdict stays open. Resume: learn the exact dialog keys (interactive or screenshot steps), fix drive_song_clean.ps1, run the three configs (MFRAME60 only; +pair 60,60; +pair 60,15) with the whole-song dance clock/wall ~166-168 s as arbiter, then M-B4/build/repack/release notes; fallback to the render-interpolation road only if none is real-time. Release unchanged CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
 | M1597 | §18.5119: **Controlled preview benchmark: all three 60 fps configs advance the dance clock in real time; M1587's 1.55-2.0x readings were polluted.** The song-list preview dance is reachable deterministically (main menu -> song list -> confirm), so the same route benchmarks every config: steady-state dance-clock median at 60 fps all-screen: MFRAME60 only 0.01663 s/frame (0.998/60), +APPFPS60 pair(60,60) 0.01662 (0.997), +APPFPS(60,15) 0.01666 (1.000) - all real time. M1587's multi-config 1.55-2.0x numbers came from non-steady segments; the pair does not break the dance clock, so the native-60 question hinges on animation/render pacing. Next M1598: pixel-diff benchmark on the same preview (low RECOMP_SHOT_EVERY, four configs, [DCLK]-aligned steady window) to check per-second change against the 30 fps baseline; if it matches, native 60 is validated and M-B4 proceeds. Release unchanged CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
+| M1598/M1599 | §18.5120: **Preview pixel benchmark: at 60 fps the dance animation is 1.5-1.7x the 30 fps baseline while the dance clock is real time; the frame-rate pair lowers it to ~1.1-1.4x but breaks the note/HUD layer.** Same preview route, RECOMP_SHOT=5, shot frames mapped to the dance clock via [DCLK], steady window 6-14 s: 60 MFRAME60 only ratios 1.49-1.68; pair (60,60) 1.46-1.64; (60,15) 1.10-1.34; (60,12) 1.10-1.35; (60,10) 1.12-1.39; (60,7) 1.14-1.43 (never 1.0). Screenshots at ~11 s: MFRAME60-only has the full note ring/buttons/progress bar, pair (60,7) shows only one star note and no ring/buttons/progress bar - the note/HUD layer desyncs (user also saw picture errors); metrics still guest ~60 fps/speed 1.00x/no errors, so it is pacing/state, not GPU. Conclusion: the gap is the animation advance rate, not the dance clock; the pair is unacceptable; next make the character and note/HUD animation time base advance by real time (preview benchmark as the acceptance test). Release unchanged CEBB6C124FF7B269, 2026-11-10 16:39:04; 60 experimental. |
 proposal).** mnsHandle_8111b64c/8111b190 receive a real-time float (+0.01668/frame at 60 vs +0.03337 at 30);
 mnsProcess_811251d6 fires per-frame but constant; other mnsProcess/mnsOption/gfd entries do not fire per-frame;
 object-word slopes show only the known danceQuantizer_81049976 w2 (+0.5 at 60 vs +1.0 at 30). The remaining
@@ -521184,3 +521185,61 @@ proceed (title timing, full song length, guest 60 fps, speed 1.00x, repackage); 
 (2026-11-10 16:39:04), 60 experimental, all hooks env-gated and off by default, 30 fps path untouched.
 LOOKUP: M1597 corrects M1587 -> 18.5114 [relevant: clock rate verdict], 18.5118 [relevant: route/heuristics], 18.5094
 [relevant: MFRAME60 full-song real time]
+
+### 18.5120 M1598/M1599 PREVIEW PIXEL BENCHMARK: AT 60 FPS THE DANCE ANIMATION IS 1.5-1.7x THE 30 FPS BASELINE WHILE THE DANCE CLOCK IS REAL TIME; THE FRAME-RATE PAIR LOWERS IT TO ~1.1-1.4x BUT BREAKS THE NOTE/HUD LAYER
+
+The song-list preview (M1597: reachable deterministically, steady dance clock real time in every configuration) became
+the pixel-diff benchmark: four runs captured every 5th presented frame in a fixed shot window (RECOMP_SHOT=5), each shot
+frame mapped to the dance clock through the [DCLK] lines, and the per-second pixel change measured in the same steady
+window (dance clock 6-14 s). Measured per-second change, ratio versus the 30 fps baseline (30 fps values in the
+second column):
+
+| config | char_center | bg_left | hud_left | hud_right | bottom_bar | top_corner |
+|---|---|---|---|---|---|---|
+| 60 fps MFRAME60 only | 1373 / 1.50 | 1131 / 1.68 | 1093 / 1.68 | 1153 / 1.62 | 1174 / 1.62 | 1248 / 1.49 |
+| 60 fps + pair (60,60) | 1341 / 1.46 | 1102 / 1.63 | 1067 / 1.64 | 1125 / 1.58 | 1150 / 1.58 | 1231 / 1.47 |
+| 60 fps + pair (60,15) | 1226 / 1.34 | 827 / 1.22 | 819 / 1.25 | 863 / 1.21 | 797 / 1.10 | 1100 / 1.31 |
+| 60 fps + pair (60,12) | 1226 / 1.34 | 836 / 1.24 | 833 / 1.28 | 865 / 1.22 | 798 / 1.10 | 1134 / 1.35 |
+| 60 fps + pair (60,10) | 1277 / 1.39 | 873 / 1.29 | 881 / 1.35 | 890 / 1.25 | 815 / 1.12 | 1165 / 1.39 |
+| 60 fps + pair (60,7) | 1283 / 1.40 | 879 / 1.30 | 888 / 1.36 | 886 / 1.24 | 825 / 1.14 | 1197 / 1.43 |
+
+So the rendered animation advances 1.5-1.7x faster than the 30 fps baseline even though the dance clock is real time
+(the animation is not driven by that clock). The frame-rate pair's second value lowers the ratio to a minimum around
+12-15 (1.10-1.35) and then it rises again; it cannot reach 1.0. Worse, the screenshots show a visual regression in the
+pair runs: at the same dance clock (shot_02500, clock ~11 s) the MFRAME60-only frame shows the full note ring, the two
+side buttons, the progress bar and the top-left mascot, while the pair (60,7) frame shows only one star note and no
+ring/buttons/progress bar - the note/HUD layer is desynced or missing. The user independently observed picture errors in
+some of the later runs, which matches this. (The metrics of all pair runs read guest ~60 fps, speed 1.00x, 5 scenes 933
+draws, no logged error/fallback, so this is a pacing/state issue, not a GPU failure.)
+
+Conclusions: (1) the native-60 gap is not the dance/music clock (real time) but the animation advance rate (1.5-1.7x);
+(2) the frame-rate pair is not an acceptable solution - it changes an internal rate that the note/HUD animation also
+consumes, causing missing/desynced UI; (3) the next step must find the animation time base used by the dance character
+and the note/HUD layers (the appCalculator keyframe evaluator was already partly characterised in M-B1) and make it
+advance by real time instead of per-frame; the preview benchmark gives a fast, reachable acceptance test (per-second
+pixel change equal to the 30 fps baseline, full note/HUD present).
+
+Release unchanged: payload CEBB6C124FF7B269 (2026-11-10 16:39:04), 60 experimental; all hooks env-gated and off by default, the 30 fps path
+untouched.
+
+ANTI-FORGETTING ENTRY. Keywords: M1598/M1599 preview pixel benchmark - the song-list preview (reachable deterministically,
+steady dance clock real time in every configuration per M1597) is the benchmark: four/eight runs captured every 5th
+presented frame (RECOMP_SHOT=5) in a fixed window, shot frames mapped to the dance clock through the [DCLK] lines, and the
+per-second pixel change measured in the same steady window (dance clock 6-14 s); per-second ratios versus the 30 fps
+baseline: 60 fps MFRAME60 only char_center 1373/1.50, bg_left 1131/1.68, hud_left 1093/1.68, hud_right 1153/1.62,
+bottom_bar 1174/1.62, top_corner 1248/1.49; +pair 60,60 1.46-1.64; +pair 60,15 1.10-1.34; +pair 60,12 1.10-1.35; +pair
+60,10 1.12-1.39; +pair 60,7 1.14-1.43 - the pair lowers the ratio to a minimum around 12-15 and cannot reach 1.0; the
+rendered animation advances 1.5-1.7x faster than the baseline even though the dance clock is real time (the animation is
+not driven by that clock); worse, the screenshots show a visual regression in the pair runs: at the same dance clock
+(shot_02500, ~11 s) the MFRAME60-only frame shows the full note ring, two side buttons, progress bar and top-left mascot,
+while the pair 60,7 frame shows only one star note and no ring/buttons/progress bar - the note/HUD layer is desynced or
+missing (the user independently observed picture errors in some later runs); metrics of all pair runs read guest ~60 fps,
+speed 1.00x, 5 scenes 933 draws, no logged error/fallback, so it is a pacing/state issue, not a GPU failure; conclusions:
+the native-60 gap is the animation advance rate (1.5-1.7x), not the dance/music clock (real time); the frame-rate pair is
+unacceptable because it changes an internal rate the note/HUD animation also consumes; next find the animation time base
+used by the dance character and note/HUD layers (appCalculator was partly characterised in M-B1) and make it advance by
+real time instead of per frame - the preview benchmark is the fast acceptance test (per-second pixel change equal to the
+30 fps baseline, full note/HUD present); release unchanged payload CEBB6C124FF7B269 (2026-11-10 16:39:04), 60 experimental, all hooks
+env-gated and off by default, the 30 fps path untouched.
+LOOKUP: M1598/M1599 measure after M1597 -> 18.5119 [relevant: preview clock benchmark], 18.5114 [relevant: clock rate
+correction], 18.5107 [relevant: earlier screenshot measurements]
