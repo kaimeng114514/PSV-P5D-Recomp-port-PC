@@ -1693,6 +1693,7 @@
 | M1615 | §18.5135: **Native-60 visual proof on the packaged-built host (13 dance screenshots, complete note ring/HUD/progress bar/3D scene) and the 60 option is relabelled from experimental; release repackaged (stub id B1EAA48103F9FAE4).** The packaged-built host with settings frame_rate=60/osd=1: MFRAME60 auto, dance clock 0.01672 s/frame = 1.003 per 60 frames, metrics 60.1 fps speed 1.00x, and 13 captured dance frames (960x544, every 120 frames from 1920 to 3360) show the full note ring/buttons/star note/progress bar/combo HUD and 3D character over Shibuya - no missing layers, correct picture at 60 fps (unlike the rejected pair configs). The launcher 60 option now reads 60 幀（全 60：選單/舞池/UI）; release rebuilt: stub B1EAA48103F9FAE4, 300,317,551 B, SHA256 EEB39AE347EF2660..., previous 6B029A072AD3ACA3, copied to the desktop; settings remain 60/OSD; 30 fps default untouched. |
 | M1616 | §18.5136: **The shipped launcher binary carries the promoted 60 label and no "實驗性" string; release-notes wording.** Byte check of the release launcher (2,089,456 B): UTF-8 "60 幀（全 60：選單/舞池/UI）" present (offset 1079409), old "…，實驗性" and standalone "實驗性" absent. Release notes wording: 60 幀 = 全畫面 60 Hz 實時推進、音樂/判定/動畫真實時間無倍速（舞曲時鐘/標題/整曲時長均已驗證）、音符與 HUD 完整；30 幀仍為默認可切回。Release: stub B1EAA48103F9FAE4, 300,317,551 B, SHA256 EEB39AE347EF2660..., desktop updated; 30 fps default untouched; phase-B2 user bar closed pending the user visual pass. |
 | M1618 | §18.5137: **Song-select 3D character acceleration at 60 fps fixed: the song list keeps the game's own 30 fps cadence in the 60 mode (character real time, ratio 1.00-1.02); main menu still 60.** Measured the character region at 60 fps vs the 30 fps baseline: it ran 2x while the panel/UI parts were real time; the MusicSelectMain / DanceReady_P5 paths receive real dt and halving the known animation layers (EVALSLOW/EASE_DT/JOBSLOW) changed speed only 3-4%, so the character's presented-frame clock was not narrowed to one hookable site; shipped fix: display.c swap_interval keeps the guest's 30 fps cadence on the song screen only (window_p5d_song_screen; not the dance stage) and hooks.c p5d_mframe_screen_tick (per-frame from window.c) keeps the appMframe frame base at 30 there and 60 elsewhere; per-frame sequence validation vs the 30 fps baseline: ratios 1.02/1.02/1.02/1.02/1.00 at gaps 1/2/3/5/10 -> no acceleration; main menu still 60.0 fps/speed 1.00x, dance/title/full-song untouched by construction; launcher wording updated (60 幀（舞池/選單/UI 60，歌單原版 30）) and release repackaged: stub A30F3FDAFB2D7B3A, 300,318,768 B, SHA256 EF3E0E3F7965CCBB..., previous B1EAA48103F9FAE4, desktop updated. |
+| M1619 | §18.5138: **Regression checks for the song-select fix: main menu still 60.0 fps/speed 1.00x, title unchanged (1786 frames = 29.77 s); the dance-stage re-run is blocked by the pre-existing song-confirm route.** Main menu metrics stay 60.0 fps/speed 1.00x; [TITLE] frames 95..1881 = 29.77 s at 60 fps identical to the pre-fix M1605 value; the song list itself passed the per-frame sequence comparison (M1618 ratios 1.00-1.02); the dance clock was not re-measured because the automation song-list confirm route returns to the main menu (pre-existing), but the dance screen is excluded by construction from the new rule (and the frame base stays 60 elsewhere), so the validated native-60 dance evidence stands; RECOMP_P5D_SONGFPS60=1 is in place for the optional 60-capable song-list work. Release: stub A30F3FDAFB2D7B3A, 300,318,768 B, SHA256 EF3E0E3F7965CCBB...; docs/builds audit-clean; awaiting the user visual pass. |
 proposal).** mnsHandle_8111b64c/8111b190 receive a real-time float (+0.01668/frame at 60 vs +0.03337 at 30);
 mnsProcess_811251d6 fires per-frame but constant; other mnsProcess/mnsOption/gfd entries do not fire per-frame;
 object-word slopes show only the known danceQuantizer_81049976 w2 (+0.5 at 60 vs +1.0 at 30). The remaining
@@ -522043,3 +522044,38 @@ main menu in automation (pre-existing song confirm behaviour, unrelated); releas
 EF3E0E3F7965CCBB... (previous B1EAA48103F9FAE4), copied to the desktop.
 LOOKUP: M1618 fixes the song-select acceleration -> 18.5136 [relevant: promoted 60 release], 18.5135 [relevant: visual proof],
 18.5134 [relevant: packaged e2e]
+
+### 18.5138 M1619 REGRESSION CHECKS FOR THE SONG-SELECT FIX: MAIN MENU STILL 60.0 FPS / SPEED 1.00x, TITLE UNCHANGED (1786 FRAMES = 29.77 S); THE DANCE-STAGE RE-RUN IS BLOCKED BY THE PRE-EXISTING SONG-CONFIRM ROUTE
+
+With the M1618 fix in the dev build:
+
+- main menu (60 mode, no env overrides): metrics stay **60.0 fps, speed 1.00x, window 60.0-60.7** across the sampled log -
+  the per-screen cadence rule and the frame-base tick leave every non-song screen at 60;
+- title sequence: [TITLE] worker frames 95..1881 = 1786 frames = **29.77 s at 60 fps** - exactly the pre-fix M1605
+  measurement, so the title path is unaffected;
+- the song list itself was validated separately with the per-frame sequence comparison (M1618: ratios 1.02/1.02/1.02/1.02/1.00
+  against the 30 fps baseline, i.e. no acceleration);
+- dance-stage re-run: the automation's song-list confirm route still returns to the main menu ("song confirmed" behaviour
+  noted in the earlier handoff, unrelated to this fix), so the dance-stage clock was not re-measured in this round. The code
+  path is untouched by construction: display.c's new rule matches only the song screen and explicitly excludes the dance
+  screen (window_p5d_dance_screen), and the frame-base tick keeps the 60 base on every non-song screen; the previously
+  validated native-60 dance evidence (M1597/M1604/M1605/M1614/M1615) therefore still applies. The RECOMP_P5D_SONGFPS60=1 test
+  switch is in place for the optional future work of making the song list run at 60 with its character animation retimed.
+
+Release state: desktop exe = song-select fix build, stub id A30F3FDAFB2D7B3A (300,318,768 B, SHA256 EF3E0E3F7965CCBB...);
+docs/builds audit-clean. Waiting on the user's visual pass (main menu 60, song list not accelerated, notes/HUD complete).
+
+ANTI-FORGETTING ENTRY. Keywords: M1619 regression checks for the song-select fix - with the M1618 fix in the dev build: main
+menu (60 mode, no env overrides) metrics stay 60.0 fps, speed 1.00x, window 60.0-60.7; the title sequence [TITLE] worker frames
+95..1881 = 1786 frames = 29.77 s at 60 fps, exactly the pre-fix M1605 measurement, so the title path is unaffected; the song list
+itself was validated separately with the per-frame sequence comparison (M1618 ratios 1.02/1.02/1.02/1.02/1.00 against the 30 fps
+baseline, no acceleration); the dance-stage re-run was blocked because the automation's song-list confirm route still returns to
+the main menu (the earlier handoff's song-confirmed behaviour, unrelated to this fix), so the dance clock was not re-measured,
+but the code path is untouched by construction - display.c's new rule matches only the song screen and explicitly excludes the
+dance screen (window_p5d_dance_screen), and the frame-base tick keeps the 60 base on every non-song screen - so the previously
+validated native-60 dance evidence (M1597/M1604/M1605/M1614/M1615) still applies; the RECOMP_P5D_SONGFPS60=1 test switch is in
+place for the optional future work of making the song list run at 60 with its character animation retimed; release state:
+desktop exe = song-select fix build, stub id A30F3FDAFB2D7B3A (300,318,768 B, SHA256 EF3E0E3F7965CCBB...), docs/builds audit-clean;
+waiting on the user's visual pass (main menu 60, song list not accelerated, notes/HUD complete).
+LOOKUP: M1619 completes the regression checks after M1618 -> 18.5137 [relevant: song-select fix], 18.5125 [relevant: title
+evidence], 18.5126 [relevant: promotion]
