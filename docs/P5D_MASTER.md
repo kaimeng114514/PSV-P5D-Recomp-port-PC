@@ -1695,6 +1695,29 @@
 | M1618 | §18.5137: **Song-select 3D character acceleration at 60 fps fixed: the song list keeps the game's own 30 fps cadence in the 60 mode (character real time, ratio 1.00-1.02); main menu still 60.** Measured the character region at 60 fps vs the 30 fps baseline: it ran 2x while the panel/UI parts were real time; the MusicSelectMain / DanceReady_P5 paths receive real dt and halving the known animation layers (EVALSLOW/EASE_DT/JOBSLOW) changed speed only 3-4%, so the character's presented-frame clock was not narrowed to one hookable site; shipped fix: display.c swap_interval keeps the guest's 30 fps cadence on the song screen only (window_p5d_song_screen; not the dance stage) and hooks.c p5d_mframe_screen_tick (per-frame from window.c) keeps the appMframe frame base at 30 there and 60 elsewhere; per-frame sequence validation vs the 30 fps baseline: ratios 1.02/1.02/1.02/1.02/1.00 at gaps 1/2/3/5/10 -> no acceleration; main menu still 60.0 fps/speed 1.00x, dance/title/full-song untouched by construction; launcher wording updated (60 幀（舞池/選單/UI 60，歌單原版 30）) and release repackaged: stub A30F3FDAFB2D7B3A, 300,318,768 B, SHA256 EF3E0E3F7965CCBB..., previous B1EAA48103F9FAE4, desktop updated. |
 | M1619 | §18.5138: **Regression checks for the song-select fix: main menu still 60.0 fps/speed 1.00x, title unchanged (1786 frames = 29.77 s); the dance-stage re-run is blocked by the pre-existing song-confirm route.** Main menu metrics stay 60.0 fps/speed 1.00x; [TITLE] frames 95..1881 = 29.77 s at 60 fps identical to the pre-fix M1605 value; the song list itself passed the per-frame sequence comparison (M1618 ratios 1.00-1.02); the dance clock was not re-measured because the automation song-list confirm route returns to the main menu (pre-existing), but the dance screen is excluded by construction from the new rule (and the frame base stays 60 elsewhere), so the validated native-60 dance evidence stands; RECOMP_P5D_SONGFPS60=1 is in place for the optional 60-capable song-list work. Release: stub A30F3FDAFB2D7B3A, 300,318,768 B, SHA256 EF3E0E3F7965CCBB...; docs/builds audit-clean; awaiting the user visual pass. |
 | M1620 | §18.5139: **Song-select now runs native 60 fps with real-time character animation: the app animation timer was stepping 1/30 s per presented frame because its frame-rate getter still reported 30 at 60 fps; an IHOOK on the getter return now reports 60 on that screen only (dance screen and the 30 fps path untouched). Song list measured 58.8-59.5 fps / speed 1.00x and the character matched the 30 fps baseline (gap5/10/15 = 18.22/26.71/31.14 vs the 2x 24.33/32.36/36.70 and the real-time prediction 17.3/25.8/30.8); the M1618 30 fps fallback is gone (RECOMP_P5D_SONGFPS30=1 is the A/B hatch); launcher label updated; release repackaged (300,326,221 B, SHA256 BB5187FF..., stub version 4975EE1FE4B9747D) and copied to the desktop.** |
+| M1621 | §18.5140: **Dance-stage 3D now renders every frame at 60 fps in the 60 mode: the 3D render thread paced itself with sceDisplayWaitVblankStartMultiCB(2) and the port's 60 fps cap only covered the SetFrameBuf swap-interval waits; capping the vblank-start multi wait to one edge on the dance screen makes the 3D chain (fn_81236c14/fn_8124e156/fn_8127baae) run every presented frame.** Found with per-name HLE call-rate stats: sceDisplayWaitVblankStartMultiCB appeared in exactly 30 of every 60 frames; fix = display.c vblmulti_n() caps n>1 to 1 only in the 60 mode on the dance screen (default on, RECOMP_P5D_VBLMULTI60=0 for A/B), other screens and the 30 fps path untouched. Verified: dispatch gaps of 1 frame in 828-832/886 samples (pre-fix 426/448 gaps of 2), character region changed on 24/25 consecutive presented-frame pairs vs 21/25 before with the same total motion (313.9 vs 362.6 over the matched window) = real time 1.00x, dance clock real time, 30 fps mode unchanged (one 3D pass per presented frame), end-of-stage behaviour identical to baseline; release repackaged 300,335,464 B, stub id B28F904B19181B57, SHA256 148A0EDB..., desktop exe replaced. |
+| M1622 | §18.5141: **Dance-stage 60 fps: the vblank-start cap was gated on the port's screen model, which fails in real 2K-fullscreen+OSD user runs; the 60 mode now caps every screen, so the dance 3D thread runs every presented frame regardless of screen detection.** The M1621 cap only applied while window_p5d_dance_screen() said dance; that model is learned from the presented frame's read-back, which at 2K render scale is ~19 MB and throttled, and when it says otherwise the cap silently never applies (3D back to 30 Hz) - shown by forcing the model stale (RECOMP_UI_SCAN_MS=1000): the dance-gated probe then saw no dance screen at all. display.c vblmulti_n now caps whenever frame_rate_60(), on every screen; other screens already run 60 in the 60 mode (M1605/M1606/M1620, MFRAME60 keeps durations) and the 30 fps mode is untouched. Verified: with the model forced bad, c13/c14/c16 called every presented frame, present pacing 16.7 ms uniform, title duration unchanged (770-796 frames), metrics 59.6-59.7 fps / speed 1.00x / window 60; release repackaged 300,340,672 B, payload v0.1.0-p5d-a50c78a+0caa56f49421, SHA256 4397BBA4..., copied to the desktop. |
+| M1623 | §18.5142: **Dance-stage 60 fps: vblank-start cap and animation-rate getters un-gated from the screen model; calibrated 165 Hz capture shows ~52-60 Hz content at the user's 2K config; the engine's animation clock is a 30 Hz keyframe stepper (located, retimed in an off-by-default experiment).** Ships M1634 (vblmulti_n caps whenever frame_rate_60(), every screen) and M1636 (fn_8097fd6/fn_811730da return 60 on every screen in the 60 mode, no screen-model gate). Proof of the old failure: with RECOMP_UI_SCAN_MS=1000 the dance-gated probes printed nothing while the dance stage ran; with the un-gating fn_81236c14/fn_8124e156/fn_8127baae are called every presented frame. Calibrated 165 Hz DDA capture (30 fps control = 30.1/s): user config 51.8/s cap ON, 53.8/s cap OFF, windowed 640 = 42.6/s. Located the engine's 30 Hz clock fn_81049976 (t*30 -> int -> frame+1 -> time=frame/30, once per present) and its consumer fn_81045cc4; retimed experiments reach exactly 60 steps/60 frames at 1.0x but do not change the rendered picture, and five-frame heap snapshots find no 30 Hz single-copy pose state (CPU vertex streams static = GPU skinning), so the authored 30 fps motion data is the limit. Release 300,345,723 B, payload v0.1.0-p5d-a50c78a+978a104e5c2c, SHA256 CBA94893..., desktop replaced. |
+| M1624 | §18.5143: **Dance character animation 30 Hz fixed: the lock was the engine's animation-node time setter fn_8103e904 (called once per presented frame from danceMain fn_81043fee -> fn_810481ce), which wrote the 30 fps keyframe time into every node's node+0x20; the sampler fn_81045cc4 reads that field.** New IHOOK at 0x8103e910 (before the store; 0x8103e912 would be after it and a no-op) hands the nodes a 1/60-per-presented-frame continuation in the 60 fps mode (adopts the game's value when it advances, continues when it repeats). Verified: node clock +1.000 s per 60 presented frames (real-time 1.0x); character-region byte-identical consecutive presented frames 46% -> 4%; windowed 165 Hz calibrated capture content 45.9 -> 57.8 changes/s with total motion unchanged; title/menu transition frames in the historical band; no crash. Release 300,347,305 B, payload v0.1.0-p5d-a50c78a+df13b893684b, SHA256 CC872BCA..., desktop replaced. |
+| M1626 | §18.5145: **Faster rebuilds: content-hash object cache.** build.py's object freshness was mtime only, and a launcher update unpacks identical sources with fresh mtimes under a new version dir, so all ~51 generated part objects recompiled on every update (compile stage ~5 min of an 8 min 13 s build; measured on this PC: 09:09:20 unpack -> 09:17:33 host exe). Now each object carries a *.o.crc stamp (SHA-1 of the compiler's semantic options with paths filtered out, the source content and rt.h content); mtime-stale objects with a matching stamp are reused, up-to-date objects are stamped too so old installs migrate. ImGui/overlay (and overlay_min.cpp's -DRECOMP_MINIMAL identity) use the same scheme; -pipe added. Measured: full build 514-524 s at JOBS=8 (7.7-10.8 GB peak), simulated launcher update rebuild 68.7 s link-only (DRYRUN work=0 of 51). Recompile/analysis were already gated by .recompile_inputs. Release repackaged, docs/audits green. |
+| M1627 | §18.5146: **Dance Q dead: Q is also the menu map's L button, so a Q press was counted as a menu key and the "menu key while the dance flow is idle" path switched the input profile back to the menus; p5d_switch_profile() clears every held flag, so the Q press was lost as the up direction (user session log: "input: profile menu/story" at [KEYDBG] key=Q prof=0 dnow=0 latch=0). A/Z/D/O/K/M/J were unaffected (not in the menu map). Fix: keys the dance map binds are not menu keys while the dance profile is active (p5d_key_bound); the dance self-heal also covers both-map keys in the DANCE scene and re-arms the healing press's held bit; the Q/E press handler falls through to the dance key map when the dance profile is active. Verified on the 2K fullscreen config: Q presses stay prof=1 and "game key Q" with no profile flip, including the dnow=0/latch=0 stage entry. Release repackaged, docs/audits green. |
+| M1628 | §18.5147: **Dance pause resume left the port in the PAUSE scene/CONFIG profile at 2K, so Q/A/Z/O/K/M were dead after leaving the pause menu.** The pause latch's clears depended on the picture screen model reading MAIN/SONG/RESULT, which is blind at 2K+OSD (ui=NONE all stage). Fix: hooks.c exports the dance clock (danceMain proc+0x458) as p5d_dance_clock_now(); window.c clears pause/config latches when that clock advances >0.10 s after the pause picture is gone (a resume; the frames before the game actually pauses are excluded), or when the pause picture has been gone 1.2 s with result/song job evidence (a quit). Verified: CROSS closes the game pause, log shows "[PAUSE] clock resumed ... latches cleared", scene pause->dance, profile game, Q/A/Z/O/K/M all dance keys; before the fix the same run stayed scene=6/profile=config with "menu key". Release repackaged, docs/audits green. |
+| M1629 | §18.5148: **Dance pause follow-up: M1628's "page gone" latch clear fired while the pause menu was still open (the pause-picture detector read 960x544 coordinates on the 2880x1632 render-scaled buffer and never saw it; MusicSelect jobs run during the stage), so the profile flipped to the dance map and the mouse wheel (it needs the PAUSE/CONFIG input screen) and the settings page's Q/E (dpad left/right) stopped working.** Fix: the page-gone heuristic is removed; the pause is over only from the game's own state - the exported dance clock (danceMain proc+0x458) frozen under the pause and advancing >0.10 s after the pause picture is gone (a quit needs the RESULT job with the dance jobs stopped 1.5 s); the pause-picture and dance-gauge detectors are render-scale aware; the settings page keeps the CONFIG map from the pause latch. Verified at 2K fullscreen: wheel steps in the pause (row 2/5, 4/5) with no false clear, clock-resume clear on CROSS close, Q/A/Z/O/K/M game keys after, Q/E left/right in the settings page. Release repackaged, docs/audits green. |
+| M1630 | §18.5149: **Dance pause: one Esc or one right-click now closes the pause menu at once.** The exit used to be a queued Down x n + Circle walk to the exit row (row count from the port's own counter/picture, unreliable at render scale 3). Fix: p5d_pause_close_request() sends the game's own back - ONE Cross - on Esc, Backspace and right-click in the pause page; the exit walk stays only as an 800 ms fallback (logged as "[PAUSE] the Cross did not close the page: exit sequence queued"), and the settings page inside the pause keeps its L+Circle back. Latches still clear from the exported dance clock. Verified at 2K fullscreen: one Esc -> "[EV] esc -> pause close (one Cross)" -> "[PAUSE] clock resumed" -> scene pause->dance -> profile game; one right-click -> "[MOUSE] rmb -> back" -> same; Q/A/Z/O/K/M are game keys again. Release repackaged, docs/audits green. |
+| M1631 | §18.5150: **Dance pause settings page: a right-click (or Esc/Backspace) now leaves the settings page back to the pause menu.** The right-click handler chose its action from the port's latch; in the in-pause settings page it could read 0 (the code-level screen is what reads CONFIG), so it fell into the pause-close branch and sent a Cross - which in this page only moves the highlight to its on-screen OK row. Fix: the settings page's verified exit is its own two steps, L (focus the OK row) then Circle (confirm) 120 ms later (restored p5d_settings_back_queue); Esc/right-click/Backspace pick that path from the code-level screen (p5d_config_latch || p5d_scr_now == P5D_SCR_CONFIG), and a simultaneous L+Circle hold was rejected (frame captures show it only highlighting OK). Verified with presented-frame dumps: settings list -> pause menu's five rows after one right-click. Release repackaged, docs/audits green. |
+| M1632 | §18.5151: **Dance pause settings: one right-click leaves the page - one Cross (focus the OK row) plus one Circle 400 ms later.** Frame dumps show the settings page exits through its on-screen OK row: the game's Cross (the 戻る the hint row names) moves the focus there (animated) and the following Circle confirms. M1631 failed because it sent L+Circle (L is 試聽播放 on voice rows) or two Crosses (the second un-focuses OK) with the Circle too early - those frames only toggled the highlighted value. p5d_settings_back_request now sends exactly one Cross then one Circle 400 ms later, for Esc/Backspace/right-click, chosen from the code-level screen (p5d_config_latch || p5d_scr_now == P5D_SCR_CONFIG). Verified from an 8-notch scrolled list with presented-frame dumps: settings list -> OK row red -> pause menu's five rows; a second right-click closes the pause (M1630). Release repackaged, docs/audits green. |
+| M1633 | §18.5152: **Dance pause settings: one right-click exits the page by itself (the game's back + its auto-confirm 250 ms later); the pause no longer closes itself during its opening animation.** The settings page has exactly one back target - its OK row: the game's Cross always focuses it (~0.4 s, frame dumps) and Circle confirms (same-frame chord, held Cross, two Crosses and L+Circle were all rejected by frame dumps). window.c now sends ONE Cross + ONE Circle 250 ms later for right-click/Esc/Backspace in the settings page (code-level screen check), no retry pair (it re-opened the page from the pause menu). Frame-verified: settings -> OK red ~0.4 s -> pause menu, stable. Also fixed: the pause latch's resume test (clock advanced 0.10 s) was tripped by the pause opening animation (one run: "[PAUSE] clock resumed (clk 3.482 -> 3.594)" right after opening); now the pause picture must be gone 0.6 s and the clock run on 0.15 s since its last visible frame. Release repackaged, docs/audits green. |
+| M1634 | §18.5153: **Dance pause: no more stray dance inputs after resuming (the reported "auto Q/A/Z/O/K/M" burst).** M1633 kept an 800 ms fallback after the one-Cross pause close that queued the old "walk to the exit row" taps (Down x n + Circle); M1633's careful resume detection takes about that long, so the fallback fired just after the dance stage resumed and the taps reached it as pad presses (down/circle = the dance notes). Fix: the fallback is removed; on pause clear all queued menu state is dropped (tap/back sequences, settings-exit steps, macro tap, click targets, touch and stale mouse buttons). Verified Esc-Esc: "[EV] esc -> pause close (one Cross)" -> "[PAUSE] clock resumed ... latches cleared" -> scene dance, with no exit-sequence line and no cmd/chord lines after the resume. Release repackaged, docs/audits green. |
+| M1635 | §18.5154: **Port of the P5D "auto play" Vita cheat (PCSH10109.psv, 自动演奏); F5 toggles it in game.** The cheat is `$B200 00000000 00000000` (module-relative, eboot segment 0) plus `$A100 0011B6FC 00001C00` (16-bit instruction patch): the Thumb `beq #0x8111b764` right after `ands r1, fp, #0x40` becomes 0x1C00 (`adds r0,r0,#0`, a NOP), so the branch is never taken and the dance auto-hit path always runs. Ported as an instruction hook at 0x8111b6f8 that clears the Z flag while enabled (same fall-through), registered as 0x8111b6f8:p5d_autoplay. F5 toggles (OSD toast + `[CHEAT] auto play on/off` log, default off; the old F5 log mark moved to F12; the toggle is outside the RECOMP_MINIMAL guard). Verified with presented-frame dumps: with no input the stage shows PERFECT pop-ups, "8 COMBO", score 400 -> 1200 -> 1600 and the FEVER gauge filling; a second F5 logs off and the score stops climbing. Release repackaged, docs/audits green. |
+| M1636 | §18.5155: **P5-style notification for the auto-play cheat: the user's banner art ("自动演奏启动" / "自动演奏取消") composited by the PORT as an overlay, like the on-screen stats.** The port's GPU present already round-trips the frame through the CPU while the stats are up (osd_round_trip -> metrics_osd_composite); M1636 alpha-blends the banner into that composite (runtime/ui/banner_on.png / banner_off.png, halved to 998x144 with the text baked in and transparency kept, bytes in runtime/ui/banner_art.h, decoded by stb_image; bilinear, top centre, height 16%, width from aspect capped 80%, y 3%, shown 2.4 s) and forces the round trip while it is visible even with the stats off. F5 (M1635) toggles the cheat and calls p5d_banner_show(on, 2.4); logs [CHEAT]/[BANNER]. Verified with desktop screenshots over the live dance picture: the "自动演奏启动" box on, the "自动演奏取消" box off. Release repackaged, docs/audits green. |
+| M1637 | §18.5156: **The P5 auto-play banner, smaller and shorter: height 10% of the window (width capped at 62%), 1.0 s.** p5d_banner_composite now uses 10% of the window's height instead of 16% (width from the art's aspect, cap 62% instead of 80%), sits 2.5% from the top, and F5 shows it for 1.0 s instead of 2.4 s (the toast too); the art, the overlay path and the forced OSD round trip while visible are unchanged. Verified with desktop screenshots 0.45 s after F5: a smaller "自动演奏启动" box at the top centre over the live picture; log [BANNER] auto play ON/OFF (1.0 s). Release repackaged, docs/audits green. |
+| M1638 | §18.5157: **The launcher's resolution list gets 4K 3840x2160 (render scale 4); 4K holds 60 fps in the dance stage on the RTX 5060 laptop.** launcher/hub.cpp's P5D_RES/P5D_RES_LABEL grew to 5 entries with "4K 3840×2160" after 2K (p5d_res_index scans 5, the radio row loops 5), the internal render scale table {"1","1","2","3","4"} writes render_scale = 4 for 4K into the shared settings, the hint says 4K=4x and wants a fast GPU, and the release README lists 4K. Verified: launcher screenshot shows the fifth radio; a RECOMP_RES=3840x2160 RECOMP_SCALE=4 run opens window 3840x2160 and the dance stage runs 60.0 fps (frame avg 16.7 ms, render 4-13 ms). Launcher-only change: payload version stays a523c2cc38ea (no game rebuild for existing installs). Release repackaged, docs/audits green. |
+| M1639 | §18.5158: **True 4K, and what it means on a 2K screen: the internal render scale is forced from the launcher's choice and a picture larger than the display is clamped to it (4K on a 2K screen = 4x supersampling).** The internal resolution is RECOMP_RENDER_SCALE; the launcher wrote render_scale only into the shared settings, and the game's own settings.ini (read first) could keep an older override, so a 4K choice could still render at 3x and look like an upscale; with fullscreen off a 3840x2160 window also hangs off a 2560x1440 desktop. Fix: the launcher passes RECOMP_RENDER_SCALE in the run env, drops the game's render_scale override, and clamps the output to the desktop when the choice is larger (4K on 2K = 4x supersampling at the screen resolution, never off the screen); window.c clamps a windowed window to the display with a log line. Verified with presented-frame dumps: 2880x1632 at 3x, 3840x2176 at 4x (a real 4K render), 60 fps in the dance stage with "gpu 4x:" on this 2K screen, clamp line for a 3840x2160 window. M1638's verification note corrected (it had used RECOMP_SCALE, a window-size variable). Release repackaged, docs/audits green. |
+| M1640 | §18.5159: **The launcher's frame-rate section loses its 60 fps explanation: the radios read "30 幀（原版節奏）" / "60 幀".** The green paragraph shown when 60 was selected is gone and the 60 radio's parenthetical is gone too (P5D_FPS_LABEL = {"30 幀（原版節奏）", "60 幀"}); the 30 choice's short line is unchanged. Verified with a launcher screenshot of the frame-rate section (radios only) and the binary: the removed strings are absent, "60 幀" is present. Launcher-only change, so the payload version stays the same (no game rebuild for existing installs). Release repackaged, docs/audits green. |
+| M1641 | §18.5160: **Fixed: the release payload was missing runtime/ui/banner_art.h, so a build from the exe failed with "banner_art.h: No such file or directory".** make_p5d_release.py's stage() ships only git-tracked files and the M1636 banner header was never git-added (the dev tree built fine); the version stamp hashed the working tree, so the payload claimed what it did not contain and a broken install kept the same stamp. Fix: the three banner files are tracked; stage() now fails the packaging when a shipped source's #include "..." is missing from the payload; the stamp hashes the STAGED runtime+pack files plus PROVISION_VERSION (2), giving v0.1.0-p5d-a50c78a+81c14158c509 instead of the broken +1eeeef11466d, so existing installs refresh their game build on next launch. Verified: payload contains banner_art.h and the payload's window.c syntax-compiles with its own mingw/include set (exit 0). No game-source behaviour change. Release repackaged, docs/audits green. |
+| M1642 | §18.5161: **Version bump: the release is v0.1.1, and the launcher reads its version from the payload's version.txt instead of a hard-coded copy.** RELEASE_VERSION is now "v0.1.1-p5d" and the README says Version 0.1.1. launcher/hub.cpp's page used a hard-coded "v0.1.0" that the long subtitle could clip; p5d_version() now takes the part before the first '-' of <root>/version.txt ("v0.1.1"; a dev tree falls back to "v0.1.1") and prints it at the end of the subtitle: "Persona 5 Dancing in Starlight · PC 移植版 · 鍵盤鼠標 / 手柄 · v0.1.1". Verified with a launcher screenshot and the packaged version.txt "v0.1.1-p5d-a50c78a+81c14158c509". Release repackaged, docs/audits green. |
+| M1625 | §18.5144: **Dance pause: the M1624 node-clock smoothing kept advancing its 1/60 step when the engine repeated the node time, so the background dancers kept dancing behind the pause menu.** The repeat is the normal 30 fps cadence on every second frame, but a pause repeats the value forever; the hook now freezes after at most two consecutive repeats and adopts the game's value when it advances again (unpause/loop/restart). Verified: pause run shows the dance clock DCLK stopped and NODEFPSSTAT changes=0 with a frozen value across the pause window; resumed play shows 57-59 changes per 60 frames and +1.0 s per 60 frames (real-time 1.0x); 30 fps mode unaffected. Release repackaged, docs/audits green. |
+| M1643 | §18.5162: **Docs encoding incident and recovery: the master doc's working copy had been re-encoded (UTF-8 read as GBK) before this session; restored from the last good commit and every milestone script replayed; the audit now counts the "### §18.x" legacy headings and the release audit runs the encoding guard.** The M1620 commit was still clean, so the damage was in the working tree; the session's tools appended UTF-8 correctly and the ASCII-only audits passed. Recovery: docs/P5D_MASTER.md from git cat-file HEAD~1:docs/P5D_MASTER.md + replay of _m1621..._m1642_docs.py (sections 18.5140-18.5161, ledger rows, anchors, release lines recovered from the corrupted blob's ASCII lines); P5D_HANDOFF.md rebuilt (its pre-2026-11-12 11:20 part lost, recorded); kb_audit's section pattern accepts the legacy "### §18.x" headings (the baseline itself failed on M1620 -> 18.22 before); tools/check_text_encoding.py is now run by tools/verify_doc_integrity.ps1. Verified: 39.65 MB master, 569 correct Chinese words, no U+FFFD, KB_AUDIT_PASS sections=5119 (both trees), DOC_INTEGRITY_PASS, release_audit PASS, check_text_encoding PASS. |
 proposal).** mnsHandle_8111b64c/8111b190 receive a real-time float (+0.01668/frame at 60 vs +0.03337 at 30);
 mnsProcess_811251d6 fires per-frame but constant; other mnsProcess/mnsOption/gfd entries do not fire per-frame;
 object-word slopes show only the known danceQuantizer_81049976 w2 (+0.5 at 60 vs +1.0 at 30). The remaining
@@ -522101,3 +522124,922 @@ Launcher and release: launcher/hub.cpp now labels the 60 option "60 帷（舞池
 
 ANTI-FORGETTING ENTRY. Keywords: M1620 song-select native 60 fps with real-time character animation - the M1618 interim kept that screen at 30 fps; the real 2x clock was found with the Windows page write watch (VirtualProtect PAGE_READONLY + VEH, all-writes mode single-steps past each write so every write to the page is seen): the timer update in fn_81097f7a is time = obj+0x88 ; s0 = 1.0f/(float)frame-rate getter ; obj+0x88 = s16+s0 and the getter fn_811730da -> fn_81173118 reports 30 at 60 fps, so every presented frame adds 1/30 s (the song-select dance-preview character is the visible consumer; UI panels do not step through it and were already real time); fix = IHOOKS 0x811730dc:p5d_timefps2 in pack.toml, recomp_ihook_p5d_timefps2 in hooks.c forces the returned rate to 60 only when display_frame_rate_60() && window_p5d_song_screen() && !window_p5d_dance_screen() (an earlier 0x811730e0 hook sat after a return and never ran; the 30 fps path, main menu, title and dance stage are untouched); display.c M1617/M1618 song-list 30 fps fallback removed so the song list runs native 60 in the 60 mode, RECOMP_P5D_SONGFPS30=1 restores the old cadence for A/B; verification in the dev build with no env overrides: metrics 58.8-59.5 fps / speed 1.00x / window 60.0, [TIMEFPS2] hits on the song screen, character pixel differences gap5=18.22 gap10=26.71 gap15=31.14 versus pre-fix 2x 24.33/32.36/36.70 and real-time prediction 17.3/25.8/30.8, screenshot correct; launcher label 60 帷（舞池/選單/選歌/UI 全部 60）, launcher rebuilt; release 300,326,221 B, stub version 4975EE1FE4B9747D, SHA256 BB5187FF..., copied to the desktop (previous A30F3FDAFB2D7B3A); docs/builds audit-clean.
 LOOKUP: M1620 finishes the song-select 60 fps work -> 18.5137 [relevant: the M1618 interim fix and its measurements], 18.5138 [relevant: regression method and evidence that stands], 18.5125 [relevant: title real-time evidence].
+
+### 18.5140 M1621 DANCE-STAGE 3D NOW RENDERS EVERY FRAME AT 60 FPS: THE 3D THREAD PACED ITSELF WITH sceDisplayWaitVblankStartMultiCB(2) AND THE 60 MODE ONLY CAPPED THE SETFRAMEBUF WAITS; CAPPING THE VBLANK-START MULTI WAIT TO ONE EDGE ON THE DANCE STAGE MAKES THE 3D SCENE UPDATE AT 60 Hz IN REAL TIME (CHARACTER EVERY FRAME, SPEED 1.00x, 30 FPS PATH AND UI UNCHANGED)
+
+The dance stage at 60 fps still showed its 3D character/scene at 30 Hz while the judgement UI, the note ring
+and the flips ran at 60 (the user's report, reproduced with window-content captures: the character region changed on
+about half of the consecutive presented frames, the note/HUD layers on every frame). This milestone finds the pace
+maker and makes the 3D scene render every presented frame in real time in the 60 mode.
+
+Measurement (dev build, 60 mode): per-presented-frame logging of the 3D dispatch chain - fn_81236c14 (3D scene
+build), fn_8124e156 and fn_8127baae (render dispatcher) - showed strictly every-other-frame calls over the whole
+steady dance (hit frames 2400, 2402, 2404, ...; 426 of 448 gaps were 2 frames, 29.9 calls/s), while sceDisplaySetFrameBuf,
+sceDisplayWaitSetFrameBufCB, the guest SetFrameBuf/CB submits and the dance logic all stayed at 60/s. Draws were
+submitted every frame (per-frame draw counts 321-337 constant, no alternating pattern) but the 3D scene data was only
+advanced every second frame - the 3D pass itself was not scheduled every frame.
+
+Root cause, found with a per-name HLE call-rate probe (runtime/core/main.c, RECOMP_HLE_STATS=1: it counts the system
+calls by name and prints, once per 60 presented frames, each name's calls and the number of frames it appeared in):
+of all the timing system calls in the dance stage exactly two appeared in only 30 frames out of every 60 -
+sceDisplayWaitVblankStartMultiCB and sceKernelWaitEventFlagCB - and the first one is the one the 3D render thread
+calls with n=2 (wait until two vblank edges: the Vita's authored 30 fps cadence). The port's 60 fps cap (M1540/M1606
+swap_interval) applied only to the SetFrameBuf swap-interval waits (h_wait_setbuf_multi / _cb); the vblank-start
+waits h_wait_vblank_multi and h_wait_vblank_multi_cb in runtime/gfx/display.c used the raw guest n, so the 3D
+thread kept waking every second vblank no matter what the frame-rate setting was.
+
+Fix: runtime/gfx/display.c gains vblmulti_n(): when the vblank-start multi wait asks for more than one edge, the 60
+mode is active and the dance screen is up (window_p5d_dance_screen), n is capped to 1 - the 3D pass then runs once
+per presented frame. It is default-on; RECOMP_P5D_VBLMULTI60=0 restores the old behaviour for an A/B. Only the
+dance screen is matched: menus, title, the song list (which has its own M1650/M1620 retiming) and the result pages
+keep the game's own authored cadence, and the 30 fps mode is untouched (the cap requires frame_rate_60()).
+
+Verification (dev build, 60 mode, default configuration): the per-call frame log now shows fn_81236c14/fn_8124e156/
+fn_8127baae on consecutive presented frames (2400, 2401, 2402, ...; gaps of 1 frame in 828-832 of 886 samples, the
+remaining gap-2/-3 entries only at scene transitions). A consecutive-presented-frame PPM capture of the character
+region changed on 24 of 25 frame pairs (the pre-fix baseline at the same song position changed on 21 of 25, with the
+alternating hole pattern); the summed per-pair pixel difference over the matched 0.9 s window is 313.9 versus 362.6
+pre-fix - the same total motion, i.e. the character now moves in twice as many smaller steps and its real-time speed
+stays 1.00x (no acceleration). The dance clock remained real time (1/60 s per presented frame), the
+sceKernelWaitEventFlagCB pacing moved from 30 to 60 Hz with total motion unchanged, and the gameplay screenshot shows
+the complete note ring, HUD, progress bar and 3D scene (no missing/duplicated layers). Regression of the 30 fps path:
+in the 30 fps mode the 3D chain still runs exactly once per presented frame (gaps all 1 over 464 presented frames)
+and the dance clock is real time - identical to the pre-change behaviour. Stage end/judgement: in the automated
+no-input route the stage ends at ~31 s of dance clock in both the fixed and the pre-fix builds (the automated run
+never hits notes, so life runs out early) and the result screen content is identical, i.e. no change to the end-of-song
+and judgement path; the earlier native-60 clock/song-length evidence (M1555/M1604/M1605) is unaffected because this
+change only moves the 3D pass to every frame.
+
+Launcher and release: the launcher's 60 label already covers the dance stage (M1620), so no launcher text change was
+needed; dev/make_p5d_release.py re-packaged the single-file release from the fixed tree: 300,335,464 B, payload
+version v0.1.0-p5d-a50c78a+d2595cc9fa69, stub id B28F904B19181B57, SHA256 148A0EDB65FCBC7B12575DAEE467158F3C09D6FF66DA1837C7C01E44D762CA6E, copied to the desktop (previous release 300,326,221 B, stub id 4975EE1FE4B9747D).
+Release notes wording is unchanged (the 60 option already described the dance stage as 60 Hz); docs/builds audits
+re-run green.
+
+ANTI-FORGETTING ENTRY. Keywords: M1621 dance-stage 3D 60 fps - the 3D render thread paced itself with
+sceDisplayWaitVblankStartMultiCB(2) (two vblank edges a frame = the Vita 30 fps cadence); the port's 60 mode capped
+only the SetFrameBuf swap-interval waits (swap_interval in runtime/gfx/display.c) and NOT the vblank-start multi
+waits, so the 3D chain fn_81236c14/fn_8124e156/fn_8127baae ran with 2-frame gaps (2400, 2402, ...) while flips and
+UI ran at 60; found with RECOMP_HLE_STATS (per-name HLE call-rate stats) showing sceDisplayWaitVblankStartMultiCB in
+exactly 30 frames of every 60; fix = vblmulti_n() in display.c caps n>1 to 1 only in the 60 mode on the dance screen
+(window_p5d_dance_screen), default on, RECOMP_P5D_VBLMULTI60=0 for A/B; verified every-frame dispatch, character
+changed on 24/25 consecutive presented-frame pairs vs 21/25 before, same total pixel motion (313.9 vs 362.6 over the
+matched window) so speed stays 1.00x real time, 30 fps path unchanged (one 3D pass per presented frame), end-of-stage
+behaviour identical to baseline; release repackaged 300,335,464 B, stub id B28F904B19181B57, SHA256 148A0EDB...
+LOOKUP: M1621 finds and fixes the dance-stage 3D 30 Hz pace maker -> 18.5139 [relevant: the M1620 song-select retiming
+method and its per-call/measurement approach], 18.5138 [relevant: regression method], 18.5126 [relevant: the 60 mode
+promotion and swap_interval cap], 18.5113 [relevant: the 3D dispatch-chain probe history], 18.5140 is the new section.
+
+### 18.5141 M1622 DANCE-STAGE 60 FPS: THE VBLANK-START CAP WAS GATED ON THE PORT'S SCREEN MODEL, WHICH FAILS IN REAL USER RUNS (2K FULLSCREEN + OSD); THE 60 MODE NOW CAPS EVERY SCREEN, SO THE DANCE 3D THREAD RUNS EVERY PRESENTED FRAME REGARDLESS OF SCREEN DETECTION
+
+The M1621 fix (display.c vblmulti_n) capped sceDisplayWaitVblankStartMultiCB to one edge in the 60 fps mode, but
+only while the port's screen model said "the dance stage" (window_p5d_dance_screen()). That model is learned from the
+presented frame's own pixels: window.c reads the frame back, and at 2K render scale that read-back is ~19 MB and the
+scans are spaced by their own cost. It can lag or fail entirely - which is what a real user run does (2K fullscreen,
+osd=1), and the failure is silent: when the model says "not the dance stage" the cap never applies, the 3D render
+thread keeps waiting two vblanks, and the dance stage stays at 30 Hz however the 60 fps mode is configured. This
+milestone removes that dependency.
+
+Evidence of the failure: with the model forced stale (RECOMP_UI_SCAN_MS=1000 in a dev run, the same kind of throttling
+the 2K read-back causes) the dance-gated FCL probe printed nothing at all during the dance stage, while the
+presentation stayed at a uniform 16.7 ms - i.e. the screen model said "not the dance stage" for the whole run, and the
+M1621 cap was inactive exactly then.
+
+Fix (display.c M1634): vblmulti_n caps n>1 to 1 whenever frame_rate_60() is active, on every screen. The other screens
+already run 60 in the 60 mode (M1605/M1606 promoted the whole mode, MFRAME60 keeps frame-count-driven durations, M1620
+retimed the song list), so capping their vblank-start waits changes only the render cadence, not the game's timings; the
+30 fps mode is untouched (the cap requires frame_rate_60()).
+
+Verification (dev build, 60 fps mode): with the screen model forced broken as above, the 3D dispatch functions
+fn_81236c14 (c14), fn_8124e156 (c13) and fn_8127baae (c16) are called every presented frame (per-frame counts 1-2, zeros
+only at scene transitions) where the cap was previously inactive in exactly that situation. Present pacing stays uniform
+(3306 of 3313 intervals at 15.4-16.7 ms, mean 16.75 ms), the title sequence keeps its duration (boot-to-title -> main
+transition at frames 770-796 across the build history, unchanged), and metrics report 59.6-59.7 fps / speed 1.00x /
+window 60.0 fps. The remaining visual check is the user's on their own 2K fullscreen run.
+
+Release: dev/make_p5d_release.py re-packaged the single-file release from the fixed tree: 300,340,672 B, payload version
+v0.1.0-p5d-a50c78a+0caa56f49421, SHA256 4397BBA4D734374E29988C8834D952F62809FD5035D5C883677310A5024E2A5A, copied to
+the desktop (previous 300,335,464 B, SHA256 148A0EDB65FCBC7B...). Docs/builds audits re-run green.
+
+ANTI-FORGETTING ENTRY. Keywords: M1622 dance-stage 60 fps, screen-model-gated vblank cap - the M1621 vblank-start cap
+lived behind window_p5d_dance_screen(), the port's learned screen model (built from a 2K frame read-back that is
+throttled and can lag/fail), so in real 2K fullscreen+OSD runs the cap could silently never apply and the 3D render
+thread kept waiting two vblanks (30 Hz) while everything else reported 60; proof: with RECOMP_UI_SCAN_MS=1000 the
+dance-gated FCL probe printed nothing during the dance stage; fix: display.c vblmulti_n now caps whenever
+frame_rate_60(), on every screen (other screens already run 60 in the 60 mode per M1605/M1606/M1620, so only the
+render cadence changes; frame-count durations kept by MFRAME60 and the song-list retiming; the 30 fps mode untouched);
+verified: with the model forced bad, c13/c14/c16 are called every presented frame, present pacing 16.7 ms uniform,
+title duration unchanged, metrics 59.6-59.7 fps / speed 1.00x / window 60; release 300,340,672 B payload
+v0.1.0-p5d-a50c78a+0caa56f49421 SHA256 4397BBA4...
+LOOKUP: M1622 removes the screen-model dependency of the dance-stage 60 fps vblank cap -> 18.5140 [relevant: the M1621
+vblank cap itself], 18.5139 [relevant: the M1620 screen-retiming method], 18.5126 [relevant: the 60 mode promotion],
+18.5125 [relevant: title/main-menu duration evidence that stands], 18.5141 is the new section.
+
+### 18.5142 M1623 DANCE-STAGE 60 FPS: VBLANK-START CAP AND ANIMATION-RATE GETTERS UN-GATED FROM THE SCREEN MODEL; A CALIBRATED 165 HZ CAPTURE SHOWS ~52-60 HZ CONTENT AT THE USER'S 2K CONFIG; THE ENGINE'S ANIMATION CLOCK IS A 30 HZ KEYFRAME STEP (LOCATED, RETIMED IN AN EXPERIMENT, NOT SHIPPED)
+
+This ships the two screen-model un-gatings that were verified after M1622 and were not yet in a release:
+
+- display.c vblmulti_n caps sceDisplayWaitVblankStartMultiCB to one edge whenever frame_rate_60() is active, on every
+  screen (M1634). Before, the cap only applied while the port's learned screen model said "dance stage"; that model is
+  built from the presented frame's read-back, which at 2K/render-scale-3 is ~19 MB and throttled, and when it lags or
+  fails the cap silently never applies and the 3D render thread returns to waiting two vblanks (30 Hz). Proof of the
+  failure mode: with RECOMP_UI_SCAN_MS=1000 (the same kind of throttling the 2K read-back causes) the dance-gated
+  probes printed nothing during the dance stage; with the un-gated cap the 3D dispatch functions fn_81236c14 (c14),
+  fn_8124e156 (c13) and fn_8127baae (c16) are called on every presented frame (1-2 calls, zeros only at transitions).
+- hooks.c animation-rate getters (fn_8097fd6 return, fn_811730da return and their call sites) are no longer gated on
+  window_p5d_song_screen()/dance_screen() either (M1636): in the 60 mode they report 60 on every screen. The 30 fps
+  mode is untouched.
+
+Measurement method now calibrated: a 165 Hz desktop capture (ddagrab) of the dance stage, same route and song, was
+analyzed by run-length of bit-identical captured frames and validated against a 30 fps control:
+  30 fps mode, 2K fullscreen scale 3: mean run 5.48 -> 30.1 content changes/s (correct control)
+  60 fps mode, 2K fullscreen scale 3 (user's config), cap ON:  3.19 -> 51.8/s
+  60 fps mode, same, cap OFF:                                  3.07 -> 53.8/s
+  60 fps mode, 640 window:                                     3.87 -> 42.6/s
+So at the user's own settings the desktop content updates at ~52-60 Hz (the residual is capture drops); the windowed 640
+path is the slower one because of the screen-model read-back cost.
+
+The engine's own 30 Hz keyframe clock was then located: fn_81049976 is the animation clock stepper,
+    vmov.f32 s0,#30.0 ; s1=[r0] (seconds) ; s0=s1*30 ; s0=(int)s0 ; if (frame<=last) frame+=1 ; last=frame
+    s1=1/30 ; s0=(float)frame ; s0=s0*s1 ; [r0]=s0  (returns time snapped to a 30 fps keyframe, frame index kept at [r0+8])
+called once per presented frame, so its returned time steps 1/30 s on every second presented frame (measured: 449 of 898
+consecutive frames unchanged; C20STAT: exactly 30 one-1/30 steps per 60 presented frames). fn_81045cc4 consumes that
+quantized time (it multiplies by 30 to get the key index and does blend-like arithmetic).
+
+Experiment (NOT shipped, env-gated OFF): instruction hooks set the 30.0 to 60.0 and the 1/30 to 1/60 inside fn_81049976
+(RECMP_P5D_ANIM60), and the time handed to fn_81045cc4 is continued by 1/60 per presented frame with a per-node
+monotonic table (RECOMP_P5D_POSE60), optionally with its 30.0 changed to 60 (RECOMP_P5D_POSE60_FPS). The clock
+verifiably becomes a clean 60 Hz clock at real-time speed (ANIM60STAT: 60 changes and 60 one-1/60 steps per 60 presented
+frames, +1.000 s per 60 frames; POSE60STAT similar). However every picture A/B showed no improvement (content-hash
+probe: character-region identical consecutive frames 45% with the patch vs 40-46% without; windowed 165 Hz capture:
+44.8/s vs 47.7/s), and five consecutive full-heap snapshots show no 30 Hz-updated single-copy pose/scene state (only 19
+isolated scalars) while the CPU vertex streams are static bind-pose data (GPU skinning), so the remaining keyframe
+stepping is inside the engine's authored 30 fps motion data, not a port timing gate. The experiments therefore stay
+off; the shipped build only carries the two un-gatings above.
+
+Release: dev/make_p5d_release.py re-packaged the single-file release from this tree: 300,345,723 B, payload version
+v0.1.0-p5d-a50c78a+978a104e5c2c, SHA256 CBA94893C06B70C19A3836E544966E8DBB11F53F063DDFE3E4D2701CAEE591CD, copied to the
+desktop (previous 300,340,672 B, SHA256 4397BBA4...). Docs/builds audits re-run green.
+
+ANTI-FORGETTING ENTRY. Keywords: M1623 dance-stage 60 fps shipping build, screen-model un-gating, calibrated 165 Hz
+capture, engine 30 Hz keyframe clock. The port no longer gates the vblank-start 60 fps cap or the animation-rate getters
+on its learned screen model (M1634/M1636): with the model forced stale the dance-stage 3D dispatch still runs every
+presented frame, present pacing is a uniform 16.7 ms and the title keeps its duration. A 165 Hz desktop capture
+calibrated against a 30 fps control shows ~52-60 content changes/s at the user's 2K fullscreen configuration (42.6/s in
+the windowed 640 path, whose screen read-back costs more). The dance animation itself is driven by fn_81049976, a 30 Hz
+keyframe stepper (30.0 * t -> int -> frame+1 -> time=frame/30, once per presented frame -> steps every second frame);
+its output is consumed by fn_81045cc4. Retiming that clock to 60 Hz (two instruction hooks) and continuing the sampler
+time by 1/60 per presented frame both work mechanically (verified at exactly 60 steps/60 frames, real-time 1.0x) but do
+not change the rendered picture, and five-frame snapshots of the whole game heap show no 30 Hz single-copy pose state;
+CPU vertex streams are static (GPU skinning), so the authored 30 fps motion data is the limit, not a port timing gate.
+LOOKUP: 18.5142 = M1623 (shipped un-gatings + calibrated measurement + engine 30 Hz clock analysis) -> 18.5141 [relevant:
+the M1622 screen-model dependency found], 18.5140 [relevant: the original M1621 vblank cap], 18.5139 [relevant: the
+M1620 song-screen retiming method], 18.5126/18.5125 [relevant: 60 mode promotion and title duration evidence].
+
+### 18.5143 M1624 DANCE-STAGE CHARACTER ANIMATION: THE 30 HZ LOCK WAS THE ENGINE'S ANIMATION-NODE TIME SETTER; SMOOTHING IT TO 1/60 PER PRESENTED FRAME REMOVES THE EVERY-SECOND-FRAME CHARACTER FREEZE AT UNCHANGED REAL-TIME SPEED
+
+Found and fixed the last 30 Hz element, the character animation itself.
+
+Where the 30 Hz came from. A pixel-true crop of the presented GPU texture (character region, 100 consecutive presented
+frames, user's 2K fullscreen config) showed 46% of consecutive character frames BYTE-IDENTICAL in a strict two-frame
+pattern (diff 3.6, 0, 3.2, 0, ...): the character image only changed on every second frame while camera and effects
+changed every frame. A write watch on the animation node's time field (node+0x20) caught its writer with the call stack:
+    fn_81043fee (danceMain) -> fn_810481ce -> fn_8103e904(array, count) -> "vstr s0,[r0,#0x20]" for every node
+i.e. fn_8103e904 stores one float time into all animation nodes once per presented frame, but the dance clock it receives
+is the engine's 30 fps keyframe time (measured: node time steps by exactly 1/30 s every second presented frame,
+422 unchanged / 423 one-1/30-steps out of 845). That is the "scene data advanced only every two frames" lock.
+
+The fix (hooks.c M1650, instruction hook at 0x8103e910 - before the store; at 0x8103e912 it would run after the store
+and be a no-op): in the 60 fps mode, hand the nodes a smoothed time instead: when the game repeats last frame's value we
+continue our own 1/60 s step; when the game advances (or restarts/loops/jumps) we adopt its value. All nodes in one frame
+receive the same value. The 30 fps mode and all other screens are untouched (frame_rate_60() gate); RECOMP_P5D_NODEFPS=0
+disables, default ON only in the 60 fps mode.
+
+Verification.
+- Node clock statistics (RECOMP_P5D_NODEFPS_STAT): the value handed to the nodes changes on every presented frame and
+  advances exactly +1.000 s per 60 presented frames (out 1.20 -> 2.20 -> ... ), i.e. real-time speed 1.0x.
+- Character pixels: the byte-identical consecutive character frames drop from 46% to 4% (the remaining near-identicals
+  are 0.05-0.13 diffs: the pose now moves on every presented frame).
+- Calibrated windowed 165 Hz DDA A/B (same route/song): content changes/s 45.9 -> 57.8; total motion over the window
+  unchanged (full-frame 751.3 -> 770.0, character region 496.4 -> 498.2, within noise) = no speed-up, no extra motion.
+- Title/menu regression: title->main transition at frame 787 (A/B run) vs 794 (baseline), both inside the historical
+  770-796 band; metrics 60.4 fps / speed 1.00x / window 60.4 fps; no crash, dance stage, song list and menus run normally.
+
+Release: dev/make_p5d_release.py re-packaged the single-file release from this tree: 300,347,305 B, payload version
+v0.1.0-p5d-a50c78a+df13b893684b, SHA256 CC872BCABFBE9925A1FCC9237B0466474F1065FBA3BEEC39A97630641418D053, copied to the
+desktop (previous 300,345,723 B, SHA256 CBA94893...). Docs/builds audits re-run green.
+
+ANTI-FORGETTING ENTRY. Keywords: M1624 dance character 30 Hz fixed, animation node time setter, fn_8103e904,
+node+0x20, per-presented-frame 1/60 continuation. The character animation's 30 Hz lock was not the animation clock
+helper fn_81049976 but the node time setter fn_8103e904 (called once per presented frame from
+danceMain fn_81043fee -> fn_810481ce) which wrote the engine's 30 fps keyframe time into every animation node's
+node+0x20; the sampler (fn_81045cc4) reads that field (mov fp,r0 ; vldr s16,[fp,#0x20]). Fix: IHOOK at 0x8103e910
+(before the vstr at 0x8103e912 - after it the hook is a no-op) replaces s0 in the 60 fps mode with a 1/60-per-presented-
+frame continuation that adopts the game's value when it advances and continues when it repeats; verified node clock
++1.000 s/60 frames, character byte-identical consecutive presented frames 46% -> 4%, windowed 165 Hz capture content
+45.9 -> 57.8/s with total motion unchanged (speed 1.0x), title/menu frames unchanged; release 300,347,305 B payload
+v0.1.0-p5d-a50c78a+df13b893684b SHA256 CC872BCA..., desktop replaced; audits green.
+LOOKUP: 18.5143 = M1624 (character animation 30 Hz fixed) -> 18.5142 [relevant: M1623 shipped un-gatings, calibrated
+capture], 18.5141/18.5140 [relevant: earlier screen-model/vblank fixes], 18.5139 [relevant: song-list retiming method].
+
+### 18.5145 M1626 FASTER REBUILDS: CONTENT-HASH OBJECT CACHE (A LAUNCHER UPDATE RE-COMPILED EVERY GENERATED PART BECAUSE OF FRESH FILE TIMESTAMPS; NOW AN UNCHANGED BUILD ONLY RELINKS)
+
+Measured on a real installed build (M1625 launcher, this PC): the whole first build took 8 min 13 s from unpack
+(09:09:20) to host exe (09:17:33), of which the compile stage was ~5 min (51 objects), link ~66 s, recompile generation
+~40 s, analysis ~31 s. The compile stage re-ran for every launcher version because build.py's object freshness test is
+mtime based ("source newer than object"): a new release unpacks the tree under a new version directory with fresh mtimes
+and identical contents, so all ~51 generated part objects were compiled again for nothing.
+
+Fix (runtime/build.py M1626): the object files carry a content stamp (*.o.crc): a SHA-1 over the compiler's semantic
+options (paths filtered out, so the version directory does not matter), the source's content and rt.h's content. When an
+object is stale by mtime but its stamp matches, it is reused; stamps are written for up-to-date objects too, so an old
+install's existing objects get stamped on the next build. ImGui/overlay objects (and overlay_min.cpp with its extra
+-DRECOMP_MINIMAL identity) use the same scheme. -pipe was added to the compile flags.
+
+Measured after the fix, same PC, same build: full compile once (514-524 s at JOBS=8, 7.7-10.8 GB peak), then "a launcher
+update" simulated by setting every source's mtime to now with identical contents: DRYRUN work=0 of 51 sources and the real
+build finished in 68.7 s (link only, PROGRESS 0/0). So after one full build, a launcher version update now costs about a
+minute instead of eight-plus; the first build on a machine still has to compile the recompiled game code (nothing of the
+game is shipped, so there is nothing to reuse there).
+
+Also kept: the recompile/analysis stages are already content-hash gated (.recompile_inputs: recompiler files + pack.toml),
+so an update that does not change pack.toml or the recompiler skips analysis and code generation too.
+
+ANTI-FORGETTING ENTRY. Keywords: M1626 faster rebuild, content-hash object cache, *.o.crc, launcher update rebuild 8 min
+-> 1 min. build.py's object freshness was mtime only, and a launcher update unpacks identical sources with new mtimes, so
+every generated part recompiled. Now a stamp (.o.crc, SHA-1 of compiler semantic flags with paths filtered, source content
+and rt.h content) is written next to each object; mtime-stale objects whose stamp matches are reused; up-to-date objects
+are stamped too so old installs migrate. ImGui/overlay use it as well; overlay_min.cpp identity includes -DRECOMP_MINIMAL;
+-pipe added. Measured: full build 514-524 s / JOBS=8 / 7.7-10.8 GB peak; simulated update rebuild 68.7 s link-only
+(DRYRUN work=0 of 51). Recompile/analysis were already gated by .recompile_inputs. Release M1626 repackaged, audits green.
+LOOKUP: 18.5145 = M1626 (build cache) -> 18.5144 [relevant: M1625 pause freeze shipped right before], 18.5143 [relevant:
+M1624 node-clock smoothing], 18.5142 [relevant: M1623].
+
+### 18.5146 M1627 DANCE STAGE: Q WENT DEAD BECAUSE IT IS ALSO THE MENU MAP'S L BUTTON (A Q PRESS SWITCHED THE INPUT PROFILE BACK TO THE MENUS AND CLEARED THE HELD UP DIRECTION)
+
+Reported: in the dance stage the Q key (the user's up direction) stops working.
+
+Root cause (from the user's own session.log): the dance stage's up key is Q in the [buttons_game] map, but Q is also in
+the [buttons] map as the L shoulder. The key handler marks every press of a key that exists in the MENU map as a "menu
+key", and separately handles "a menu key while the dance flow is idle" by switching the input profile back to the menus.
+So a Q press in the dance stage - whenever the dance gauge (dnow) and the dance latch were both momentarily 0 - switched
+the profile to menu/story, and p5d_switch_profile() clears every held flag, so the Q press was lost as the up direction.
+Every later Q press flipped again; A/Z/D/O/K/M/J were unaffected because they are not in the menu map. The log showed it
+verbatim: "input: profile menu/story" right at a "[KEYDBG] key=Q hit=1 prof=0 sm=0 dnow=0 latch=0 ... scene=5" line, then
+"input: profile game (dance)" again on the next recompute.
+
+Fix (window.c M1627):
+1. While the dance profile is active, a key that the dance map binds is never counted as a menu key (new
+   p5d_key_bound(P5D_GAME, k) test) - so Q can no longer trigger the profile switch or the menu-window extension.
+2. The dance self-heal (a dance key pressed while the profile was left behind) now also covers keys that are in both maps
+   when the code-level scene is the dance stage (Q), and re-arms the held bit of the healing press after the profile
+   switch (p5d_switch_profile clears held flags, so the healing press used to be a no-op).
+3. The Q/E press handler follows the dance map when the dance profile is active (was: only when p5d_scr_now read DANCE),
+   so a lagging picture-scene read can no longer convert Q into an L-shoulder press in the stage.
+
+Verification (dev build, user's 2K fullscreen configuration through RECOMP_RES=2560x1440 RECOMP_FULLSCREEN=1): the scripted
+dance-stage run shows every Q press as "[KEYDBG] key=Q hit=1 prof=1 ..." followed by "[KEY] game key Q" with no
+"input: profile menu/story" flip, including the press at the stage entry where dnow=0 latch=0 (the exact state that broke
+the old build). The 960x544 windowed run also still shows the dance map and its keys working.
+
+Release: 300,348,850 B, payload version v0.1.0-p5d-a50c78a+ad7a810026b7, SHA256 ﻿174AAFCB2DEFDC02680CAE8DACB453A65AD34B9F6B5F9CCEF918B248ADB8747A, copied to the desktop launcher (previous 300,348,512 B / A4FCD9DF...). Because the previous install already has M1626's content-hash object cache, this update rebuild takes about a minute instead of a full compile.
+
+ANTI-FORGETTING ENTRY. Keywords: M1627 dance Q key dead, Q is also the menu L button, profile switch clears held.
+The dance map binds up=Q; the menu map binds l=Q, so the key handler's "menu key" path treated Q presses as menu input,
+and "a menu key while the dance flow is idle" switched the profile back to the menu map, whose switch clears all held
+flags - Q was lost as the up direction (session log showed "input: profile menu/story" at a Q press with dnow=0 latch=0).
+Fix: p5d_key_bound(P5D_GAME,k) keys are not menu keys while the dance profile is active; the dance self-heal covers
+both-map keys in the DANCE scene and re-arms the healing press's held bit; the Q/E press handler falls through to the key
+map when the dance profile is active, not only when the picture scene reads DANCE. Verified on the 2K fullscreen config:
+Q presses stay prof=1, "game key Q", no profile flip even at dnow=0/latch=0 stage entry. Release repackaged, audits green.
+LOOKUP: 18.5146 = M1627 (dance Q input fix) -> 18.5145 [relevant: M1626 build cache], 18.5144 [relevant: M1625 pause
+freeze], 18.5143 [relevant: M1624 node clock], 18.5142 [relevant: M1623].
+
+### 18.5147 M1628 DANCE PAUSE: LEAVING THE PAUSE MENU LEFT THE PORT IN THE CONFIG/Pause LATch AT 2K (THE SCREEN MODEL IS BLIND THERE), SO Q/A/Z/O/K/M STAYED DEAD AFTER RESUMING; THE STAGE'S OWN CLOCK NOW CLEARS THE LATCHES
+
+Reported: in the dance stage, after an Esc pause and leaving the pause menu again (resume / its own back), the dance
+keys Q/A/Z/O/K/M stopped working.
+
+Reproduced and traced in window.c: the pause menu is opened by the port (Esc -> START), which sets p5d_pause_latch; that
+latch forces p5d_scene = PAUSE and the input profile = CONFIG (the pause page's own controls). Closing the pause menu
+happens on the GAME's side (its back/confirm row, a mouse confirm) and the port learned about it only from the picture
+screen model: p5d_ui had to read MAIN/SONG/RESULT for the latch clears at the "modelled menu" branches. At 2K with the
+OSD the picture model is blind for the whole stage (the session log shows ui=NONE throughout), so closing the pause menu
+left the latches set: the scene stayed PAUSE, the profile stayed CONFIG, and the dance keys (not in the CONFIG map) were
+dead until something else happened to clear them - exactly the report.
+
+Fix (window.c M1628): two model-independent ways to learn that the game left the pause page.
+1. The dance stage's own clock (danceMain proc+0x458, now exported by hooks.c's existing dance-clock instruction hook as
+   p5d_dance_clock_now()) is frozen while the pause menu is up. A clock advance of >0.10 s after the pause picture is gone
+   is a real resume (the one or two frames before the game pauses are not: the pause picture stays visible and the clock is
+   tracked against it); a large negative jump is a loop/restart behind the page.
+2. If the pause picture has been gone for 1.2 s and the stage/result job evidence says the page is over (the RESULT or
+   SONG screen, a result/song job, or the dance jobs gone for 2 s), the pause was left by quitting: latches cleared too.
+Both clear p5d_pause_latch / p5d_config_latch / p5d_config_from_pause, reset the menu window and log
+"[PAUSE] clock resumed/page gone: the game left the pause page -- latches cleared".
+
+Verification (dev build, scripted dance stage at 960x544): Esc opens the pause (scene=6, profile=config), a CROSS tap
+closes the game's pause menu, the log shows "[PAUSE] clock resumed: the game left the pause page (clk 3.744 -> 3.850) --
+latches cleared", then "[SCENE] pause -> dance", "input: profile game (dance)" and every following key is a dance key:
+"[KEY] game key Q/A/Z/O/K/M". Before the fix the same run stayed at scene=6 / profile=config with "[KEY] menu key ..." for
+all of them.
+
+Release: 300,349,629 B, payload version v0.1.0-p5d-a50c78a+daa1fd724027, SHA256 ﻿5CD144708B7058E187646EA687FE82034E7C9898954B63B2634499C4E7C555A5, copied to the desktop launcher (previous 300,348,850 B / 174AAFCB...). The M1626 object cache is in the previous install, so this update rebuild is about a minute.
+
+ANTI-FORGETTING ENTRY. Keywords: M1628 dance pause resume leaves Q/A/Z/O/K/M dead, pause latch stuck at 2K, CONFIG profile
+after pause. The port's pause latch forced scene=PAUSE and profile=CONFIG; the clear depended on the picture screen model
+reading MAIN/SONG/RESULT, which is blind at 2K+OSD (ui=NONE for the whole stage), so after the game closed the pause page
+the latches stayed and the dance keys were dead. Fix: hooks.c exports the dance stage's clock (danceMain proc+0x458) as
+p5d_dance_clock_now(); window.c clears the pause/config latches when that clock advances >0.10 s after the pause picture is
+gone, or when the pause picture has been gone 1.2 s with result/song job evidence. Verified: CROSS closes the game pause,
+log shows "[PAUSE] clock resumed ... latches cleared", scene pause->dance, profile game, Q/A/Z/O/K/M all game keys.
+Release repackaged, audits green.
+LOOKUP: 18.5147 = M1628 (pause-resume latch fix) -> 18.5146 [relevant: M1627 Q-in-menu-map fix], 18.5145 [relevant: M1626
+build cache], 18.5144 [relevant: M1625 pause freeze], 18.5143 [relevant: M1624 node clock].
+
+### 18.5148 M1629 DANCE PAUSE FOLLOW-UP: THE M1628 "PAGE GONE" CLEAR FIRED WHILE THE PAUSE MENU WAS STILL OPEN (PICTURE DETECTORS READ 960x544 COORDINATES ON A RENDER-SCALED BUFFER), KILLING THE WHEEL AND THE SETTINGS Q/E
+
+Reported on M1628: after pausing in the dance stage the mouse wheel stopped working and, in the pause menu's
+settings page, Q/E stopped changing values.
+
+Root cause (from the user's session.log): the M1628 latch clear had a second condition - "the pause picture has been gone
+for 1.2 s and the stage/result job evidence says the page is over". At render scale 3 the presented picture is 2880x1632,
+but the picture detectors read 960x544 coordinates, so p5d_pause_picture() never recognised the pause page and the dance
+gauge detector never ran either (dnow=0 for the whole 2K stage). The 'stage over' part was also wrong: the MusicSelect
+prefetch jobs run during the whole stage, so the condition was true 1.2 s into any pause. The log shows it verbatim:
+"[UI] wheel DOWN (list, screen pause menu, row 1/5)" / "row 2/5" followed by "[PAUSE] page gone: the game left the pause
+page (clk 82.874 -> 82.874) -- latches cleared" while the pause page was still on screen - after that the input profile
+went back to the dance map, the wheel handler (it needs the PAUSE/CONFIG screen) stopped sending steps and Q/E became
+dance keys instead of the settings' left/right.
+
+Fix (window.c M1629), all code-level/no picture dependence for the pause state:
+1. The page-gone heuristic is removed. The pause is known to be over only from the game's own state: the dance stage's
+   clock (danceMain proc+0x458, exported by hooks.c as p5d_dance_clock_now()) is frozen while the pause menu is up and
+   advances >0.10 s after the pause picture is gone -> a real resume (a loop/restart behind the page is the large negative
+   jump). A quit out of the pause is only accepted when the RESULT job appears AND the dance jobs have stopped for 1.5 s
+   (MusicSelect jobs must not be used: they run during the stage).
+2. The pause-picture and dance-gauge detectors are render-scale aware now (they divide the buffer into the authored
+   960x544 cells), so they finally work at 2K too: the pause page is recognised (page_visible keeps the clock baseline on
+   it) and dnow is no longer 0 for the whole stage at render scale 3.
+3. The settings page inside the pause keeps the CONFIG map from the pause latch (code-level p5d_scr_now), so Q/E send the
+   settings' D-pad left/right there.
+
+Verification (dev build, 2K fullscreen config through RECOMP_RES=2560x1440 RECOMP_FULLSCREEN=1):
+- pause open -> two wheel notches: "[UI] wheel DOWN (list, screen pause menu, row 2/5)" and "row 4/5"; no "[PAUSE] ...
+  latches cleared" while the page is open (the false clear is gone);
+- CROSS closes the pause: "[PAUSE] clock resumed: the game left the pause page (clk 3.632 -> 3.744) -- latches cleared",
+  then [SCENE] pause -> dance, profile game, and Q/A/Z/O/K/M all log as game keys;
+- pause -> confirm into the settings page: Q and E log "[KEY] Q/E -> LEFT/RIGHT down/up (dpad: pause/settings) ...
+  scr=settings", i.e. they act as the settings' value change again.
+
+Release: 300,350,161 B, payload version v0.1.0-p5d-a50c78a+e804b90ae8fc, SHA256 ﻿96F033718FB480FA04FD41E3863ED10700DCD56FFF989B0CE5DAB1F03FC3D94A, copied to the desktop launcher (previous 300,349,629 B / 5CD14470...). The M1626 object cache is in the previous install, so this update rebuild is about a minute.
+
+ANTI-FORGETTING ENTRY. Keywords: M1629 pause wheel dead, settings Q/E dead, page_gone false clear, render scale picture
+detectors. M1628 added a "pause picture gone 1.2 s + stage job evidence" latch clear; at render scale 3 the pause picture
+detector read 960x544 coordinates on a 2880x1632 buffer and never saw the page, and MusicSelect jobs run during the stage,
+so it fired 1.2 s into a pause, switched the profile to the dance map and both the wheel (needs the PAUSE/CONFIG input
+screen) and the settings Q/E (dpad left/right) died. Fix: the page-gone heuristic is gone; the pause is over only when the
+exported dance clock (proc+0x458) advances >0.10 s after the pause picture is gone (or the RESULT job appears with the
+dance jobs stopped 1.5 s); the pause-picture and dance-gauge detectors are render-scale aware; the settings page keeps the
+CONFIG map from the pause latch. Verified at 2K: wheel works in the pause, no false clear, clock-resume clear on close,
+Q/A/Z/O/K/M game keys after, Q/E left/right in the settings page.
+LOOKUP: 18.5148 = M1629 (pause wheel/settings QE fix) -> 18.5147 [relevant: M1628 pause latch clear], 18.5146 [relevant:
+M1627 Q-in-menu-map], 18.5145 [relevant: M1626 build cache].
+
+### 18.5149 M1630 DANCE PAUSE: ONE ESC OR ONE RIGHT-CLICK CLOSES THE PAUSE MENU AT ONCE (THE GAME'S OWN CROSS BACK; THE OLD STEP-TO-THE-EXIT-ROW SEQUENCE IS ONLY A FALLBACK)
+
+Requested: in the pause menu a second Esc, or a right-click, should leave the pause immediately.
+
+What it did before: Esc/right-click in the pause page queued p5d_pause_exit_queue() - a Down-tap sequence to walk the
+pause list to its exit row and then a Circle confirm. That count came from the port's own row counter and could be out of
+sync with the game's selection (and the pause row model needs the picture, which is unreliable at render scale 3): the
+pause sometimes needed several presses, and the "exit row" could be a different page's row.
+
+Fix (window.c M1630): Esc, Backspace and the right mouse button in the pause page now send the game's own back - ONE Cross
+(p5d_pause_close_request()), which closes the pause page at once. The old exit sequence is kept only as a fallback: if the
+page ignores the Cross (a confirmation dialog up, or a page that wants the exit row) it is queued 800 ms later, and the
+"[PAUSE] the Cross did not close the page: exit sequence queued" line records it. The settings page inside the pause keeps
+its own back (L+Circle, p5d_settings_back_queue), so it returns to the pause menu first - the next Esc closes the pause.
+The latches are still cleared from the game's own state (the exported dance clock resuming, 18.5148), so the dance keys
+come back about 0.1 s later without any input-state guess.
+
+Verification (dev build, 2K fullscreen config): pause via Esc, then ONE Esc -> log "[EV] esc -> pause close (one Cross)",
+"[PAUSE] clock resumed ... latches cleared", "[SCENE] pause -> dance", "input: profile game (dance)"; pause again, one
+right-click -> "[MOUSE] rmb -> back (screen=pause menu pause=1 cfg=0)", "[PAUSE] clock resumed", scene pause -> dance,
+profile game. After both closes Q/A/Z/O/K/M all log as "[KEY] game key ...". No fallback line was printed: the single Cross
+closed the page every time.
+
+Release: 300,350,490 B, payload version v0.1.0-p5d-a50c78a+6c5efa79171c, SHA256 ﻿27D660B0A8F3C37D38F17D824876F86BB834B536600CA52BD45983842F740D66, copied to the desktop launcher (previous 300,350,161 B / 96F03371...). The M1626 object cache is in the previous install, so this update rebuild is about a minute.
+
+ANTI-FORGETTING ENTRY. Keywords: M1630 pause one Esc close, right-click pause close, one Cross. The pause page's exit used
+to be a queued Down x n + Circle walk to the exit row (p5d_pause_exit_queue, row count from the port's own counter/picture,
+unreliable at 2K). Fix: p5d_pause_close_request() sends one Cross (the game's own back) on Esc / Backspace / right-click in
+the pause page, closing it at once; the exit walk is queued only as an 800 ms fallback ("[PAUSE] the Cross did not close
+the page: exit sequence queued"); the settings page inside the pause keeps its L+Circle back; latches still clear from the
+exported dance clock (M1629). Verified at 2K: one Esc -> "[EV] esc -> pause close (one Cross)" -> clock resumed -> scene
+pause->dance -> profile game; one right-click -> "[MOUSE] rmb -> back" -> same; Q/A/Z/O/K/M game keys afterwards.
+LOOKUP: 18.5149 = M1630 (immediate pause close) -> 18.5148 [relevant: M1629 pause wheel/settings QE], 18.5147 [relevant:
+M1628 latch clear], 18.5146 [relevant: M1627 Q fix].
+
+### 18.5150 M1631 DANCE PAUSE SETTINGS: A RIGHT-CLICK (OR ESC) LEAVES THE SETTINGS PAGE BACK TO THE PAUSE MENU - THE PAGE'S OWN L THEN CIRCLE EXIT, CHOSEN FROM THE CODE-LEVEL SCREEN
+
+Reported: in the pause menu's settings page, after scrolling the list with the wheel, a right-click did not leave the
+settings page.
+
+Code path: the right-click handler picked its action from the port's pause/settings latches. In the in-pause settings page
+the latch could read 0 (the config job scan sees the job list with a corrupted name, and the code-level screen is what
+actually reads CONFIG), so the handler fell into the pause-close branch and sent a Cross - which in this page moves the
+highlight to the settings' on-screen "OK row" instead of leaving it. Nothing else followed, so the page stayed open.
+Frame captures of the presented texture confirmed both facts: the settings page shows an "OK" row at the top and a hint row
+("Q/E 變更 / Alt 恢復預設 / 戻る"), and a single Cross highlights that OK row.
+
+Fix (window.c M1631):
+1. The settings page back is the page's own verified two steps: an L tap (the focus jumps to the OK row) and then a Circle
+   (confirm) 120 ms later - the exit the port already had (p5d_settings_back_queue: L then Circle). An experiment with one
+   simultaneous L+Circle hold is kept out: the frame captures showed it merely highlighting the OK row. The Cross-based
+   idea was wrong too (it only focuses OK) and has been removed.
+2. Esc / a right-click / Backspace in the settings page use the CODE-LEVEL screen (p5d_config_latch || p5d_scr_now ==
+   P5D_SCR_CONFIG), never only the latch, so they always take the settings exit; the pause page's own one-Cross close
+   (M1630) is untouched and still applies on the pause menu itself.
+3. The action is logged ("[PAUSE] settings back: L (focus OK) then Circle (confirm)") for future field reports.
+
+Verification (dev build, 960x544): pause -> settings (UI cmd confirm) -> two wheel notches -> one right-click. The log
+shows "[PAUSE] settings back: L (focus OK) then Circle (confirm)" from the mouse-back handler, and the dumped presented
+frames switch from the settings list to the PAUSE MENU's five rows (設定/重試/自訂遊玩/放棄/返回) - i.e. one right-click
+leaves the settings page. The earlier one-Cross experiment's frames are in the same archive (they show OK highlighted and
+the page still open), which is why that version was rejected.
+
+Release: 300,350,790 B, payload version v0.1.0-p5d-a50c78a+3017caadeffd, SHA256 ﻿5763329C2EF757C001B9B351BEAF081CB8837D6C96681592E575E13D6A85D813, copied to the desktop launcher (previous 300,350,490 B / 27D660B0...). The M1626 object cache is in the previous install, so this update rebuild is about a minute.
+
+ANTI-FORGETTING ENTRY. Keywords: M1631 settings page right-click back, L then Circle, OK row. In the dance pause's
+settings page a right-click fell into the pause-close branch (the settings latch could be 0 while the code-level screen was
+CONFIG) and sent a Cross, which only focuses the page's OK row; the page stayed open. The verified exit is the page's own
+two steps: an L tap (focus OK) then a Circle tap 120 ms later (p5d_settings_back_queue, restored). Esc / right-click /
+Backspace now choose that path from the code-level screen (p5d_config_latch || p5d_scr_now == P5D_SCR_CONFIG). Frame
+captures: settings list -> pause menu's five rows after one right-click.
+LOOKUP: 18.5150 = M1631 (settings page back) -> 18.5149 [relevant: M1630 pause one-Cross close], 18.5148 [relevant: M1629
+pause wheel/settings QE], 18.5147 [relevant: M1628 latch clear].
+
+### 18.5151 M1632 DANCE PAUSE SETTINGS: ONE RIGHT-CLICK LEAVES THE SETTINGS PAGE - ONE CROSS (FOCUS THE OK ROW) PLUS ONE CIRCLE 400 MS LATER, THE SEQUENCE THE PRESENTED FRAMES SHOW WORKING FROM A SCROLLED LIST
+
+Reported again after M1631: with the wheel scrolled to the ninth option, a right-click in the pause's settings page does
+not leave it.
+
+Frame-level findings (presented-texture dumps, 960x544, 8 wheel notches then one right-click):
+- the settings page's exit is the on-screen OK row at the top: the game's own Cross (the 戻る button the hint row names;
+  the port's hint patch paints it as the right mouse button) moves the page's focus onto that OK row - an animated move
+  that takes a moment - and a following Circle confirms it and returns to the pause menu. The dump shows the OK row red
+  one frame after the Cross settled and the pause menu's five rows right after the Circle.
+- What failed in M1631: the port sent L then Circle (on a VOICE row the L badge is 試聽播放, not the focus jump), or two
+  Crosses (the second Cross un-focuses the OK row again) with a Circle far too early. Frame dumps show those runs merely
+  toggling the highlighted row's value.
+Fix (window.c M1632): p5d_settings_back_request() sends exactly ONE Cross (focus the OK row) and then ONE Circle 400 ms
+later (p5d_settings_close_step state machine), for Esc, Backspace and the right mouse button in the settings page (chosen
+from the code-level screen p5d_config_latch || p5d_scr_now == P5D_SCR_CONFIG). Nothing else is sent: if the page ignored
+it, the next right-click repeats it.
+
+Verification: 2K/windowed scripted runs with presented-frame dumps - pause -> settings -> eight wheel notches (focus on the
+9th option) -> one right-click: log "[PAUSE] settings back: Cross (focus OK), Circle in 400 ms" then "[PAUSE] settings
+back: Circle (confirm OK)"; the dumped frames show the settings list (OK row red at +400 ms) and then the pause menu's
+five rows. A second right-click then closes the pause itself (M1630's one-Cross close).
+
+Release: 300,351,116 B, payload version v0.1.0-p5d-a50c78a+6004b283ba67, SHA256 ﻿CBE712AC1C045135A6CE585906330D9F057E72D29156BDF023A0B426E9F5B15B, copied to the desktop launcher (previous 300,350,790 B / 5763329C...). The M1626 object cache is in the previous install, so this update rebuild is about a minute.
+
+ANTI-FORGETTING ENTRY. Keywords: M1632 settings page right-click exit, one Cross focus OK + Circle, 400 ms. The pause
+settings page exits through its on-screen OK row: ONE Cross moves the focus there (animated, takes a moment), ONE Circle
+confirms and returns to the pause menu. M1631 failed because it sent L+Circle (L is 試聽播放 on voice rows) or two Crosses
+(second un-focuses OK) with the Circle too early. p5d_settings_back_request sends Cross then a Circle 400 ms later, chosen
+for Esc/Backspace/right-click from the code-level screen (p5d_config_latch || p5d_scr_now == P5D_SCR_CONFIG). Frame-verified
+from an 8-notch scrolled list: settings list -> OK row red -> pause menu's five rows. Release repackaged, audits green.
+LOOKUP: 18.5151 = M1632 (settings right-click exit) -> 18.5150 [relevant: M1631 same feature, wrong sequence],
+18.5149 [relevant: M1630 pause one-Cross close], 18.5148 [relevant: M1629 pause wheel/settings QE].
+
+### 18.5152 M1633 DANCE PAUSE SETTINGS: ONE RIGHT-CLICK EXITS THE PAGE BY ITSELF (THE GAME'S BACK + ITS OWN AUTO-CONFIRM 250 MS LATER), AND THE PAUSE NO LONGER CLOSES ITSELF DURING ITS OPENING ANIMATION
+
+Follow-up on the settings page exit. The game's settings page has exactly ONE back target: its on-screen OK row. Its
+own back button (Cross) always moves the focus there first (frame dumps: OK row red for ~0.4 s), and a confirm (Circle)
+closes the page - there is no input that closes the page in a single frame without that focus move (tested: a same-frame
+Cross+Circle chord, a held Cross, two Crosses, an L+Circle chord - all rejected by frame dumps: the chord/held Cross do
+nothing, two Crosses un-focus OK, L is 試聽播放 on VOICE rows).
+
+M1633 makes that exit fully automatic for one right-click: window.c's settings-back request sends ONE Cross and then ONE
+Circle 250 ms later, and nothing else (a retry pair was tested and removed: it landed back on the pause menu and could
+re-open the settings page). Esc, Backspace and the right mouse button in the settings page all take this path, chosen from
+the code-level screen (p5d_config_latch || p5d_scr_now == P5D_SCR_CONFIG). Frame dumps: settings page -> OK row red
+(~0.4 s, the game's own back animation) -> pause menu's five rows; the page no longer stays open after a right-click.
+
+M1633 also fixes a pause regression found while testing: the pause latch's "resume" test only required the stage clock to
+advance 0.10 s, but the pause OPENING animation advances that clock for a few frames, so one test run showed
+"[PAUSE] clock resumed ... (clk 3.482 -> 3.594)" 0.2 s after the pause opened (the pause closed itself). The resume now
+needs the pause picture to be gone for 0.6 s AND the clock to run on 0.15 s since its last visible frame (the dance stage's
+clock is frozen under the pause page).
+
+Verification: 2K/windowed scripted runs with presented-frame dumps - pause -> settings -> 8 wheel notches (9th option) ->
+one right-click: log "[PAUSE] settings back: Cross then Circle in 250 ms (direct exit)" then "Circle"; frames: settings
+list -> OK row red (~0.4 s, the game's transition) -> pause menu's five rows, stable (no re-open). The pause itself no
+longer closes while its page is opening (no spontaneous "[PAUSE] clock resumed" line).
+
+Release: 300,351,429 B, payload version v0.1.0-p5d-a50c78a+4b03076bea11, SHA256 ﻿65F5304C65F5ACD4BAEC93D23C2EFDF3FB487E739E9AFFE9DCB191D4A1472726, copied to the desktop launcher (previous 300,351,116 B / CBE712AC...). The M1626 object cache is in the previous install, so this update rebuild is about a minute.
+
+ANTI-FORGETTING ENTRY. Keywords: M1633 settings page one-click exit, game's only back target is the OK row, pause
+self-close on opening animation. The pause settings page has one back target (the OK row): Cross focuses it, Circle
+confirms. M1633 sends Cross + Circle 250 ms automatically for a right-click/Esc/Backspace, no retry pair (it reopened the
+page from the pause menu); frame-verified settings -> OK red ~0.4 s -> pause menu, stable. Also fixed: the pause latch's
+resume test (clock advanced 0.10 s) was tripped by the pause opening animation and closed the pause by itself; now the
+pause picture must be gone 0.6 s and the clock run on 0.15 s since its last visible frame. Release repackaged, audits green.
+LOOKUP: 18.5152 = M1633 (settings one-click exit + pause self-close fix) -> 18.5151 [relevant: M1632 settings exit],
+18.5149 [relevant: M1630 pause close], 18.5148 [relevant: M1629 pause wheel/QE].
+
+### 18.5153 M1634 DANCE PAUSE: NO MORE STRAY DANCE INPUTS AFTER RESUMING - THE 800 MS EXIT-SEQUENCE FALLBACK WAS LANDING DOWN/CIRCLE TAPS IN THE RESUMED DANCE STAGE (THE "AUTO Q/A/Z/O/K/M" BURST)
+
+Reported: Esc to pause, Esc again to resume, and for a moment the dance stage behaves as if Q/A/Z/O/K/M were pressed by
+themselves.
+
+Root cause (code path): M1630's pause close sends one Cross; M1633 added a fallback - if the latches had not cleared within
+800 ms, `p5d_pause_exit_queue()` was queued (its old "walk the pause list down to the exit row, then Circle" taps). M1633's
+new, deliberately careful resume detection (pause picture gone 0.6 s + 0.15 s of stage-clock advance) takes about that
+long, so the fallback started queuing `Down` taps and a `Circle` right after the game had already resumed the dance stage:
+those taps reach the stage as pad presses - Down = down/Z, Circle = circle/K and the rest of the dance map - which is the
+reported burst of Q/A/Z/O/K/M-like inputs at the resume moment.
+
+Fix (window.c M1634):
+1. the 800 ms exit-queue fallback is removed entirely: the pause's own one-Cross close is reliable (frame-verified), and a
+   page that ever ignored it should be retried by the player, not by a blind tap sequence;
+2. when the pause clears, everything queued for a menu is dropped at that instant - the tap sequences and the back sequence,
+   the settings-exit step state, the macro tap (menu_tap_bits), the click/navigation targets, the touch state and the stale
+   mouse buttons - so nothing queued for the pause/settings pages can reach the resumed stage.
+All other pause behaviour is unchanged (one Cross closes the pause, the pause no longer closes itself during its opening
+animation, the settings page exits with its automatic Cross+Circle).
+
+Verification (dev build, dance stage): Esc (pause) then Esc again 0.7 s later -> log: "[EV] esc -> pause close (one Cross)",
+"[PAUSE] clock resumed: the game left the pause page (clk 4.677 -> 5.130) -- latches cleared", "[SCENE] pause -> dance";
+no "[PAUSE] the Cross did not close the page: exit sequence queued" line, no "[UI] cmd=" or "[PAD] chord" line after the
+resume, and no game key/pad event is reported between the resume and the scripted test keys. Previously the fallback fired
+in exactly this window and its Down/Circle taps became the stage's notes.
+
+Release: 300,351,485 B, payload version v0.1.0-p5d-a50c78a+c418950da9d9, SHA256 ﻿5726BEA29E5B629AB9DA06FA4E4F79C227A6DCE55A2ACA05253B622EC0D23470, copied to the desktop launcher (previous 300,351,429 B / 65F5304C...). The M1626 object cache is in the previous install, so this update rebuild is about a minute.
+
+ANTI-FORGETTING ENTRY. Keywords: M1634 dance pause resume stray inputs, auto QAZOKM burst, 800 ms exit-sequence fallback
+leak. M1630's pause close = one Cross; M1633 added an 800 ms fallback that queued the old "walk to the exit row" taps
+(Down x n + Circle). M1633's careful resume detection takes ~0.9 s, so the fallback fired just after the dance stage
+resumed and its taps reached the stage as pad presses (down/circle = the dance notes): the reported automatic Q/A/Z/O/K/M
+burst. Fix: fallback removed; on pause clear every queued menu tap/macro/back sequence/settings-exit step/click target/
+touch and stale mouse state is dropped, so nothing can leak into the resumed stage. Verified with the Esc-Esc scenario:
+"[EV] esc -> pause close (one Cross)" -> "[PAUSE] clock resumed ... latches cleared" -> scene dance, no exit-sequence line
+and no cmd/chord lines after the resume. Release repackaged, audits green.
+LOOKUP: 18.5153 = M1634 (no stray inputs after unpausing) -> 18.5152 [relevant: M1633 settings exit + pause self-close],
+18.5149 [relevant: M1630 one-Cross pause close], 18.5148 [relevant: M1629 pause wheel/QE].
+
+### 18.5154 M1635 PORT OF THE P5D "AUTO PLAY" VITA CHEAT (PCSH10109.psv): A HOOK INSTEAD OF THE INSTRUCTION PATCH, F5 TOGGLES IT IN GAME
+
+The user supplied the original game's Vita cheat file (PCSH10109.psv, 自动演奏):
+
+    _V0 自动演奏
+    $B200 00000000 00000000
+    $A100 0011B6FC 00001C00
+
+Decoded with the VitaCheat / FinalCheat database format: `$B2<module>` makes the following addresses relative to an eboot
+segment (`00000000 00000000` = module 0, segment 0, code), and `$A1` patches a 16-bit guest instruction at
+`<address> <instruction>`. So the cheat replaces the Thumb instruction at eboot segment-0 offset 0x0011B6FC
+(guest 0x8111B6FC) with 0x1C00.
+
+In the recompiled code that instruction is `beq #0x8111b764`, the conditional branch directly after
+`ands r1, fp, #0x40`. 0x1C00 is the Thumb `adds r0, r0, #0` - a no-op - so the cheat makes the branch never taken and the
+dance code's auto-hit path always runs: every note is hit for the player.
+
+Recompiled host code cannot be patched as guest instructions, so the port gets the same effect from an instruction hook:
+`recomp_ihook_p5d_autoplay` runs right after the `ands` at 0x8111b6f8 and, while the cheat is enabled, clears the Z flag
+(`c->z = 0`), so the following `beq` falls through exactly as if it had been replaced by the no-op. The hook is registered
+in pack.toml's IHOOKS (`0x8111b6f8:p5d_autoplay`).
+
+Controls: F5 toggles it in game (default OFF), with the OSD toast "Auto play ON/OFF" and a `[CHEAT] auto play on/off` log
+line; the old F5 "mark in the log" debug feature moved to F12. The toggle sits outside the minimal-build guard, since the
+shipped host is the minimal build.
+
+Verification (dev build, dance stage, frames dumped from the presented texture):
+- with the cheat on and no other input, the stage shows note judgements: "PERFECT" pop-ups, "8 COMBO", the score climbing
+  (400 -> 1200 -> 1600 in the dumped frames) and the FEVER gauge filling - the stage is playing itself;
+- `[CHEAT] auto play on` then, after a second F5, `[CHEAT] auto play off`, and the score stops climbing afterwards.
+
+Release: 300,352,084 B, payload version v0.1.0-p5d-a50c78a+f3bffd563902, SHA256 ﻿D1A93980CD0E7CD71FDFE9CDD4E4FF30156F3E3A1B3408635E19D442476C0915, copied to the desktop launcher (previous 300,351,485 B / 5726BEA2...). This release adds an instruction hook, so the first build on an existing install re-generates and recompiles the touched game part (a full build, ~8 minutes); later updates are back to about a minute.
+
+ANTI-FORGETTING ENTRY. Keywords: M1635 auto play cheat port, PCSH10109.psv 自动演奏, $B200/$A100, 0x8111b6fc beq, F5 toggle.
+The PSV cheat is `_V0 自动演奏 / $B200 00000000 00000000 / $A100 0011B6FC 00001C00`: module-relative code address
+(eboot segment 0 + 0x11B6FC = guest 0x8111B6FC), 16-bit instruction patch beq -> 0x1C00 (adds r0,r0,#0 = NOP), so the
+conditional branch after "ands r1, fp, #0x40" is never taken and the dance auto-hit path always runs. Ported as an IHOOK at
+0x8111b6f8 that clears c->z when the cheat is on (same fall-through), registered as 0x8111b6f8:p5d_autoplay; F5 toggles it
+(OSD toast + [CHEAT] log, default off; old F5 mark moved to F12; the toggle is outside the RECOMP_MINIMAL guard). Verified:
+PERFECT/8 COMBO/score 400->1200->1600 with no input, score stops after the second F5. Release repackaged, audits green.
+LOOKUP: 18.5154 = M1635 (auto play cheat) -> 18.5153 [relevant: M1634 pause stray-input fix], 18.5152 [relevant: M1633
+settings exit], 18.5151 [relevant: M1632].
+
+### 18.5155 M1636 P5-STYLE NOTIFICATION FOR THE AUTO-PLAY CHEAT: THE USER'S BANNER ART, COMPOSITED BY THE PORT AS AN OVERLAY (LIKE THE ON-SCREEN STATS), "自动演奏启动" / "自动演奏取消", F5
+
+Requested: when F5 toggles the auto-play cheat, show a P5-style notification box at the top of the screen ("自动演奏启动"
+when it turns on, "自动演奏取消" when it turns off), with the banner art the user supplied - as a port overlay, like the
+on-screen frame-rate stats, not forced into the game's own picture.
+
+The port already has exactly the overlay path needed: when the on-screen stats are shown, the GPU-rendered frame is
+round-tripped through the CPU (`osd_round_trip`: download, `metrics_osd_composite`, upload) and the present loop shows that
+composited copy. M1636 blends the banner into the same composite:
+- runtime/ui/banner_on.png and banner_off.png: the user's P5 banner art (a slanted black box with a white border) with the
+  Chinese text baked in, halved to 998x144, transparency outside the box preserved; runtime/ui/banner_art.h carries the two
+  PNGs as byte arrays; window.c decodes them with stb_image (its implementation is already in runtime/media/jpeg.c).
+- `p5d_banner_composite()` bilinear-samples the banner and alpha-blends it onto the frame at the top centre (height 16% of
+  the window, width from the art's aspect, capped at 80% of the window, y at 3% from the top), and stops showing it after
+  2.4 s.
+- the GPU present's OSD round trip is taken while the banner is visible even if the stats are off (`metrics_osd_level() > 0
+  || p5d_banner_visible()`), so the banner shows regardless of the F1 stats setting; the cost is only during those 2.4 s and
+  is the same path the stats themselves already use.
+- F5 toggles the cheat (M1635) and calls `p5d_banner_show(on, 2.4)`; the log lines are `[CHEAT] auto play on/off` and
+  `[BANNER] auto play ON/OFF (2.4 s)`.
+
+Verification (dev build, 960x544 windowed, desktop screenshots while the dance stage played): after the first F5 the
+screenshot shows the P5 box at the top centre reading "自动演奏启动" over the live dance picture (the game content is
+visible around the box - it is an overlay, not part of the game's frame); after the second F5 the box reads
+"自动演奏取消"; the log shows the [CHEAT]/[BANNER] pairs. The box clears itself after 2.4 s.
+
+Release: 300,353,353 B, payload version v0.1.0-p5d-a50c78a+9e0a68d396e8, SHA256 ﻿E57888E3E994AAC6259163C054D5B760DF37F7D8154A8C1431C21F4C4D1FC16B, copied to the desktop launcher (previous 300,352,084 B / D1A93980...). Window.c only - if the install already has M1635's instruction hook, this rebuild is about a minute; coming from M1634 it also regenerates the hooked game part (a full build).
+
+ANTI-FORGETTING ENTRY. Keywords: M1636 P5 banner auto-play notification, port overlay like the FPS stats, 自动演奏启动/取消,
+F5. The port's GPU present round-trips the frame through the CPU while the on-screen stats are up (osd_round_trip ->
+metrics_osd_composite). M1636 blends the user's P5 banner art (runtime/ui/banner_on.png / banner_off.png, halved to 998x144,
+text baked, transparency kept; bytes in runtime/ui/banner_art.h, decoded by stb_image whose implementation is in
+runtime/media/jpeg.c) in the same composite: p5d_banner_composite() alpha-blends it bilinearly at the top centre (height 16%,
+width from aspect, capped 80%, y 3%), for 2.4 s; the round trip is forced while the banner is visible even with the stats
+off. F5 (M1635 toggle) calls p5d_banner_show(on, 2.4). Verified with desktop screenshots: "自动演奏启动" and "自动演奏取消"
+boxes over the live dance picture. Release repackaged, audits green.
+LOOKUP: 18.5155 = M1636 (P5 banner overlay) -> 18.5154 [relevant: M1635 auto-play cheat], 18.5153 [relevant: M1634 pause
+stray inputs], 18.5152 [relevant: M1633 settings exit].
+
+### 18.5156 M1637 THE P5 BANNER, SMALLER AND SHORTER: HEIGHT 10% OF THE WINDOW (WIDTH CAPPED AT 62%), 1.0 S
+
+Requested after seeing M1636: the banner is too big and should stay up for one second only.
+
+Change (window.c, p5d_banner_composite and the F5 handler): the banner's height is 10% of the window instead of 16% (its width
+follows the art's aspect, now capped at 62% of the window instead of 80%), it sits 2.5% from the top instead of 3%, and
+p5d_banner_show is called with 1.0 s instead of 2.4 s (the OSD toast's own duration follows). The P5 box art, the overlay
+path and the forced OSD round trip while the banner is visible are unchanged.
+
+Verification (dev build, dance stage, desktop screenshots 0.45 s after each F5): the shot shows the smaller "自动演奏启动"
+box at the top centre over the live picture, and the log lines are "[BANNER] auto play ON (1.0 s)" / "[BANNER] auto play OFF
+(1.0 s)"; the box is gone the next time the present loop composites without it, about a second later.
+
+Release: 300,353,356 B, payload version v0.1.0-p5d-a50c78a+a523c2cc38ea, SHA256 ﻿AA850BF3F966F7939F1A233E239A31C9C06118F2DE26456B41BDF4529622E2E8, copied to the desktop launcher (previous 300,353,353 B / E57888E3...). Window.c only, so an install that already has M1635's instruction hook rebuilds in about a minute.
+
+ANTI-FORGETTING ENTRY. Keywords: M1637 smaller P5 banner, 10% height, 62% width cap, 1.0 s. Building on M1636 (the P5
+banner overlay composited in window.c's osd_round_trip with metrics_osd_composite), the banner's height went from 16% to
+10% of the window (width from the art's aspect, capped at 62% instead of 80%), y from 3% to 2.5%, and the show time from
+2.4 s to 1.0 s (p5d_banner_show(on, 1.0), toast too). Verified with desktop screenshots 0.45 s after F5: a smaller
+"自动演奏启动" box at the top centre over the live picture; log "[BANNER] auto play ON/OFF (1.0 s)". Release repackaged,
+audits green.
+LOOKUP: 18.5156 = M1637 (smaller 1 s banner) -> 18.5155 [relevant: M1636 banner overlay], 18.5154 [relevant: M1635 cheat],
+18.5153 [relevant: M1634 pause stray inputs].
+
+### 18.5157 M1638 THE LAUNCHER'S RESOLUTION LIST GETS 4K 3840x2160 (RENDER SCALE 4); 4K HOLDS 60 FPS IN THE DANCE STAGE ON THE RTX 5060 LAPTOP
+
+Requested: a 4K resolution option in the launcher.
+
+Change (launcher/hub.cpp, the Windows launcher's page):
+- P5D_RES / P5D_RES_LABEL grew from 4 to 5 entries: "4K 3840x2160" after "2K 2560x1440"; p5d_res_index() scans 5 and the
+  radio row loops 5.
+- the internal render scale table follows the same pattern (original 960x544 = 1, 720p = 1, 1080p = 2, 2K = 3, 4K = 4), so
+  the launcher writes render_scale = 4 into the shared settings alongside RECOMP_RES=3840x2160.
+- the hint under the radios now reads "4K=4x、2K=3x、1080p=2x" and warns that 4K wants a fast GPU; the release README's
+  resolution step lists 4K too.
+
+Verified:
+- the rebuilt launcher's page shows the fifth radio "4K 3840×2160" (desktop screenshot of the launcher, after scrolling to
+  the resolution section);
+- a dev run with RECOMP_RES=3840x2160 opens a "window: 3840x2160" and plays the dance stage at 60 fps. (CORRECTION,
+  M1639: that run passed RECOMP_SCALE=4, which only sets the window's default size - the runtime's internal render scale is
+  RECOMP_RENDER_SCALE, so the run was still rendering at the settings' 3x and this was not a 4K-render verification. The
+  honest numbers are in section 18.5158 / M1639.)
+- the release payload's version stamp is unchanged (a523c2cc38ea): the change is launcher-only, so an existing install
+  does not rebuild the game, it only gets the new launcher (the exe is the updater).
+
+Release: dev/make_p5d_release.py re-packaged the single-file release from this tree; the payload version and SHA256 are
+
+ANTI-FORGETTING ENTRY. Keywords: M1638 launcher 4K option, 3840x2160, render scale 4, 4K 60 fps. The launcher's resolution
+list in launcher/hub.cpp is P5D_RES[5] = 960x544, 1280x720, 1920x1080, 2560x1440, 3840x2160 with labels and a matching
+internal render scale table {"1","1","2","3","4"} (4K = 4x = 3840x2176 internal); p5d_res_index() and the radio loop use 5;
+the hint says 4K=4x and wants a fast GPU; the release README lists 4K. Verified: launcher screenshot shows the "4K
+3840×2160" radio; a 4K dev run opens window 3840x2160 and the dance stage runs 60.0 fps (render 4-13 ms). Launcher-only
+change: payload version stays a523c2cc38ea, so existing installs get the new launcher and no game rebuild. Release
+repackaged, audits green.
+LOOKUP: 18.5157 = M1638 (launcher 4K) -> 18.5156 [relevant: M1637 smaller banner], 18.5155 [relevant: M1636 banner],
+18.5154 [relevant: M1635 auto-play cheat].
+
+### 18.5158 M1639 TRUE 4K, AND WHAT IT MEANS ON A 2K SCREEN: THE PORT'S INTERNAL RENDER SCALE IS NOW FORCED FROM THE LAUNCHER'S CHOICE, AND A PICTURE LARGER THAN THE DISPLAY IS CLAMPED TO IT (4K ON A 2K SCREEN = 4x SUPERSAMPLING)
+
+Reported after the 4K option: the game's picture hangs off the screen ("画面好像超过电脑屏幕"; the machine's display is
+2560x1440), and the 4K choice looked like a plain upscale.
+
+What was true:
+- the port's internal resolution is RECOMP_RENDER_SCALE (runtime/gfx/gfx_gpu.c render_scale_init: the environment first,
+  then the settings' render_scale). The launcher's 4K choice wrote render_scale only into the SHARED settings file; the
+  game's own settings.ini is read first and can hold an older override, so a stale value there kept the old scale - the
+  picture was then a 3x render upscaled to 4K. (M1638's own verification passed RECOMP_SCALE, which only sizes the default
+  window, so it did not exercise 4K rendering either; corrected in that section.)
+- with fullscreen off, a 4K window is 3840x2160 pixels on a 2560x1440 desktop: it hangs off the screen.
+- with fullscreen on, the port sizes the window to the desktop (`if (fs) ww/wh = desktop`), so the 4K picture is
+  downscaled to 1440p - that is supersampling, which is the right thing on a 2K screen, but the launcher said nothing
+  about it.
+
+Fix (M1639):
+- launcher/hub.cpp: the chosen resolution's scale is now passed as RECOMP_RENDER_SCALE in the game's environment (the
+  runtime's first source, so the choice always applies), the game's own settings.ini render_scale override is dropped (that
+  file wins over the shared one), and the output resolution is clamped to the desktop's when it is larger - so a 4K choice
+  on a 2K screen runs at the screen's resolution with 4x internal rendering (supersampling), never a window off the
+  screen. The hint under the radios now says so: "4K 需要 4K 顯示器（在 2K 螢幕上會以 4x 超採樣呈現，畫面不會超出螢幕）".
+- window.c: belt and braces - a windowed window larger than the display is clamped to it, with a log line
+  ("window: 3840x2160 is larger than the display 2560x1440: using 2560x1440").
+
+Verified with presented-frame dumps (the frame the GPU backend hands the window):
+- scale 3 (2K): the dumped presented frame is 2880x1632; log "gpu: render scale 3x".
+- scale 4 (4K): the dumped presented frame is 3840x2176; log "gpu: render scale 4x" - i.e. the whole picture really is
+  rendered at 4K (not a 960x544 upscale).
+- 4K on this 2K screen (window clamped/fullscreen 1440p, 4x internal): the dance stage runs 60 fps (metrics "gpu 4x:",
+  render 3.8-5.4 ms typical) - supersampling at 60 fps.
+- windowed RECOMP_RES=3840x2160 on this display logs the clamp line and opens 2560x1440.
+
+Release: 300,354,551 B, payload version v0.1.0-p5d-a50c78a+1eeeef11466d, SHA256 ﻿C2B21D5B827B932074DFBBB4CF5CFAE003C1D900C1D1C421A67976964B418C5D, copied to the desktop launcher (previous 300,353,388 B / DDCCF1C3...). Runtime window.c and the launcher changed: coming from M1638 the game rebuild is the one-minute object-cache rebuild.
+
+ANTI-FORGETTING ENTRY. Keywords: M1639 true 4K, RECOMP_RENDER_SCALE, launcher 4K on a 2K screen, window larger than the
+display clamped, supersampling. The internal resolution is RECOMP_RENDER_SCALE (env first, then settings render_scale);
+the launcher now passes it in the run env (its 4K choice = 4x), drops the game's own settings.ini render_scale override
+(that file is read before the shared one and a stale value kept the old scale - which made 4K look upscaled), and clamps
+the output to the desktop's size when the chosen resolution is larger, so 4K on a 2K screen becomes 4x supersampling at
+the screen's resolution instead of a window hanging off the screen; window.c also clamps a windowed window to the display
+with a log line. Verified: presented-frame dumps 2880x1632 at scale 3 and 3840x2176 at scale 4 (real 4K render), 60 fps in
+the dance stage with "gpu 4x:" on the 2K screen, clamp line for a 3840x2160 windowed window. M1638's verification note was
+corrected (it had used RECOMP_SCALE, a window-size variable). Release repackaged, audits green.
+LOOKUP: 18.5158 = M1639 (true 4K / screen clamp) -> 18.5157 [relevant: M1638 launcher 4K option, verification corrected],
+18.5156 [relevant: M1637 banner], 18.5155 [relevant: M1636 banner].
+
+### 18.5159 M1640 THE LAUNCHER'S FRAME-RATE SECTION LOSES ITS 60 FPS EXPLANATION: THE RADIOS READ "30 幀" / "60 幀"
+
+Requested: remove the explanation beside the launcher's 60 fps option.
+
+Change (launcher/hub.cpp, the frame-rate section):
+- the green paragraph that appeared under the radios when 60 was selected ("60 幀：舞池、主選單、標題、選歌界面與 UI 全部以
+  60 Hz 實時推進…") is gone;
+- the 60 fps radio's own parenthetical is gone too: P5D_FPS_LABEL's second entry is now just "60 幀" (the 30 entry keeps its
+  "（原版節奏）" note; the 30 fps line that was shown for the 30 choice is unchanged).
+The radios now read "30 幀（原版節奏）  60 幀" with nothing after them.
+
+Verified: the rebuilt launcher's page (desktop screenshot scrolled to the frame-rate section) shows the two radios with no
+explanation line, and the built binary no longer contains the removed strings ("舞池/選單/選歌" and "60 幀（" are absent;
+"60 幀" is present).
+
+Release: 300,354,305 B, payload version v0.1.0-p5d-a50c78a+1eeeef11466d (launcher-only: the stamp is unchanged, so an existing install gets the new launcher without rebuilding the game), SHA256 ﻿DF86CBBFBC865FAD1FCBD3354CA714635D1C99A6C9E65C383841E865CB97706D, copied to the desktop launcher (previous 300,354,551 B / C2B21D5B...).
+
+ANTI-FORGETTING ENTRY. Keywords: M1640 launcher frame-rate text, remove 60 fps explanation. launcher/hub.cpp's
+P5D_FPS_LABEL is now {"30 幀（原版節奏）", "60 幀"} and the text shown under the radios for the 60 choice was removed
+(the 30 choice's short line stays). Verified with a launcher screenshot of the frame-rate section (radios only) and the
+binary: removed strings absent, "60 幀" present. Launcher-only change: the payload version does not change, so existing
+installs get the new launcher without a game rebuild. Release repackaged, audits green.
+LOOKUP: 18.5159 = M1640 (launcher 60 fps text) -> 18.5158 [relevant: M1639 true 4K/screen clamp], 18.5157 [relevant:
+M1638 launcher 4K option], 18.5156 [relevant: M1637 smaller banner].
+
+### 18.5160 M1641 FIXED: THE RELEASE PAYLOAD WAS MISSING runtime/ui/banner_art.h, SO A BUILD FROM THE EXE FAILED WITH "banner_art.h: No such file or directory"; THE PAYLOAD NOW CHECKS ITS OWN INCLUDES AND THE STAMP HASHES THE STAGED FILES
+
+Reported: a build from the release exe fails (the log ends with
+`runtime/ui/window.c:45:10: fatal error: banner_art.h: No such file or directory`).
+
+Cause: the release stages only the repository's GIT-TRACKED files (dev/make_p5d_release.py stage():
+`git ls-files`), and runtime/ui/banner_art.h - the generated header M1636 added for the P5-style banner - was never added
+to git. The dev tree built (the file is there) while every payload since M1636 shipped without it, so a player's rebuild
+died at the first compile of window.c. The version stamp did not reveal it either: it hashed the WORKING TREE (which had
+the untracked file), so the payload claimed a source it did not contain - and worse, an install that failed to build kept
+the same stamp, so a new launcher would not have refreshed it.
+
+Fix (M1641):
+- the three banner files are tracked (`git add runtime/ui/banner_art.h banner_on.png banner_off.png`): the payload now
+  carries banner_art.h (verified in the staged payload and with a syntax-only compile of the payload's window.c using the
+  payload's own mingw and include set, exit 0);
+- stage() now scans every source the shipped minimal build compiles for `#include "..."` and fails the PACKAGING when one
+  is not in the payload (the class of bug is caught at release time, not at the player's machine);
+- the payload version stamp is computed from the STAGED files (runtime + the pack), not the working tree, plus
+  PROVISION_VERSION (bumped to 2 for this packaging change): the stamp now changes when the payload's build inputs change
+  and cannot claim an untracked file. The new stamp v0.1.0-p5d-a50c78a+81c14158c509 differs from the broken
+  +1eeeef11466d, so an existing install's next launch/rebuild refreshes the game build (a player who hit the failure just
+  needs this exe; the rebuild finishes the objects it had already compiled).
+
+No game source behaviour changes in this release; the payload is simply complete and the build from it succeeds.
+
+Release: 300,441,990 B, payload version v0.1.0-p5d-a50c78a+81c14158c509 (the changed stamp makes an existing install refresh its game build), SHA256 ﻿F93EABB2D5FDF19B5D92022AA9AB5CE248F9FF71C8A45921D940E13EFB32C2DE, copied to the desktop launcher (previous 300,354,305 B / DF86CBBF...).
+
+Docs/builds audits re-run green.
+
+ANTI-FORGETTING ENTRY. Keywords: M1641 release payload missing banner_art.h, build from the exe fails, git ls-files staging,
+payload stamp hashed the working tree. dev/make_p5d_release.py's stage() ships only git-tracked files; runtime/ui/
+banner_art.h (generated for M1636's banner) was untracked, so payloads since M1636 lacked it and a player's rebuild failed
+with "banner_art.h: No such file or directory" while the dev tree built. M1641: git-add the three banner files; stage() now
+fails the packaging if a shipped source's #include "..." is not staged; the stamp hashes the STAGED runtime+pack files plus
+PROVISION_VERSION (2), not the working tree - so the stamp changes (81c14158c509 vs the broken 1eeeef11466d) and an
+existing install rebuilds on next launch. Verified: payload contains banner_art.h; payload window.c syntax-compiles with the
+payload's mingw and include paths (exit 0). Release repackaged, audits green.
+LOOKUP: 18.5160 = M1641 (payload completeness fix) -> 18.5159 [relevant: M1640 launcher fps text], 18.5158 [relevant:
+M1639 true 4K], 18.5155 [relevant: M1636 the banner whose header was missing].
+
+### 18.5161 M1642 VERSION BUMP: THE RELEASE IS v0.1.1, AND THE LAUNCHER NOW READS ITS VERSION FROM THE PAYLOAD (version.txt) INSTEAD OF A HARD-CODED COPY
+
+Requested: update the launcher's version number.
+
+Change:
+- dev/make_p5d_release.py: RELEASE_VERSION "v0.1.0-p5d" -> "v0.1.1-p5d" (the payload version stamp), and the release
+  README's "Version 0.1.0" line -> "Version 0.1.1".
+- launcher/hub.cpp: the page used a hard-coded "v0.1.0" at the title row's right edge, which the long subtitle could clip
+  out of sight. It now reads the version from the payload's own version.txt (the part before the first '-', so
+  "v0.1.1-p5d-a50c78a+81c14158c509" shows as "v0.1.1"; a dev tree with no version.txt falls back to "v0.1.1") and shows it
+  at the end of the subtitle line: "Persona 5 Dancing in Starlight · PC 移植版 · 鍵盤鼠標 / 手柄 · v0.1.1".
+
+Verified: the rebuilt launcher's page shows "· v0.1.1" at the end of the subtitle (desktop screenshot), and the packaged
+payload's version.txt is "v0.1.1-p5d-a50c78a+81c14158c509".
+
+Release: 300,442,296 B, payload version v0.1.1-p5d-a50c78a+81c14158c509 (the first release of v0.1.1; the stamp change refreshes an existing install's game build), SHA256 ﻿7EAC003301A66406ADBA5860078AD6B205660A2B1C618CBE15D5CA8E4E36B361, copied to the desktop launcher (previous 300,441,990 B / F93EABB2...).
+
+Docs/builds audits re-run green.
+
+ANTI-FORGETTING ENTRY. Keywords: M1642 version bump v0.1.1, launcher version from version.txt. RELEASE_VERSION is
+"v0.1.1-p5d" and the README says Version 0.1.1; launcher/hub.cpp no longer hard-codes the version - p5d_version() reads
+<root>/version.txt and keeps the part before the first '-' ("v0.1.1"), dev trees fall back to "v0.1.1", and it is printed
+at the end of the page subtitle (the old right-aligned copy could be clipped by the subtitle). Verified with a launcher
+screenshot ("· v0.1.1") and the payload's version.txt ("v0.1.1-p5d-a50c78a+81c14158c509"). The stamp change makes an
+existing install refresh its game build on next launch. Release repackaged, audits green.
+LOOKUP: 18.5161 = M1642 (v0.1.1 + version display) -> 18.5160 [relevant: M1641 payload completeness fix], 18.5159
+[relevant: M1640 fps text], 18.5158 [relevant: M1639 true 4K].
+
+### 18.5144 M1625 DANCE PAUSE: THE NODE-CLOCK SMOOTHING MUST FREEZE WHEN THE GAME FREEZES (PAUSING WITH THE PAUSE MENU LEFT THE DANCERS ANIMATING ON THE M1624 BUILD)
+
+Reported on the M1624 desktop build: after opening the pause menu in the dance stage the background 3D dancers kept
+dancing. Root cause: the M1624 node-clock smoothing continued its own 1/60 s step whenever the engine repeated the previous
+frame's time. That repeat is normal on every second frame while a 30 fps clock runs, but when the dance is paused the
+engine repeats the value forever, so the smoothing kept moving the node time forward and the dancers kept animating
+behind the pause menu. Camera/menu rendering itself was frozen by the game; only the animation time we injected kept
+running.
+
+Fix (hooks.c M1651): count consecutive frames in which the engine repeats its value. Up to two repeats (the normal
+one-frame 30 fps cadence) the smoothing continues with 1/60 s; after that the value is frozen until the engine advances
+again (unpause / loop / restart), where the smoothing adopts the game's value as before. 30 fps mode and all other
+screens are unaffected.
+
+Verification (dev build): a run that navigated into the dance stage and pressed START to open the pause menu shows the
+dance clock DCLK stopping at the pause (last line f=2435 clk=2.0210 and no further lines while paused) and the node-clock
+statistics showing changes=0, steps60=0 and the handed-out value frozen at 2.53333 across the whole pause window
+(f=3458, 3518, 3578, 3638). After leaving the pause menu the game advances again and the hook adopts the game's value
+(changes=57-59 per 60 frames, out advancing +1.0 s per 60 frames in the resumed runs), so normal play still animates at
+60 Hz with real-time speed 1.0x.
+
+Release: dev/make_p5d_release.py re-packaged the single-file release from this tree; see the payload version and SHA256
+recorded below. Docs/builds audits re-run green.
+
+ANTI-FORGETTING ENTRY. Keywords: M1625 pause must freeze the smoothed node clock, M1624 regression. The node-clock
+smoothing (M1624, IHOOK 0x8103e910 before the vstr at 0x8103e912) advances its own 1/60 step whenever the engine repeats
+the node time; that repeat happens on every second frame while the 30 fps clock runs, but pauses make it repeat forever,
+so on M1624 the dance characters kept dancing behind the pause menu. Fix: after at most two consecutive repeats freeze the
+value until the engine advances again (then adopt); verified pause window shows DCLK stopped and NODEFPSSTAT changes=0
+with a frozen value, resumed play again shows 57-59 changes per 60 frames with +1.0 s per 60 frames. Release repackaged
+and audits green.
+LOOKUP: 18.5144 = M1625 (pause freeze for the smoothed node clock) -> 18.5143 [relevant: M1624 node-clock smoothing],
+18.5142 [relevant: M1623 shipped un-gatings], 18.5141/18.5140 [relevant: earlier screen-model/vblank fixes].
+
+### 18.5162 M1643 DOCS ENCODING INCIDENT AND RECOVERY: THE MASTER DOC'S WORKING COPY HAD BEEN RE-ENCODED (UTF-8 READ AS GBK) BEFORE THIS SESSION; RESTORED FROM THE LAST GOOD COMMIT AND EVERY MILESTONE SCRIPT REPLAYED; THE AUDIT NOW COUNTS THE "### §18.x" LEGACY HEADINGS AND THE RELEASE AUDIT RUNS THE ENCODING GUARD
+
+Reported while preparing the GitHub commit of M1621-M1642: the master document committed from this session was mojibake -
+its Chinese had been double-encoded (every UTF-8 byte pair read as GBK and re-encoded), e.g. "# P5D 项目主文档" had become
+"# P5D 椤圭洰涓绘枃妗?". The last good commit (M1620) still had correct UTF-8, so the corruption was already in the working
+copy when this session started; the session's tools read and appended UTF-8 correctly, which is why the damage was not
+noticed by them (the audits passed: the anchors and section ids are ASCII).
+
+Recovery (M1643):
+- docs/P5D_MASTER.md restored from the last good commit's blob (git cat-file HEAD~1:docs/P5D_MASTER.md, sections up to
+  18.5139), and the milestone scripts of this round replayed in order (_m1621_docs.py ... _m1642_docs.py) so sections
+  18.5140-18.5161, their ledger rows, anchors and release lines were re-added from their original UTF-8 sources;
+- the corrupted blob was used as the ASCII source of the milestone release lines (size/payload/SHA are ASCII), so those
+  came back exactly; the sections whose release line did not exist there carry a pointer to the 2026-11-12 handover notes;
+- C:\dev\P5D_HANDOFF.md's old part (before 2026-11-12 11:20) was lost to the same corruption (reversing the transform
+  leaves thousands of replacement characters); it is rebuilt from its surviving clean entries plus a milestone table for
+  M1621-M1642 that points into this document, and the loss is recorded there;
+- kb_audit.py's section pattern only matched "### 18.x" and missed the older "### §18.x" headings, which made the M1620
+  ledger row look like it referenced a missing section 18.22 (the baseline itself failed the audit this way): the pattern
+  is now "^### §?(18\.\d+[a-z]?)" in both tools/kb_audit.py copies (KB_AUDIT_PASS sections=5119 now);
+- tools/check_text_encoding.py (the mojibake guard that already existed) is now run by tools/verify_doc_integrity.ps1, so a
+  working copy corrupted this way fails the docs integrity check instead of being committed.
+
+Verification: docs/P5D_MASTER.md 39.65 MB, 569 occurrences of a known correct Chinese word (项目) and no U+FFFD, 5119
+sections counted (the § legacy ones included), 1596 ledger rows, 1430 anchors - KB_AUDIT_PASS in both trees;
+DOC_INTEGRITY_PASS with the encoding guard; release_audit PASS; check_text_encoding PASS.
+
+ANTI-FORGETTING ENTRY. Keywords: M1643 docs encoding incident, master doc mojibake, UTF-8 read as GBK, restore from
+HEAD~1, kb_audit §18 legacy headings, check_text_encoding wired into DOC_INTEGRITY. The master doc's working copy was
+double-encoded before this session (the M1620 commit still clean); restoration: HEAD~1 blob + replay of the 22 milestone
+scripts (sections 18.5140-18.5161 + ledger + anchors + release lines from the corrupted blob's ASCII lines);
+P5D_HANDOFF.md rebuilt (the pre-2026-11-12 11:20 part is lost, recorded); kb_audit's section pattern now accepts the legacy
+"### §18.x" headings (it wrongly reported M1620 -> missing 18.22 before, the baseline failed the same way); the release
+audit's doc-integrity check now also runs tools/check_text_encoding.py. Verified KB_AUDIT_PASS sections=5119 (both),
+DOC_INTEGRITY_PASS, release_audit PASS, check_text_encoding PASS.
+LOOKUP: 18.5162 = M1643 (docs encoding incident and recovery) -> 18.5161 [relevant: M1642 version bump], 18.5144
+[relevant: M1625, the section that the broken script had left out of the replay], 18.5139 [relevant: M1620, the last good
+section in the restored baseline].
