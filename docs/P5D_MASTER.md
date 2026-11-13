@@ -1721,6 +1721,7 @@
 | M1644 | §18.5163: **The port's complete source published to the repository: `src/` (snapshot of commit 6dd5ab9; 405 files, about 20 MB - the 24 red-line images are excluded and listed in src/ASSETS_EXCLUDED.txt); no game data included.** `src/` is the only published form of the source: a temporary `source` branch and a docs/BUILD_REPRODUCTION.md guide were added and removed again at the author's request (redundant with src/; the source tree plus the pinned toolchain recipe runtime/platform/win/setup-toolchain.sh describe the build), both reachable in git history. The full git development history stays local (nativ_src) and is not published. README links src/; the resolution list gains 4K. Nothing of the game is in the repository (release_audit PASS); all audits green. |
 | M1645 | §18.5164: **Frame-generation panel in the launcher: NVIDIA Smooth Motion support for the port (driver-level AI frame interpolation on Vulkan; RTX 40/50 + NVIDIA App), with GPU/driver detection, the game executable path to copy and a shortcut to NVIDIA App.** In-engine DLSS Frame Generation is impossible here (needs D3D12 + NGX + motion vectors/depth; the port is GXM->Vulkan on SDL_GPU), but Smooth Motion is the driver-level equivalent and its Vulkan path works with this port unchanged: the player flips it per program in NVIDIA App (Graphics > Program settings > Driver settings > Smooth Motion). The panel (section 7 of the launcher page) detects the GPU/driver via nvidia-smi and shows RTX 40/50 usability, detects/opens NVIDIA App (or its download page), prints the built game exe path (game_host_min.exe) with a copy button, re-probes, and explains the steps and caveats (game keeps 60 fps; NVIDIA overlay counts generated frames, the port's F1 overlay shows the real 60; artifacts possible). Verified with a launcher screenshot on the RTX 5060 Laptop / driver 617.42 / NVIDIA App machine. Launcher-only release (payload version unchanged, no game rebuild), docs/audits green. |
 | M1646 | §18.5165: **AI frame interpolation mode: the 30 fps setting now feeds NVIDIA Smooth Motion (the driver-level AI interpolator, not DLSS Frame Generation) - RECOMP_FG_PRESENT=1 presents only fresh game frames (30 fps setting -> 30 presents/s) so the driver can insert frames between them; 60 fps is unchanged.** Old behaviour: the present loop repeated every picture at 60/s (measured [WIN] presents=60 newtex=30 same=30 per second), leaving nothing to interpolate; with the mode: presents=60 newtex=60 same=0 per two seconds. The overlay keeps 60 Hz presents so the mode applies while nothing is paused. Launcher: panel renamed to '⑯ AI 插帧（NVIDIA Smooth Motion）', option '啟用 AI 插帧插帧支援（30 幀設定也有效）' (launcher.ini p5d_fg_present -> RECOMP_FG_PRESENT=1), texts say AI 插帧 not DLSS; the NVIDIA App AI 插帧 switch stays manual (private driver channel). Release: 300,445,545 B, SHA256 506563D08BA689E53B53C2A93B0F4BB3E7F2916D9F46EAC09827FAA1CD1978B6, payload v0.1.1-p5d-36516cf+130f8cc9c47c (runtime change -> rebuild hint once), payload launcher C31C8F51...89A40, desktop copy; audits green. |
+| M1647 | §18.5166: **The OSD's level-1 line also shows the AI-interpolated frame rate next to the real one while the launcher's AI interpolation option is on - an ESTIMATE (real fps * 2, capped by the display refresh), because the driver does not expose the generated-frame count.** `FPS 30.0 FRAME 33.3MS AI 60 EST` verified on the RTX 5060 machine with RECOMP_FG_PRESENT=1 at the 30 fps setting (window.c exports window_fg_present/window_display_hz; metrics.c builds the line). The measured value is only available from the NVIDIA overlay (Alt+R) or an external capture measurement; exact counting needs own interpolation (a separate project). The launcher's section 6 text explains the EST line, the panel says the NVIDIA overlay is the measured source. Release 300,447,383 B, SHA256 78F0D7F7...D200C38F, payload v0.1.1-p5d-782dff1+1aa29a995ba7, payload launcher D4E08D6F...5F0AA56A; audits green. |
 proposal).** mnsHandle_8111b64c/8111b190 receive a real-time float (+0.01668/frame at 60 vs +0.03337 at 30);
 mnsProcess_811251d6 fires per-frame but constant; other mnsProcess/mnsOption/gfd entries do not fire per-frame;
 object-word slopes show only the known danceQuantizer_81049976 w2 (+0.5 at 60 vs +1.0 at 30). The remaining
@@ -523239,3 +523240,45 @@ was not in the running binary. p5d_start_play now runs build automatically when 
 (RECOMP_FG_PRESENT)" when it engages. The port's F1 overlay counts real frames (30), the NVIDIA overlay counts interpolated
 ones. Release 300,446,740 B, SHA256 8643FAFD...3DC4D, payload v0.1.1-p5d-5a58d10+8bd93766dc29, payload launcher
 9AAFFE83...16374; audits green.
+
+### 18.5166 M1647 THE OSD SHOWS THE AI-INTERPOLATED FRAME RATE NEXT TO THE REAL ONE (AN ESTIMATE: THE DRIVER DOES NOT EXPOSE THE GENERATED-FRAME COUNT), AND THE LAUNCHER TEXT EXPLAINS IT
+
+Requested: the in-game top-left FPS should also show the frame rate after AI interpolation.
+
+What the port can and cannot know: NVIDIA Smooth Motion generates its frames inside the display driver, after the application
+presented its own ones; none of the interfaces the port talks to (NVAPI, DXGI, the Vulkan present path) exposes the number of
+generated frames, so the game process cannot count them. The NVIDIA App overlay remains the measured source (it hooks the
+driver's present path itself). What the port can show honestly is its own real rate plus the driver's usual ~2x interpolation,
+capped by the panel refresh, labelled EST.
+
+M1647: metrics.c's level-1 OSD line (the line the launcher's "show FPS" option turns on) becomes, while the launcher's AI
+interpolation option is active:
+`FPS 30.0 FRAME 33.3MS AI 60 EST`
+- FPS/FRAME are the port's real render rate and frame time (unchanged in meaning);
+- AI is the estimated interpolated rate: real fps * 2, capped by the primary display's refresh (window.c's
+  window_display_hz); without the mode the old `FPS x FRAME avg/max/1%low MS` line is shown;
+- window.c exposes window_fg_present()/window_display_hz() for the OSD; the launcher's section 6 text explains the EST line.
+Verified on this machine: with RECOMP_FG_PRESENT=1 and the 30 fps setting the window's top-left read
+`FPS 30.0 FRAME 33.3MS AI 60 EST` (screenshot), and the run's log carried "window: AI interpolation present mode: only fresh
+frames (RECOMP_FG_PRESENT)".
+
+Limits (documented so nobody mistakes EST for a measurement): the driver's real generated-frame count is only visible to
+NVIDIA's own overlay (Alt+R) or to an external capture-based measurement (desktop duplication counting distinct displayed
+pictures per second); integrating such a measurement into the in-game OSD would need a background helper and is not reliable
+in exclusive fullscreen, and only an own frame-interpolation implementation (a separate, much larger project) could count
+its generated frames exactly. The launcher panel says the NVIDIA overlay is the measured source.
+
+Release for this round: 300,447,383 B, SHA256
+`78F0D7F7C5C0B4CDBF2EC48CECF5A2AC6873E0B43858C9671EABC0B8D200C38F`, payload
+`v0.1.1-p5d-782dff1+1aa29a995ba7` (runtime change -> the automatic rebuild covers it), payload launcher
+`D4E08D6FF7AAC2F4B734136D0C3DEEFDE0474DC8E6F7DEE0DA2D4D7A5F0AA56A`; copied to the desktop; audits green.
+
+ANTI-FORGETTING ENTRY. Keywords: M1647 OSD AI interpolation estimate, AI 60 EST, no public generated-frame counter, NVIDIA
+overlay is the measured source. NVIDIA Smooth Motion generates frames in the driver after the app's presents; NVAPI, DXGI and
+Vulkan expose no generated-frame count, so the game cannot count them - the OSD shows real FPS/FRAME plus an EST value
+(real * 2, capped by the display refresh) while RECOMP_FG_PRESENT is on, e.g. "FPS 30.0 FRAME 33.3MS AI 60 EST" (verified in
+window.c/metrics.c; window_fg_present/window_display_hz added). The measured value comes from the NVIDIA overlay (Alt+R) or an
+external capture measurement; exact counting requires own interpolation (a separate project). Release 300,447,383 B, SHA256
+78F0D7F7...D200C38F, payload v0.1.1-p5d-782dff1+1aa29a995ba7, payload launcher D4E08D6F...5F0AA56A; audits green.
+LOOKUP: 18.5166 = M1647 (OSD AI estimate) -> 18.5165 [relevant: M1646 the AI-interpolation present mode], 18.5164 [relevant:
+M1645 the launcher's frame-generation panel].
