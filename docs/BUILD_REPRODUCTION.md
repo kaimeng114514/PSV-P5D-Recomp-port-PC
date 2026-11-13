@@ -1,8 +1,7 @@
 # 从本仓库完整复现 P5D PC 移植（v0.1.1 / M1642）
 
-本仓库的 `src/` 是移植工程源码快照（`nativ_src` 提交 `6dd5ab9`，树 `b37fbbe75324...`，428 个文件，约 20 MB），
-另有分支 **`source`** 保存完整 git 历史。按本文档可以从零完成：解密 → 分析 → 重编译 → 编译 → 运行，以及
-构建启动器和打包单文件发布版。
+本仓库的 `src/` 是移植工程源码快照（`nativ_src` 提交 `6dd5ab9`，树 `b37fbbe75324...`，428 个文件，约 20 MB）。
+按本文档可以从零完成：解密 → 分析 → 重编译 → 编译 → 运行，以及构建启动器和打包单文件发布版。
 
 > **本仓库不含任何游戏数据、游戏密钥、固件、解密产物或工具链二进制**；游戏与固件必须由你自己合法持有。
 > 许可证：GPL-2（基于 Project Nativ 架构，见 `LICENSE` / `NOTICE.md` / `THIRD_PARTY.md`）。
@@ -18,12 +17,13 @@
 
 ## 1. 获取源码
 
-- GitHub 网页直接下载整个仓库（默认分支 main 里含 `src/` 快照）；
-- 分支 `source` 是同一份源码的独立快照提交（内容与 `src/` 相同，放在仓库根目录），便于单独 clone/fork；
-  完整 git 开发历史保存在本地工程（`nativ_src`，提交 `6dd5ab9`），仓库不发布历史对象；
-- 在已有克隆里取这一份：`git fetch origin source && git checkout source`。
+```bat
+git clone https://github.com/kaimeng114514/PSV-P5D-Recomp-port-PC.git
+cd PSV-P5D-Recomp-port-PC\src
+```
 
-下文命令都在源码根目录（`src/` 或 `source` 分支的仓库根）执行。
+源码就是主分支里的 **`src/`** 目录（`nativ_src` 提交 `6dd5ab9` 的快照；完整 git 开发历史保存在本地工程，仓库不发布
+历史对象）。下文命令都在 `src/` 目录下执行。
 
 ## 2. 工具链：两种获得方式
 

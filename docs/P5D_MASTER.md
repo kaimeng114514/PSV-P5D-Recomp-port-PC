@@ -523053,10 +523053,12 @@ the repository alone.
 Published (2026-11-13):
 - `src/` in the main branch: the port's complete source at commit `6dd5ab9250b862e45679c6ee8c8c7ae105866499` (tree
   `b37fbbe7532438edafedb21b9f511f16f681ad8c`), exported with `git archive` (428 files, about 20 MB: pipeline, recompiler,
-  runtime, decrypt, packs, third_party, launcher, dev, assets, the nativ base including its LICENSE/THIRD_PARTY notices);
-- branch `source`: the same source as an independent snapshot commit (the repository-root form of `src/`), so it can be
-  cloned/forked on its own (`git clone -b source <repo>`); the full git development history stays in the local project
-  (nativ_src, commit 6dd5ab9) and is not published as history objects (repository size and the release red line);
+  runtime, decrypt, packs, third_party, launcher, dev, assets, the nativ base including its LICENSE/THIRD_PARTY notices) -
+  the single published form of the source;
+- the source is published ONLY as `src/` in the main branch (`git clone <repo>` then `src/`); a short-lived `source` branch
+  carrying the same tree at the repository root was dropped again as redundant - the full git development history stays in
+  the local project (nativ_src, commit 6dd5ab9) and is not published as history objects (repository size and the release
+  red line; a private repository or a git bundle can archive it if ever needed);
 - `docs/BUILD_REPRODUCTION.md`: the step-by-step reproduction guide - game/firmware prerequisites, the exact toolchain
   versions this port was built with (MinGW-w64 GCC 16.1.0 winlibs; SDL3 3.4.16 x86_64-w64-mingw32; zlib; FFmpeg dev;
   Python 3.10.9 with capstone 5.0.9 / pycryptodome 3.24.0 / tomli 2.5.0 and the tomllib shim), the environment variables
@@ -523076,7 +523078,7 @@ DOC_INTEGRITY_PASS, release_audit PASS (24 excluded, zero violations), check_tex
 
 ANTI-FORGETTING ENTRY. Keywords: M1644 source published, src/ snapshot 6dd5ab9, branch source, BUILD_REPRODUCTION.md,
 toolchain recovery from the release exe. The port source is in the main branch as src/ (git archive of commit 6dd5ab9, tree
-b37fbbe..., 428 files / 20 MB) and with full history on branch source; docs/BUILD_REPRODUCTION.md gives the prerequisites,
+b37fbbe..., 428 files / 20 MB); a redundant source branch was dropped again; docs/BUILD_REPRODUCTION.md gives the prerequisites,
 the exact toolchain versions (MinGW-w64 GCC 16.1.0, SDL3 3.4.16, zlib, FFmpeg, Python 3.10.9 + capstone/pycryptodome/tomli
 + tomllib shim), the environment variables, the add/firmware/ready/build/run flow, the launcher and release packaging steps,
 the audits and the in-game checklist; the release exe's unpack dir (%LOCALAPPDATA%\P5D-Port\<id>) holds the same toolchain.
