@@ -1727,6 +1727,7 @@
 | M1652 | §18.5169: **The OSD's FPS line gains DISP: the measured number of pictures the game window really shows per second (including the driver's AI-interpolated frames), measured by screen capture - no estimate.** window.c's capture thread (GDI StretchBlt 192x108 at ~250 Hz, >1% changed pixels, changes within the last second, HIGH priority, only while the OSD is on) publishes the displayed rate; metrics.c's line becomes `FPS <real> FRAME <ms> DISP <measured>` (falls back to the old FPS/frame-time line when measurement is unavailable). Verified: 30 fps setting title reads FPS 30.0 FRAME 33.3MS DISP 48 (24 fps content doubled); external probe: dance ~56 at 30 fps, ~107 at 60 fps. The old AI 60 EST estimate is gone. Launcher texts explain FPS vs DISP. Release 300,450,754 B, SHA256 E72F9106...EBDDBDE9, payload v0.1.1-p5d-28b0a1f+692a6d8151b4, payload launcher 13FCDB89...46C8913; audits green. |
 | M1653 | §18.5170: **DISP is measured with DXGI Desktop Duplication (compositor-timed, centre-patch copy) instead of GDI screen grabs - the same post-interpolation displayed-rate figure, more precisely and more cheaply.** New runtime/ui/dispcapture.c/.h: D3D11 device, the output containing the window via IDXGIDevice/GetAdapter/EnumOutputs, DuplicateOutput, AcquireNextFrame (4 ms timeout) -> 192x108 centre patch copied to a staging texture, >1% pixel-change threshold, distinct pictures in the last second = DISP; interpolated frames reach the compositor and are counted; access-lost re-initialises; without duplication the OLD FPS/FRAME line shows. window.c drops the GDI thread; build.py adds dispcapture.c and links -ld3d11 -ldxgi -ldxguid. Verified: 30 fps title reads 'FPS 30.0 FRAME 33.3MS DISP 41'; dance ~56 at 30 fps / ~107 at 60 fps per M1652. Release 300,452,487 B, SHA256 6279E242...D56E30BC1, payload v0.1.1-p5d-c8e64ef+25b25d97b160, payload launcher 13FCDB89...46C8913; audits green. |
 | M1654 | §18.5171: **Version bump: the release is v0.1.2 (launcher subtitle and payload stamp), covering the AI-interpolation fix, DISP measurements and the menu-bar/tabs work.** RELEASE_VERSION "v0.1.2-p5d"; payload version.txt v0.1.2-p5d-c8e64ef+25b25d97b160; launcher fallback v0.1.2; content hash unchanged (launcher-only, no game rebuild). Release 300,452,488 B, SHA256 5F4BEDFF...F5B9F96D; audits green. |
+| M1655 | §18.5172: **The COLLECTION character viewer keeps its PC keycaps after visiting the costume option: the flow-aware detection window (1.2 s -> 6 s), costume-list jobs counted as flow evidence, the costume-list back no longer stepping out, and a viewer-job self-heal restoring depth 3 - no PC key-binding or hint-glyph cell change.** Verified from the recorded session: old build logged viewer on -> off after the costume list; the fix keeps the viewer on (self-heal line instead). RECOMP_INPUT_LOG=1 records raw input events for replay. Version v0.1.3; release 300,453,354 B, SHA256 F0E95347...9D608CA0, payload v0.1.3-p5d-3e37179+a86a7bfe46bb; audits green. |
 proposal).** mnsHandle_8111b64c/8111b190 receive a real-time float (+0.01668/frame at 60 vs +0.03337 at 30);
 mnsProcess_811251d6 fires per-frame but constant; other mnsProcess/mnsOption/gfd entries do not fire per-frame;
 object-word slopes show only the known danceQuantizer_81049976 w2 (+0.5 at 60 vs +1.0 at 30). The remaining
@@ -523458,3 +523459,44 @@ is v0.1.2: RELEASE_VERSION was bumped in dev/make_p5d_release.py (payload versio
 launcher's fallback version is v0.1.2; the content hash is unchanged (launcher-only release, no game rebuild). Release
 300,452,488 B, SHA256 5F4BEDFF...F5B9F96D, payload v0.1.2-p5d-c8e64ef+25b25d97b160; audits green.
 LOOKUP: 18.5171 = M1654 (version bump v0.1.2) -> 18.5161 [relevant: M1642 the v0.1.1 bump], 18.5170 [relevant: M1653 DDA DISP].
+
+### 18.5172 M1655 THE COLLECTION CHARACTER VIEWER KEEPS ITS PC KEYCAPS AFTER VISITING THE COSTUME OPTION: THE FLOW-AWARE DETECTION WINDOW, THE COSTUME-LIST BACK BOOKKEEPING AND A VIEWER-JOB SELF-HEAL (NO KEY-MAPPING CHANGE)
+
+Reported: in COLLECTION -> CHARACTER, after choosing a character, entering the left costume option and going back sometimes
+repainted the bottom-right PC keycaps with the game's PS button badges.
+
+Root cause (code level): p5d_collection_active() was a 1.2 s freshness window on the collection job stamp. Entering/leaving
+the costume option makes the game unload and reload its own jobs ("key help", "UNIT_LOAD", "CostumeListTutorial") for longer
+than that, so the port believed it had left the COLLECTION flow: p5d_collection_depth was reset to 0, the next frame set it
+to 1, window_in_collection_costume() became false and gfx_hintglyph_refresh() repainted the hint atlas without the viewer's
+Enter/Ctrl keycaps - the game's PS badges came back. The back bookkeeping also decremented the depth when a back only closed
+the costume list back into the viewer.
+
+Fix (runtime/ui/window.c, no PC key binding or hint-glyph cell changed):
+- the flow-active window is 6 s now, so the costume option's own job re-loads no longer look like leaving the flow;
+- "CostumeList*" jobs also refresh the collection stamp (the costume list is inside the flow);
+- a back pressed while the costume-list job is fresh only closes the list (the viewer depth stays 3);
+- self-heal: while the viewer's own job ("collection modeler") or the costume-list job runs, the depth is restored to 3, so
+  the viewer keycaps (Enter START, Ctrl Triangle, and the watch-mode wheel/Alt hints) stay painted.
+
+Dev aid: RECOMP_INPUT_LOG=1 makes window.c record every keyboard/mouse/wheel event ([IN] lines) so a manual reproduction can be
+replayed exactly. Verified from the recorded session: with the old build the log showed "[KEYCAP] collection viewer on"
+immediately followed by "off" after the costume list; with the fix the viewer stays on and "[KEY] collection: viewer job seen -
+viewer depth restored to 3" fires instead - no revert to the PS badges.
+
+Version bumped to v0.1.3. Release: 300,453,354 B, SHA256
+`F0E9534765B39865D7269A661572EE8A2FE9159C662BD7E506A003AD9D608CA0`, payload
+`v0.1.3-p5d-3e37179+a86a7bfe46bb` (runtime change -> one automatic rebuild on existing installs), copied to the desktop; source
+commit 3e37179; audits green.
+
+ANTI-FORGETTING ENTRY. Keywords: M1655 COLLECTION costume-list back, PC keycaps revert to PS badges, collection flow window,
+collection modeler self-heal, RECOMP_INPUT_LOG. The COLLECTION character viewer's bottom-right PC keycaps sometimes reverted to
+the game's PS badges after entering/leaving the left costume option: the 1.2 s collection-flow freshness window expired during
+the costume option's own job re-loads, the viewer depth was reset and the hint-glyph refresh repainted the atlas without the
+Enter/Ctrl keycaps; the back that closed the costume list also decremented the depth. Fix in window.c: flow window 6 s,
+CostumeList* jobs count as flow evidence, costume-list back does not step out, and the depth is restored to 3 while the
+"collection modeler"/costume-list job runs (viewer keycaps and watch hints stay). No key mapping changed. RECOMP_INPUT_LOG=1
+records the raw input events for replay. Verified by the recorded session (old: viewer on -> off; new: viewer stays on). Version
+v0.1.3, release 300,453,354 B, SHA256 F0E95347...9D608CA0, payload v0.1.3-p5d-3e37179+a86a7bfe46bb; audits green.
+LOOKUP: 18.5172 = M1655 (COLLECTION costume-list keycap fix) -> 18.5161 [relevant: M1642 input/keycap mapping history],
+18.5168 [relevant: M1651 the launcher driver-profile repair].
