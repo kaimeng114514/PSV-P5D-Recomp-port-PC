@@ -1718,7 +1718,7 @@
 | M1642 | §18.5161: **Version bump: the release is v0.1.1, and the launcher reads its version from the payload's version.txt instead of a hard-coded copy.** RELEASE_VERSION is now "v0.1.1-p5d" and the README says Version 0.1.1. launcher/hub.cpp's page used a hard-coded "v0.1.0" that the long subtitle could clip; p5d_version() now takes the part before the first '-' of <root>/version.txt ("v0.1.1"; a dev tree falls back to "v0.1.1") and prints it at the end of the subtitle: "Persona 5 Dancing in Starlight · PC 移植版 · 鍵盤鼠標 / 手柄 · v0.1.1". Verified with a launcher screenshot and the packaged version.txt "v0.1.1-p5d-a50c78a+81c14158c509". Release repackaged, docs/audits green. |
 | M1625 | §18.5144: **Dance pause: the M1624 node-clock smoothing kept advancing its 1/60 step when the engine repeated the node time, so the background dancers kept dancing behind the pause menu.** The repeat is the normal 30 fps cadence on every second frame, but a pause repeats the value forever; the hook now freezes after at most two consecutive repeats and adopts the game's value when it advances again (unpause/loop/restart). Verified: pause run shows the dance clock DCLK stopped and NODEFPSSTAT changes=0 with a frozen value across the pause window; resumed play shows 57-59 changes per 60 frames and +1.0 s per 60 frames (real-time 1.0x); 30 fps mode unaffected. Release repackaged, docs/audits green. |
 | M1643 | §18.5162: **Docs encoding incident and recovery: the master doc's working copy had been re-encoded (UTF-8 read as GBK) before this session; restored from the last good commit and every milestone script replayed; the audit now counts the "### §18.x" legacy headings and the release audit runs the encoding guard.** The M1620 commit was still clean, so the damage was in the working tree; the session's tools appended UTF-8 correctly and the ASCII-only audits passed. Recovery: docs/P5D_MASTER.md from git cat-file HEAD~1:docs/P5D_MASTER.md + replay of _m1621..._m1642_docs.py (sections 18.5140-18.5161, ledger rows, anchors, release lines recovered from the corrupted blob's ASCII lines); P5D_HANDOFF.md rebuilt (its pre-2026-11-12 11:20 part lost, recorded); kb_audit's section pattern accepts the legacy "### §18.x" headings (the baseline itself failed on M1620 -> 18.22 before); tools/check_text_encoding.py is now run by tools/verify_doc_integrity.ps1. Verified: 39.65 MB master, 569 correct Chinese words, no U+FFFD, KB_AUDIT_PASS sections=5119 (both trees), DOC_INTEGRITY_PASS, release_audit PASS, check_text_encoding PASS. |
-| M1644 | §18.5163: **The port's complete source published to the repository (src/ snapshot of commit 6dd5ab9, 428 files / 20 MB, plus the full history on branch source) and a step-by-step reproduction guide (docs/BUILD_REPRODUCTION.md); no game data included.** src/ is a git archive of the source commit (tree b37fbbe...); branch source carries the commit history (git clone -b source <repo>); the guide lists the exact toolchain versions (MinGW-w64 GCC 16.1.0, SDL3 3.4.16, zlib, FFmpeg, Python 3.10.9 + capstone 5.0.9 / pycryptodome 3.24.0 / tomli 2.5.0 + tomllib shim), the environment variables, add/firmware/ready/build/run, the launcher build, release packaging (including PYEMBED), audits and the in-game checklist; the release exe's unpack dir holds the same toolchain for a fresh machine. README links all of it and the resolution list gains 4K. Nothing of the game is in the repository (release_audit PASS); all audits green. |
+| M1644 | §18.5163: **The port's complete source published to the repository: `src/` (snapshot of commit 6dd5ab9; 405 files, about 20 MB - the 24 red-line images are excluded and listed in src/ASSETS_EXCLUDED.txt); no game data included.** `src/` is the only published form of the source: a temporary `source` branch and a docs/BUILD_REPRODUCTION.md guide were added and removed again at the author's request (redundant with src/; the source tree plus the pinned toolchain recipe runtime/platform/win/setup-toolchain.sh describe the build), both reachable in git history. The full git development history stays local (nativ_src) and is not published. README links src/; the resolution list gains 4K. Nothing of the game is in the repository (release_audit PASS); all audits green. |
 proposal).** mnsHandle_8111b64c/8111b190 receive a real-time float (+0.01668/frame at 60 vs +0.03337 at 30);
 mnsProcess_811251d6 fires per-frame but constant; other mnsProcess/mnsOption/gfd entries do not fire per-frame;
 object-word slopes show only the known danceQuantizer_81049976 w2 (+0.5 at 60 vs +1.0 at 30). The remaining
@@ -523045,43 +523045,39 @@ LOOKUP: 18.5162 = M1643 (docs encoding incident and recovery) -> 18.5161 [releva
 [relevant: M1625, the section that the broken script had left out of the replay], 18.5139 [relevant: M1620, the last good
 section in the restored baseline].
 
-### 18.5163 M1644 SOURCE PUBLISHED TO THE REPOSITORY: THE PORT'S COMPLETE SOURCE AS src/ (COMMIT 6dd5ab9, 428 FILES, 20 MB) PLUS THE FULL HISTORY ON BRANCH source, AND A STEP-BY-STEP REPRODUCTION GUIDE; NOTHING OF THE GAME IS INCLUDED
+### 18.5163 M1644 SOURCE PUBLISHED TO THE REPOSITORY: THE PORT'S COMPLETE SOURCE AS src/ (COMMIT 6dd5ab9, 405 FILES, ABOUT 20 MB; THE 24 RED-LINE IMAGES EXCLUDED)
 
 Requested: the source at the repository too, so the project survives losing the local machine and can be rebuilt from
 the repository alone.
 
-Published (2026-11-13):
+Published (2026-11-13), final state:
 - `src/` in the main branch: the port's complete source at commit `6dd5ab9250b862e45679c6ee8c8c7ae105866499` (tree
-  `b37fbbe7532438edafedb21b9f511f16f681ad8c`), exported with `git archive` (428 files, about 20 MB: pipeline, recompiler,
-  runtime, decrypt, packs, third_party, launcher, dev, assets, the nativ base including its LICENSE/THIRD_PARTY notices) -
-  the single published form of the source;
-- the source is published ONLY as `src/` in the main branch (`git clone <repo>` then `src/`); a short-lived `source` branch
-  carrying the same tree at the repository root was dropped again as redundant - the full git development history stays in
-  the local project (nativ_src, commit 6dd5ab9) and is not published as history objects (repository size and the release
-  red line; a private repository or a git bundle can archive it if ever needed);
-- `docs/BUILD_REPRODUCTION.md`: the step-by-step reproduction guide (prerequisites, the exact toolchain versions, the environment variables, add/firmware/ready/build/run, the launcher build, the release packaging, the audits and the in-game checklist) - game/firmware prerequisites, the exact toolchain
-  versions this port was built with (MinGW-w64 GCC 16.1.0 winlibs; SDL3 3.4.16 x86_64-w64-mingw32; zlib; FFmpeg dev;
-  Python 3.10.9 with capstone 5.0.9 / pycryptodome 3.24.0 / tomli 2.5.0 and the tomllib shim), the environment variables
-  (ATIV_DUMP, ATIV_WIN_TOOLCHAIN, RECOMP_HOST_CC/CXX, JOBS, PYTHONPATH), the add/firmware/ready/build/run commands, the
-  launcher build (`dev/build_p5d_launcher.ps1`), the single-file release packaging (`dev/make_p5d_release.py` plus how to
-  assemble PYEMBED), the audit commands, the in-game check list and the reference data of M1642;
-- a note that the same toolchain can be recovered from the release exe: its first run unpacks mingw64/, toolchain/ and
-  python/ into `%LOCALAPPDATA%\P5D-Port\<id>\`, so a reproduction on a fresh machine needs no hunting for versions;
-- README: a "源码与完整复现" section linking src/, the source branch and the guide; the resolution list now includes 4K.
+  `b37fbbe7532438edafedb21b9f511f16f681ad8c`), exported with `git archive`; of its 428 tracked files the 24 UI images that
+  the release red line forbids are left out (list and restore step in `src/ASSETS_EXCLUDED.txt`), so 405 files, about 20 MB:
+  pipeline, recompiler, runtime, decrypt, packs, third_party, launcher, dev and the nativ base with its LICENSE/THIRD_PARTY
+  notices;
+- it is the only published form of the source. During the round a short-lived `source` branch (the same tree at the
+  repository root) and a `docs/BUILD_REPRODUCTION.md` guide were also added and then removed again at the author's request:
+  the branch duplicated `src/`, and the source tree itself - together with the pinned toolchain recipe
+  `runtime/platform/win/setup-toolchain.sh` and the master document - already describes what to do; both remain reachable in
+  the git history if they are ever wanted;
+- the full git development history stays in the local project (nativ_src, commit 6dd5ab9) and is not published as history
+  objects (repository size and the release red line; a private repository or a git bundle can archive it if needed);
+- README: a "源码" section linking `src/`; the resolution list now includes 4K.
 
-Nothing of the game is in the repository, and the release red line stays intact: `release_audit.py` refuses image
-extensions in the tree, so 24 UI images (the launcher icons/bg, the auto-play banner screenshots and the Kenney CC0 prompt
-atlas - all inside the release exe's payload, none of them game data) were left out of `src/`; `src/ASSETS_EXCLUDED.txt`
-lists them with the restore step (copy them back from `%LOCALAPPDATA%\P5D-Port\<id>\` after the release exe unpacks).
-The game build/run does not need them. All audits green after the publication: KB_AUDIT_PASS sections=5121 (both trees),
-DOC_INTEGRITY_PASS, release_audit PASS (24 excluded, zero violations), check_text_encoding PASS.
+Nothing of the game is in the repository, and the release red line stays intact: `release_audit.py` refuses image extensions
+in the tree, so the 24 UI images (launcher icons/bg, the auto-play banner screenshots and the Kenney CC0 prompt atlas - all
+inside the release exe's payload, none of them game data) stay out of `src/`; the game build/run does not need them. All
+audits green after the publication: KB_AUDIT_PASS sections=5121 (both trees), DOC_INTEGRITY_PASS, release_audit PASS
+(24 excluded, zero violations), check_text_encoding PASS.
 
-ANTI-FORGETTING ENTRY. Keywords: M1644 source published, src/ snapshot 6dd5ab9, branch source, BUILD_REPRODUCTION.md,
-toolchain recovery from the release exe. The port source is in the main branch as src/ (git archive of commit 6dd5ab9, tree
-b37fbbe..., 428 files / 20 MB); a redundant source branch was dropped again; docs/BUILD_REPRODUCTION.md gives the prerequisites,
-the exact toolchain versions (MinGW-w64 GCC 16.1.0, SDL3 3.4.16, zlib, FFmpeg, Python 3.10.9 + capstone/pycryptodome/tomli
-+ tomllib shim), the environment variables, the add/firmware/ready/build/run flow, the launcher and release packaging steps,
-the audits and the in-game checklist; the release exe's unpack dir (%LOCALAPPDATA%\P5D-Port\<id>) holds the same toolchain.
-No game data is published; release_audit and the encoding guard pass. 
+ANTI-FORGETTING ENTRY. Keywords: M1644 source published, src/ snapshot 6dd5ab9, 24 red-line images excluded, temporary
+source branch and reproduction guide removed. The port source is published in the main branch as src/ only (git archive of
+nativ_src commit 6dd5ab9, 405 files / about 20 MB: 428 tracked files minus the 24 red-line UI images; the assets restore list
+is src/ASSETS_EXCLUDED.txt). A temporary source branch at the repository root and a docs/BUILD_REPRODUCTION.md guide were
+removed again at the author's request (redundant with src/; the pinned toolchain script
+runtime/platform/win/setup-toolchain.sh and the source itself describe the build) - both are reachable in the git history.
+The full git history stays local (nativ_src) and is not published. README links src/. No game data is published;
+release_audit and the encoding guard pass.
 LOOKUP: 18.5163 = M1644 (source published to the repository) -> 18.5162 [relevant: M1643 docs encoding recovery], 18.5160
 [relevant: M1641 payload completeness], 18.5154 [relevant: M1635 the auto-play cheat].
