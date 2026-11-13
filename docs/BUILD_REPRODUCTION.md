@@ -19,9 +19,9 @@
 ## 1. 获取源码
 
 - GitHub 网页直接下载整个仓库（默认分支 main 里含 `src/` 快照）；
-- 或取完整历史：`git clone -b source https://github.com/kaimeng114514/PSV-P5D-Recomp-port-PC.git p5d-src`
-  （`source` 分支就是 `src/` 的完整 git 版本，含全部提交历史）；
-- 或在已有克隆里：`git fetch origin source && git checkout source`。
+- 分支 `source` 是同一份源码的独立快照提交（内容与 `src/` 相同，放在仓库根目录），便于单独 clone/fork；
+  完整 git 开发历史保存在本地工程（`nativ_src`，提交 `6dd5ab9`），仓库不发布历史对象；
+- 在已有克隆里取这一份：`git fetch origin source && git checkout source`。
 
 下文命令都在源码根目录（`src/` 或 `source` 分支的仓库根）执行。
 

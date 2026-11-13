@@ -523054,8 +523054,9 @@ Published (2026-11-13):
 - `src/` in the main branch: the port's complete source at commit `6dd5ab9250b862e45679c6ee8c8c7ae105866499` (tree
   `b37fbbe7532438edafedb21b9f511f16f681ad8c`), exported with `git archive` (428 files, about 20 MB: pipeline, recompiler,
   runtime, decrypt, packs, third_party, launcher, dev, assets, the nativ base including its LICENSE/THIRD_PARTY notices);
-- branch `source`: the same commit with its full git history (`git push <repo> 6dd5ab9:refs/heads/source`), so changes can
-  be tracked/continued from a clone (`git clone -b source <repo>`);
+- branch `source`: the same source as an independent snapshot commit (the repository-root form of `src/`), so it can be
+  cloned/forked on its own (`git clone -b source <repo>`); the full git development history stays in the local project
+  (nativ_src, commit 6dd5ab9) and is not published as history objects (repository size and the release red line);
 - `docs/BUILD_REPRODUCTION.md`: the step-by-step reproduction guide - game/firmware prerequisites, the exact toolchain
   versions this port was built with (MinGW-w64 GCC 16.1.0 winlibs; SDL3 3.4.16 x86_64-w64-mingw32; zlib; FFmpeg dev;
   Python 3.10.9 with capstone 5.0.9 / pycryptodome 3.24.0 / tomli 2.5.0 and the tomllib shim), the environment variables

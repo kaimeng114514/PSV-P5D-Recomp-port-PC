@@ -37,7 +37,8 @@
 
 - **源码快照**：[`src/`](src/) —— 移植工程源码（对应提交 `6dd5ab9`，428 个文件，约 20 MB；含 pipeline / recompiler /
   runtime / decrypt / packs / third_party / launcher / dev）。即使本地工程被删除，也可以从本仓库恢复并重新构建。
-- **完整 git 历史**在分支 **`source`**：`git fetch origin source`（或 `git clone -b source <本仓库地址>`）。
+- 分支 **`source`**：同一份源码的独立快照提交（便于单独 clone/fork；完整 git 开发历史保存在本地工程，
+  仓库不发布历史对象，以控制体积并遵守发布红线）。
 - **完整复现指南**：[docs/BUILD_REPRODUCTION.md](docs/BUILD_REPRODUCTION.md) —— 工具链（含从发布版 exe 解包获得同一套
   工具链的方法）、环境变量、构建/运行、启动器构建、发布打包与验证命令。
 - 仓库仍然**不含**游戏数据、固件、解密产物或工具链二进制；这些由玩家自备（见指南第 0 节）。
