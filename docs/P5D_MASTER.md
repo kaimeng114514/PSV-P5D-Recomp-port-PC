@@ -1726,6 +1726,7 @@
 | M1651 | §18.5168: **AI frame interpolation made to actually work: NVIDIA App wrote a broken application path (`c:/users/`) into the driver profile, so the profile never matched the game and Smooth Motion never engaged; the launcher now repairs the profile before every play, verified with an external capture probe (30 fps: 29.8 -> 56.0 distinct pictures/s; 60 fps: about 107/s).** Root cause found with a new dev tool fpsprobe (screen-region capture at ~160 Hz, quantised pixel comparison, count of distinct displayed pictures/s): the App's add-application step failed (`m_AddManualApplication failed with 7`) leaving the only application entry as `c:/users/`. Fix: p5d_repair_fgx_profile() in the launcher (dynamic nvapi64.dll, find profile game_host_min.exe, create application game_host_min.exe, save) runs before each play and shows the state in panel ⑦; P5D_REPAIR_FGX=1 is the headless hook. Verified: 30 fps dance 29.8 -> 56.0, title 24 -> 48, 60 fps about 107-110; the OSD's AI estimate is consistent. Release 300,449,275 B, SHA256 1539EBC0...D074A6A, payload v0.1.1-p5d-50d158a+1aa29a995ba7 (launcher-only, no game rebuild), payload launcher 408C684D...B68AE43; audits green. |
 | M1652 | §18.5169: **The OSD's FPS line gains DISP: the measured number of pictures the game window really shows per second (including the driver's AI-interpolated frames), measured by screen capture - no estimate.** window.c's capture thread (GDI StretchBlt 192x108 at ~250 Hz, >1% changed pixels, changes within the last second, HIGH priority, only while the OSD is on) publishes the displayed rate; metrics.c's line becomes `FPS <real> FRAME <ms> DISP <measured>` (falls back to the old FPS/frame-time line when measurement is unavailable). Verified: 30 fps setting title reads FPS 30.0 FRAME 33.3MS DISP 48 (24 fps content doubled); external probe: dance ~56 at 30 fps, ~107 at 60 fps. The old AI 60 EST estimate is gone. Launcher texts explain FPS vs DISP. Release 300,450,754 B, SHA256 E72F9106...EBDDBDE9, payload v0.1.1-p5d-28b0a1f+692a6d8151b4, payload launcher 13FCDB89...46C8913; audits green. |
 | M1653 | §18.5170: **DISP is measured with DXGI Desktop Duplication (compositor-timed, centre-patch copy) instead of GDI screen grabs - the same post-interpolation displayed-rate figure, more precisely and more cheaply.** New runtime/ui/dispcapture.c/.h: D3D11 device, the output containing the window via IDXGIDevice/GetAdapter/EnumOutputs, DuplicateOutput, AcquireNextFrame (4 ms timeout) -> 192x108 centre patch copied to a staging texture, >1% pixel-change threshold, distinct pictures in the last second = DISP; interpolated frames reach the compositor and are counted; access-lost re-initialises; without duplication the OLD FPS/FRAME line shows. window.c drops the GDI thread; build.py adds dispcapture.c and links -ld3d11 -ldxgi -ldxguid. Verified: 30 fps title reads 'FPS 30.0 FRAME 33.3MS DISP 41'; dance ~56 at 30 fps / ~107 at 60 fps per M1652. Release 300,452,487 B, SHA256 6279E242...D56E30BC1, payload v0.1.1-p5d-c8e64ef+25b25d97b160, payload launcher 13FCDB89...46C8913; audits green. |
+| M1654 | §18.5171: **Version bump: the release is v0.1.2 (launcher subtitle and payload stamp), covering the AI-interpolation fix, DISP measurements and the menu-bar/tabs work.** RELEASE_VERSION "v0.1.2-p5d"; payload version.txt v0.1.2-p5d-c8e64ef+25b25d97b160; launcher fallback v0.1.2; content hash unchanged (launcher-only, no game rebuild). Release 300,452,488 B, SHA256 5F4BEDFF...F5B9F96D; audits green. |
 proposal).** mnsHandle_8111b64c/8111b190 receive a real-time float (+0.01668/frame at 60 vs +0.03337 at 30);
 mnsProcess_811251d6 fires per-frame but constant; other mnsProcess/mnsOption/gfd entries do not fire per-frame;
 object-word slopes show only the known danceQuantizer_81049976 w2 (+0.5 at 60 vs +1.0 at 30). The remaining
@@ -523438,3 +523439,22 @@ Started only while the OSD is on; build links d3d11/dxgi/dxguid. Verified: 30 fp
 v0.1.1-p5d-c8e64ef+25b25d97b160, payload launcher 13FCDB89...46C8913; audits green.
 LOOKUP: 18.5170 = M1653 (DISP via Desktop Duplication) -> 18.5169 [relevant: M1652 the GDI implementation it replaces],
 18.5168 [relevant: M1651 the AI-interpolation fix].
+
+### 18.5171 M1654 VERSION BUMP: THE RELEASE IS v0.1.2 (LAUNCHER SUBTITLE AND PAYLOAD STAMP), WITH EVERY AI-INTERPOLATION, DISP AND MENU-BAR CHANGE OF THE M1651-M1653 ROUNDS
+
+Requested: bump the launcher's version number.
+
+M1654: dev/make_p5d_release.py's RELEASE_VERSION becomes "v0.1.2-p5d", so the payload's version.txt reads
+`v0.1.2-p5d-<commit>+<content>` and the launcher's page subtitle ends with "· v0.1.2" (the fallback for a dev tree with no
+version.txt is v0.1.2 too). The game-binary staleness check compares only the content hash after '+', which is unchanged
+(25b25d97b160), so this is a launcher-only release: an existing install does not rebuild the game.
+
+Release: 300,452,488 B, SHA256
+`5F4BEDFF9D3B44D22E666CF6606CDDA98784971421078808FB558ED1F5B9F96D`, payload
+`v0.1.2-p5d-c8e64ef+25b25d97b160`; copied to the desktop; source commit 6d4ba42; audits green.
+
+ANTI-FORGETTING ENTRY. Keywords: M1654 version bump, v0.1.2, RELEASE_VERSION v0.1.2-p5d, launcher subtitle. The release version
+is v0.1.2: RELEASE_VERSION was bumped in dev/make_p5d_release.py (payload version.txt v0.1.2-p5d-<commit>+<content>) and the
+launcher's fallback version is v0.1.2; the content hash is unchanged (launcher-only release, no game rebuild). Release
+300,452,488 B, SHA256 5F4BEDFF...F5B9F96D, payload v0.1.2-p5d-c8e64ef+25b25d97b160; audits green.
+LOOKUP: 18.5171 = M1654 (version bump v0.1.2) -> 18.5161 [relevant: M1642 the v0.1.1 bump], 18.5170 [relevant: M1653 DDA DISP].
