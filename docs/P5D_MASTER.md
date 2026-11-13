@@ -1722,6 +1722,8 @@
 | M1645 | §18.5164: **Frame-generation panel in the launcher: NVIDIA Smooth Motion support for the port (driver-level AI frame interpolation on Vulkan; RTX 40/50 + NVIDIA App), with GPU/driver detection, the game executable path to copy and a shortcut to NVIDIA App.** In-engine DLSS Frame Generation is impossible here (needs D3D12 + NGX + motion vectors/depth; the port is GXM->Vulkan on SDL_GPU), but Smooth Motion is the driver-level equivalent and its Vulkan path works with this port unchanged: the player flips it per program in NVIDIA App (Graphics > Program settings > Driver settings > Smooth Motion). The panel (section 7 of the launcher page) detects the GPU/driver via nvidia-smi and shows RTX 40/50 usability, detects/opens NVIDIA App (or its download page), prints the built game exe path (game_host_min.exe) with a copy button, re-probes, and explains the steps and caveats (game keeps 60 fps; NVIDIA overlay counts generated frames, the port's F1 overlay shows the real 60; artifacts possible). Verified with a launcher screenshot on the RTX 5060 Laptop / driver 617.42 / NVIDIA App machine. Launcher-only release (payload version unchanged, no game rebuild), docs/audits green. |
 | M1646 | §18.5165: **AI frame interpolation mode: the 30 fps setting now feeds NVIDIA Smooth Motion (the driver-level AI interpolator, not DLSS Frame Generation) - RECOMP_FG_PRESENT=1 presents only fresh game frames (30 fps setting -> 30 presents/s) so the driver can insert frames between them; 60 fps is unchanged.** Old behaviour: the present loop repeated every picture at 60/s (measured [WIN] presents=60 newtex=30 same=30 per second), leaving nothing to interpolate; with the mode: presents=60 newtex=60 same=0 per two seconds. The overlay keeps 60 Hz presents so the mode applies while nothing is paused. Launcher: panel renamed to '⑯ AI 插帧（NVIDIA Smooth Motion）', option '啟用 AI 插帧插帧支援（30 幀設定也有效）' (launcher.ini p5d_fg_present -> RECOMP_FG_PRESENT=1), texts say AI 插帧 not DLSS; the NVIDIA App AI 插帧 switch stays manual (private driver channel). Release: 300,445,545 B, SHA256 506563D08BA689E53B53C2A93B0F4BB3E7F2916D9F46EAC09827FAA1CD1978B6, payload v0.1.1-p5d-36516cf+130f8cc9c47c (runtime change -> rebuild hint once), payload launcher C31C8F51...89A40, desktop copy; audits green. |
 | M1647 | §18.5166: **The OSD's level-1 line also shows the AI-interpolated frame rate next to the real one while the launcher's AI interpolation option is on - an ESTIMATE (real fps * 2, capped by the display refresh), because the driver does not expose the generated-frame count.** `FPS 30.0 FRAME 33.3MS AI 60 EST` verified on the RTX 5060 machine with RECOMP_FG_PRESENT=1 at the 30 fps setting (window.c exports window_fg_present/window_display_hz; metrics.c builds the line). The measured value is only available from the NVIDIA overlay (Alt+R) or an external capture measurement; exact counting needs own interpolation (a separate project). The launcher's section 6 text explains the EST line, the panel says the NVIDIA overlay is the measured source. Release 300,447,383 B, SHA256 78F0D7F7...D200C38F, payload v0.1.1-p5d-782dff1+1aa29a995ba7, payload launcher D4E08D6F...5F0AA56A; audits green. |
+| M1648 | §18.5167: **The launcher's P5D page gets a menu bar: 主頁 (game ROM / firmware / build / on-screen FPS display / launch) and 畫質選項 (resolution / frame rate / AI 插帧), instead of one long scrolling page.** ImGui tab bar + SeparatorText, same widgets only grouped; no runtime change. Verified with screenshots of both pages. Release 300,447,725 B, SHA256 DA3C9C4B...9DDCF62, payload v0.1.1-p5d-ed9edbd+1aa29a995ba7 (launcher-only, no game rebuild), payload launcher 4D87E5CA...408327; audits green. |
+| M1651 | §18.5168: **AI frame interpolation made to actually work: NVIDIA App wrote a broken application path (`c:/users/`) into the driver profile, so the profile never matched the game and Smooth Motion never engaged; the launcher now repairs the profile before every play, verified with an external capture probe (30 fps: 29.8 -> 56.0 distinct pictures/s; 60 fps: about 107/s).** Root cause found with a new dev tool fpsprobe (screen-region capture at ~160 Hz, quantised pixel comparison, count of distinct displayed pictures/s): the App's add-application step failed (`m_AddManualApplication failed with 7`) leaving the only application entry as `c:/users/`. Fix: p5d_repair_fgx_profile() in the launcher (dynamic nvapi64.dll, find profile game_host_min.exe, create application game_host_min.exe, save) runs before each play and shows the state in panel ⑦; P5D_REPAIR_FGX=1 is the headless hook. Verified: 30 fps dance 29.8 -> 56.0, title 24 -> 48, 60 fps about 107-110; the OSD's AI estimate is consistent. Release 300,449,275 B, SHA256 1539EBC0...D074A6A, payload v0.1.1-p5d-50d158a+1aa29a995ba7 (launcher-only, no game rebuild), payload launcher 408C684D...B68AE43; audits green. |
 proposal).** mnsHandle_8111b64c/8111b190 receive a real-time float (+0.01668/frame at 60 vs +0.03337 at 30);
 mnsProcess_811251d6 fires per-frame but constant; other mnsProcess/mnsOption/gfd entries do not fire per-frame;
 object-word slopes show only the known danceQuantizer_81049976 w2 (+0.5 at 60 vs +1.0 at 30). The remaining
@@ -523282,3 +523284,79 @@ external capture measurement; exact counting requires own interpolation (a separ
 78F0D7F7...D200C38F, payload v0.1.1-p5d-782dff1+1aa29a995ba7, payload launcher D4E08D6F...5F0AA56A; audits green.
 LOOKUP: 18.5166 = M1647 (OSD AI estimate) -> 18.5165 [relevant: M1646 the AI-interpolation present mode], 18.5164 [relevant:
 M1645 the launcher's frame-generation panel].
+
+### 18.5167 M1648 THE LAUNCHER'S P5D PAGE GETS A MENU BAR: 主頁 (GAME ROM / FIRMWARE / BUILD / FPS DISPLAY / LAUNCH) AND 畫質選項 (RESOLUTION / FRAME RATE / AI 插帧), INSTEAD OF ONE LONG SCROLLING PAGE
+
+Requested: the launcher should open on a main page with the remaining options and switch to a "quality options" page when
+that entry is clicked.
+
+M1648: p5d_ui's single list became a tab bar under the intro text.
+- 主頁 keeps ① 遊戲 ROM, ② 系統固件, ③ 開始構建, the on-screen frame-rate display (renumbered ④) and the launch block with the
+  task progress and log drawer;
+- 畫質選項 is a page of its own with three SeparatorText sections: 解析度 (the five radio options and the render-scale note),
+  幀率 (30/60 with the 30 fps note) and AI 插帧（NVIDIA Smooth Motion） (the GPU/driver probe, the game-executable path and
+  its copy/open/re-probe buttons, the "啟用 AI 插帧支援（30 幀設定也有效）" checkbox and the instructions/caveats).
+The widgets are unchanged, only grouped: no runtime or game code was touched. Verified with screenshots of both pages
+(desktop launcher: the tab bar under the intro, 主頁 showing ① 遊戲 ROM with the imported game, 畫質選項 showing the three
+quality sections). Release of this round: 300,447,725 B, SHA256
+`DA3C9C4BFCED7C884BFDD856C104EAC8420564C1205E466248B330D0E9DDCF62`, payload
+`v0.1.1-p5d-ed9edbd+1aa29a995ba7` (launcher-only, content hash unchanged so no game rebuild), payload launcher
+`4D87E5CAB085082F0BFEE1A18B70718EB0EB505F4DCAB11B0EDD6ADA5D408327`; audits green.
+
+ANTI-FORGETTING ENTRY. Keywords: M1648 launcher tabs, 主頁, 畫質選項, SeparatorText, ImGui BeginTabBar. The launcher's P5D
+page is a tab bar: 主頁 = game ROM, firmware, build, on-screen FPS display and launch/progress/log; 畫質選項 = 解析度, 幀率
+and AI 插帧 (NVIDIA Smooth Motion). Same widgets as before, only grouped; no runtime change. Release 300,447,725 B, SHA256
+DA3C9C4B...9DDCF62, payload v0.1.1-p5d-ed9edbd+1aa29a995ba7 (launcher-only, no game rebuild); audits green.
+LOOKUP: 18.5167 = M1648 (launcher tabs) -> 18.5164 [relevant: M1645 the frame-generation panel], 18.5168 [relevant: M1651 the
+AI-interpolation fix].
+
+### 18.5168 M1651 AI FRAME INTERPOLATION MADE TO ACTUALLY WORK: NVIDIA APP WROTE A BROKEN APPLICATION PATH INTO THE DRIVER PROFILE, SO THE PROFILE NEVER MATCHED THE GAME AND SMOOTH MOTION NEVER ENGAGED; THE LAUNCHER NOW REPAIRS THE PROFILE BEFORE EVERY PLAY (VERIFIED WITH AN EXTERNAL CAPTURE PROBE: 30 FPS 29.8 -> 56.0 DISTINCT PICTURES/S, 60 FPS ABOUT 107/S)
+
+Requested (goal): fix the AI frame interpolation that the launcher's ⑦ switch enables but never took effect.
+
+Measurement first (new dev tool fpsprobe): the probe finds the game window, samples its screen region at ~160 Hz, quantises
+the pixels and counts how often the displayed picture really changes - an external, capture-based measurement independent of
+NVIDIA's overlay and of the port's own F1 counter. 30 fps setting, dance stage, AI 插帧 on: 29.8 distinct pictures/s (exactly
+the real frame rate, no interpolation) both with the launcher's present option on and off.
+
+Root cause: NVIDIA App stores the Smooth Motion ("AI 插帧") toggle in a driver profile named `game_host_min.exe`, but its own
+"add application" step fails for this game - the CxNative log shows `Failed to get app metadata: m_AddManualApplication
+failed with 7` and then `cannot create DRS profile - game_host_min.exe` - and the profile's only application entry ends up
+as a broken path (`c:/users/`, friendly name `C:\Users\`). A profile that matches no running executable means the driver
+never applies its settings, so the interpolation stayed off although the App showed the toggle as on. NVAPI verified: the
+profile's application list contained only `c:/users/`; the App's write did create the profile and the custom setting keyed by
+the profile name, but the profile could never match the game process.
+
+Fix: the launcher repairs that entry before every play - `p5d_repair_fgx_profile()` in launcher/hub.cpp loads nvapi64.dll
+dynamically (NvAPI_QueryInterface, no SDK), opens the session, finds the profile `game_host_min.exe`, enumerates its
+applications and, when none matches `game_host_min.exe`, creates an application named `game_host_min.exe` in the profile and
+saves it. The ⑦ panel shows the driver-file state ("driver file OK" / "driver file repaired (NVIDIA App had written a broken
+application path)"), the measured result and the note that the App's own add step is the culprit; `P5D_REPAIR_FGX=1` is a
+headless hook that prints/writes the result (used for the verification below). The repair runs whether or not the present
+option is ticked: the driver interpolates whenever the app presents real frames, while the launcher option only controls the
+presentation cadence.
+
+Measured after the repair (same probe, same scenes):
+- 30 fps setting, dance stage: 56.0 distinct pictures/s (two runs: 55.2 and 56.0), i.e. about 2x the real 29.8 - Smooth
+  Motion is now inserting frames;
+- 30 fps setting, title/character scene: 47.8 -> 48.6 when already interpolated from ~24 fps content;
+- 60 fps setting: about 107-110 distinct pictures/s (real content ~55), i.e. doubling as well (panel refresh caps it);
+- the ⑦ panel's estimate line in the OSD ("AI 60 EST") is consistent with these measurements at 30 fps.
+
+Release of this round: 300,449,275 B, SHA256
+`1539EBC0704838B54BB3E0FC9B263E0D485CFB1361178498BB346E585D074A6A`, payload
+`v0.1.1-p5d-50d158a+1aa29a995ba7` (launcher-only; the content hash is unchanged, so an existing install does not rebuild the
+game), payload launcher `408C684DD38664A698054E6D55FCAB90563BF52FF52913CDCD38DA846B68AE43`; copied to the desktop. Source
+commit 50d158a. Audits green.
+
+ANTI-FORGETTING ENTRY. Keywords: M1651 AI frame interpolation fix, NVIDIA App broken application path, c:/users/, driver
+profile game_host_min.exe, p5d_repair_fgx_profile, fpsprobe capture measurement, 29.8 -> 56.0 distinct pictures/s. NVIDIA
+Smooth Motion never engaged for this port even with the App toggle on: the App's driver profile for `game_host_min.exe`
+contained a broken application entry (`c:/users/`) because its add-application step failed (`m_AddManualApplication failed
+with 7`), so the profile never matched the game process. The launcher now repairs the entry through NVAPI DRS before every
+play (create application `game_host_min.exe` in that profile, save) and shows the state in the ⑦ panel; `P5D_REPAIR_FGX=1`
+is the headless hook. External capture probe (fpsprobe) measured 29.8 distinct pictures/s before, 56.0 after at the 30 fps
+setting, and about 107-110/s at the 60 fps setting. Release 300,449,275 B, SHA256 1539EBC0...D074A6A, payload
+v0.1.1-p5d-50d158a+1aa29a995ba7, payload launcher 408C684D...B68AE43; audits green.
+LOOKUP: 18.5168 = M1651 (AI interpolation fix) -> 18.5166 [relevant: M1647 the OSD estimate], 18.5164 [relevant: M1645 the
+frame-generation panel], 18.5167 [relevant: M1648 the tabs].
