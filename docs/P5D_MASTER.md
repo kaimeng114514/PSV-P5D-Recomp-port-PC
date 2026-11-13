@@ -1719,6 +1719,7 @@
 | M1625 | §18.5144: **Dance pause: the M1624 node-clock smoothing kept advancing its 1/60 step when the engine repeated the node time, so the background dancers kept dancing behind the pause menu.** The repeat is the normal 30 fps cadence on every second frame, but a pause repeats the value forever; the hook now freezes after at most two consecutive repeats and adopts the game's value when it advances again (unpause/loop/restart). Verified: pause run shows the dance clock DCLK stopped and NODEFPSSTAT changes=0 with a frozen value across the pause window; resumed play shows 57-59 changes per 60 frames and +1.0 s per 60 frames (real-time 1.0x); 30 fps mode unaffected. Release repackaged, docs/audits green. |
 | M1643 | §18.5162: **Docs encoding incident and recovery: the master doc's working copy had been re-encoded (UTF-8 read as GBK) before this session; restored from the last good commit and every milestone script replayed; the audit now counts the "### §18.x" legacy headings and the release audit runs the encoding guard.** The M1620 commit was still clean, so the damage was in the working tree; the session's tools appended UTF-8 correctly and the ASCII-only audits passed. Recovery: docs/P5D_MASTER.md from git cat-file HEAD~1:docs/P5D_MASTER.md + replay of _m1621..._m1642_docs.py (sections 18.5140-18.5161, ledger rows, anchors, release lines recovered from the corrupted blob's ASCII lines); P5D_HANDOFF.md rebuilt (its pre-2026-11-12 11:20 part lost, recorded); kb_audit's section pattern accepts the legacy "### §18.x" headings (the baseline itself failed on M1620 -> 18.22 before); tools/check_text_encoding.py is now run by tools/verify_doc_integrity.ps1. Verified: 39.65 MB master, 569 correct Chinese words, no U+FFFD, KB_AUDIT_PASS sections=5119 (both trees), DOC_INTEGRITY_PASS, release_audit PASS, check_text_encoding PASS. |
 | M1644 | §18.5163: **The port's complete source published to the repository: `src/` (snapshot of commit 6dd5ab9; 405 files, about 20 MB - the 24 red-line images are excluded and listed in src/ASSETS_EXCLUDED.txt); no game data included.** `src/` is the only published form of the source: a temporary `source` branch and a docs/BUILD_REPRODUCTION.md guide were added and removed again at the author's request (redundant with src/; the source tree plus the pinned toolchain recipe runtime/platform/win/setup-toolchain.sh describe the build), both reachable in git history. The full git development history stays local (nativ_src) and is not published. README links src/; the resolution list gains 4K. Nothing of the game is in the repository (release_audit PASS); all audits green. |
+| M1645 | §18.5164: **Frame-generation panel in the launcher: NVIDIA Smooth Motion support for the port (driver-level AI frame interpolation on Vulkan; RTX 40/50 + NVIDIA App), with GPU/driver detection, the game executable path to copy and a shortcut to NVIDIA App.** In-engine DLSS Frame Generation is impossible here (needs D3D12 + NGX + motion vectors/depth; the port is GXM->Vulkan on SDL_GPU), but Smooth Motion is the driver-level equivalent and its Vulkan path works with this port unchanged: the player flips it per program in NVIDIA App (Graphics > Program settings > Driver settings > Smooth Motion). The panel (section 7 of the launcher page) detects the GPU/driver via nvidia-smi and shows RTX 40/50 usability, detects/opens NVIDIA App (or its download page), prints the built game exe path (game_host_min.exe) with a copy button, re-probes, and explains the steps and caveats (game keeps 60 fps; NVIDIA overlay counts generated frames, the port's F1 overlay shows the real 60; artifacts possible). Verified with a launcher screenshot on the RTX 5060 Laptop / driver 617.42 / NVIDIA App machine. Launcher-only release (payload version unchanged, no game rebuild), docs/audits green. |
 proposal).** mnsHandle_8111b64c/8111b190 receive a real-time float (+0.01668/frame at 60 vs +0.03337 at 30);
 mnsProcess_811251d6 fires per-frame but constant; other mnsProcess/mnsOption/gfd entries do not fire per-frame;
 object-word slopes show only the known danceQuantizer_81049976 w2 (+0.5 at 60 vs +1.0 at 30). The remaining
@@ -523081,3 +523082,71 @@ The full git history stays local (nativ_src) and is not published. README links 
 release_audit and the encoding guard pass.
 LOOKUP: 18.5163 = M1644 (source published to the repository) -> 18.5162 [relevant: M1643 docs encoding recovery], 18.5160
 [relevant: M1641 payload completeness], 18.5154 [relevant: M1635 the auto-play cheat].
+
+### 18.5164 M1645 FRAME-GENERATION PANEL IN THE LAUNCHER: NVIDIA SMOOTH MOTION SUPPORT FOR THE PORT (DRIVER-LEVEL AI FRAME INTERPOLATION ON VULKAN; RTX 40/50 + NVIDIA APP), WITH GPU/DRIVER DETECTION, THE GAME EXECUTABLE PATH TO COPY AND A SHORTCUT TO NVIDIA APP
+
+Requested: an interesting launcher feature - let the game use NVIDIA's AI frame generation.
+
+What is possible and what is not:
+- the game cannot use in-engine DLSS Frame Generation (DLSS-G/MFG): that needs a DirectX 12 swapchain, the NGX SDK and the
+  frame's motion vectors + depth, while this port is a GXM->Vulkan renderer on SDL_GPU with no motion-vector/depth channel to
+  give a frame generator; adding a D3D12 + DXIL + NGX pipeline would be a separate project;
+- the equivalent that DOES work here is NVIDIA Smooth Motion, the driver-level AI frame interpolator: it needs GeForce RTX 40
+  or 50 series, an NVIDIA App installation and a DirectX 11/12 **or Vulkan** application (NVIDIA added the Vulkan path to
+  Smooth Motion in 2025; it interpolates an extra frame between two rendered frames and typically about doubles the perceived
+  frame rate). This port is already a Vulkan application, so no game-side change is needed - the switch is a per-program
+  setting in NVIDIA App (Graphics > Program settings > Driver settings > Smooth Motion).
+
+M1645 adds the launcher panel that makes that usable (launcher/hub.cpp, section 7 of the P5D page):
+- GPU and driver detection through nvidia-smi (System32, the old NVSMI folder, then PATH), parsed into "name, driver" and
+  shown with a status dot: RTX 40/50 -> usable, anything else -> Smooth Motion is not available on it;
+- NVIDIA App detection (the two Program Files paths) with a button that opens it (ShellExecuteA) - or a button to its
+  download page when it is not installed;
+- the built game's executable path shown verbatim (game_host_min.exe in the install's recomp folder) with a "copy path"
+  button, because that executable is the program to add in NVIDIA App's program list;
+- a "re-probe" button, and the three-step instruction plus the two caveats: the game keeps its 60 fps option (Smooth Motion
+  works from any rendered frame rate), the NVIDIA overlay's FPS counts the generated frames while the port's own F1 overlay
+  keeps showing the real rendered 60, and image artifacts/latency are possible (driver interpolation, not DLSS-G).
+
+Verified on this machine: the rebuilt launcher's page shows "⑦ 幀生成（NVIDIA Smooth Motion）", "檢測到 NVIDIA GeForce RTX 5060
+Laptop GPU（驅動 617.42）：可在 NVIDIA App 為這個遊戲開啟 Smooth Motion", the game executable path with its copy button, the
+NVIDIA App button and the re-probe button (desktop screenshot). The NVIDIA App toggle itself is a per-program setting the
+player flips once; the panel explains where. No game build or runtime change is involved (launcher-only release), so the
+payload version stamp is unchanged and existing installs do not rebuild the game.
+
+Release: dev/make_p5d_release.py re-packaged the single-file release from this tree; the payload version and SHA256 are
+recorded below. Docs/builds audits re-run green.
+
+ANTI-FORGETTING ENTRY. Keywords: M1645 launcher frame generation panel, NVIDIA Smooth Motion, driver-level AI frame
+interpolation on Vulkan, RTX 40/50, nvidia-smi detection, copy game_host_min.exe path. In-engine DLSS Frame Generation is
+not possible in this port (needs D3D12 + NGX + motion vectors/depth; the port is GXM->Vulkan on SDL_GPU). NVIDIA Smooth
+Motion (driver AI interpolation; RTX 40/50; DX11/12 and Vulkan since 2025) works because the port is Vulkan: the player
+enables it per program in NVIDIA App (Graphics > Program settings > Driver settings > Smooth Motion). M1645 adds launcher
+section ⑦: nvidia-smi GPU/driver detection with a status dot (RTX 40/50 usable), NVIDIA App detection + open button (or its
+download page), the built game exe path (game_host_min.exe) with a copy button, a re-probe button and the instructions plus
+the caveats (game keeps 60 fps; NVIDIA overlay counts generated frames, the port's F1 overlay shows the real 60; artifacts
+possible). Verified with a launcher screenshot on the RTX 5060 Laptop / driver 617.42 / NVIDIA App machine. Launcher-only
+release: payload version unchanged, no game rebuild. Release repackaged, audits green.
+LOOKUP: 18.5164 = M1645 (frame-generation panel) -> 18.5158 [relevant: M1639 true 4K], 18.5161 [relevant: M1642 launcher
+version from the payload], 18.5163 [relevant: M1644 source publication].
+
+
+### Update (later the same day): what the panel can and cannot automate
+
+The panel is useful, but it cannot flip the switch itself: NVIDIA Smooth Motion is not in the public NVAPI driver-settings
+(DRS) namespace. Verified on this machine (RTX 5060 Laptop, driver 617.42, NVIDIA App installed): an NVAPI session can
+create a per-application driver profile and write ordinary driver settings (e.g. PRERENDERLIMIT returns NVAPI_OK), but
+`NvAPI_DRS_SetSetting`/`GetSetting` for the Smooth Motion ids `0xB0D384C0` (Enable) and `0xB0CC0875` (Enabled APIs) return
+`NVAPI_SETTING_NOT_FOUND` (0xFFFFFF60). The same ids are absent from `NvAPI_DRS_EnumAvailableSettingIds` and from
+`EnumSettings` even on a profile that already has Smooth Motion enabled (the driver database `nvdrsdb0.bin` contains the
+0xB0D384C0=1 record for Shadow of the Tomb Raider): NVIDIA App writes them through a private channel, so a launcher
+checkbox cannot toggle them and neither can a "one manual toggle, then let the launcher take over" scheme. The temporary
+test profile was deleted again. The panel therefore stays a detector/helper and the switch is flipped once by hand in
+NVIDIA App; the in-engine alternative (own optical-flow frame interpolation) is a much larger, separate project.
+
+Also in the final release: `p5d_build_stale` now compares only the content hash after '+' of version.txt, because a
+launcher-only release bumps the commit prefix but not the game's runtime/packs content - a player who just updated the
+launcher is no longer told to rebuild the game. The release rebuilt from this tree (single-file exe, payload
+`v0.1.1-p5d-6dd5ab9+81c14158c509`, content hash unchanged so no game rebuild is needed) has size 300,444,452 B and SHA256
+`975975951DE141CFA749653EC9461C8CC4802217E9B978F0AB0DE3506FA0BBCA`; its payload launcher has SHA256
+`E3CB9DBEA114E11436EBF44897BCC275FDF06971E9D270B503D188A854FF9AAE`. Audits green; the exe copied to the desktop.
