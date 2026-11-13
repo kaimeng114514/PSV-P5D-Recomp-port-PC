@@ -1724,6 +1724,7 @@
 | M1647 | §18.5166: **The OSD's level-1 line also shows the AI-interpolated frame rate next to the real one while the launcher's AI interpolation option is on - an ESTIMATE (real fps * 2, capped by the display refresh), because the driver does not expose the generated-frame count.** `FPS 30.0 FRAME 33.3MS AI 60 EST` verified on the RTX 5060 machine with RECOMP_FG_PRESENT=1 at the 30 fps setting (window.c exports window_fg_present/window_display_hz; metrics.c builds the line). The measured value is only available from the NVIDIA overlay (Alt+R) or an external capture measurement; exact counting needs own interpolation (a separate project). The launcher's section 6 text explains the EST line, the panel says the NVIDIA overlay is the measured source. Release 300,447,383 B, SHA256 78F0D7F7...D200C38F, payload v0.1.1-p5d-782dff1+1aa29a995ba7, payload launcher D4E08D6F...5F0AA56A; audits green. |
 | M1648 | §18.5167: **The launcher's P5D page gets a menu bar: 主頁 (game ROM / firmware / build / on-screen FPS display / launch) and 畫質選項 (resolution / frame rate / AI 插帧), instead of one long scrolling page.** ImGui tab bar + SeparatorText, same widgets only grouped; no runtime change. Verified with screenshots of both pages. Release 300,447,725 B, SHA256 DA3C9C4B...9DDCF62, payload v0.1.1-p5d-ed9edbd+1aa29a995ba7 (launcher-only, no game rebuild), payload launcher 4D87E5CA...408327; audits green. |
 | M1651 | §18.5168: **AI frame interpolation made to actually work: NVIDIA App wrote a broken application path (`c:/users/`) into the driver profile, so the profile never matched the game and Smooth Motion never engaged; the launcher now repairs the profile before every play, verified with an external capture probe (30 fps: 29.8 -> 56.0 distinct pictures/s; 60 fps: about 107/s).** Root cause found with a new dev tool fpsprobe (screen-region capture at ~160 Hz, quantised pixel comparison, count of distinct displayed pictures/s): the App's add-application step failed (`m_AddManualApplication failed with 7`) leaving the only application entry as `c:/users/`. Fix: p5d_repair_fgx_profile() in the launcher (dynamic nvapi64.dll, find profile game_host_min.exe, create application game_host_min.exe, save) runs before each play and shows the state in panel ⑦; P5D_REPAIR_FGX=1 is the headless hook. Verified: 30 fps dance 29.8 -> 56.0, title 24 -> 48, 60 fps about 107-110; the OSD's AI estimate is consistent. Release 300,449,275 B, SHA256 1539EBC0...D074A6A, payload v0.1.1-p5d-50d158a+1aa29a995ba7 (launcher-only, no game rebuild), payload launcher 408C684D...B68AE43; audits green. |
+| M1652 | §18.5169: **The OSD's FPS line gains DISP: the measured number of pictures the game window really shows per second (including the driver's AI-interpolated frames), measured by screen capture - no estimate.** window.c's capture thread (GDI StretchBlt 192x108 at ~250 Hz, >1% changed pixels, changes within the last second, HIGH priority, only while the OSD is on) publishes the displayed rate; metrics.c's line becomes `FPS <real> FRAME <ms> DISP <measured>` (falls back to the old FPS/frame-time line when measurement is unavailable). Verified: 30 fps setting title reads FPS 30.0 FRAME 33.3MS DISP 48 (24 fps content doubled); external probe: dance ~56 at 30 fps, ~107 at 60 fps. The old AI 60 EST estimate is gone. Launcher texts explain FPS vs DISP. Release 300,450,754 B, SHA256 E72F9106...EBDDBDE9, payload v0.1.1-p5d-28b0a1f+692a6d8151b4, payload launcher 13FCDB89...46C8913; audits green. |
 proposal).** mnsHandle_8111b64c/8111b190 receive a real-time float (+0.01668/frame at 60 vs +0.03337 at 30);
 mnsProcess_811251d6 fires per-frame but constant; other mnsProcess/mnsOption/gfd entries do not fire per-frame;
 object-word slopes show only the known danceQuantizer_81049976 w2 (+0.5 at 60 vs +1.0 at 30). The remaining
@@ -523360,3 +523361,43 @@ setting, and about 107-110/s at the 60 fps setting. Release 300,449,275 B, SHA25
 v0.1.1-p5d-50d158a+1aa29a995ba7, payload launcher 408C684D...B68AE43; audits green.
 LOOKUP: 18.5168 = M1651 (AI interpolation fix) -> 18.5166 [relevant: M1647 the OSD estimate], 18.5164 [relevant: M1645 the
 frame-generation panel], 18.5167 [relevant: M1648 the tabs].
+
+### 18.5169 M1652 THE OSD'S FPS LINE GAINS DISP: THE MEASURED NUMBER OF PICTURES THE GAME WINDOW REALLY SHOWS PER SECOND (INCLUDING THE DRIVER'S AI-INTERPOLATED FRAMES), MEASURED BY SCREEN CAPTURE - NO ESTIMATE
+
+Requested: show the frame count after AI interpolation, not only the real render rate; and no estimate.
+
+M1652 implements it as a measurement. window.c starts a small thread (only while the OSD is on, so the cost exists only when
+the numbers are being looked at) that copies the game window's screen rectangle at ~250 Hz with GDI StretchBlt into a 192x108
+24-bit bitmap, compares it with the previous sample (per-pixel |dR|+|dG|+|dB| > 24 counts as changed, a new picture needs more
+than 1% of the pixels changed) and publishes the number of changes within the last second as the displayed rate. The driver's
+interpolated frames do reach the compositor, so they are counted; without interpolation the number equals the real rate. Thread
+priority HIGH, precise 4 ms pacing (SDL_DelayPrecise), skipped while the window is hidden/minimised.
+
+metrics.c's first overlay line becomes `FPS %.1f FRAME %.1fMS DISP %.0f`:
+- FPS/FRAME remain the port's real render rate and frame time (unchanged meaning);
+- DISP is the measured displayed rate - on the title screen at the 30 fps setting the port renders 30 (its title animation is
+  ~24 fps content) and the window shows DISP 48, i.e. twice the content rate: the interpolation is visible in the measurement;
+- in the dance stage the external capture probe measured ~56 at 30 fps and ~107 at 60 fps, so DISP reports the post-
+  interpolation rate there as well;
+- when the measurement is unavailable (no window yet, occluded, non-Windows) the line falls back to the old
+  `FPS x FRAME avg/max/1%low MS`.
+
+The earlier AI estimate (`AI 60 EST`) is gone - this is a measurement, not an estimate. Verified with a desktop screenshot at
+the 30 fps setting: the overlay reads `FPS 30.0 FRAME 33.3MS DISP 48` while the game runs normally; the capture thread only
+starts when the OSD is on. The launcher's section 6 text explains FPS vs DISP (measured, includes the driver's interpolated
+frames; 30 fps ~48-56, 60 fps ~107, capped by the panel refresh) and the AI panel notes that DISP shows the post-interpolation
+rate. Release: 300,450,754 B, SHA256
+`E72F910697D69A774C5F396A8FF1DCC4A0F1DAC2D8B36FBA5C27B730EBDDBDE9`, payload
+`v0.1.1-p5d-28b0a1f+692a6d8151b4` (runtime change), payload launcher
+`13FCDB8934484000488419F3A2F0B6D4BAB9C48269249500697C0AD3946C8913`; copied to the desktop; audits green.
+
+ANTI-FORGETTING ENTRY. Keywords: M1652 OSD DISP, measured displayed frame rate, GDI screen capture thread, FPS vs DISP, no
+estimate. The OSD's first line is "FPS <real> FRAME <ms> DISP <measured>": FPS is the port's real render rate, DISP is the
+number of distinct pictures the game window really shows per second, measured by window.c's capture thread (192x108
+StretchBlt at ~250 Hz, >1% changed pixels, changes in the last second; HIGH priority, SDL_DelayPrecise(4 ms), started only
+while the OSD is on). Interpolated frames are counted because they reach the compositor: title at 30 fps reads DISP 48 (24 fps
+content doubled), dance ~56 (30 fps + interpolation), 60 fps ~107; without interpolation DISP equals the real rate. No estimate
+is shown (the old AI 60 EST is gone). Launcher texts explain FPS vs DISP. Release 300,450,754 B, SHA256 E72F9106...EBDDBDE9,
+payload v0.1.1-p5d-28b0a1f+692a6d8151b4, payload launcher 13FCDB89...46C8913; audits green.
+LOOKUP: 18.5169 = M1652 (OSD DISP) -> 18.5168 [relevant: M1651 the AI-interpolation fix], 18.5166 [relevant: M1647 the earlier
+estimate it replaces].
