@@ -523059,7 +523059,7 @@ Published (2026-11-13):
   carrying the same tree at the repository root was dropped again as redundant - the full git development history stays in
   the local project (nativ_src, commit 6dd5ab9) and is not published as history objects (repository size and the release
   red line; a private repository or a git bundle can archive it if ever needed);
-- `docs/BUILD_REPRODUCTION.md`: the step-by-step reproduction guide - game/firmware prerequisites, the exact toolchain
+- `docs/BUILD_REPRODUCTION.md`: the step-by-step reproduction guide, including a checklist for an AI/automated re-reader (what the repository already contains - the complete source, the pinned toolchain versions in runtime/platform/win/setup-toolchain.sh, the audits - versus what must be supplied outside it - the game, the firmware, the compiler/SDL3/zlib/FFmpeg/Python, and the six usual pitfalls: the tomllib shim, the absolute path constants in make_p5d_release.py, the 24 red-line images, the RECOMP_CFLAGS object set, build non-determinism and the no-game-data red line) - game/firmware prerequisites, the exact toolchain
   versions this port was built with (MinGW-w64 GCC 16.1.0 winlibs; SDL3 3.4.16 x86_64-w64-mingw32; zlib; FFmpeg dev;
   Python 3.10.9 with capstone 5.0.9 / pycryptodome 3.24.0 / tomli 2.5.0 and the tomllib shim), the environment variables
   (ATIV_DUMP, ATIV_WIN_TOOLCHAIN, RECOMP_HOST_CC/CXX, JOBS, PYTHONPATH), the add/firmware/ready/build/run commands, the

@@ -151,6 +151,43 @@ python tools\check_text_encoding.py .                   :: [ENCODING] PASS
 - 构建目录放错位置：`ATIV_DUMP` 下会生成 `decrypted/`、`firmware/`；不要把游戏原数据放进仓库目录。
 - 红线：**永远不要**把游戏文件、固件、解密产物或重编译生成的游戏代码（`game_part*.c`、`game.img` 等）提交到仓库。
 
+## 10.5 给 AI / 自动化复读者的检查清单
+
+**仓库里已经有的（足够让一个 AI 读懂并重建）**：
+- 完整源码 `src/`（pipeline 解密/分析、recompiler AOT 重编译、runtime HLE 运行时、packs/PCSH10109 的 hooks 与
+  pack.toml、启动器 `launcher/hub.cpp`、发布打包 `dev/make_p5d_release.py` + 自解压 stub `dev/p5d_sfx_stub.c`）；
+- 全部技术结论与证据：`docs/P5D_MASTER.md`（31 MB、5100+ 小节，每个修复都有地址/反汇编/探针日志/截图说明）；
+- 工具链版本与下载来源：`src/runtime/platform/win/setup-toolchain.sh`（脚本内**固定版本 + SHA256**：llvm-mingw
+  `20261006`、SDL3 `3.4.16`、zlib `1.3.1`、FFmpeg `7.1.1`，走 GitHub/ffmpeg.org 官方下载）；
+- 四个审计脚本：`tools/kb_audit.py`、`tools/verify_doc_integrity.ps1`、`tools/release_audit.py`、
+  `tools/check_text_encoding.py`（复刻完用它自检）。
+
+**仓库外必须自备的**：
+| 项 | 说明 |
+|---|---|
+| 游戏与固件 | PCSH10109 1.00 游戏拷贝 + PSVUPDAT.PUP 3.74（法律原因不能入库） |
+| Windows 编译器 | 本机验证用 winlibs MinGW-w64 GCC **16.1.0**（x86_64, msvcrt, posix, seh）；或按 `setup-toolchain.sh` 的 llvm-mingw 路径（未在 P5D 上验证） |
+| SDL3 / zlib / FFmpeg 开发文件 | 版本同 `setup-toolchain.sh`（SDL3 3.4.16 的 `SDL3-devel-3.4.16-mingw.tar.gz`、zlib 1.3.1、FFmpeg 7.1.1 裁剪构建） |
+| Python | 3.10.9 + capstone 5.0.9 / pycryptodome 3.24.0 / tomli 2.5.0 + tomllib shim |
+| （可选，最省事） | 发布版启动器 exe：首次运行解包出的 `%LOCALAPPDATA%\P5D-Port\<id>\` 里就是上面整套工具链；exe 不在仓库里，可另行获取 |
+
+**最可能让自动化复读者卡住的点**：
+1. `ModuleNotFoundError: tomllib`（Python 3.10）→ 装 tomli 并放 `tomllib.py` shim，或把 `PYTHONPATH` 指向发布包 site-packages；
+2. `dev/make_p5d_release.py` 顶部是绝对路径常量（MINGW / TOOLCHAIN / WORK / PYEMBED）→ 按本机修改；
+3. 24 张 UI PNG 不在 `src/`（发布红线，见 `src/ASSETS_EXCLUDED.txt`）→ 只影响启动器/发布包的外观，不影响游戏构建；
+4. `RECOMP_CFLAGS`/对象缓存目录：改了编译参数字符串会触发全量重编译（正常）；
+5. 构建产物非比特级确定（时间戳/并行顺序）；`version.txt` 的 payload 版本才是有意义的内容指纹；
+6. 不要提交游戏数据：`release_audit.py` 会拒绝（红线）。
+
+**最短复刻路径（AI 视角）**：
+```
+git clone <repo> → cd src → 准备游戏/固件 → 备好工具链与 Python → 设环境变量
+→ python pipeline\vitarecomp.py add <game> ; firmware <PUP>
+→ ready PCSH10109 → build PCSH10109 → run PCSH10109
+→ （可选）build_p5d_launcher.ps1 / make_p5d_release.py
+→ 跑四个审计自检
+```
+
 ## 10. 许可
 
 - 本项目：GPL-2（见 `LICENSE`）；
