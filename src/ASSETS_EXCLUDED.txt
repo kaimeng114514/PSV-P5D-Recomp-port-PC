@@ -1,0 +1,37 @@
+# 按发布红线从源码快照中排除的图片资源（不是游戏数据）
+
+本仓库的发布红线（tools/release_audit.py：仓库/发布树不允许 .png/.bmp，游戏截图例外）把这些图片挡在版本库之外。
+它们**不是游戏原始资源文件**，而是本项目自己的 UI 图（launcher 图标、背景、自动演奏横幅、Kenney CC0 提示图集），
+但为保持仓库红线一致，`src/` 中不含它们。**游戏本体的构建/运行不需要这些图片**（只有启动器界面与发布打包需要）。
+
+从发布版 exe 恢复（推荐的完整复现方式）：
+1. 运行一次 `P5D Windows移植版启动器.exe`，它把 payload 解包到 `%LOCALAPPDATA%\P5D-Port\<版本ID>\`；
+2. 把下面这些文件从解包目录复制回源码树的同路径（解包目录里都有）：
+
+- `%LOCALAPPDATA%\P5D-Port\<版本ID>\assets\brand\png\icon-1024.png`
+- `%LOCALAPPDATA%\P5D-Port\<版本ID>\assets\brand\png\icon-128.png`
+- `%LOCALAPPDATA%\P5D-Port\<版本ID>\assets\brand\png\icon-16.png`
+- `%LOCALAPPDATA%\P5D-Port\<版本ID>\assets\brand\png\icon-256.png`
+- `%LOCALAPPDATA%\P5D-Port\<版本ID>\assets\brand\png\icon-32.png`
+- `%LOCALAPPDATA%\P5D-Port\<版本ID>\assets\brand\png\icon-48.png`
+- `%LOCALAPPDATA%\P5D-Port\<版本ID>\assets\brand\png\icon-512.png`
+- `%LOCALAPPDATA%\P5D-Port\<版本ID>\assets\brand\png\icon-64.png`
+- `%LOCALAPPDATA%\P5D-Port\<版本ID>\assets\brand\png\icon-96.png`
+- `%LOCALAPPDATA%\P5D-Port\<版本ID>\assets\brand\png\icon-macos-512.png`
+- `%LOCALAPPDATA%\P5D-Port\<版本ID>\assets\p5d\bg.png`
+- `%LOCALAPPDATA%\P5D-Port\<版本ID>\assets\p5d\p5d_icon_source.png`
+- `%LOCALAPPDATA%\P5D-Port\<版本ID>\assets\p5d\png\icon-1024.png`
+- `%LOCALAPPDATA%\P5D-Port\<版本ID>\assets\p5d\png\icon-128.png`
+- `%LOCALAPPDATA%\P5D-Port\<版本ID>\assets\p5d\png\icon-16.png`
+- `%LOCALAPPDATA%\P5D-Port\<版本ID>\assets\p5d\png\icon-256.png`
+- `%LOCALAPPDATA%\P5D-Port\<版本ID>\assets\p5d\png\icon-32.png`
+- `%LOCALAPPDATA%\P5D-Port\<版本ID>\assets\p5d\png\icon-48.png`
+- `%LOCALAPPDATA%\P5D-Port\<版本ID>\assets\p5d\png\icon-512.png`
+- `%LOCALAPPDATA%\P5D-Port\<版本ID>\assets\p5d\png\icon-64.png`
+- `%LOCALAPPDATA%\P5D-Port\<版本ID>\assets\p5d\png\icon-96.png`
+- `%LOCALAPPDATA%\P5D-Port\<版本ID>\runtime\ui\banner_off.png`
+- `%LOCALAPPDATA%\P5D-Port\<版本ID>\runtime\ui\banner_on.png`
+- `%LOCALAPPDATA%\P5D-Port\<版本ID>\third_party\kenney-prompts\prompts.png`
+
+（解包目录里是完整 payload：`assets/`、`runtime/ui/`、`third_party/` 都在，与官方构建一致。）
+若不需要启动器/发布包，只想把游戏跑起来：可以完全跳过这些图片。
