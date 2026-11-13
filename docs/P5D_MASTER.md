@@ -1720,6 +1720,7 @@
 | M1643 | §18.5162: **Docs encoding incident and recovery: the master doc's working copy had been re-encoded (UTF-8 read as GBK) before this session; restored from the last good commit and every milestone script replayed; the audit now counts the "### §18.x" legacy headings and the release audit runs the encoding guard.** The M1620 commit was still clean, so the damage was in the working tree; the session's tools appended UTF-8 correctly and the ASCII-only audits passed. Recovery: docs/P5D_MASTER.md from git cat-file HEAD~1:docs/P5D_MASTER.md + replay of _m1621..._m1642_docs.py (sections 18.5140-18.5161, ledger rows, anchors, release lines recovered from the corrupted blob's ASCII lines); P5D_HANDOFF.md rebuilt (its pre-2026-11-12 11:20 part lost, recorded); kb_audit's section pattern accepts the legacy "### §18.x" headings (the baseline itself failed on M1620 -> 18.22 before); tools/check_text_encoding.py is now run by tools/verify_doc_integrity.ps1. Verified: 39.65 MB master, 569 correct Chinese words, no U+FFFD, KB_AUDIT_PASS sections=5119 (both trees), DOC_INTEGRITY_PASS, release_audit PASS, check_text_encoding PASS. |
 | M1644 | §18.5163: **The port's complete source published to the repository: `src/` (snapshot of commit 6dd5ab9; 405 files, about 20 MB - the 24 red-line images are excluded and listed in src/ASSETS_EXCLUDED.txt); no game data included.** `src/` is the only published form of the source: a temporary `source` branch and a docs/BUILD_REPRODUCTION.md guide were added and removed again at the author's request (redundant with src/; the source tree plus the pinned toolchain recipe runtime/platform/win/setup-toolchain.sh describe the build), both reachable in git history. The full git development history stays local (nativ_src) and is not published. README links src/; the resolution list gains 4K. Nothing of the game is in the repository (release_audit PASS); all audits green. |
 | M1645 | §18.5164: **Frame-generation panel in the launcher: NVIDIA Smooth Motion support for the port (driver-level AI frame interpolation on Vulkan; RTX 40/50 + NVIDIA App), with GPU/driver detection, the game executable path to copy and a shortcut to NVIDIA App.** In-engine DLSS Frame Generation is impossible here (needs D3D12 + NGX + motion vectors/depth; the port is GXM->Vulkan on SDL_GPU), but Smooth Motion is the driver-level equivalent and its Vulkan path works with this port unchanged: the player flips it per program in NVIDIA App (Graphics > Program settings > Driver settings > Smooth Motion). The panel (section 7 of the launcher page) detects the GPU/driver via nvidia-smi and shows RTX 40/50 usability, detects/opens NVIDIA App (or its download page), prints the built game exe path (game_host_min.exe) with a copy button, re-probes, and explains the steps and caveats (game keeps 60 fps; NVIDIA overlay counts generated frames, the port's F1 overlay shows the real 60; artifacts possible). Verified with a launcher screenshot on the RTX 5060 Laptop / driver 617.42 / NVIDIA App machine. Launcher-only release (payload version unchanged, no game rebuild), docs/audits green. |
+| M1646 | §18.5165: **AI frame interpolation mode: the 30 fps setting now feeds NVIDIA Smooth Motion (the driver-level AI interpolator, not DLSS Frame Generation) - RECOMP_FG_PRESENT=1 presents only fresh game frames (30 fps setting -> 30 presents/s) so the driver can insert frames between them; 60 fps is unchanged.** Old behaviour: the present loop repeated every picture at 60/s (measured [WIN] presents=60 newtex=30 same=30 per second), leaving nothing to interpolate; with the mode: presents=60 newtex=60 same=0 per two seconds. The overlay keeps 60 Hz presents so the mode applies while nothing is paused. Launcher: panel renamed to '⑯ AI 插帧（NVIDIA Smooth Motion）', option '啟用 AI 插帧友善呈現（30 幀設定也有效）' (launcher.ini p5d_fg_present -> RECOMP_FG_PRESENT=1), texts say AI 插帧 not DLSS; the NVIDIA App AI 插帧 switch stays manual (private driver channel). Release: 300,445,545 B, SHA256 506563D08BA689E53B53C2A93B0F4BB3E7F2916D9F46EAC09827FAA1CD1978B6, payload v0.1.1-p5d-36516cf+130f8cc9c47c (runtime change -> rebuild hint once), payload launcher C31C8F51...89A40, desktop copy; audits green. |
 proposal).** mnsHandle_8111b64c/8111b190 receive a real-time float (+0.01668/frame at 60 vs +0.03337 at 30);
 mnsProcess_811251d6 fires per-frame but constant; other mnsProcess/mnsOption/gfd entries do not fire per-frame;
 object-word slopes show only the known danceQuantizer_81049976 w2 (+0.5 at 60 vs +1.0 at 30). The remaining
@@ -523150,3 +523151,55 @@ launcher is no longer told to rebuild the game. The release rebuilt from this tr
 `v0.1.1-p5d-6dd5ab9+81c14158c509`, content hash unchanged so no game rebuild is needed) has size 300,444,452 B and SHA256
 `975975951DE141CFA749653EC9461C8CC4802217E9B978F0AB0DE3506FA0BBCA`; its payload launcher has SHA256
 `E3CB9DBEA114E11436EBF44897BCC275FDF06971E9D270B503D188A854FF9AAE`. Audits green; the exe copied to the desktop.
+
+### 18.5165 M1646 AI FRAME INTERPOLATION MODE: THE 30 FPS SETTING NOW FEEDS NVIDIA SMOOTH MOTION (PRESENT ONLY FRESH FRAMES; 30 REAL FRAMES/S + DRIVER-INSERTED FRAMES), THE LAUNCHER'S PANEL RENAMED TO 'AI 插帧' WITH ITS OWN PRESENT OPTION - NOT DLSS FRAME GENERATION
+
+Requested: support for AI frame interpolation (not the DLSS override frame generation), and it should also work when the
+game is set to 30 fps.
+
+What was wrong: the panel added in M1645 points at NVIDIA Smooth Motion, which is the driver-level AI interpolator (RTX
+40/50, DirectX 11/12 and Vulkan; NVIDIA App's Chinese UI calls it "AI 插帧"), not DLSS Frame Generation, but the port's
+presentation was not feeding it: with the 30 fps setting the present loop repeats every picture at 60/s (30 fresh + 30
+duplicates per second), and the driver can only infer frames between frames it actually receives - it had nothing to
+interpolate, so a 30 fps setting looked exactly as before with Smooth Motion on.
+
+M1646 fixes the presentation side: RECOMP_FG_PRESENT=1 makes the present loop skip repeats and present only when there is a
+fresh game frame (30 fps setting -> 30 presents/s with new content, 60 -> 60 presents/s). The overlay keeps its 60 Hz
+presents (its animations and the pause menu need them); the mode applies while nothing is paused. Measured with
+RECOMP_WINPRES=1 (the [WIN] line prints presents/newtex/same once per 60 loop presents):
+- 30 fps setting, old behaviour: presents=60 newtex=30 same=30 every second (half the presents were duplicates);
+- 30 fps setting, RECOMP_FG_PRESENT=1: presents=60 newtex=60 same=0, and the line now appears every two seconds - i.e. 30
+  presents per second, every one a fresh picture, exactly what the driver needs to insert interpolated frames between;
+- 60 fps setting: newtex=60 same=0 both with and without the mode (no change, no regression).
+
+Launcher: the 7 panel is renamed "⑦ AI 插帧（NVIDIA Smooth Motion）" and its texts now say "AI 插帧" (the NVIDIA App name)
+and explicitly that this is driver-level AI interpolation, not DLSS 優設 / DLSS Frame Generation. It gains the option
+"啟用 AI 插帧友善呈現（30 幀設定也有效）" (prefs launcher.ini p5d_fg_present), which launches the game with
+RECOMP_FG_PRESENT=1; the paragraphs explain that game logic, music and judgement stay on the real 30/60, that a 30 fps
+setting shows about 2x the frames on screen, and that the NVIDIA overlay counts interpolated frames while the port's own F1
+overlay keeps showing the real 30/60. The Smooth Motion/AI 插帧 switch itself still cannot be flipped from the launcher
+(NVIDIA App writes it through a private driver channel; verified in M1645: public NVAPI DRS returns NVAPI_SETTING_NOT_FOUND
+for 0xB0D384C0/0xB0CC0875), so the steps are: copy the game executable path, add it in NVIDIA App (Graphics -> Program
+settings), Driver settings -> AI 插帧 (Smooth Motion) = on, then tick the launcher option and play.
+
+Release (M1646): rebuilt single-file exe 300,445,545 B, SHA256
+`506563D08BA689E53B53C2A93B0F4BB3E7F2916D9F46EAC09827FAA1CD1978B6`, payload `v0.1.1-p5d-36516cf+130f8cc9c47c`
+(the runtime changed, so the content hash moved from 81c14158c509 to 130f8cc9c47c and an existing build shows the rebuild
+hint once); payload launcher SHA256 `C31C8F51490CF50F68CB21D9AEACCB16CF48A7AF1F89938776FC4E0EAE389A40`; copied to the
+desktop. Source commit for this round: window.c (the present mode), launcher/hub.cpp (panel, option, play env) and
+dev/make_p5d_release.py (README wording). Audits green.
+
+ANTI-FORGETTING ENTRY. Keywords: M1646 AI frame interpolation at 30 fps, RECOMP_FG_PRESENT, present only fresh frames,
+NVIDIA Smooth Motion / AI 插帧, not DLSS Frame Generation. Smooth Motion is the driver-level AI interpolator (RTX 40/50,
+DX11/12 + Vulkan); it can only insert frames between frames the application actually presents. The old present loop sent 60
+pictures/s even in the 30 fps setting (half duplicates), so the driver had nothing to interpolate. RECOMP_FG_PRESENT=1
+(runtime/ui/window.c) presents only fresh game frames: 30 fps setting -> 30 presents/s (measured [WIN] presents=60
+newtex=60 same=0 per two seconds; old: presents=60 newtex=30 same=30 per second), 60 fps setting unchanged. The overlay
+keeps 60 Hz presents, so the mode applies while nothing is paused. Launcher panel renamed "⑦ AI 插帧（NVIDIA Smooth Motion）"
+with the option "啟用 AI 插帧友善呈現（30 幀設定也有效）" (launcher.ini p5d_fg_present -> RECOMP_FG_PRESENT=1) and texts
+that say AI 插帧, not DLSS; the NVIDIA App switch itself stays manual (private driver channel; NVAPI returns
+NVAPI_SETTING_NOT_FOUND for 0xB0D384C0/0xB0CC0875). Release: 300,445,545 B, SHA256
+506563D08BA689E53B53C2A93B0F4BB3E7F2916D9F46EAC09827FAA1CD1978B6, payload v0.1.1-p5d-36516cf+130f8cc9c47c, payload
+launcher C31C8F51...89A40, desktop copy. Audits green.
+LOOKUP: 18.5165 = M1646 (AI interpolation at 30 fps) -> 18.5164 [relevant: M1645 the frame-generation panel and the NVAPI
+limits], 18.5158 [relevant: M1639 4K render scale], 18.5161 [relevant: M1642 the launcher version from the payload].
