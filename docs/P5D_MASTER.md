@@ -1728,6 +1728,8 @@
 | M1653 | §18.5170: **DISP is measured with DXGI Desktop Duplication (compositor-timed, centre-patch copy) instead of GDI screen grabs - the same post-interpolation displayed-rate figure, more precisely and more cheaply.** New runtime/ui/dispcapture.c/.h: D3D11 device, the output containing the window via IDXGIDevice/GetAdapter/EnumOutputs, DuplicateOutput, AcquireNextFrame (4 ms timeout) -> 192x108 centre patch copied to a staging texture, >1% pixel-change threshold, distinct pictures in the last second = DISP; interpolated frames reach the compositor and are counted; access-lost re-initialises; without duplication the OLD FPS/FRAME line shows. window.c drops the GDI thread; build.py adds dispcapture.c and links -ld3d11 -ldxgi -ldxguid. Verified: 30 fps title reads 'FPS 30.0 FRAME 33.3MS DISP 41'; dance ~56 at 30 fps / ~107 at 60 fps per M1652. Release 300,452,487 B, SHA256 6279E242...D56E30BC1, payload v0.1.1-p5d-c8e64ef+25b25d97b160, payload launcher 13FCDB89...46C8913; audits green. |
 | M1654 | §18.5171: **Version bump: the release is v0.1.2 (launcher subtitle and payload stamp), covering the AI-interpolation fix, DISP measurements and the menu-bar/tabs work.** RELEASE_VERSION "v0.1.2-p5d"; payload version.txt v0.1.2-p5d-c8e64ef+25b25d97b160; launcher fallback v0.1.2; content hash unchanged (launcher-only, no game rebuild). Release 300,452,488 B, SHA256 5F4BEDFF...F5B9F96D; audits green. |
 | M1655 | §18.5172: **The COLLECTION character viewer keeps its PC keycaps after visiting the costume option: the flow-aware detection window (1.2 s -> 6 s), costume-list jobs counted as flow evidence, the costume-list back no longer stepping out, and a viewer-job self-heal restoring depth 3 - no PC key-binding or hint-glyph cell change.** Verified from the recorded session: old build logged viewer on -> off after the costume list; the fix keeps the viewer on (self-heal line instead). RECOMP_INPUT_LOG=1 records raw input events for replay. Version v0.1.3; release 300,453,354 B, SHA256 F0E95347...9D608CA0, payload v0.1.3-p5d-3e37179+a86a7bfe46bb; audits green. |
+| M1656 | §18.5173: **Xbox controller support: auto device switching (keyboard/mouse default, pad input switches the UI and input to Xbox, keyboard/mouse switches back), LB/RB as the game's L/R by default (shoulder_buttons=bumpers), A = confirm / B = back everywhere except the dance chart (keyed to the song gauge), P5R BUTTON_XBOX.PAK glyphs for the menus/LB/RB/start/view/sticks, the game's PS d-pad art kept, and author-drawn coloured Y/B/A dance letters.** Version v0.1.4, release 300,504,229 B, SHA256 FC24C14C...A55561D, payload v0.1.4-p5d-8149f45+de082c99a301; audits green. |
+| M1657 | §18.5174: **The launcher imports DLC (add-on content): a "③ 追加內容（DLC，可選）" step copies a NoNpDrm reAddcont tree into <RECOMP_FS>/addcont0 with a progress bar (and a --import-dlc hook without the window), plus 移除全部 DLC; P5D then licenses and opens every addcont pack.** Verified: 59 add-ons / 2409 MB imported, the game logs "add-on licence ... -> licensed" and opens addcont0:/ADDCONT.../DLCD....cpk (previously add-cont data absent); the base game still runs without DLC. Release v0.1.4, 300,504,229 B, SHA256 FC24C14C...A55561D, payload v0.1.4-p5d-8149f45+de082c99a301; audits green. |
 proposal).** mnsHandle_8111b64c/8111b190 receive a real-time float (+0.01668/frame at 60 vs +0.03337 at 30);
 mnsProcess_811251d6 fires per-frame but constant; other mnsProcess/mnsOption/gfd entries do not fire per-frame;
 object-word slopes show only the known danceQuantizer_81049976 w2 (+0.5 at 60 vs +1.0 at 30). The remaining
@@ -523500,3 +523502,75 @@ records the raw input events for replay. Verified by the recorded session (old: 
 v0.1.3, release 300,453,354 B, SHA256 F0E95347...9D608CA0, payload v0.1.3-p5d-3e37179+a86a7bfe46bb; audits green.
 LOOKUP: 18.5172 = M1655 (COLLECTION costume-list keycap fix) -> 18.5161 [relevant: M1642 input/keycap mapping history],
 18.5168 [relevant: M1651 the launcher driver-profile repair].
+
+### 18.5173 M1656 XBOX CONTROLLER SUPPORT: AUTO DEVICE SWITCHING, LB/RB AS L/R, A = CONFIRM / B = BACK EVERYWHERE BUT THE CHART, AND THE AUTHOR-CHOSEN GLYPH STYLES (P5R's XBOX BADGES, PS D-PAD, HAND-DRAWN DANCE LETTERS)
+
+Requested: an Xbox controller that starts on keyboard/mouse and switches the input and the on-screen prompts to the controller
+as soon as the pad is used (and back on keyboard/mouse), with Xbox button art found in the user's P5R installation.
+
+Data: the Xbox glyphs come from the user's P5R PC copy (D:\steam\steamapps\common\P5R\CPK\BASE.CPK ->
+BUTTON/BUTTON_XBOX.PAK, decoded from its DXT5 textures into runtime/gfx/xboxglyphs.h; the user later picked the styles). The
+game had no Xbox art of its own, so the pad UI repaints the same PS-badge cells: menu hints (lclick/rclick/tab/ctrl = A/B/X/Y
+octagon badges), LB/RB (lb_w/rb_b), start/view, the sticks, and the dance chart's Y/B/A (hand-drawn coloured letters, plain,
+no disc or square, cut to fill the cell so they read larger). The d-pad cells keep the game's own PS d-pad art (the author
+preferred it).
+
+Input: pads are enabled by default (the old PC-only gate is gone; RECOMP_ALLOW_PAD=0 restores it). Any real pad button (or a
+stick past 8k of 32k, so drift can't switch) calls device_gamepad(): last_device_kb clears and the keyglyph/hintglyph atlases
+are re-uploaded with the Xbox art. Any keyboard/mouse action calls device_keyboard() and swaps them back; the default is
+keyboard/mouse. RECOMP_XBOXGLYPHS=0 disables the pad art, RECOMP_PAD_UI_PREVIEW=1 previews it without a pad.
+
+Mapping: "shoulder_buttons" now defaults to bumpers -- LB/RB are the game's L and R (the Xbox/PS convention; the triggers hold
+the touch cursor), the old mapping stays available in the settings. Outside the chart A = confirm and B = back (this game's
+confirm is Circle, back is Cross, so the pad's two faces are swapped there); the chart itself keeps the Vita layout (South =
+Cross note, East = Circle note) - the swap is keyed to the dance stage's song gauge being on screen (p5d_dance_bar_us), the
+only reliable "actually playing" signal, and to the pause/config menus being open. That covers the pre-dance partner/costume
+confirmation too (A confirm, B back), which an input-profile test alone got wrong. No PC key binding was changed.
+
+Verified with the author's pad and by glyph screenshots: the UI starts on keyboard/mouse, a pad press turns the prompts into
+the Xbox art, A/B behave as confirm/back in menus and in the partner/costume screen, the chart is unchanged, LB/RB work in
+the menus, and mouse/keyboard input returns the PC prompts. Version bumped to v0.1.4.
+
+ANTI-FORGETTING ENTRY. Keywords: M1656 Xbox pad UI, auto device switching, P5R BUTTON_XBOX.PAK glyphs, A=confirm B=back
+outside the chart, LB/RB as L/R, dance Y/B/A hand-drawn letters. Xbox pads are enabled by default; the UI starts on
+keyboard/mouse and device_gamepad() switches to the Xbox art on real pad input (device_keyboard() switches back), the pad art
+coming from P5R's BUTTON_XBOX.PAK (runtime/gfx/xboxglyphs.h): ABXY octagon badges outside the dance stage, lb_w/rb_b for LB/RB,
+start/view/sticks, hand-drawn coloured Y/B/A letters in the chart, and the game's own PS d-pad art. Outside the chart A=confirm
+and B=back (Circle=confirm/Cross=back swapped); the chart keeps the Vita layout, keyed to the song gauge being on screen plus
+pause/config; the pre-dance partner/costume screen gets the swapped faces. shoulder_buttons defaults to bumpers. RECOMP_XBOXGLYPHS=0
+/ RECOMP_PAD_UI_PREVIEW=1 are the dev switches. Release v0.1.4, payload v0.1.4-p5d-8149f45+de082c99a301.
+LOOKUP: 18.5173 = M1656 (Xbox pad UI) -> 18.5162 [relevant: M1642 input mapping], 18.5174 [relevant: M1657 DLC import].
+
+### 18.5174 M1657 THE LAUNCHER IMPORTS DLC (ADD-ON CONTENT): A "③ 追加內容（DLC，可選）" STEP COPIES A NoNpDrm reAddcont TREE INTO <RECOMP_FS>/addcont0 WITH A PROGRESS BAR, AND P5D FINDS AND LICENSES ALL ITS addcont PACKS
+
+Requested: a launcher option that imports the game's DLC so the port can use it (the user's DLC tree:
+C:\Users\...\Downloads\p5d\P5D\reAddcont\PCSH10109\ADDCONTDLCD000xx, 59 add-ons, ~2.4 GB).
+
+How P5D's DLC works, from the game itself: eboot.bin builds "addcont0:/ADDCONT%s/%s.cpk" and its addContThread calls
+sceAppUtilDrmOpen for every add-on id it knows. apputil.c's h_drm_open already answered "licensed" and, when addcont0 exists,
+the port's path mapping resolves addcont0:/... to <RECOMP_FS>/addcont0/... . The only missing piece was the data.
+
+M1657: the launcher's main page gained an optional ③ 追加內容（DLC，可選） step (later sections renumbered ④ build, ⑤ frame
+rate): it shows the imported add-on count and size, "選擇 DLC 文件夾…" opens a folder picker (the reAddcont folder, or its
+PCSH10109 folder, or a folder of ADDCONT* add-ons), and a Python copy step (progress bar via PROGRESS lines) copies the
+add-ons into <library>/decrypted/PCSH10109/recomp/fs/addcont0/, skipping a folder that holds no add-ons with a message; "移除
+全部 DLC" deletes the imported tree. A headless `--import-dlc <folder>` runs the same copy without the window (used for the
+verification here).
+
+Verified: importing the user's reAddcont folder produced fs/addcont0/ADDCONT* (59 add-ons, 2409 MB) and the game then logged
+"np: add-on licence ADDCONTDLCD00028 -> licensed" for every id and opened
+"addcont0:/ADDCONTDLCD00028/DLCD00028.cpk -> fs/addcont0/ADDCONTDLCD00028/DLCD00028.cpk" (previously it logged "add-cont data
+absent"). The base game still runs without DLC (the step is optional). Launcher-only change (no game rebuild for DLC itself).
+
+Release: v0.1.4, 300,504,229 B, SHA256 FC24C14C56AFEE975942230B457FE6852C4C46899EF30C91A15113840A55561D, payload
+v0.1.4-p5d-8149f45+de082c99a301 (the Xbox pad runtime change also rebuilds existing installs once); copied to the desktop;
+audits green.
+
+ANTI-FORGETTING ENTRY. Keywords: M1657 DLC import, reAddcont, ADDCONTDLCD, addcont0, 追加內容, --import-dlc. The launcher has
+an optional DLC step that copies a NoNpDrm reAddcont tree (or the PCSH10109 folder) into
+<library>/decrypted/PCSH10109/recomp/fs/addcont0; P5D opens addcont0:/ADDCONT<id>/<id>.cpk (the string is in eboot.bin) and
+apputil.c licenses every add-on whenever addcont0 exists, so the copy is the whole support. Verified: 59 add-ons / 2409 MB
+imported, the game licensed them and opened the cpk, previously "add-cont data absent". Headless --import-dlc runs the same
+copy. Release v0.1.4, payload v0.1.4-p5d-8149f45+de082c99a301.
+LOOKUP: 18.5174 = M1657 (DLC import) -> 18.5173 [relevant: M1656 the Xbox pad UI in the same release], 18.5168 [relevant: M1651
+launcher-side repairs].
